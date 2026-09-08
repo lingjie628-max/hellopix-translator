@@ -70,3 +70,15 @@ test('production refuses to boot the in-memory demo backend', () => {
   assert.equal(result.status, 1)
   assert.match(result.stderr, /拒绝启动/)
 })
+
+test('desktop and standalone translation requests carry an idempotency key', () => {
+  // 正式后端 core.translate 强制幂等键（缺失返回 400 IDEMPOTENCY_KEY_REQUIRED），
+  // 桌面端与独立电报端必须带 requestId；同文本同参数幂等可避免重复渲染二次扣费。
+  const root = path.join(__dirname, '..')
+  const desktop = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
+  const telegramMain = fs.readFileSync(path.join(root, 'standalone', 'telegram', 'main.js'), 'utf8')
+  assert.ok(desktop.includes('function transRequestId('), 'desktop 缺少幂等键生成函数')
+  assert.ok(desktop.includes('requestId: transRequestId(text, from, to, engine)'), 'desktop translate:run 请求缺少 requestId')
+  assert.ok(telegramMain.includes('function transRequestKey('), 'standalone telegram 缺少幂等键生成函数')
+  assert.ok(telegramMain.includes('requestId: transRequestKey('), 'standalone telegram 翻译请求缺少 requestId')
+})
