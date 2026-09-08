@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; script-src 'self'">
+  <title>Telegram</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="pixLogin" class="screen">
+    <div class="pix-card">
+      <h1>Hello Pix Telegram</h1>
+      <label>用户名<input id="pixUser" type="text" autocomplete="username"></label>
+      <label>密码<input id="pixPass" type="password" autocomplete="current-password"></label>
+      <label>服务器
+        <select id="pixServer">
+          <option value="auto">自动获取</option>
+        </select>
+      </label>
+      <label>语言
+        <select id="pixLang">
+          <option value="zh">简体中文</option>
+        </select>
+      </label>
+      <p id="pixError" class="error"></p>
+      <div class="row">
+        <button type="button" id="pixClose" class="ghost">关闭</button>
+        <button type="button" id="pixPreview" class="ghost">先看界面</button>
+        <button type="button" id="pixEnter">登录</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="tgSetup" class="screen hidden">
+    <div class="pix-card">
+      <h1>连接真实 Telegram</h1>
+      <p class="hint">到 <b>my.telegram.org</b> 登录后创建应用，填写 api_id 和 api_hash。这是官方协议客户端，不是网页电报。</p>
+      <label>api_id<input id="apiId" type="text" inputmode="numeric"></label>
+      <label>api_hash<input id="apiHash" type="text"></label>
+      <p id="setupError" class="error"></p>
+      <div class="row">
+        <button type="button" id="setupSave">保存并继续</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="tgLogin" class="screen hidden">
+    <div class="pix-card">
+      <h1>登录 Telegram</h1>
+      <label id="phoneRow">手机号<input id="tgPhone" type="tel" placeholder="+8613812345678"></label>
+      <label id="codeRow" class="hidden">验证码<input id="tgCode" type="text" inputmode="numeric"></label>
+      <label id="passRow" class="hidden">两步验证密码<input id="tg2fa" type="password"></label>
+      <p id="tgError" class="error"></p>
+      <div class="row">
+        <button type="button" id="tgNext">发送验证码</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="shell" class="shell hidden">
+    <aside class="rail">
+      <button type="button" class="rail-btn active" data-rail="chats" title="所有聊天"><i>💬</i><span>所有聊天</span></button>
+      <button type="button" class="rail-btn" data-rail="multi" title="程序多开"><i>✦</i><span>程序多开</span></button>
+      <button type="button" class="rail-btn" data-rail="trans" title="翻译设置"><i>☰</i><span>翻译设置</span></button>
+      <button type="button" class="rail-btn" data-rail="add" title="添加账号"><i>⌂</i><span>添加账号</span></button>
+      <div class="rail-space"></div>
+      <button type="button" class="rail-btn" data-rail="profile" title="用户信息"><i id="railAvatar">P</i><span>账号</span></button>
+    </aside>
+    <section class="chats">
+      <div class="chats-head">
+        <button type="button" class="menu" aria-label="菜单">☰</button>
+        <input id="chatSearch" type="search" placeholder="搜索">
+      </div>
+      <div id="dialogList" class="dialog-list"></div>
+    </section>
+    <section class="thread">
+      <header class="thread-head">
+        <div>
+          <b id="threadTitle">Telegram</b>
+          <small id="threadMeta">选择左侧对话</small>
+        </div>
+      </header>
+      <div id="messageList" class="message-list"></div>
+      <footer class="composer">
+        <textarea id="composer" rows="1" placeholder="写消息..."></textarea>
+        <button type="button" id="sendBtn">发送</button>
+      </footer>
+    </section>
+  </div>
+
+  <div id="modal" class="modal hidden">
+    <div class="modal-card" id="modalCard"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

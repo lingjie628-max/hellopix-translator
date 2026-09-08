@@ -1,0 +1,17 @@
+{
+  "name": "hello-pix-telegram",
+  "productName": "Hello Pix Telegram",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hello Pix 电报独立应用：真实 Telegram 协议客户端",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "dependencies": {
+    "telegram": "^2.26.16"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1"
+  }
+}

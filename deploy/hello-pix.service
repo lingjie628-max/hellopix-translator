@@ -1,0 +1,32 @@
+[Unit]
+Description=Hello Pix API
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+User=hello-pix
+Group=hello-pix
+WorkingDirectory=/opt/hello-pix
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/hello-pix/hello-pix.env
+ExecStartPre=/usr/bin/node scripts/migrate.js up
+ExecStart=/usr/bin/node server/index.js
+Restart=always
+RestartSec=5
+TimeoutStartSec=90
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,572 @@
+const { ipcRenderer } = require('electron')
+
+const pixBridge = {
+  getPrefs: () => ipcRenderer.invoke('translate:guestPrefs'),
+  translate: payload => {
+    const text = String(payload && payload.text || '')
+    if (!text || text.length > 5000) return Promise.resolve({ success: false, msg: '翻译文本长度无效' })
+    return ipcRenderer.invoke('translate:run', {
+      text,
+      incoming: !!(payload && payload.incoming)
+    })
+  },
+  onPrefs: callback => {
+    ipcRenderer.removeAllListeners('translate:prefs')
+    ipcRenderer.on('translate:prefs', (_event, data) => callback(data))
+  }
+}
+
+;(() => {
+  if (window.__helloPixChat) return true
+  window.__helloPixChat = true
+
+  const cache = new Map()
+  const pending = new Map()
+  const BUSY_MARK = '[正在翻译中...]'
+  const EMOJI_RE = /(?:\p{Extended_Pictographic}|\p{Emoji_Presentation}|[\uFE0F\u200D\u20E3])/gu
+  let prefs = {
+    transRecv: true,
+    transSend: true,
+    transGroup: false,
+    langMine: 'zh',
+    langOther: 'auto',
+    sendTo: 'en',
+    includeZh: false,
+    antiRevoke: false
+  }
+  let scanTimer = 0
+  let sendBusy = false
+  let passOnce = false
+
+  const style = document.createElement('style')
+  style.textContent = `
+    #pix-h-btn { display: none !important; }
+    .pix-trans {
+      display: block;
+      clear: both;
+      margin: 6px 0 2px;
+      padding-top: 6px;
+      border-top: 1px solid currentColor;
+      border-top-color: rgba(255,255,255,.16);
+      font-size: var(--pix-font-size, 15px);
+      color: var(--pix-font-color, inherit);
+      line-height: 1.45;
+      opacity: 0.9;
+      white-space: pre-wrap;
+      user-select: text;
+    }
+    .message-in .pix-trans, .message-list-item:not(.own) .pix-trans {
+      border-top-color: rgba(255,255,255,.12);
+    }
+    .pix-click {
+      display: inline-block;
+      clear: both;
+      margin-top: 6px;
+      padding: 2px 8px;
+      border-radius: 8px;
+      background: rgba(255,255,255,.12);
+      font-size: 12px;
+      cursor: pointer;
+      user-select: none;
+      opacity: 0.85;
+    }
+    .pix-kept {
+      display: block;
+      clear: both;
+      margin-top: 6px;
+      white-space: pre-wrap;
+      line-height: 1.45;
+    }
+    .pix-revoked {
+      display: block;
+      margin-top: 4px;
+      font-size: 11px;
+      color: #d97706;
+      opacity: 0.95;
+    }
+  `
+  function mountStyle() {
+    if (document.documentElement && !style.isConnected) document.documentElement.appendChild(style)
+  }
+  mountStyle()
+  if (!document.documentElement) document.addEventListener('DOMContentLoaded', mountStyle, { once: true })
+
+  function api() {
+    return pixBridge
+  }
+
+  function applyPrefs(next) {
+    if (!next) return
+    prefs = {
+      transRecv: next.transRecv !== 0 && next.transRecv !== false,
+      transSend: next.transSend !== 0 && next.transSend !== false,
+      transGroup: !!(next.transGroup && next.transGroup !== '0'),
+      langMine: next.langMine || 'zh',
+      langOther: next.langOther || 'auto',
+      sendTo: next.sendTo && next.sendTo !== 'auto' ? next.sendTo : 'en',
+      includeZh: next.includeZh === 1 || next.includeZh === true || next.includeZh === 'true',
+      antiRevoke: !!(next.antiRevoke && next.antiRevoke !== '0')
+    }
+    const root = document.documentElement
+    root.style.setProperty('--pix-font-size', (Number(next.fontSize) || 15) + 'px')
+    if (next.fontColor) root.style.setProperty('--pix-font-color', next.fontColor)
+    schedule()
+  }
+  window.__helloPixApplyPrefs = applyPrefs
+
+  function stripEmoji(text) {
+    return String(text || '').replace(EMOJI_RE, '').replace(/\s+/g, ' ').trim()
+  }
+
+  function isEmojiOnly(text) {
+    const raw = String(text || '').trim()
+    return !!raw && !stripEmoji(raw)
+  }
+
+  function isBusyText(text) {
+    const s = String(text || '')
+    return s.indexOf(BUSY_MARK) !== -1 || s.indexOf('|翻译中...') !== -1 || s.indexOf('翻译中...') !== -1
+  }
+
+  function hasChinese(text) {
+    return /[\u4e00-\u9fff]/.test(String(text || ''))
+  }
+
+  function sourceText(node) {
+    const preferred = node.querySelector('.translatable-message')
+    if (preferred) return preferred.innerText.replace(/\s+/g, ' ').trim()
+    const clone = node.cloneNode(true)
+    clone.querySelectorAll('.MessageMeta, .message-time, .pix-trans, .pix-click, .pix-kept, .pix-revoked, time, .Reactions, .message-views').forEach(item => item.remove())
+    return clone.innerText.replace(/\s+/g, ' ').trim()
+  }
+
+  function messageNodes() {
+    return Array.from(document.querySelectorAll(
+      '.message-list-item .text-content, .Message .text-content, div.message-in span.selectable-text, div.message-out span.selectable-text, div.copyable-text span.selectable-text'
+    ))
+  }
+
+  function isOwn(node) {
+    return !!(node.closest('.own') || node.closest('.message-out'))
+  }
+
+  function isGroupChat() {
+    const info = document.querySelector('.ChatInfo, header')
+    const text = ((info && info.innerText) || '').slice(0, 400)
+    return /members|subscribers|位成员|位订阅|群组/i.test(text)
+  }
+
+  function hostOf(node) {
+    return node.closest('.text-content') ||
+      node.closest('div.copyable-text') ||
+      node.closest('[data-testid="msg-container"]') ||
+      node
+  }
+
+  function detectLang(text) {
+    const s = String(text || '')
+    if (/[\u4e00-\u9fff]/.test(s)) return 'zh'
+    if (/[\u3040-\u30ff]/.test(s)) return 'ja'
+    if (/[\uac00-\ud7af]/.test(s)) return 'ko'
+    if (/[\u0e00-\u0e7f]/.test(s)) return 'th'
+    if (/[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(s)) return 'vi'
+    return 'en'
+  }
+
+  function sameLang(text) {
+    return detectLang(text) === (prefs.langMine || 'zh')
+  }
+
+  function clearExtras(host) {
+    host.querySelectorAll(':scope > .pix-trans, :scope > .pix-click').forEach(el => el.remove())
+  }
+
+  async function translateText(text, incoming) {
+    const cleaned = stripEmoji(text)
+    if (!cleaned) return ''
+    const key = (incoming ? 'in:' : 'out:') + cleaned
+    if (cache.has(key)) return cache.get(key)
+    if (pending.has(key)) return pending.get(key)
+    const pix = api()
+    if (!pix || !pix.translate) return ''
+    const job = pix.translate({ text: cleaned, incoming: incoming }).then(resp => {
+      const out = String((resp && (resp.translation || resp.text)) || '').trim()
+      if (out) cache.set(key, out)
+      pending.delete(key)
+      return out
+    }).catch(() => {
+      pending.delete(key)
+      return ''
+    })
+    pending.set(key, job)
+    return job
+  }
+
+  function paint(host, translated) {
+    const click = host.querySelector(':scope > .pix-click')
+    if (click) click.remove()
+    const original = sourceText(host)
+    if (!translated || translated.replace(/\s+/g, '') === original.replace(/\s+/g, '')) {
+      clearExtras(host)
+      return
+    }
+    let box = host.querySelector(':scope > .pix-trans')
+    if (!box) {
+      box = document.createElement('div')
+      box.className = 'pix-trans'
+      const meta = host.querySelector(':scope > .MessageMeta, :scope > .message-time')
+      if (meta) host.insertBefore(box, meta)
+      else host.appendChild(box)
+    }
+    box.textContent = translated
+  }
+
+  function addClick(host, incoming) {
+    if (host.querySelector(':scope > .pix-trans, :scope > .pix-click')) return
+    const chip = document.createElement('span')
+    chip.className = 'pix-click'
+    chip.textContent = '译'
+    chip.onclick = async event => {
+      event.preventDefault()
+      event.stopPropagation()
+      chip.textContent = '…'
+      const text = sourceText(host)
+      paint(host, await translateText(text, incoming))
+    }
+    const meta = host.querySelector(':scope > .MessageMeta, :scope > .message-time')
+    if (meta) host.insertBefore(chip, meta)
+    else host.appendChild(chip)
+  }
+
+  function visible(el) {
+    if (!el) return false
+    const rect = el.getBoundingClientRect()
+    return rect.width > 8 && rect.height > 8
+  }
+
+  function firstMatch(selectors) {
+    for (let i = 0; i < selectors.length; i++) {
+      const nodes = document.querySelectorAll(selectors[i])
+      for (let j = 0; j < nodes.length; j++) {
+        if (visible(nodes[j])) return nodes[j]
+      }
+    }
+    return null
+  }
+
+  function composerEl() {
+    const found = firstMatch([
+      'footer [contenteditable="true"]',
+      '#editable-message-text',
+      '.input-message-input[contenteditable="true"]',
+      '[data-testid="conversation-compose-box-input"]',
+      '[data-tab="10"][contenteditable="true"]',
+      'div[contenteditable="true"][role="textbox"]',
+      'div[aria-label*="message" i][contenteditable="true"]',
+      'div[aria-placeholder][contenteditable="true"]',
+      'form [contenteditable="true"]',
+      'textarea[placeholder*="message" i]',
+      'textarea[aria-label*="message" i]'
+    ])
+    if (found) return found
+    const ae = document.activeElement
+    if (ae && visible(ae) && (ae.isContentEditable || ae.tagName === 'TEXTAREA' || ae.tagName === 'INPUT')) {
+      if (!ae.closest('header, [role="search"], [data-testid="chat-list-search"]')) return ae
+    }
+    return null
+  }
+
+  function readComposer(el) {
+    if (!el) return ''
+    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') return String(el.value || '')
+    return String(el.innerText || el.textContent || '')
+  }
+
+  function writeComposer(el, text) {
+    if (!el) return
+    el.focus()
+    const value = String(text || '')
+    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+      const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype
+      const desc = Object.getOwnPropertyDescriptor(proto, 'value')
+      if (desc && desc.set) desc.set.call(el, value)
+      else el.value = value
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+      el.dispatchEvent(new Event('change', { bubbles: true }))
+      return
+    }
+    const sel = window.getSelection()
+    const range = document.createRange()
+    range.selectNodeContents(el)
+    sel.removeAllRanges()
+    sel.addRange(range)
+    const ok = document.execCommand('insertText', false, value)
+    if (!ok) {
+      el.textContent = value
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }))
+    }
+  }
+
+  function sendButton() {
+    return firstMatch([
+      'button[aria-label="Send"]',
+      'button[aria-label="发送"]',
+      'button[aria-label="Send message"]',
+      'button[aria-label="Send a message"]',
+      'button[data-testid="send"]',
+      'button[data-testid="compose-btn-send"]',
+      'button.Button.send',
+      '.btn-send',
+      'span[data-icon="send"]',
+      '[data-icon="wds-ic-send-filled"]'
+    ])
+  }
+
+  function looksLikeSend(target) {
+    if (!target || !target.closest) return false
+    const icon = target.closest('[data-icon]')
+    if (icon && /send/i.test(icon.getAttribute('data-icon') || '')) return true
+    const el = target.closest('button, [role="button"], span[data-icon], div[role="button"]')
+    if (!el) return false
+    const label = [
+      el.getAttribute('aria-label'),
+      el.getAttribute('title'),
+      el.getAttribute('data-icon'),
+      el.getAttribute('data-testid'),
+      el.className
+    ].join(' ').toLowerCase()
+    if (/(voice|mic|attach|emoji|sticker|gif|record|拍照|语音|表情)/i.test(label)) return false
+    return /(^|[\s_-])(send|发送|enviar|envoyer|senden|invia)([\s_-]|$)/i.test(label) ||
+      /btn-send|compose-btn-send|wds-ic-send/i.test(label)
+  }
+
+  function isSendEnter(event) {
+    if (event.key !== 'Enter' && event.code !== 'Enter' && event.keyCode !== 13) return false
+    if (event.shiftKey || event.altKey || event.isComposing) return false
+    return true
+  }
+
+  function eventInComposer(event, box) {
+    if (!event || !box) return false
+    const t = event.target
+    return t === box || box.contains(t)
+  }
+
+  function fireSend(box) {
+    passOnce = true
+    window.setTimeout(() => { passOnce = false }, 400)
+    const btn = sendButton()
+    if (btn) {
+      const clickable = btn.closest('button, [role="button"]') || btn
+      clickable.click()
+      return
+    }
+    if (!box) return
+    box.focus()
+    box.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Enter',
+      code: 'Enter',
+      keyCode: 13,
+      which: 13,
+      bubbles: true,
+      cancelable: true
+    }))
+  }
+
+  function wait(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms))
+  }
+
+  async function runIntercept(event, box) {
+    const raw = readComposer(box).replace(/\s+$/g, '')
+    const trimmed = raw.trim()
+    if (!trimmed) return false
+    if (isBusyText(trimmed) || sendBusy) {
+      if (event) {
+        event.preventDefault()
+        event.stopPropagation()
+        event.stopImmediatePropagation()
+      }
+      return true
+    }
+    if (isEmojiOnly(trimmed)) return false
+    const forApi = stripEmoji(trimmed)
+    if (!forApi) return false
+    if (detectLang(forApi) === (prefs.sendTo || 'en')) return false
+    if (event) {
+      event.preventDefault()
+      event.stopPropagation()
+      event.stopImmediatePropagation()
+    }
+    sendBusy = true
+    writeComposer(box, raw.replace(/\s+$/g, '') + BUSY_MARK)
+    try {
+      const out = await translateText(forApi, false)
+      if (!out) {
+        writeComposer(box, raw)
+        return true
+      }
+      writeComposer(box, out === forApi ? raw : out)
+      await wait(50)
+      fireSend(box)
+    } catch (e) {
+      writeComposer(box, raw)
+    } finally {
+      sendBusy = false
+    }
+    return true
+  }
+
+  function onKeyDown(event) {
+    if (passOnce && isSendEnter(event)) {
+      passOnce = false
+      return
+    }
+    if (!prefs.transSend) return
+    if (event.defaultPrevented) return
+    if (!isSendEnter(event)) return
+    const box = composerEl()
+    if (!box || !eventInComposer(event, box)) return
+    runIntercept(event, box)
+  }
+
+  function onBeforeInput(event) {
+    if (!prefs.transSend) return
+    if (passOnce) return
+    if (event.inputType !== 'insertParagraph') return
+    const box = composerEl()
+    if (!box || !eventInComposer(event, box)) return
+    runIntercept(event, box)
+  }
+
+  function onClick(event) {
+    if (passOnce) {
+      passOnce = false
+      return
+    }
+    if (!prefs.transSend) return
+    if (!looksLikeSend(event.target)) return
+    const box = composerEl()
+    if (!box) return
+    if (!readComposer(box).trim()) return
+    runIntercept(event, box)
+  }
+
+  const DELETED_RE = /^(this message was deleted\.?|you deleted this message\.?|此消息已删除|你删除了这条消息|你已删除此消息|esta mensagem foi apagada|este mensaje fue eliminado|ce message a été supprimé|diese nachricht wurde gelöscht|pesan ini telah dihapus)$/i
+  const revokeMap = new Map()
+
+  function messageRoot(node) {
+    return node.closest('[data-id]') ||
+      node.closest('[data-testid="msg-container"]') ||
+      hostOf(node)
+  }
+
+  function messageKey(root) {
+    if (!root) return ''
+    return root.getAttribute('data-id') || root.getAttribute('data-pre-plain-text') || ''
+  }
+
+  function isDeletedText(text) {
+    return DELETED_RE.test(String(text || '').trim())
+  }
+
+  function rememberMessage(root, text) {
+    const key = messageKey(root)
+    if (!key || !text || isDeletedText(text) || text.length > 4000) return
+    revokeMap.set(key, text)
+  }
+
+  function keepRevoked(root, text) {
+    if (!prefs.antiRevoke || !root) return
+    const key = messageKey(root)
+    const saved = key && revokeMap.get(key)
+    if (!saved) return
+    if (!isDeletedText(text) && root.querySelector('.pix-kept')) return
+    if (!isDeletedText(text)) return
+    let kept = root.querySelector(':scope > .pix-kept')
+    if (!kept) {
+      kept = document.createElement('div')
+      kept.className = 'pix-kept'
+      root.appendChild(kept)
+    }
+    kept.textContent = saved
+    let tag = root.querySelector(':scope > .pix-revoked')
+    if (!tag) {
+      tag = document.createElement('div')
+      tag.className = 'pix-revoked'
+      root.appendChild(tag)
+    }
+    tag.textContent = '已撤回'
+  }
+
+  async function scan() {
+    const nodes = messageNodes()
+    const group = isGroupChat()
+    const auto = !group || prefs.transGroup
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i]
+      const host = hostOf(node)
+      const root = messageRoot(node)
+      const text = sourceText(host)
+      if (prefs.antiRevoke) {
+        rememberMessage(root, text)
+        keepRevoked(root, text)
+      }
+      if (!text || text.length > 4000) continue
+      if (isBusyText(text) || isDeletedText(text)) continue
+      if (!prefs.transRecv) {
+        clearExtras(host)
+        continue
+      }
+      if (isEmojiOnly(text)) {
+        clearExtras(host)
+        continue
+      }
+      if (hasChinese(text) && !prefs.includeZh) {
+        clearExtras(host)
+        continue
+      }
+      if (sameLang(text) && !(prefs.includeZh && hasChinese(text))) {
+        clearExtras(host)
+        continue
+      }
+      if (!auto) {
+        if (!host.querySelector(':scope > .pix-trans')) addClick(host, true)
+        continue
+      }
+      const translated = await translateText(text, true)
+      if (translated) paint(host, translated)
+    }
+  }
+
+  function schedule() {
+    if (scanTimer) return
+    scanTimer = window.setTimeout(() => {
+      scanTimer = 0
+      scan()
+    }, 220)
+  }
+
+  async function boot() {
+    const pix = api()
+    if (pix && pix.onPrefs) pix.onPrefs(applyPrefs)
+    if (pix && pix.getPrefs) {
+      try { applyPrefs(await pix.getPrefs()) } catch (e) {}
+    }
+    document.querySelectorAll('#pix-h-btn').forEach(el => el.remove())
+    document.addEventListener('keydown', onKeyDown, true)
+    document.addEventListener('beforeinput', onBeforeInput, true)
+    document.addEventListener('click', onClick, true)
+    schedule()
+  }
+
+  const obs = new MutationObserver(schedule)
+  const observePage = () => {
+    if (document.documentElement) obs.observe(document.documentElement, { childList: true, subtree: true })
+  }
+  observePage()
+  if (!document.documentElement) document.addEventListener('DOMContentLoaded', observePage, { once: true })
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot)
+  else boot()
+  return true
+})()

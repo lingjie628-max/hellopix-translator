@@ -1,0 +1,48 @@
+{
+  "name": "hello-pix",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Hello Pix 翻译软件",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "serve": "vue-cli-service serve",
+    "start": "vue-cli-service serve",
+    "start:prod": "NODE_ENV=production node server/index.js",
+    "build": "vue-cli-service build",
+    "test:security": "node --test test/*.test.js",
+    "test:integration": "node --test test/database.integration.test.js",
+    "desktop": "npm start --prefix desktop",
+    "telegram": "npm start --prefix standalone/telegram",
+    "db:migrate": "node scripts/migrate.js up",
+    "db:rollback": "node scripts/migrate.js down",
+    "seed:admin": "node scripts/seed-admin.js"
+  },
+  "dependencies": {
+    "axios": "^1.20.0",
+    "core-js": "^3.33.0",
+    "element-ui": "^2.15.14",
+    "express": "^5.2.1",
+    "ioredis": "^5.7.0",
+    "node-pg-migrate": "^8.0.4",
+    "pg": "^8.16.3",
+    "vue": "^2.7.16",
+    "vue-router": "^3.6.5",
+    "vuex": "^3.6.2"
+  },
+  "devDependencies": {
+    "@vue/babel-helper-vue-jsx-merge-props": "^1.4.0",
+    "@vue/babel-preset-jsx": "^1.4.0",
+    "@vue/cli-plugin-babel": "^5.0.8",
+    "@vue/cli-plugin-router": "^5.0.8",
+    "@vue/cli-plugin-vuex": "^5.0.8",
+    "@vue/cli-service": "^5.0.8",
+    "vue-template-compiler": "^2.7.16"
+  },
+  "browserslist": [
+    "> 1%",
+    "last 2 versions",
+    "not dead"
+  ]
+}

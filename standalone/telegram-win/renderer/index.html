@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:">
+  <title>Hello Pix Telegram</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="login" class="login">
+    <div class="login-bg" aria-hidden="true">
+      <div class="login-grid"></div>
+      <div class="login-scan"></div>
+    </div>
+    <div class="drag"></div>
+    <div class="card">
+      <span class="hud-corner tl"></span>
+      <span class="hud-corner tr"></span>
+      <span class="hud-corner bl"></span>
+      <span class="hud-corner br"></span>
+      <div class="brand-block">
+        <div class="mark">P</div>
+        <div>
+          <div class="brand">Hello Pix</div>
+          <p class="sub">Telegram 独立应用</p>
+          <p class="hud-line"><span class="led"></span> NODE ONLINE</p>
+        </div>
+      </div>
+      <div class="field">
+        <label for="username">账号</label>
+        <input id="username" type="text" placeholder="请输入账号" autocomplete="username">
+      </div>
+      <div class="field">
+        <label for="password">密码</label>
+        <input id="password" type="password" placeholder="请输入密码" autocomplete="current-password">
+      </div>
+      <div class="field">
+        <label for="server">服务器</label>
+        <input id="server" type="text" placeholder="http://127.0.0.1:8080">
+      </div>
+      <p id="loginError" class="error"></p>
+      <button type="button" id="loginBtn">进入 Hello Pix</button>
+      <div class="login-foot">
+        <button type="button" id="openOnly" class="link-btn">直接打开电报</button>
+        <button type="button" id="closeBtn" class="link-btn">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="shell" class="shell hidden">
+    <aside class="rail">
+      <div class="drag rail-drag"></div>
+      <button type="button" class="rail-btn active" data-rail="chats">
+        <i class="ic-chat"></i><span>所有聊天</span>
+      </button>
+      <button type="button" class="rail-btn" data-rail="multi">
+        <i class="ic-multi"></i><span>程序多开</span>
+      </button>
+      <button type="button" class="rail-btn" data-rail="trans">
+        <i class="ic-trans"></i><span>翻译设置</span>
+      </button>
+      <button type="button" class="rail-btn" data-rail="add">
+        <i class="ic-add"></i><span>添加账号</span>
+      </button>
+      <div class="rail-space"></div>
+      <button type="button" class="rail-btn" data-rail="profile">
+        <i id="railAvatar" class="ic-user">P</i><span>账号</span>
+      </button>
+    </aside>
+    <section id="flyout" class="flyout hidden">
+      <div id="flyoutBody"></div>
+    </section>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

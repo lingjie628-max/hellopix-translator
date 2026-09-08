@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <rect width="48" height="48" rx="12" fill="#6656D9"/>
+  <path fill="#fff" d="M9 11h30v22H25l-8 6v-6H9z"/>
+  <text x="24" y="24" text-anchor="middle" dominant-baseline="middle" fill="#6656D9" font-family="Arial,sans-serif" font-size="8" font-weight="700">TEXT</text>
+  <text x="24" y="30" text-anchor="middle" dominant-baseline="middle" fill="#6656D9" font-family="Arial,sans-serif" font-size="6" font-weight="700">FREE</text>
+</svg>

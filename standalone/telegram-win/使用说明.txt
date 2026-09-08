@@ -1,0 +1,15 @@
+Hello Pix Telegram（Windows）
+
+1. 解压整个文件夹，双击 HelloPixTelegram.exe。
+2. 用 Hello Pix 账号登录。服务器填后台地址。
+   后台在这台电脑：http://127.0.0.1:8080
+   后台在另一台电脑 / Mac：http://那台机器的局域网 IP:8080
+3. 登录后会自动打开官方 Telegram Desktop，左侧贴上 Hello Pix 侧栏。
+4. 侧栏：所有聊天、程序多开、翻译设置、添加账号、用户信息。
+5. 「程序多开 / 添加账号」会再开一份官方电报，数据目录互不影响。
+
+说明：
+- 聊天窗口是官方 Telegram Desktop。左侧侧栏和登录是 Hello Pix 风格。
+- 登录和改翻译设置后，会在电报数据目录写下 hello-pix-bridge.json。
+- 当前安装包里仍是官方原版电报，气泡还不会自动出译文。
+- 要气泡里直接出 [译文]，需在 Windows 上按 tdesktop-fork/APPLY.txt 编译魔改版，再替换 Telegram.exe。

@@ -1,0 +1,28 @@
+{
+  "name": "hello-pix-desktop",
+  "productName": "Hello Pix",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hello Pix 桌面客户端",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.2.1"
+  },
+  "build": {
+    "appId": "com.hellopix.desktop",
+    "productName": "Hello Pix",
+    "mac": {
+      "icon": "build/icon.icns",
+      "category": "public.app-category.business"
+    },
+    "win": {
+      "icon": "build/icon.png"
+    },
+    "linux": {
+      "icon": "build/icon.png"
+    }
+  }
+}

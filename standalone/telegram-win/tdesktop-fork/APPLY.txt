@@ -1,0 +1,24 @@
+Hello Pix 气泡译文：官方 tdesktop 已改好
+
+本机源码目录：
+  /Users/lingjie/Desktop/tdesktop
+
+已改文件：
+  Telegram/SourceFiles/lang/hello_pix_translate_provider.h
+  Telegram/SourceFiles/lang/hello_pix_translate_provider.cpp
+  Telegram/SourceFiles/lang/translate_provider.cpp
+  Telegram/SourceFiles/history/view/history_view_translate_tracker.cpp
+  Telegram/CMakeLists.txt
+
+这台 Mac 编不出 Windows 的 Telegram.exe。请把整个 tdesktop 文件夹拷到 Windows，按官方文档编译：
+  https://github.com/telegramdesktop/tdesktop/blob/dev/docs/building-win-x64.md
+
+需要 Visual Studio、Win10 SDK，以及 my.telegram.org 的 api_id / api_hash。
+
+编出来后，用 Telegram.exe 替换安装包里的：
+  HelloPix-Telegram\Telegram\Telegram.exe
+
+启动器不用改。登录后会在 -workdir 写下 hello-pix-bridge.json，魔改电报会读它并在气泡里出 [译文]。
+
+若 Windows 上是重新克隆的源码，再执行：
+  python apply.py D:\TBuild\tdesktop
