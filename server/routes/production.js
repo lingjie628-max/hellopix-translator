@@ -702,9 +702,16 @@ function productionRouter(context) {
 
   router.post('/admin/packages/save', asyncRoute(async (req, res) => {
     const data = input(req)
+    const safeParse = value => {
+      try {
+        return JSON.parse(value)
+      } catch (error) {
+        throw new ApiError(400, '提交的数据不是合法 JSON', 'BAD_JSON')
+      }
+    }
     const parseJson = (value, fallback, kind) => {
       if (value === undefined || value === null || value === '') return fallback
-      const parsed = typeof value === 'string' ? JSON.parse(value) : value
+      const parsed = typeof value === 'string' ? safeParse(value) : value
       if (kind === 'array' && !Array.isArray(parsed)) throw new ApiError(400, '通道列表必须是数组', 'BAD_PACKAGE_ENGINES')
       if (kind === 'object' && (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))) {
         throw new ApiError(400, '权益配置必须是对象', 'BAD_PACKAGE_FEATURES')
@@ -791,7 +798,8 @@ function productionRouter(context) {
     telegramUrl: 'support.telegram_url',
     supportNote: 'support.note',
     supportBtnText: 'support.button_text',
-    supportShow: 'support.visible'
+    supportShow: 'support.visible',
+    notices: 'site.notices'
   }
 
   async function readSettings() {
@@ -813,6 +821,7 @@ function productionRouter(context) {
       supportNote: byKey['support.note'] || '',
       supportBtnText: byKey['support.button_text'] || '联系客服',
       supportShow: byKey['support.visible'] === false ? 0 : 1,
+      notices: Array.isArray(byKey['site.notices']) ? byKey['site.notices'] : [],
       lines: Array.isArray(byKey['service.lines']) ? byKey['service.lines'] : []
     }
   }
@@ -836,8 +845,24 @@ function productionRouter(context) {
       let value = data[field]
       if (field === 'trialChars') value = Math.max(0, Math.floor(Number(value) || 0))
       if (field === 'supportShow') value = Number(value) ? true : false
+      if (field === 'notices') {
+        const parsed = typeof value === 'string' ? safeParse(value) : value
+        if (!Array.isArray(parsed)) throw new ApiError(400, '公告必须是数组', 'BAD_NOTICES')
+        const gone = Array.isArray(data.goneNoticeIds) ? data.goneNoticeIds.map(String) : []
+        value = parsed
+          .filter(item => item && item.title !== undefined)
+          .filter(item => !gone.includes(String(item.id)))
+          .slice(0, 200)
+          .map((item, index) => ({
+            id: item.id ? String(item.id) : `n${Date.now()}${index}`,
+            title: String(item.title || '').slice(0, 200),
+            content: String(item.content || '').slice(0, 5000),
+            enabled: Number(item.enabled) ? 1 : 0,
+            createTime: String(item.createTime || new Date().toISOString().slice(0, 19).replace('T', ' '))
+          }))
+      }
       if (field === 'lines') {
-        const parsed = typeof value === 'string' ? JSON.parse(value) : value
+        const parsed = typeof value === 'string' ? safeParse(value) : value
         if (!Array.isArray(parsed)) throw new ApiError(400, '线路必须是数组', 'BAD_LINES')
         value = parsed.map((line, index) => {
           const url = String(line.url || '').trim()
@@ -892,6 +917,62 @@ function productionRouter(context) {
     ok(res, '设置已保存')
   }))
 
+
+  // ---- 验证码接口配置（后台「验证配置」页）------------------------------------
+  // 真实发信/发短信尚未迁移，因此这里只保存配置，wired 恒为 false ——
+  // 页面如实显示"未接通"，绝不假装可用。
+  const VERIFY_DEFAULTS = [
+    { id: 'email', name: '邮箱验证码', kind: '邮箱', provider: 'local', revealDemo: 0,
+      resendSeconds: 60, expireMin: 10, digits: 6, note: 'SMTP 未接入，仅本地演示；生产环境注册/找回仍返回 503' },
+    { id: 'sms', name: '短信验证码', kind: '短信', provider: 'local', revealDemo: 0,
+      resendSeconds: 60, expireMin: 5, digits: 6, note: '短信通道未接入，保留配置位' }
+  ]
+
+  router.get('/admin/verify', asyncRoute(async (_req, res) => {
+    const row = (await repo.query("SELECT value FROM app_settings WHERE key='verify.channels'")).rows[0]
+    const saved = row && Array.isArray(row.value) ? row.value : []
+    const byId = saved.reduce((out, item) => { if (item && item.id) out[item.id] = item; return out }, {})
+    const rows = VERIFY_DEFAULTS.map(item => {
+      const merged = Object.assign({}, item, byId[item.id] || {})
+      return Object.assign(merged, {
+        providerName: merged.provider === 'smtp' ? 'SMTP（未接入）' : '本地演示（不发信）',
+        // 没有任何一条真实发信通道，接口状态如实为"未接通"
+        wired: false,
+        wiredText: '未接通',
+        hasKey: false
+      })
+    })
+    res.json({ data: { rows, smtpReady: false, note: '邮件/短信服务尚未迁移，注册与找回密码接口保持 503' } })
+  }))
+
+  router.post('/admin/verify/save', asyncRoute(async (req, res) => {
+    const data = input(req)
+    const id = String(data.id || '').trim()
+    if (!VERIFY_DEFAULTS.some(item => item.id === id)) {
+      throw new ApiError(404, '验证通道不存在', 'VERIFY_CHANNEL_NOT_FOUND')
+    }
+    const row = (await repo.query("SELECT value FROM app_settings WHERE key='verify.channels'")).rows[0]
+    const saved = row && Array.isArray(row.value) ? row.value.slice() : []
+    const entry = {
+      id,
+      provider: String(data.provider || 'local').slice(0, 30),
+      revealDemo: Number(data.revealDemo) ? 1 : 0,
+      resendSeconds: Math.min(300, Math.max(10, Math.floor(Number(data.resendSeconds) || 60))),
+      expireMin: Math.min(60, Math.max(1, Math.floor(Number(data.expireMin) || 10))),
+      digits: Math.min(8, Math.max(4, Math.floor(Number(data.digits) || 6)))
+    }
+    const index = saved.findIndex(item => item && item.id === id)
+    if (index >= 0) saved[index] = entry
+    else saved.push(entry)
+    await repo.query(
+      `INSERT INTO app_settings(key,value,description) VALUES('verify.channels',$1::jsonb,'验证码通道配置')
+       ON CONFLICT (key) DO UPDATE SET value=$1::jsonb`,
+      [JSON.stringify(saved)]
+    )
+    await repo.audit(null, req.pixAdmin, '配置验证码通道', JSON.stringify(entry), req.ip, { type: 'verify', id })
+    ok(res, '已保存（真实发信通道未接入，暂不生效）')
+  }))
+
   router.post('/user/register', stub('user.register', '注册依赖验证码及邮件服务迁移'))
   router.post('/user/forgot', stub('user.forgot', '找回密码依赖验证码及邮件服务迁移'))
   router.post('/user/emailCode', stub('user.emailCode', '邮件发送服务尚未迁移'))
@@ -908,7 +989,7 @@ function productionRouter(context) {
     '/assistant/deleteAssistantGroup', '/assistant/selectAssistantGroupById', '/assistant/editAssistant',
     '/assistant/editAssistantGroup', '/weixin/weixinPay', '/weixin/checkStatus', '/zfb/alipay',
     '/admin/accounts', '/admin/fans', '/admin/links',
-    '/admin/scripts', '/admin/verify', '/admin/verify/save',
+    '/admin/scripts',
     '/admin/faqs', '/admin/faqs/save',
     '/admin/notices', '/admin/notices/save', '/admin/notices/delete'
   ]
