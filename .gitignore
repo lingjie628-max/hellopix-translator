@@ -15,3 +15,14 @@ all_src.txt
 # 本地环境变量（真 .env 绝不入版本库；.env.example 保留）
 .env
 .env.local
+
+# tdesktop 构建凭据（api_id/api_hash，等同密钥，绝不入版本库）
+standalone/telegram-win/tdesktop-fork/build-credentials.txt
+
+# CI 镜像工作副本：本身是独立 git 仓库（推到 lingjie628-max/hellopix-tdesktop-build），
+# 直接入库会变成嵌套 gitlink，这里排除；补丁包正文在主仓库 standalone 那份
+.ci-build/
+
+# Python 缓存
+__pycache__/
+*.pyc

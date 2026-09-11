@@ -1,24 +1,45 @@
-Hello Pix 气泡译文：官方 tdesktop 已改好
+Hello Pix 气泡译文：官方 tdesktop 补丁方案
 
-本机源码目录：
-  /Users/lingjie/Desktop/tdesktop
+版本锚点：refs/tags/v7.2.8（commit 272f6f5c2d29d8cdb3aec15907d616b87451a3ca）
+  apply.py 会校验 Telegram/SourceFiles/core/version.h 里的 AppVersionStr：
+  非 7.2.8 且不在 CI 里 -> 直接报错退出，不会带着错版本编下去。
+  补丁锚点已对 v7.2.8 真实源码逐处验过 7/7 全中且幂等（重复执行只 skip 不重复注入）。
+  v7.2.6 的结构同样 7/7 命中，但版本门禁会要求先切回 v7.2.8，不提供"带旧版本编"的口子。
 
 已改文件：
-  Telegram/SourceFiles/lang/hello_pix_translate_provider.h
-  Telegram/SourceFiles/lang/hello_pix_translate_provider.cpp
-  Telegram/SourceFiles/lang/translate_provider.cpp
+  Telegram/SourceFiles/lang/hello_pix_translate_provider.h   （新增）
+  Telegram/SourceFiles/lang/hello_pix_translate_provider.cpp （新增）
+  Telegram/SourceFiles/lang/translate_provider.cpp           （工厂优先返回 HelloPix Provider）
   Telegram/SourceFiles/history/view/history_view_translate_tracker.cpp
-  Telegram/CMakeLists.txt
+      （5 处：桥接 include、强制开启接收翻译、群组/频道过滤、发送翻译开关）
+  Telegram/CMakeLists.txt                                    （注册两个新源文件）
 
-这台 Mac 编不出 Windows 的 Telegram.exe。请把整个 tdesktop 文件夹拷到 Windows，按官方文档编译：
-  https://github.com/telegramdesktop/tdesktop/blob/dev/docs/building-win-x64.md
+【transRecv / transSend / transGroup 三个开关都已接线】
+  transRecv  -> HelloPixShouldTranslateIncoming()  强制打开该会话的翻译追踪
+  transSend  -> HelloPixShouldTranslateSend()      放开"自己发出的消息"那条短路
+  transGroup -> HelloPixShouldTranslateGroup()     群组/频道是否也翻
+  三者都从实例目录的 hello-pix-bridge.json 读取，未启用时表达式退化回官方原样。
 
-需要 Visual Studio、Win10 SDK，以及 my.telegram.org 的 api_id / api_hash。
+【本机编译前置：Visual Studio 组件】
+必须勾选 C++ ATL，否则 prepare 会在 breakpad 阶段挂掉：
+  D:\Libraries\win64\breakpad\src\common\windows\dia_util.cc(31,10):
+  error C1083: Cannot open include file: 'atlbase.h'
+在 VS Installer → 单个组件 里搜 ATL，勾：
+  → C++ ATL for latest v143 build tools (x86 & x64)
+（CI 上由 apply.py 自动补装，本机需要手动勾。）
 
-编出来后，用 Telegram.exe 替换安装包里的：
-  HelloPix-Telegram\Telegram\Telegram.exe
+这台 Mac 编不出 Windows 的 Telegram.exe（物理平台边界，需 VS + Win SDK）。
+请在 Windows 上按配套手册执行：
+  → tdesktop-fork/构建手册-在Windows上编译气泡译文版.md
+一键驱动脚本：
+  → tdesktop-fork/build-on-windows.bat   （fresh 模式：clone→补丁→prepare→configure→编译 全自动）
+手动 apply：python apply.py D:\TBuild\tdesktop
 
-启动器不用改。登录后会在 -workdir 写下 hello-pix-bridge.json，魔改电报会读它并在气泡里出 [译文]。
+编出来后替换：HelloPix-Telegram\Telegram\Telegram.exe
+登录后启动器会往各实例 -workdir 写 hello-pix-bridge.json，魔改电报读桥接在气泡出 [译文]。
 
-若 Windows 上是重新克隆的源码，再执行：
-  python apply.py D:\TBuild\tdesktop
+【桥接契约】hello-pix-bridge.json 放在 -workdir 根目录（与 tdata/ 同级）
+  apiBase / deviceId / cookies / engine / lang / transRecv / transSend / transGroup
+  读取方式：cWorkingDir() + "hello-pix-bridge.json"
+  （cWorkingDir() 由 settings.h 的 DeclareSetting(QString, WorkingDir) 提供，
+    实际值 = 启动参数 -workdir 的绝对路径 + '/'，已在 core/launcher.cpp 核实）

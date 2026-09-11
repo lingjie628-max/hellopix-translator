@@ -137,7 +137,7 @@ function transHtml() {
     <label class="check"><input id="prefRecv" type="checkbox" ${prefs.transRecv !== false ? 'checked' : ''}> 接收翻译</label>
     <label class="check"><input id="prefSend" type="checkbox" ${prefs.transSend !== false ? 'checked' : ''}> 发送翻译</label>
     <textarea id="transIn" class="tr-box" placeholder="粘贴电报消息，点翻译"></textarea>
-    <div id="transOut" class="tr-box">[译文] 翻译结果会显示在这里。官方气泡内嵌还在下一阶段。</div>
+    <div id="transOut" class="tr-box">[译文] 翻译结果会显示在这里。气泡内嵌由魔改版 Telegram.exe 提供。</div>
     <p id="transErr" class="error"></p>
     <div class="row">
       <button type="button" id="doTrans" class="action">翻译</button>
