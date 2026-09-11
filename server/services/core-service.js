@@ -43,6 +43,9 @@ class CoreService {
     this.shareGrants = options && options.shareGrants ||
       new RedisShareGrantStore(redis)
     this.reservationTtlMs = Math.max(30_000, Number(options && options.reservationTtlMs) || 120_000)
+    // 公共翻译网络（如"谷歌极速"的免费端点）默认关闭，只有显式配置才放行。
+    // 关闭时相关通道直接 ok:false，不产生任何译文或计费。
+    this.allowPublicNetwork = Boolean(options && options.allowPublicNetwork)
     this.reconciliationTimer = null
     this.reconciliationRun = null
   }
@@ -358,7 +361,7 @@ class CoreService {
       const result = cachedText == null
         ? await this.translator.translate(engine, {
           text, from, to, detected: this.translator.detectLang(text)
-        }, { allowPublicNetwork: false })
+        }, { allowPublicNetwork: this.allowPublicNetwork })
         : { ok: true, text: cachedText, cached: true }
       if (!result || !result.ok) throw new ApiError(502, result && result.msg || '翻译服务暂不可用', 'TRANSLATE_FAILED')
       const translated = String(result.text || '').trim()

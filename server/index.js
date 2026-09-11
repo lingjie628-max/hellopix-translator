@@ -100,7 +100,12 @@ async function createRuntime(options) {
 
   let services
   try {
-    services = api.register(app, api.context, opts.productionApiOptions)
+    // 公共翻译网络（"谷歌极速"这类免费公共端点）默认关闭，需显式开启；
+    // 显式传入的 productionApiOptions 优先级最高，便于测试与定制部署。
+    const productionApiOptions = Object.assign({
+      allowPublicNetwork: envFlag(process.env.PIX_ALLOW_PUBLIC_TRANSLATION)
+    }, opts.productionApiOptions || {})
+    services = api.register(app, api.context, productionApiOptions)
   } catch (error) {
     if (persistent && db && typeof db.closeDependencies === 'function') await db.closeDependencies()
     throw error

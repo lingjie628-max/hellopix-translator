@@ -203,6 +203,83 @@ test('channelStatus reports credential readiness per channel', async () => {
   })
 })
 
+// --- 谷歌极速：公共端点必须显式放行 ------------------------------------------
+
+const googleFast = { id: 'google-fast', name: '谷歌极速', enabled: true, wired: true }
+
+async function withPublicNetwork(value, run) {
+  const saved = process.env.PIX_ALLOW_PUBLIC_TRANSLATION
+  if (value === undefined) delete process.env.PIX_ALLOW_PUBLIC_TRANSLATION
+  else process.env.PIX_ALLOW_PUBLIC_TRANSLATION = value
+  try {
+    return await run()
+  } finally {
+    if (saved === undefined) delete process.env.PIX_ALLOW_PUBLIC_TRANSLATION
+    else process.env.PIX_ALLOW_PUBLIC_TRANSLATION = saved
+  }
+}
+
+test('google-fast stays offline unless the public network switch is on', async () => {
+  await withPublicNetwork(undefined, async () => {
+    const { calls, impl } = captureFetch(jsonResponse([['你好', 'hello']]))
+    const result = await provider.translate(googleFast, payload, {
+      allowPublicNetwork: false,
+      fetch: impl
+    })
+    assert.equal(result.ok, false)
+    assert.match(result.msg, /未启用/)
+    assert.equal(calls.length, 0, '开关关闭时不允许发出任何请求')
+  })
+})
+
+test('google-fast parses the nested gtx response when allowed', async () => {
+  await withPublicNetwork(undefined, async () => {
+    const body = [[['你好', 'hello', null, null, 10], ['世界', 'world', null, null, 3]], null, 'en']
+    const { calls, impl } = captureFetch(jsonResponse(body))
+    const result = await provider.translate(googleFast, payload, {
+      allowPublicNetwork: true,
+      fetch: impl
+    })
+    assert.equal(result.ok, true)
+    assert.equal(result.text, '你好世界')
+
+    const url = new URL(calls[0].url)
+    assert.equal(url.origin + url.pathname, 'https://translate.googleapis.com/translate_a/single')
+    assert.equal(url.searchParams.get('client'), 'gtx')
+    assert.equal(url.searchParams.get('tl'), 'zh-CN', 'zh 必须映射成 gtx 的 zh-CN')
+    assert.equal(url.searchParams.get('q'), 'hello')
+  })
+})
+
+test('google-fast rejects malformed or empty payloads', async () => {
+  await withPublicNetwork(undefined, async () => {
+    const malformed = captureFetch(jsonResponse({ error: 'nope' }))
+    const bad = await provider.translate(googleFast, payload, {
+      allowPublicNetwork: true,
+      fetch: malformed.impl
+    })
+    assert.equal(bad.ok, false)
+    assert.match(bad.msg, /结构异常/)
+
+    const empty = captureFetch(jsonResponse([[['', 'hello', null, null, 0]]]))
+    const nothing = await provider.translate(googleFast, payload, {
+      allowPublicNetwork: true,
+      fetch: empty.impl
+    })
+    assert.equal(nothing.ok, false)
+    assert.match(nothing.msg, /未返回译文/)
+  })
+})
+
+test('google-fast readiness follows the public network switch', async () => {
+  await withPublicNetwork('1', () => {
+    assert.equal(provider.channelStatus().find(row => row.id === 'google-fast').credentialReady, true)
+  })
+  await withPublicNetwork('0', () => {
+    assert.equal(provider.channelStatus().find(row => row.id === 'google-fast').credentialReady, false)
+  })
+})
+
 test('detectLang and countBillableChars keep their billing semantics', () => {
   assert.equal(provider.detectLang('你好'), 'zh')
   assert.equal(provider.detectLang('こんにちは'), 'ja')

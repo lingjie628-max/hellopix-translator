@@ -156,6 +156,88 @@ async function youdaoTranslate(engine, payload, options) {
   return { ok: true, text: translated }
 }
 
+// --- 谷歌极速（公共端点，默认关闭）-------------------------------------------
+// translate.googleapis.com/translate_a/single?client=gtx 是公开的免费端点：
+// 无需凭据、延迟低，但没有 SLA、可能被限流或按来源封禁，且属于非官方接口。
+// 因此它必须由运行时的 PIX_ALLOW_PUBLIC_TRANSLATION 显式开启（默认关），
+// 未开启时一律 ok:false —— 与"公共翻译网络回退默认关闭"的既有安全约定一致。
+
+const GTX_URL = 'https://translate.googleapis.com/translate_a/single'
+
+const GTX_LANGUAGES = {
+  zh: 'zh-CN',
+  'zh-cn': 'zh-CN',
+  'zh-tw': 'zh-TW',
+  en: 'en',
+  ja: 'ja',
+  ko: 'ko',
+  es: 'es',
+  fr: 'fr',
+  pt: 'pt',
+  id: 'id',
+  vi: 'vi',
+  th: 'th'
+}
+
+function publicNetworkAllowed() {
+  return /^(1|true|yes)$/i.test(envValue('PIX_ALLOW_PUBLIC_TRANSLATION'))
+}
+
+function gtxLanguage(code, fallback) {
+  const value = String(code || '').toLowerCase()
+  if (!value) return fallback
+  if (value === 'auto') return 'auto'
+  return GTX_LANGUAGES[value] || value
+}
+
+async function googleFastTranslate(engine, payload, options) {
+  if (!options.allowPublicNetwork) {
+    return { ok: false, msg: '谷歌极速未启用（需显式开启 PIX_ALLOW_PUBLIC_TRANSLATION）' }
+  }
+  const text = String(payload.text || '')
+  if (!text) return { ok: false, msg: '请输入要翻译的文本' }
+
+  const query = new URLSearchParams({
+    client: 'gtx',
+    sl: gtxLanguage(payload.from, 'auto'),
+    tl: gtxLanguage(payload.to, 'zh-CN'),
+    dt: 't',
+    q: text.slice(0, 4500)
+  })
+
+  let response
+  try {
+    response = await options.fetch(`${GTX_URL}?${query.toString()}`, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(options.timeoutMs)
+    })
+  } catch (error) {
+    const reason = (error && error.name === 'TimeoutError')
+      ? '请求超时'
+      : ((error && error.message) || error)
+    return { ok: false, msg: `谷歌极速请求失败：${reason}` }
+  }
+  if (!response.ok) return { ok: false, msg: `谷歌极速返回 HTTP ${response.status}` }
+
+  let data
+  try {
+    data = await response.json()
+  } catch (error) {
+    return { ok: false, msg: '谷歌极速返回体无法解析为 JSON' }
+  }
+  // 形如 [[["译文","原文",null,null,10]],null,"en",...]
+  if (!Array.isArray(data) || !Array.isArray(data[0])) {
+    return { ok: false, msg: '谷歌极速返回结构异常' }
+  }
+  const translated = data[0]
+    .map(part => (Array.isArray(part) && part[0]) ? String(part[0]) : '')
+    .join('')
+    .trim()
+  if (!translated) return { ok: false, msg: '谷歌极速未返回译文' }
+  return { ok: true, text: translated }
+}
+
 // --- 通道注册表 --------------------------------------------------------------
 // 未接入的通道保留 stub：即使有人把 wired 误置为 true，也不会拿到任何"演示译文"。
 
@@ -171,7 +253,13 @@ const providers = {
   papago: { name: 'Papago 翻译', translate: notWired('Papago 翻译'), configured: () => false },
   baidu: { name: '百度翻译', translate: notWired('百度翻译'), configured: () => false },
   niutrans: { name: '小牛翻译', translate: notWired('小牛翻译'), configured: () => false },
-  google: { name: '谷歌翻译', translate: notWired('谷歌翻译'), configured: () => false },
+  google: { name: '谷歌稳定', translate: notWired('谷歌稳定'), configured: () => false },
+  'google-fast': {
+    name: '谷歌极速',
+    translate: googleFastTranslate,
+    // 无需凭据，"就绪"取决于是否显式允许公共翻译网络
+    configured: () => publicNetworkAllowed()
+  },
   tencent: { name: '腾讯翻译', translate: notWired('腾讯翻译'), configured: () => false },
   deepl: { name: 'DeepL 翻译', translate: notWired('DeepL 翻译'), configured: () => false },
   aws: { name: '亚马逊 AWS 翻译', translate: notWired('亚马逊 AWS 翻译'), configured: () => false },
