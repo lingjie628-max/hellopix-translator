@@ -683,6 +683,215 @@ function productionRouter(context) {
     ok(res, `默认通道已设为 ${engine.name}`)
   }))
 
+  // ---- 套餐管理（后台「套餐管理」页）------------------------------------------
+  async function packagesWithEngines() {
+    const rows = await repo.packages()
+    const links = await repo.query('SELECT package_id, engine_id FROM package_engines ORDER BY engine_id')
+    const byPackage = {}
+    for (const link of links.rows) {
+      const key = String(link.package_id)
+      if (!byPackage[key]) byPackage[key] = []
+      byPackage[key].push(link.engine_id)
+    }
+    return rows.map(row => Object.assign(row, { engines: byPackage[String(row.id)] || [] }))
+  }
+
+  router.get('/admin/packages', asyncRoute(async (_req, res) => {
+    res.json({ success: 'success', data: await packagesWithEngines() })
+  }))
+
+  router.post('/admin/packages/save', asyncRoute(async (req, res) => {
+    const data = input(req)
+    const parseJson = (value, fallback, kind) => {
+      if (value === undefined || value === null || value === '') return fallback
+      const parsed = typeof value === 'string' ? JSON.parse(value) : value
+      if (kind === 'array' && !Array.isArray(parsed)) throw new ApiError(400, '通道列表必须是数组', 'BAD_PACKAGE_ENGINES')
+      if (kind === 'object' && (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))) {
+        throw new ApiError(400, '权益配置必须是对象', 'BAD_PACKAGE_FEATURES')
+      }
+      return parsed
+    }
+
+    const code = String(data.code || '').trim().toLowerCase()
+    const title = String(data.title || '').trim()
+    if (!title) throw new ApiError(400, '套餐名称不能为空', 'PACKAGE_TITLE_REQUIRED')
+    if (!/^[a-z][a-z0-9_-]{1,63}$/.test(code)) {
+      throw new ApiError(400, '套餐标识必须是 2-64 位小写字母/数字/下划线/横线，且以字母开头', 'BAD_PACKAGE_CODE')
+    }
+    const engineIds = parseJson(data.engines, [], 'array').map(id => String(id))
+    if (engineIds.length) {
+      const found = await repo.query('SELECT id FROM engines WHERE id = ANY($1::text[])', [engineIds])
+      const known = new Set(found.rows.map(row => row.id))
+      const unknown = engineIds.filter(id => !known.has(id))
+      if (unknown.length) throw new ApiError(400, `未知通道: ${unknown.join(', ')}`, 'ENGINE_NOT_FOUND')
+    }
+
+    const price = Math.max(0, Number(data.price) || 0)
+    const chars = Math.max(0, Math.floor(Number(data.chars || data.includedChars) || 0))
+    const portLimit = Math.max(0, Math.floor(Number(data.port || data.portLimit) || 0))
+    const fields = {
+      title,
+      subtitle: String(data.subtitle || '').slice(0, 300),
+      portLimit,
+      portUnlimited: data.portUnlimited === undefined ? true : Boolean(Number(data.portUnlimited)),
+      chars,
+      price,
+      clients: parseJson(data.clients, {}, 'object'),
+      features: parseJson(data.features, {}, 'object'),
+      sortOrder: Math.max(0, Math.floor(Number(data.sortOrder) || 0))
+    }
+
+    const saved = await repo.transaction(async client => {
+      let packageId = data.id ? Number(data.id) : null
+      if (packageId) {
+        const updated = await repo.query(
+          `UPDATE packages SET title=$2,subtitle=$3,port_limit=$4,port_unlimited=$5,included_chars=$6,
+                  price=$7,clients=$8::jsonb,features=$9::jsonb,sort_order=$10,updated_at=NOW()
+           WHERE id=$1 RETURNING id`,
+          [packageId, fields.title, fields.subtitle, fields.portLimit, fields.portUnlimited,
+            fields.chars, fields.price, JSON.stringify(fields.clients), JSON.stringify(fields.features),
+            fields.sortOrder], client
+        )
+        if (!updated.rows[0]) throw new ApiError(404, '套餐不存在', 'PACKAGE_NOT_FOUND')
+      } else {
+        const inserted = await repo.query(
+          `INSERT INTO packages(code,title,subtitle,port_limit,port_unlimited,included_chars,price,clients,features,sort_order)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10) RETURNING id`,
+          [code, fields.title, fields.subtitle, fields.portLimit, fields.portUnlimited,
+            fields.chars, fields.price, JSON.stringify(fields.clients), JSON.stringify(fields.features),
+            fields.sortOrder], client
+        )
+        packageId = inserted.rows[0].id
+      }
+      await repo.query('DELETE FROM package_engines WHERE package_id=$1', [packageId], client)
+      if (engineIds.length) {
+        await repo.query(
+          `INSERT INTO package_engines(package_id,engine_id)
+           SELECT $1, unnest($2::text[]) ON CONFLICT DO NOTHING`,
+          [packageId, engineIds], client
+        )
+      }
+      await repo.audit(client, req.pixAdmin, data.id ? '编辑套餐' : '新建套餐',
+        `${fields.title}（${engineIds.length} 个通道）`, req.ip, { type: 'package', id: packageId })
+      return packageId
+    })
+    ok(res, data.id ? '套餐已更新' : '套餐已创建', { id: saved })
+  }))
+
+  // ---- 系统设置（后台「系统设置」「客服支持」两页共用）--------------------------
+  const SETTING_KEYS = {
+    siteName: 'site.name',
+    announcement: 'site.announcement',
+    clientDownloadUrl: 'downloads.client_url',
+    officialUrl: 'links.official_url',
+    guideUrl: 'links.guide_url',
+    trialChars: 'registration.trial_chars',
+    lines: 'service.lines',
+    telegram: 'support.telegram',
+    telegramUrl: 'support.telegram_url',
+    supportNote: 'support.note',
+    supportBtnText: 'support.button_text',
+    supportShow: 'support.visible'
+  }
+
+  async function readSettings() {
+    const rows = (await repo.query('SELECT key,value FROM app_settings')).rows
+    const byKey = rows.reduce((out, row) => { out[row.key] = row.value; return out }, {})
+    const discounts = byKey['billing.discounts'] || {}
+    return {
+      siteName: byKey['site.name'] || '',
+      announcement: byKey['site.announcement'] || '',
+      clientDownloadUrl: byKey['downloads.client_url'] || '',
+      officialUrl: byKey['links.official_url'] || '',
+      guideUrl: byKey['links.guide_url'] || '',
+      trialChars: Number(byKey['registration.trial_chars'] || 0),
+      discount1: Number(discounts['1'] || 0.9),
+      discount10: Number(discounts['10'] || 0.8),
+      discount50: Number(discounts['50'] || 0.75),
+      telegram: byKey['support.telegram'] || '',
+      telegramUrl: byKey['support.telegram_url'] || '',
+      supportNote: byKey['support.note'] || '',
+      supportBtnText: byKey['support.button_text'] || '联系客服',
+      supportShow: byKey['support.visible'] === false ? 0 : 1,
+      lines: Array.isArray(byKey['service.lines']) ? byKey['service.lines'] : []
+    }
+  }
+
+  router.get('/admin/settings', asyncRoute(async (_req, res) => {
+    res.json({ success: 'success', data: await readSettings() })
+  }))
+
+  router.post('/admin/settings/save', asyncRoute(async (req, res) => {
+    const data = input(req)
+    const httpsOrLoopback = value => {
+      const text = String(value || '').trim()
+      if (!text) return true
+      if (/^https:\/\//.test(text)) return true
+      // 与客户端 validateApiUrl 同一策略：只放行本机回环的 http，方便本地联调
+      return /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(?:\/|$)/.test(text)
+    }
+    const updates = []
+    for (const [field, key] of Object.entries(SETTING_KEYS)) {
+      if (data[field] === undefined) continue // 两页各自提交子集，缺省即不动
+      let value = data[field]
+      if (field === 'trialChars') value = Math.max(0, Math.floor(Number(value) || 0))
+      if (field === 'supportShow') value = Number(value) ? true : false
+      if (field === 'lines') {
+        const parsed = typeof value === 'string' ? JSON.parse(value) : value
+        if (!Array.isArray(parsed)) throw new ApiError(400, '线路必须是数组', 'BAD_LINES')
+        value = parsed.map((line, index) => {
+          const url = String(line.url || '').trim()
+          if (!httpsOrLoopback(url)) {
+            throw new ApiError(400, `第 ${index + 1} 条线路地址必须是 https://（本机回环可 http）`, 'BAD_LINE_URL')
+          }
+          return {
+            id: line.id ? Number(line.id) : index + 1,
+            name: String(line.name || '').trim() || `线路${index + 1}`,
+            url,
+            region: String(line.region || '').trim(),
+            enabled: Number(line.enabled) ? 1 : 0
+          }
+        })
+      }
+      if (['clientDownloadUrl', 'officialUrl', 'guideUrl', 'telegramUrl'].includes(field)) {
+        const text = String(value || '').trim()
+        if (text && !/^https:\/\//.test(text)) {
+          throw new ApiError(400, `${field} 必须是 https:// 地址`, 'BAD_SETTING_URL')
+        }
+      }
+      updates.push([key, JSON.stringify(value)])
+    }
+    const discounts = ['discount1', 'discount10', 'discount50'].filter(field => data[field] !== undefined)
+    if (discounts.length) {
+      const current = await readSettings()
+      const pick = (field, fallback) => {
+        const value = Number(data[field] === undefined ? fallback : data[field])
+        if (!Number.isFinite(value) || value <= 0 || value > 1) {
+          throw new ApiError(400, '折扣必须在 0 与 1 之间', 'BAD_DISCOUNT')
+        }
+        return value
+      }
+      updates.push(['billing.discounts', JSON.stringify({
+        1: pick('discount1', current.discount1),
+        10: pick('discount10', current.discount10),
+        50: pick('discount50', current.discount50)
+      })])
+    }
+    if (!updates.length) throw new ApiError(400, '没有需要保存的设置项', 'NOTHING_TO_SAVE')
+
+    await repo.transaction(async client => {
+      for (const [key, value] of updates) {
+        await repo.query(
+          `INSERT INTO app_settings(key,value,description) VALUES($1,$2::jsonb,$3)
+           ON CONFLICT (key) DO UPDATE SET value=$2::jsonb`,
+          [key, value, key], client
+        )
+      }
+      await repo.audit(client, req.pixAdmin, '修改系统设置', updates.map(item => item[0]).join(','), req.ip, { type: 'settings' })
+    })
+    ok(res, '设置已保存')
+  }))
+
   router.post('/user/register', stub('user.register', '注册依赖验证码及邮件服务迁移'))
   router.post('/user/forgot', stub('user.forgot', '找回密码依赖验证码及邮件服务迁移'))
   router.post('/user/emailCode', stub('user.emailCode', '邮件发送服务尚未迁移'))
@@ -698,9 +907,8 @@ function productionRouter(context) {
     '/assistant/getAssistantGroup', '/assistant/getAssistantDetails', '/assistant/deleteAssistantDetails',
     '/assistant/deleteAssistantGroup', '/assistant/selectAssistantGroupById', '/assistant/editAssistant',
     '/assistant/editAssistantGroup', '/weixin/weixinPay', '/weixin/checkStatus', '/zfb/alipay',
-    '/admin/packages', '/admin/packages/save', '/admin/accounts', '/admin/fans', '/admin/links',
+    '/admin/accounts', '/admin/fans', '/admin/links',
     '/admin/scripts', '/admin/verify', '/admin/verify/save',
-    '/admin/settings', '/admin/settings/save',
     '/admin/faqs', '/admin/faqs/save',
     '/admin/notices', '/admin/notices/save', '/admin/notices/delete'
   ]
