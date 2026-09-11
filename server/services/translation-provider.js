@@ -92,17 +92,21 @@ function youdaoLanguage(code, fallback) {
   return YOUDAO_LANGUAGES[value] || value
 }
 
-function youdaoCredentials() {
-  return {
-    appKey: envValue('PIX_YOUDAO_APP_KEY'),
-    appSecret: envValue('PIX_YOUDAO_APP_SECRET')
-  }
+/**
+ * 取厂商凭据：数据库里配置的（管理后台填写，落盘加密）优先，
+ * 环境变量兜底。两者都没有 -> 空凭据 -> 上层 fail-closed。
+ */
+function youdaoCredentials(credentials) {
+  const fromAdmin = credentials || {}
+  const apiKey = String(fromAdmin.apiKey || '').trim() || envValue('PIX_YOUDAO_APP_KEY')
+  const appSecret = String(fromAdmin.secret || '').trim() || envValue('PIX_YOUDAO_APP_SECRET')
+  return { appKey: apiKey, appSecret }
 }
 
 async function youdaoTranslate(engine, payload, options) {
-  const { appKey, appSecret } = youdaoCredentials()
+  const { appKey, appSecret } = youdaoCredentials(options.credentials)
   if (!appKey || !appSecret) {
-    return { ok: false, msg: '有道翻译凭据未配置（PIX_YOUDAO_APP_KEY / PIX_YOUDAO_APP_SECRET）' }
+    return { ok: false, msg: '有道翻译凭据未配置（管理后台填写，或设置 PIX_YOUDAO_APP_KEY / PIX_YOUDAO_APP_SECRET）' }
   }
   const text = String(payload.text || '')
   if (!text) return { ok: false, msg: '请输入要翻译的文本' }
@@ -245,8 +249,8 @@ const providers = {
   youdao: {
     name: '有道翻译',
     translate: youdaoTranslate,
-    configured: () => {
-      const { appKey, appSecret } = youdaoCredentials()
+    configured: (credentials) => {
+      const { appKey, appSecret } = youdaoCredentials(credentials)
       return Boolean(appKey && appSecret)
     }
   },
@@ -267,12 +271,14 @@ const providers = {
   grok: { name: 'Grok 翻译', translate: notWired('Grok 翻译'), configured: () => false }
 }
 
-/** 供后台/运维查看哪些通道已具备凭据（不代表计费侧已放开）。 */
-function channelStatus() {
+/** 供后台/运维查看哪些通道已具备凭据（不代表计费侧已放开）。
+ *  credentialsByEngine: { [engineId]: { apiKey, secret } }，来自管理后台配置的密钥。 */
+function channelStatus(credentialsByEngine) {
+  const byEngine = credentialsByEngine || {}
   return Object.keys(providers).map(id => ({
     id,
     name: providers[id].name,
-    credentialReady: providers[id].configured()
+    credentialReady: providers[id].configured(byEngine[id])
   }))
 }
 

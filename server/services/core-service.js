@@ -50,6 +50,21 @@ class CoreService {
     this.reconciliationRun = null
   }
 
+  /**
+   * 取通道的厂商凭据（管理后台配置的，落盘加密）。
+   * 取不到就返回空对象，由适配层回退到环境变量 ——
+   * 绝不能因为"读密钥失败"就把翻译整个打断。
+   */
+  async engineCredentials(engineId) {
+    if (!this.repo || typeof this.repo.engineCredentials !== 'function') return {}
+    try {
+      return await this.repo.engineCredentials(engineId)
+    } catch (error) {
+      console.error('Engine credential read failed:', error.message)
+      return {}
+    }
+  }
+
   profile(session) {
     const account = session.account
     const parent = session.parent
@@ -361,7 +376,10 @@ class CoreService {
       const result = cachedText == null
         ? await this.translator.translate(engine, {
           text, from, to, detected: this.translator.detectLang(text)
-        }, { allowPublicNetwork: this.allowPublicNetwork })
+        }, {
+          allowPublicNetwork: this.allowPublicNetwork,
+          credentials: await this.engineCredentials(engine.id)
+        })
         : { ok: true, text: cachedText, cached: true }
       if (!result || !result.ok) throw new ApiError(502, result && result.msg || '翻译服务暂不可用', 'TRANSLATE_FAILED')
       const translated = String(result.text || '').trim()

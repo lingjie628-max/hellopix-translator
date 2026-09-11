@@ -1,6 +1,7 @@
 'use strict'
 
 const { ApiError } = require('../lib/http')
+const { decryptSecret } = require('../lib/credentials')
 
 const TABLES = Object.freeze({
   users: 'users',
@@ -119,13 +120,54 @@ class ProductionRepository {
     )).rows)
   }
 
+  // 面向客户端的通道列表：**绝不能**带 api_key_ciphertext / secret_ciphertext。
+  // 原先是 SELECT e.*，而 /translate/engines 是客户端接口，
+  // 结果把密钥密文（bytea -> Buffer -> JSON）一路发给了商户端。
   async packageEngines(packageId) {
     const result = await this.query(
-      `SELECT e.* FROM engines e JOIN package_engines pe ON pe.engine_id=e.id
+      `SELECT e.id,e.name,e.provider,e.tier,e.enabled,e.wired,e.cost_per_million,
+              e.model,e.note,e.updated_at
+       FROM engines e JOIN package_engines pe ON pe.engine_id=e.id
        WHERE pe.package_id=$1 ORDER BY e.id`,
       [packageId]
     )
     return mapRows(result.rows)
+  }
+
+  /** 全部通道（管理端列表用），同样不带密钥本体，只带"是否已填"。 */
+  async enginesForAdmin() {
+    return mapRows((await this.query(
+      `SELECT id,name,provider,tier,enabled,wired,cost_per_million,model,endpoint,note,updated_at,
+              (api_key_ciphertext IS NOT NULL) AS has_key,
+              (secret_ciphertext IS NOT NULL) AS has_secret
+       FROM engines ORDER BY id`
+    )).rows)
+  }
+
+  async engineById(id) {
+    return mapRow((await this.query(
+      `SELECT id,name,provider,tier,enabled,wired,cost_per_million,model,endpoint,note,
+              (api_key_ciphertext IS NOT NULL) AS has_key,
+              (secret_ciphertext IS NOT NULL) AS has_secret
+       FROM engines WHERE id=$1`,
+      [id]
+    )).rows[0])
+  }
+
+  /**
+   * 取某个通道的厂商凭据（已解密）。
+   * 只给服务端内部调用：core-service 翻译前、管理端保存前做就绪校验。
+   */
+  async engineCredentials(id) {
+    const row = (await this.query(
+      'SELECT api_key_ciphertext,secret_ciphertext FROM engines WHERE id=$1',
+      [id]
+    )).rows[0]
+    if (!row) return { apiKey: '', secret: '' }
+    return {
+      apiKey: decryptSecret(row.api_key_ciphertext),
+      secret: decryptSecret(row.secret_ciphertext)
+    }
   }
 
   async settings() {

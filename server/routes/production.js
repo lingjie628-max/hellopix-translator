@@ -7,6 +7,8 @@ const { mapRow, mapRows } = require('../repositories/production-repository')
 const { number } = require('../services/core-service')
 const { redisRateLimit } = require('../redis-security')
 const captcha = require('../lib/captcha')
+const { encryptSecret, credentialsKeyReady, KEY_ENV } = require('../lib/credentials')
+const { providers, channelStatus } = require('../services/translation-provider')
 
 function publicUser(session) {
   return {
@@ -572,6 +574,115 @@ function productionRouter(context) {
     })
     ok(res, result.updated ? '客户端版本已更新' : '客户端版本已创建', { id: result.id })
   }))
+  // ---- 翻译通道管理（后台「翻译通道」页）--------------------------------------
+  // 密钥走 engines.api_key_ciphertext / secret_ciphertext，AES-256-GCM 加密落盘；
+  // 列表只回"是否已填"，永不回密钥本体。
+  async function activeEngineId() {
+    const row = (await repo.query("SELECT value FROM app_settings WHERE key='translation.active_engine'")).rows[0]
+    return row && row.value ? String(row.value) : ''
+  }
+
+  router.get('/admin/engines', asyncRoute(async (_req, res) => {
+    const rows = await repo.enginesForAdmin()
+    const active = await activeEngineId()
+    const credentials = {}
+    for (const row of rows) credentials[row.id] = await repo.engineCredentials(row.id)
+    const readiness = channelStatus(credentials).reduce((out, item) => {
+      out[item.id] = item.credentialReady
+      return out
+    }, {})
+    const packages = await repo.packages()
+    res.json({
+      data: {
+        rows: rows.map(row => ({
+          id: row.id,
+          name: row.name,
+          provider: row.provider,
+          tier: row.tier,
+          costPerMillion: Number(row.costPerMillion || 0),
+          model: row.model || '',
+          endpoint: row.endpoint || '',
+          note: row.note || '',
+          enabled: Boolean(row.enabled),
+          wired: Boolean(row.wired),
+          // 只暴露"够不够用"，不暴露密钥本身
+          hasKey: Boolean(row.hasKey || row.hasSecret),
+          credentialReady: Boolean(readiness[row.id]),
+          wiredText: row.wired ? '已接通' : (Boolean(row.enabled) ? '未接通（缺凭据或未实现）' : '未启用'),
+          active: row.id === active
+        })),
+        activeEngine: active,
+        credentialsKeyReady: credentialsKeyReady(),
+        packageBill: packages
+          .map(item => `${item.title} ¥${Number(item.price || 0)}/${Math.round(Number(item.chars || 0) / 10000)}万`)
+          .join(' · ')
+      }
+    })
+  }))
+
+  router.post('/admin/engines/save', asyncRoute(async (req, res) => {
+    const data = input(req)
+    const id = String(data.id || '').trim()
+    const engine = await repo.engineById(id)
+    if (!engine) throw new ApiError(404, '通道不存在', 'ENGINE_NOT_FOUND')
+
+    const endpoint = String(data.endpoint || '').trim()
+    if (endpoint && !/^https:\/\//.test(endpoint)) {
+      throw new ApiError(400, '接口地址必须是 https:// 开头', 'BAD_ENDPOINT')
+    }
+
+    // 密钥非空才更新；留空表示保持原值（前端占位符就是这么写的）
+    const apiKey = String(data.apiKey || '').trim()
+    const secret = String(data.secret || '').trim()
+    if ((apiKey || secret) && !credentialsKeyReady()) {
+      throw new ApiError(503, `服务端未配置 ${KEY_ENV}，拒绝保存厂商密钥`, 'CREDENTIAL_KEY_MISSING')
+    }
+
+    const existing = await repo.engineCredentials(id)
+    const effective = {
+      apiKey: apiKey || existing.apiKey,
+      secret: secret || existing.secret
+    }
+    const enabled = Boolean(Number(data.enabled))
+    const adapter = providers[id]
+    const ready = Boolean(adapter && adapter.configured(effective))
+    // wired 不让人手填：适配器实现 + 凭据齐备才允许接通，与 CLI 脚本同一把尺子
+    const wired = enabled && ready
+
+    await repo.query(
+      `UPDATE engines SET enabled=$2, wired=$3, cost_per_million=$4, model=$5, endpoint=$6, note=$7,
+              api_key_ciphertext=COALESCE($8, api_key_ciphertext),
+              secret_ciphertext=COALESCE($9, secret_ciphertext),
+              updated_at=NOW()
+       WHERE id=$1`,
+      [id, enabled, wired,
+        Math.max(0, Number(data.costPerMillion) || 0),
+        String(data.model || '').trim() || null,
+        endpoint || null,
+        String(data.note || '').slice(0, 1000),
+        apiKey ? encryptSecret(apiKey) : null,
+        secret ? encryptSecret(secret) : null]
+    )
+    await repo.audit(null, req.pixAdmin, '配置翻译通道', `${engine.name}: enabled=${enabled} wired=${wired}`, req.ip, {
+      type: 'engine', id
+    })
+    ok(res, wired ? `${engine.name} 已接通` : `${engine.name} 已保存（未接通：${adapter ? '凭据未就绪' : '适配器未实现'}）`)
+  }))
+
+  router.post('/admin/engines/active', asyncRoute(async (req, res) => {
+    const id = String(input(req).id || '').trim()
+    const engine = await repo.engineById(id)
+    if (!engine) throw new ApiError(404, '通道不存在', 'ENGINE_NOT_FOUND')
+    if (!engine.enabled) throw new ApiError(400, '该通道未启用，不能设为默认', 'ENGINE_DISABLED')
+    await repo.query(
+      `INSERT INTO app_settings(key,value,description) VALUES('translation.active_engine',to_jsonb($1::text),'默认翻译引擎')
+       ON CONFLICT (key) DO UPDATE SET value=to_jsonb($1::text)`,
+      [id]
+    )
+    await repo.audit(null, req.pixAdmin, '设置默认翻译通道', engine.name, req.ip, { type: 'engine', id })
+    ok(res, `默认通道已设为 ${engine.name}`)
+  }))
+
   router.post('/user/register', stub('user.register', '注册依赖验证码及邮件服务迁移'))
   router.post('/user/forgot', stub('user.forgot', '找回密码依赖验证码及邮件服务迁移'))
   router.post('/user/emailCode', stub('user.emailCode', '邮件发送服务尚未迁移'))
@@ -588,8 +699,8 @@ function productionRouter(context) {
     '/assistant/deleteAssistantGroup', '/assistant/selectAssistantGroupById', '/assistant/editAssistant',
     '/assistant/editAssistantGroup', '/weixin/weixinPay', '/weixin/checkStatus', '/zfb/alipay',
     '/admin/packages', '/admin/packages/save', '/admin/accounts', '/admin/fans', '/admin/links',
-    '/admin/scripts', '/admin/verify', '/admin/verify/save', '/admin/engines',
-    '/admin/engines/save', '/admin/engines/active', '/admin/settings', '/admin/settings/save',
+    '/admin/scripts', '/admin/verify', '/admin/verify/save',
+    '/admin/settings', '/admin/settings/save',
     '/admin/faqs', '/admin/faqs/save',
     '/admin/notices', '/admin/notices/save', '/admin/notices/delete'
   ]

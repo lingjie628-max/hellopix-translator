@@ -289,3 +289,39 @@ test('detectLang and countBillableChars keep their billing semantics', () => {
   assert.equal(provider.countBillableChars('你好ab'), 6)
   assert.equal(provider.countBillableChars(''), 0)
 })
+
+test('admin-configured credentials take precedence over environment', async () => {
+  // 只有管理后台配置的密钥
+  await withCredentials(null, async () => {
+    const { calls, impl } = captureFetch(jsonResponse({ errorCode: '0', translation: ['来自后台'] }))
+    const result = await provider.translate(youdao, payload, {
+      fetch: impl,
+      credentials: { apiKey: 'db-key', secret: 'db-secret' }
+    })
+    assert.equal(result.ok, true)
+    const form = new URLSearchParams(calls[0].options.body)
+    assert.equal(form.get('appKey'), 'db-key')
+  })
+
+  // 后台与 env 都有 -> 后台优先
+  await withCredentials({ PIX_YOUDAO_APP_KEY: 'env-key', PIX_YOUDAO_APP_SECRET: 'env-secret' }, async () => {
+    const { calls, impl } = captureFetch(jsonResponse({ errorCode: '0', translation: ['x'] }))
+    await provider.translate(youdao, payload, { fetch: impl, credentials: { apiKey: 'db-key', secret: 'db-secret' } })
+    assert.equal(new URLSearchParams(calls[0].options.body).get('appKey'), 'db-key')
+  })
+
+  // 后台为空时回落到 env
+  await withCredentials({ PIX_YOUDAO_APP_KEY: 'env-key', PIX_YOUDAO_APP_SECRET: 'env-secret' }, async () => {
+    const { calls, impl } = captureFetch(jsonResponse({ errorCode: '0', translation: ['x'] }))
+    await provider.translate(youdao, payload, { fetch: impl, credentials: { apiKey: '', secret: '' } })
+    assert.equal(new URLSearchParams(calls[0].options.body).get('appKey'), 'env-key')
+  })
+})
+
+test('channelStatus reflects admin-configured credentials', async () => {
+  await withCredentials(null, () => {
+    const rows = provider.channelStatus({ youdao: { apiKey: 'k', secret: 's' } })
+    assert.equal(rows.find(row => row.id === 'youdao').credentialReady, true)
+    assert.equal(provider.channelStatus({}).find(row => row.id === 'youdao').credentialReady, false)
+  })
+})

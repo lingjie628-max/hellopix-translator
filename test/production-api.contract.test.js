@@ -232,3 +232,48 @@ test('unwired translation providers fail before reserving balance', async () => 
   )
   assert.equal(transactions, 0)
 })
+
+// --- 厂商密钥不得泄漏到客户端 -------------------------------------------------
+// 背景：/translate/engines 是客户端接口，而 packageEngines 曾用 SELECT e.*，
+// 把 api_key_ciphertext / secret_ciphertext(bytea) 一路序列化进了响应体。
+
+test('client-facing engine query never selects credential columns', () => {
+  const source = fs.readFileSync(path.join(root, 'server/repositories/production-repository.js'), 'utf8')
+  const body = source.slice(
+    source.indexOf('async packageEngines('),
+    source.indexOf('async enginesForAdmin(')
+  )
+  assert.ok(body.length > 0, '找不到 packageEngines 实现')
+  assert.doesNotMatch(body, /e\.\*/, 'packageEngines 不得再用 SELECT e.*（会带出密钥密文）')
+  assert.doesNotMatch(body, /ciphertext/, 'packageEngines 不得触碰密钥列')
+  assert.match(body, /e\.id/, '应显式列出安全列')
+
+  // 管理端列表只回"是否已填"，同样不回密文
+  const admin = source.slice(
+    source.indexOf('async enginesForAdmin('),
+    source.indexOf('async engineById(')
+  )
+  assert.doesNotMatch(admin, /api_key_ciphertext\s*,/, '管理端列表不得直接回传密文列')
+  assert.match(admin, /AS has_key/, '管理端应只回 has_key 标记')
+})
+
+test('engine admin routes are registered before the unmigrated stub list', () => {
+  const source = fs.readFileSync(path.join(root, 'server/routes/production.js'), 'utf8')
+  const listIndex = source.indexOf('const unmigrated = [')
+  assert.ok(listIndex > 0)
+  for (const route of ['/admin/engines', '/admin/engines/save', '/admin/engines/active']) {
+    const routeIndex = source.indexOf(`'${route}'`, source.indexOf('router.get(\'/admin/engines\''))
+    assert.ok(routeIndex > 0 && routeIndex < listIndex, `${route} 必须在 stub 列表之前注册`)
+    assert.ok(!source.slice(listIndex).includes(`'${route}'`), `${route} 不应再留在 unmigrated 列表里`)
+  }
+  // 保存路径必须强制校验密钥已配置，不得明文落库
+  assert.match(source, /CREDENTIAL_KEY_MISSING/)
+  assert.match(source, /encryptSecret\(/)
+})
+
+test('wired is derived from adapter readiness, not typed in by hand', () => {
+  const source = fs.readFileSync(path.join(root, 'server/routes/production.js'), 'utf8')
+  const body = source.slice(source.indexOf("router.post('/admin/engines/save'"), source.indexOf("router.post('/admin/engines/active'"))
+  assert.match(body, /const wired = enabled && ready/, 'wired 必须由 enabled + 适配器就绪推导')
+  assert.doesNotMatch(body, /wired\s*=\s*(?:Boolean\()?Number\(data\.wired/, '不允许前端直接指定 wired')
+})
