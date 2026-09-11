@@ -17,7 +17,8 @@
     "telegram": "npm start --prefix standalone/telegram",
     "db:migrate": "node scripts/migrate.js up",
     "db:rollback": "node scripts/migrate.js down",
-    "seed:admin": "node scripts/seed-admin.js"
+    "seed:admin": "node scripts/seed-admin.js",
+    "engine:wired": "node scripts/set-engine-wired.js"
   },
   "dependencies": {
     "axios": "^1.20.0",
