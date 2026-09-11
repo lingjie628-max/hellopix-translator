@@ -31,6 +31,20 @@ if not defined Platform (
 )
 echo [OK] VS x64 环境已就绪 (Platform=%Platform%)
 
+rem 工具集必须是 14.44(v143)。官方 docs/building-win.md 明确要求:
+rem VS2026 默认的 v145 不支持 Win7, 而 tdesktop 的 CMake 最终构建走 14.44;
+rem 若 prepare 用默认 v145 编 Qt/libjxl/tg_angle, 链接时会因 STL 实现差异报
+rem LNK2001/LNK2019: unresolved external symbol __std_rotate / __std_min_element_*
+rem (云编译 run 34603406709 已实测踩到, 11 个 unresolved externals)。
+if not "%VCToolsVersion:~0,5%"=="14.44" (
+  echo [错误] 当前工具集是 %VCToolsVersion%(需要 14.44)。
+  echo        请改用下面这条重新初始化环境后, 再运行本脚本:
+  echo          "%%ProgramFiles%%\Microsoft Visual Studio\2026\Enterprise\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.44
+  echo        ^(路径按你的 VS 版本/版本号调整; 关键是 -vcvars_ver=14.44^)
+  exit /b 1
+)
+echo [OK] 工具集 14.44(v143)
+
 where git >nul 2>&1
 if errorlevel 1 ( echo [错误] 未找到 git,请先安装 Git for Windows & exit /b 1 )
 echo [OK] git

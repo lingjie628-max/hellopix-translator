@@ -24,7 +24,15 @@
 
 ## 二、开始（全程只开一个窗口）
 
-打开 **"x64 Native Tools Command Prompt for VS 2026"**（开始菜单里搜得到；别用普通 CMD），然后：
+⚠️ **必须先带 `-vcvars_ver=14.44` 初始化环境**。VS2026 默认的 v145 工具集不支持 Win7，而 tdesktop 的 CMake 最终构建固定用 14.44(v143)；如果 prepare 用默认 v145 编 Qt/libjxl/tg_angle，后面链接会因为 STL 实现差异报一堆 `LNK2001/LNK2019: unresolved external symbol __std_rotate / __std_min_element_*`（云编译已实测踩到，11 个 unresolved externals）。
+
+所以**不要**直接用开始菜单里的 "x64 Native Tools Command Prompt"（那是 v145），改成先开普通 CMD，执行：
+
+```bat
+call "C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.44
+```
+
+（路径按你的 VS 版本调整；关键就是结尾的 `-vcvars_ver=14.44`。`build-on-windows.bat` 会自己检查这个工具集，不对就直接报错退出。）
 
 ### 方式 A：让脚本自己搞定（推荐）
 
