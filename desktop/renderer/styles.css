@@ -821,8 +821,8 @@ button {
   position: relative;
   z-index: 2;
   flex-shrink: 0;
-  max-height: 96px;
-  padding: 8px 12px 8px;
+  max-height: 136px;
+  padding: 10px 14px;
   overflow: hidden;
   background: linear-gradient(180deg, #1a3354 0%, #142846 100%);
   border-bottom: 1px solid rgba(34, 211, 238, 0.12);
@@ -866,8 +866,8 @@ button {
   gap: 8px 12px;
 }
 .trans-bar-extra {
-  margin-top: 7px;
-  padding-top: 7px;
+  margin-top: 11px;
+  padding-top: 9px;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
   opacity: 0.96;
 }
