@@ -1671,43 +1671,27 @@ function initLangPick(inputId, listId, selectId) {
   const list = document.getElementById(listId)
   const select = document.getElementById(selectId)
   if (!input || !list || !select) return
-  let filtered = []
+  // 用原生 datalist：系统级下拉提示，输入即筛选，不会像自定义浮层那样盖住界面
+  input.setAttribute('list', listId)
+  list.innerHTML = LANGS.map(l => '<option value="' + l.name + '"></option>').join('')
 
-  const nameOf = code => {
-    const hit = LANGS.find(l => l.id === code)
-    return hit ? hit.name : ''
-  }
-  const render = keyword => {
-    const kw = String(keyword || '').trim().toLowerCase()
-    filtered = LANGS.filter(l => !kw || l.name.toLowerCase().includes(kw) || l.id.toLowerCase().includes(kw))
-    list.innerHTML = filtered.length
-      ? filtered.map(l => '<div class="lp-item' + (l.id === select.value ? ' on' : '') + '" data-code="' + l.id + '">' + l.name + '</div>').join('')
-      : '<div class="lp-empty">没有匹配的语言</div>'
-  }
-  const open = () => { render(input.value === nameOf(select.value) ? '' : input.value); list.hidden = false }
-  const close = () => { list.hidden = true; input.value = nameOf(select.value) }
-  const pick = code => {
-    select.value = code
-    input.value = nameOf(code)
-    list.hidden = true
-    select.dispatchEvent(new Event('change', { bubbles: true }))
-  }
+  const nameOf = code => { const hit = LANGS.find(l => l.id === code); return hit ? hit.name : '' }
+  const codeOf = name => { const hit = LANGS.find(l => l.name === String(name || '').trim()); return hit ? hit.id : '' }
+  const sync = () => { input.value = nameOf(select.value) }
 
-  input.addEventListener('focus', () => { input.select(); open() })
-  input.addEventListener('input', () => { render(input.value); list.hidden = false })
-  input.addEventListener('keydown', event => {
-    if (event.key === 'Escape') { close(); input.blur() }
-    if (event.key === 'Enter' && filtered.length) { event.preventDefault(); pick(filtered[0].id) }
-  })
-  input.addEventListener('blur', () => setTimeout(close, 150))
-  list.addEventListener('mousedown', event => {
-    const item = event.target.closest('.lp-item')
-    if (item) { event.preventDefault(); pick(item.dataset.code) }
-  })
-  // 原生 select 被其它代码改动时（如 applyTransPrefs），同步显示名
-  select.addEventListener('change', () => { if (list.hidden) input.value = nameOf(select.value) })
-  input.value = nameOf(select.value)
-  select._syncPickDisplay = () => { input.value = nameOf(select.value) }
+  const commit = () => {
+    const code = codeOf(input.value)
+    if (code) {
+      select.value = code
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    }
+    sync()
+  }
+  input.addEventListener('change', commit)
+  input.addEventListener('blur', commit)
+  select.addEventListener('change', sync)
+  select._syncPickDisplay = sync
+  sync()
 }
 
 function fillLangs() {
