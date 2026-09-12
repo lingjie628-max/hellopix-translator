@@ -2110,77 +2110,58 @@ button {
 }
 
 /* ==========================================================================
-   翻译设置区：两层布局（核心 / 辅助）+ 功能分组
-   仅调整布局、间距、尺寸与视觉层级，不改动任何控件、id 与事件绑定。
+   翻译设置区：保持原有上下两行布局，只重新分配宽度与间距
+   约束：纯 CSS；不动 HTML/JS/事件；不用 space-between；不加卡片边框背景；
+        整体高度与改版前基本一致（max-height 保持 96px）。
    ========================================================================== */
 
-/* 外层：两行之间留白，左右加呼吸感；展开高度足够容纳两行（折叠仍由 .is-collapsed 控制） */
-.trans-bar {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  max-height: 260px;
-  padding: 12px 18px;
-}
-
-/* 第一层：核心翻译设置。组与组之间用更大的 gap 形成明显区隔 */
+/* 第一行：核心设置。整行靠左连续排列，剩余空间留在右侧 */
 .trans-bar-main {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px 22px;
+  justify-content: flex-start;   /* 明确禁用 space-between */
+  gap: 0 24px;                   /* 接收组↔通道 / 发出组↔接收组 的横向间距 */
 }
 
-/* 功能分组容器：把「发出翻译」「接收翻译」各自框成一个整体 */
+/* 功能组：只用间距区分，不加外框、不加背景、不加内边距 */
 .trans-cluster {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 10px;
-  border-radius: 10px;
-  background: rgba(34, 211, 238, 0.06);
-  border: 1px solid rgba(34, 211, 238, 0.16);
+  padding: 0;
+  background: none;
+  border: 0;
 }
-/* 组内开关用青色强调，呼应"翻译功能" */
-.trans-cluster .pix-switch span { color: #7fe3f5; }
 
-/* 第二层：辅助设置。整体靠左、统一间距、视觉上弱于第一层 */
+/* 第二行：辅助设置。同样靠左，统一间距 */
 .trans-bar-extra {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: flex-start;
-  gap: 8px 14px;
-  margin-top: 0;
-  padding-top: 10px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-  opacity: 0.92;
+  gap: 0 14px;
 }
 
-/* 统一控件尺寸：高度、圆角、垂直居中一致 */
-.trans-bar select,
+/* 控件尺寸统一（高度回到紧凑值，保证两行仍能装进 96px） */
+.trans-bar select {
+  height: 26px;
+  box-sizing: border-box;
+  border-radius: 6px;
+  padding: 0 24px 0 9px;
+  font-size: 12px;
+}
 .trans-bar .pix-switch,
 .trans-bar input[type="color"] {
-  height: 28px;
+  height: 26px;
   box-sizing: border-box;
-  border-radius: 7px;
-  vertical-align: middle;
 }
-.trans-bar select {
-  padding: 0 26px 0 9px;
-  font-size: 12px;
-  line-height: 26px;
-}
-.trans-bar .pix-switch { display: inline-flex; align-items: center; gap: 6px; padding: 0 2px; }
 .trans-bar .trans-mini { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
-.trans-bar .trans-arrow { opacity: 0.5; font-style: normal; }
 
-/* 按内容分配宽度，避免所有下拉一律等宽 */
-#barSendFrom, #barSendTo, #barRecvFrom, #barRecvTo { width: 112px; }
-#barEngine { width: 104px; }
-#barGroupMode { width: 76px; }
-#barFontSize { width: 92px; }
-#barServer { width: 112px; }
-
-/* 当前选中/聚焦用橙色提示（沿用既有配色，不新增颜色） */
-.trans-bar select:focus { border-color: #f0a020; box-shadow: 0 0 0 1px rgba(240, 160, 32, 0.35); }
+/* 按内容分配宽度：语言类中等，功能类更短，避免一律等宽或过宽 */
+#barSendFrom, #barRecvFrom { width: 160px; }   /* 自动识别 */
+#barSendTo,   #barRecvTo   { width: 150px; }   /* 英语 / 简体中文 */
+#barEngine                 { width: 150px; }   /* 有道翻译 */
+#barGroupMode              { width: 74px; }    /* 手动 */
+#barFontSize               { width: 96px; }    /* 15号字体 */
+#barServer                 { width: 108px; }   /* 国内线路 */
