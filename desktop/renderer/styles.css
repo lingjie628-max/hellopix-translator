@@ -45,7 +45,14 @@ html, body {
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
 }
-button, input { font-family: inherit; }
+/* 表单控件统一跟随设计变量。
+   此前只在工具栏和 .add-grid 里单独设过字号，其余 select/input 落回浏览器
+   默认的 13.33px —— 与正文/控件的 13px 差 0.33px，肉眼不显但不成整数阶，
+   同一界面里两种字号并存。这里给所有控件一个基准，个别地方要覆盖再覆盖。 */
+button, input, select, textarea {
+  font-family: inherit;
+  font-size: var(--fs-ctl);
+}
 .screen { height: 100%; }
 .hidden { display: none !important; }
 
@@ -2154,6 +2161,8 @@ button {
 .ghost {
   background: rgba(51, 65, 85, 0.7);
   width: 100%;
+  /* 此前没设字号，落回浏览器默认的 13.33px，与控件/正文的 13px 不成整数阶 */
+  font-size: var(--fs-ctl);
 }
 .ghost:hover { background: rgba(71, 85, 105, 0.9); }
 .profile-body { font-size: 13px; margin: 14px 0 18px; color: #d1d5db; }
