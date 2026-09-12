@@ -1607,18 +1607,31 @@ document.addEventListener('keydown', (event) => {
   }
 })
 
+// 全球主要语言（ISO 639-1 / 639-3）。
+// 注意：能否真正翻译取决于所选通道是否支持该语种 —— 通道不支持的语种
+// 会在翻译时返回厂商错误（不会扣费），而不是静默产出错误译文。
 const LANGS = [
   { id: 'auto', name: '自动检测' },
-  { id: 'zh', name: '中文' },
-  { id: 'en', name: '英语' },
-  { id: 'ja', name: '日语' },
-  { id: 'ko', name: '韩语' },
-  { id: 'es', name: '西班牙语' },
-  { id: 'fr', name: '法语' },
-  { id: 'pt', name: '葡萄牙语' },
-  { id: 'id', name: '印尼语' },
-  { id: 'vi', name: '越南语' },
-  { id: 'th', name: '泰语' }
+  { id: 'zh', name: '中文' }, { id: 'zh-TW', name: '繁体中文' }, { id: 'en', name: '英语' }, { id: 'ja', name: '日语' }, { id: 'ko', name: '韩语' },
+  { id: 'es', name: '西班牙语' }, { id: 'fr', name: '法语' }, { id: 'de', name: '德语' }, { id: 'pt', name: '葡萄牙语' }, { id: 'ru', name: '俄语' },
+  { id: 'it', name: '意大利语' }, { id: 'ar', name: '阿拉伯语' }, { id: 'th', name: '泰语' }, { id: 'vi', name: '越南语' }, { id: 'id', name: '印尼语' },
+  { id: 'ms', name: '马来语' }, { id: 'fil', name: '菲律宾语' }, { id: 'hi', name: '印地语' }, { id: 'bn', name: '孟加拉语' }, { id: 'ur', name: '乌尔都语' },
+  { id: 'fa', name: '波斯语' }, { id: 'tr', name: '土耳其语' }, { id: 'he', name: '希伯来语' }, { id: 'el', name: '希腊语' }, { id: 'nl', name: '荷兰语' },
+  { id: 'pl', name: '波兰语' }, { id: 'uk', name: '乌克兰语' }, { id: 'ro', name: '罗马尼亚语' }, { id: 'cs', name: '捷克语' }, { id: 'sk', name: '斯洛伐克语' },
+  { id: 'hu', name: '匈牙利语' }, { id: 'bg', name: '保加利亚语' }, { id: 'hr', name: '克罗地亚语' }, { id: 'sr', name: '塞尔维亚语' }, { id: 'sl', name: '斯洛文尼亚语' },
+  { id: 'lt', name: '立陶宛语' }, { id: 'lv', name: '拉脱维亚语' }, { id: 'et', name: '爱沙尼亚语' }, { id: 'fi', name: '芬兰语' }, { id: 'sv', name: '瑞典语' },
+  { id: 'no', name: '挪威语' }, { id: 'da', name: '丹麦语' }, { id: 'is', name: '冰岛语' }, { id: 'ga', name: '爱尔兰语' }, { id: 'cy', name: '威尔士语' },
+  { id: 'ca', name: '加泰罗尼亚语' }, { id: 'eu', name: '巴斯克语' }, { id: 'gl', name: '加利西亚语' }, { id: 'sq', name: '阿尔巴尼亚语' }, { id: 'mk', name: '马其顿语' },
+  { id: 'bs', name: '波斯尼亚语' }, { id: 'mt', name: '马耳他语' }, { id: 'af', name: '南非荷兰语' }, { id: 'sw', name: '斯瓦希里语' }, { id: 'am', name: '阿姆哈拉语' },
+  { id: 'ha', name: '豪萨语' }, { id: 'yo', name: '约鲁巴语' }, { id: 'ig', name: '伊博语' }, { id: 'zu', name: '祖鲁语' }, { id: 'so', name: '索马里语' },
+  { id: 'mg', name: '马尔加什语' }, { id: 'rw', name: '卢旺达语' }, { id: 'sn', name: '绍纳语' }, { id: 'ta', name: '泰米尔语' }, { id: 'te', name: '泰卢固语' },
+  { id: 'kn', name: '卡纳达语' }, { id: 'ml', name: '马拉雅拉姆语' }, { id: 'mr', name: '马拉地语' }, { id: 'gu', name: '古吉拉特语' }, { id: 'pa', name: '旁遮普语' },
+  { id: 'ne', name: '尼泊尔语' }, { id: 'si', name: '僧伽罗语' }, { id: 'km', name: '高棉语' }, { id: 'lo', name: '老挝语' }, { id: 'my', name: '缅甸语' },
+  { id: 'mn', name: '蒙古语' }, { id: 'kk', name: '哈萨克语' }, { id: 'ky', name: '吉尔吉斯语' }, { id: 'uz', name: '乌兹别克语' }, { id: 'tg', name: '塔吉克语' },
+  { id: 'tk', name: '土库曼语' }, { id: 'az', name: '阿塞拜疆语' }, { id: 'hy', name: '亚美尼亚语' }, { id: 'ka', name: '格鲁吉亚语' }, { id: 'ps', name: '普什图语' },
+  { id: 'ku', name: '库尔德语' }, { id: 'sd', name: '信德语' }, { id: 'bo', name: '藏语' }, { id: 'ug', name: '维吾尔语' }, { id: 'jv', name: '爪哇语' },
+  { id: 'su', name: '巽他语' }, { id: 'ceb', name: '宿务语' }, { id: 'mi', name: '毛利语' }, { id: 'sm', name: '萨摩亚语' }, { id: 'to', name: '汤加语' },
+  { id: 'fj', name: '斐济语' }, { id: 'haw', name: '夏威夷语' }, { id: 'eo', name: '世界语' }, { id: 'la', name: '拉丁语' }, { id: 'yi', name: '意第绪语' }
 ]
 
 function fillLangs() {
