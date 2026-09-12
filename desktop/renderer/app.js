@@ -1923,3 +1923,24 @@ if (!usernameEl.value) usernameEl.focus()
   setTimeout(push, 0)
   setTimeout(push, 300)
 })()
+
+
+// --- 顶部 chrome 底边上报（哨兵方案）-----------------------------------------
+// 原生视图的起始 y 直接取哨兵的 bottom，不再依赖任何硬编码高度常量。
+// 这样标签栏/工具条/状态栏的高度怎么变，嵌入视图都会自动跟随。
+;(function reportChromeHeight() {
+  const end = document.getElementById('chromeEnd')
+  if (!end || !window.pix || typeof window.pix.reportChromeHeight !== 'function') return
+  let last = -1
+  const push = () => {
+    const value = Math.round(end.getBoundingClientRect().bottom)
+    if (value > 0 && value !== last) {
+      last = value
+      window.pix.reportChromeHeight(value)
+    }
+  }
+  if (typeof ResizeObserver === 'function') new ResizeObserver(push).observe(end)
+  window.addEventListener('resize', push)
+  setTimeout(push, 0)
+  setTimeout(push, 300)
+})()

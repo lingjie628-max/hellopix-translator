@@ -130,6 +130,10 @@
       <div id="appStatus" class="app-status hidden">
         <span id="appStatusText"></span>
       </div>
+      <!-- 顶部 chrome 的哨兵：它的 bottom 就是嵌入视图应当起始的 y。
+           标签栏/工具条/状态栏任意高度变化都会经由它自动同步到原生视图，
+           从而让 TABS/UTILITY/TRANS_BAR/STATUS 四个高度常量退出定位计算。 -->
+      <div id="chromeEnd" aria-hidden="true" style="height:0;overflow:hidden"></div>
       <div id="empty" class="workspace">
         <div class="home-cols">
           <section class="home-add home-panel">

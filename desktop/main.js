@@ -26,6 +26,9 @@ const TRANS_BAR_HEIGHT = 78
 // 渲染层上报的工具条真实高度（CSS 实测约 88px，与上面的常量不一致时会用到）
 let measuredTransBarHeight = 0
 let hasMeasuredBarHeight = false
+// 哨兵上报的 chrome 底边；有它就完全不需要再按常量估算
+let measuredChromeHeight = 0
+let hasMeasuredChrome = false
 const STATUS_HEIGHT = 22
 const FOOTER_HEIGHT = 30
 const DEFAULT_API = process.env.PIX_API || process.env.PIX_PUBLIC_URL || 'http://127.0.0.1:8080'
@@ -738,6 +741,9 @@ function activeWantsTransBar() {
 }
 
 function chromeOffset() {
+  // 首选哨兵实测值：标签栏/工具条/状态栏高度无论怎么变都自动生效
+  if (hasMeasuredChrome) return measuredChromeHeight
+  // 首帧（哨兵尚未上报）才按常量估算
   return TABS_HEIGHT + UTILITY_HEIGHT + (activeWantsTransBar() ? (hasMeasuredBarHeight ? measuredTransBarHeight : TRANS_BAR_HEIGHT) : 0) + (activeWantsStatus() ? STATUS_HEIGHT : 0)
 }
 
@@ -1394,6 +1400,17 @@ function rejectUntrustedSender() {
 
 // 工具条高度由渲染层实测上报：改样式后无需再同步硬编码常量。
 // 只在数值真正变化时重排，避免频繁触发原生视图跳动。
+ipcMain.on('chrome:height', (event, height) => {
+  if (!isMainSender(event)) return
+  const value = Math.round(Number(height))
+  if (!Number.isFinite(value) || value < 0 || value > 1000) return
+  if (value === measuredChromeHeight && hasMeasuredChrome) return
+  measuredChromeHeight = value
+  hasMeasuredChrome = true
+  if (activeWantsTransBar()) animateChromeTo(chromeOffset())
+  else layoutViews()
+})
+
 ipcMain.on('chrome:barHeight', (event, height) => {
   if (!isMainSender(event)) return
   const value = Math.round(Number(height))

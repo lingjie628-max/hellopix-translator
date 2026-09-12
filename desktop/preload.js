@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld('pix', {
   getConfig: () => ipcRenderer.invoke('config:get'),
   // 渲染层把工具条真实高度上报给主进程，供原生视图定位使用
   reportBarHeight: (height) => ipcRenderer.send('chrome:barHeight', height),
+  // 顶部 chrome 底边的实测位置（哨兵元素 bottom），原生视图直接用它作为起始 y
+  reportChromeHeight: (height) => ipcRenderer.send('chrome:height', height),
   getAuth: () => ipcRenderer.invoke('auth:get'),
   saveAuth: (payload) => ipcRenderer.invoke('auth:save', payload),
   autoLogin: () => ipcRenderer.invoke('auth:autoLogin'),
