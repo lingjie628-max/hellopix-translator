@@ -1368,8 +1368,10 @@ function createWindow() {
   // 而窄屏下顶部翻译设置区会被挤压换行。取下 92% 并设上下限，保证完整显示。
   const { screen: electronScreen } = require('electron')
   const { workAreaSize } = electronScreen.getPrimaryDisplay()
-  const width = Math.max(1280, Math.min(1920, Math.round(workAreaSize.width * 0.92)))
-  const height = Math.max(820, Math.min(1280, Math.round(workAreaSize.height * 0.92)))
+  // 高度优先：顶部设置区两行需要空间，因此尽量吃满可用高度（只留 16px 余量），
+  // 而不是按比例缩。1280x800 这类逻辑分辨率下可用高度约 775px，这就是物理上限。
+  const width = Math.max(1100, Math.min(1920, workAreaSize.width - 16))
+  const height = Math.max(680, Math.min(1600, workAreaSize.height - 16))
   win = new BrowserWindow({
     width,
     height,
