@@ -1079,21 +1079,12 @@ function barLangOptions() {
   }).join('')
 }
 
-function syncBarLang(id, code) {
-  const select = document.getElementById(id)
-  if (!select) return
-  select.value = code
-}
-
 function ensureTransBarOptions() {
   if (!transBarInited) {
     barSendFrom.innerHTML = barLangOptions()
     barSendTo.innerHTML = barLangOptions()
     barRecvFrom.innerHTML = barLangOptions()
     barRecvTo.innerHTML = barLangOptions()
-    ;['barSendFrom', 'barSendTo', 'barRecvFrom', 'barRecvTo'].forEach(id => {
-      initLangPick(id + 'Search', id)
-    })
     barFontSize.innerHTML = [
       [11, '小号字体'],
       [12, '12号字体'],
@@ -1162,10 +1153,10 @@ function paintTransBar(state, home, rows) {
   transBarTabId = tab.id
   barSendOn.checked = trans.enableSend !== false
   barRecvOn.checked = trans.enableRecv !== false
-  syncBarLang('barSendFrom', trans.sendFrom || 'auto')
-  syncBarLang('barSendTo', trans.sendTo || 'en')
-  syncBarLang('barRecvFrom', trans.recvFrom || 'auto')
-  syncBarLang('barRecvTo', trans.recvTo || 'zh')
+  barSendFrom.value = trans.sendFrom || 'auto'
+  barSendTo.value = trans.sendTo || 'en'
+  barRecvFrom.value = trans.recvFrom || 'auto'
+  barRecvTo.value = trans.recvTo || 'zh'
   barGroupMode.value = trans.groupMode === 'auto' ? 'auto' : 'manual'
   barFontSize.value = String(trans.fontSize || 15)
   if (trans.server) barServer.value = trans.server
@@ -1665,51 +1656,9 @@ const LANGS = [
   { id: 'zu', name: '祖鲁语' }
 ]
 
-// 原生 select 保持原样，搜索框只负责筛选它的选项
-const LANG_SELECTS = [
-  ['langMineSearch', 'langMine'],
-  ['langOtherSearch', 'langOther'],
-  ['barSendFromSearch', 'barSendFrom'],
-  ['barSendToSearch', 'barSendTo'],
-  ['barRecvFromSearch', 'barRecvFrom'],
-  ['barRecvToSearch', 'barRecvTo']
-]
-
-function initLangPick(searchId, selectId) {
-  const search = document.getElementById(searchId)
-  const select = document.getElementById(selectId)
-  if (!search || !select) return
-  const allowAuto = selectId === 'langOther' || selectId.indexOf('barSendFrom') === 0 ||
-    selectId.indexOf('barRecvFrom') === 0
-  const pool = LANGS.filter(l => allowAuto || l.id !== 'auto')
-  const fill = keyword => {
-    const kw = String(keyword || '').trim().toLowerCase()
-    const current = select.value
-    const rows = pool.filter(l => !kw || l.name.toLowerCase().includes(kw) || l.id.toLowerCase().includes(kw))
-    // 当前值即使被筛掉也要保留，否则会把用户已选的语言弄丢
-    if (current && !rows.some(l => l.id === current)) {
-      const hit = LANGS.find(l => l.id === current)
-      if (hit) rows.unshift(hit)
-    }
-    select.innerHTML = rows.map(l => '<option value="' + l.id + '">' + l.name + '</option>').join('')
-    select.value = current
-    if (select.value !== current && rows.length) select.value = rows[0].id
-  }
-  search.addEventListener('input', () => fill(search.value))
-  search.addEventListener('keydown', event => { if (event.key === 'Escape') { search.value = ''; fill('') } })
-  fill('')
-}
-
-function refreshLangSearch(selectId) {
-  const pair = LANG_SELECTS.find(item => item[1] === selectId)
-  if (pair) initLangPick(pair[0], pair[1])
-}
-
 function fillLangs() {
   langMine.innerHTML = LANGS.filter(l => l.id !== 'auto').map(l => '<option value="' + l.id + '">' + l.name + '</option>').join('')
   langOther.innerHTML = LANGS.map(l => '<option value="' + l.id + '">' + l.name + '</option>').join('')
-  initLangPick('langMineSearch', 'langMine')
-  initLangPick('langOtherSearch', 'langOther')
 }
 
 function applyTransPrefs(data) {

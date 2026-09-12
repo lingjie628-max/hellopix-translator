@@ -6,16 +6,6 @@
   <title>Hello Pix</title>
   <link rel="icon" href="icon.png">
   <link rel="stylesheet" href="styles.css">
-<style>
-/* 语言：原生下拉 + 独立搜索框（搜索框筛选下拉选项，不用自绘浮层） */
-.lang-search {
-  width: 100%; box-sizing: border-box; margin-bottom: 4px; padding: 4px 8px;
-  background: rgba(255,255,255,.06); color: inherit; border: 1px solid rgba(255,255,255,.18);
-  border-radius: 6px; font-size: 12px; outline: none;
-}
-.lang-search:focus { border-color: #409eff; }
-.trans-mini .lang-search { width: 110px; margin-bottom: 2px; padding: 2px 6px; font-size: 11px; }
-</style>
 </head>
 <body>
   <div id="login" class="screen login-screen">
@@ -116,15 +106,15 @@
         <div class="trans-bar-main">
           <div class="trans-cluster">
             <label class="pix-switch"><input id="barSendOn" type="checkbox" checked><span>发出</span></label>
-            <input class="lang-search" id="barSendFromSearch" type="text" autocomplete="off" placeholder="搜索语言"><select id="barSendFrom"></select>
+            <select id="barSendFrom"></select>
             <i class="trans-arrow">→</i>
-            <input class="lang-search" id="barSendToSearch" type="text" autocomplete="off" placeholder="搜索语言"><select id="barSendTo"></select>
+            <select id="barSendTo"></select>
           </div>
           <div class="trans-cluster">
             <label class="pix-switch"><input id="barRecvOn" type="checkbox" checked><span>气泡</span></label>
-            <input class="lang-search" id="barRecvFromSearch" type="text" autocomplete="off" placeholder="搜索语言"><select id="barRecvFrom"></select>
+            <select id="barRecvFrom"></select>
             <i class="trans-arrow">→</i>
-            <input class="lang-search" id="barRecvToSearch" type="text" autocomplete="off" placeholder="搜索语言"><select id="barRecvTo"></select>
+            <select id="barRecvTo"></select>
           </div>
           <label class="trans-mini">通道<select id="barEngine"></select></label>
         </div>
@@ -198,14 +188,12 @@
         <label class="opt"><input id="includeZh" type="checkbox"><span class="toggle"></span>翻译含中文的消息</label>
         <p class="trans-tip">关闭群聊自动翻译时，群消息需点一下才翻译（半自动）。默认不翻译已经是中文的气泡。</p>
         <div class="field">
-          <label for="langMineInput">我的语言</label>
-          <input class="lang-search" id="langMineSearch" type="text" autocomplete="off" placeholder="搜索语言"><select id="langMine"></select>
-          </div>
+          <label for="langMine">我的语言</label>
+          <select id="langMine"></select>
         </div>
         <div class="field">
-          <label for="langOtherInput">对方语言</label>
-          <input class="lang-search" id="langOtherSearch" type="text" autocomplete="off" placeholder="搜索语言"><select id="langOther"></select>
-          </div>
+          <label for="langOther">对方语言</label>
+          <select id="langOther"></select>
         </div>
         <div class="field">
           <label for="transEngine">翻译通道</label>
