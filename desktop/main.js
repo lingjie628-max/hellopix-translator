@@ -245,7 +245,7 @@ function restoreOpenApps(username) {
   else if (tabs.length) activeId = tabs[0].id
   showHome = data.showHome !== false
   if (!tabs.length) showHome = true
-  animateChromeTo(chromeOffset())
+  layoutViews()
   sendTabs()
 }
 
@@ -869,7 +869,8 @@ function closeTab(id) {
   tabs.splice(index, 1)
   if (activeId === id) activeId = tabs.length ? tabs[Math.min(index, tabs.length - 1)].id : ''
   if (!tabs.length) showHome = true
-  layoutViews()
+  // 关闭标签可能改变 chrome 高度；与 switchTab 同样走动画，避免原生视图跳变
+  animateChromeTo(chromeOffset())
   sendTabs()
   saveOpenApps()
   return { success: true }
