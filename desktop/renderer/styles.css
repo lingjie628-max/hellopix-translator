@@ -19,6 +19,7 @@
   --fs-ctl: 13px;             /* 控件文字 13px/15px 字重 300 */
   --fs-panel-title: 15px;     /* 面板标题 */
   --fs-panel-body: 13px;      /* 面板正文 */
+  --fs-meta: 12px;            /* 次要说明、页脚、标签页名字 */
   --lh-label: 17px;
   --lh-ctl: 15px;
 
@@ -519,7 +520,7 @@ button {
   white-space: nowrap;
   text-align: center;
   line-height: 1.2;
-  font-size: 11px;
+  font-size: var(--fs-meta);
 }
 .tab-name-input {
   width: 60px;
@@ -530,7 +531,7 @@ button {
   border-radius: 4px;
   background: rgba(4, 15, 29, 0.95);
   color: #e8fbff;
-  font-size: 11px;
+  font-size: var(--fs-meta);
   text-align: center;
   outline: none;
 }
@@ -1055,7 +1056,7 @@ button {
     linear-gradient(90deg, rgba(12, 38, 65, 0.98), rgba(19, 58, 91, 0.98) 50%, rgba(12, 38, 65, 0.98));
   border-top: 1px solid rgba(56, 189, 248, 0.22);
   box-shadow: 0 -5px 18px rgba(2, 10, 22, 0.2), 0 1px 0 rgba(125, 211, 252, 0.08) inset;
-  font-size: 10px;
+  font-size: var(--fs-meta);
   user-select: none;
 }
 .stage.is-home .pix-footer {
@@ -1083,7 +1084,7 @@ button {
   border-radius: 5px;
   color: #b8cde0;
   background: transparent;
-  font-size: 10px;
+  font-size: var(--fs-meta);
   white-space: nowrap;
   text-overflow: ellipsis;
   transition: color 0.18s ease, background 0.18s ease, border-color 0.18s ease;
@@ -1251,7 +1252,7 @@ button {
 .home-add h2,
 .home-enabled h2 {
   margin: 0 0 16px;
-  font-size: 16px;
+  font-size: var(--fs-panel-title);
   font-weight: 600;
   color: #fff;
   text-shadow: 0 2px 12px rgba(0, 0, 0, 0.55);
@@ -1336,7 +1337,7 @@ button {
 .enabled-head button:hover { background: rgba(255, 255, 255, 0.08); border-radius: 6px; }
 .enabled-meta {
   margin: 4px 16px 8px;
-  font-size: 12px;
+  font-size: var(--fs-panel-body);
   color: rgba(248, 250, 252, 0.78);
   text-shadow: 0 1px 8px rgba(0, 0, 0, 0.45);
 }
@@ -1425,7 +1426,7 @@ button {
 
 .trans-form { margin: 12px 0 16px; }
 .trans-form .opt { margin: 10px 0; color: #e8eef8; }
-.trans-tip { margin: 4px 0 12px; font-size: 12px; color: #94a3b8; line-height: 1.5; }
+.trans-tip { margin: 4px 0 12px; font-size: var(--fs-panel-body); color: #94a3b8; line-height: 1.5; }
 
 @media (max-width: 1100px) {
   .app-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
