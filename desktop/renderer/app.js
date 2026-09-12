@@ -1036,6 +1036,9 @@ function activeTabState() {
 
 function paintOperationMenus(home, rows) {
   const hasActiveApp = !home && !!activeTabState()
+  // 应用内：工具行清空，只在正中留翻译开关；主页按钮全部保留
+  const utilityEl = document.querySelector('.utility')
+  if (utilityEl) utilityEl.classList.toggle('in-app', hasActiveApp)
   if (appOpsWrap) appOpsWrap.classList.toggle('hidden', !hasActiveApp)
   if (!hasActiveApp && appOpsWrap) appOpsWrap.classList.remove('open')
   if (!rows || !rows.length) closeOperationMenus()

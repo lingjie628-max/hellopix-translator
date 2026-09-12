@@ -585,6 +585,17 @@ button {
   background: transparent;
   border-bottom-color: transparent;
 }
+/* 应用内：工具行清空，只在正中留一个翻译开关。
+   主页（.stage.is-home）不套这个类，按钮全部保留。
+   用一条 in-app 类统一控制，避免把这几个控件的显隐散到多处逻辑里。 */
+.utility.in-app > :not(#transBarToggle) { display: none; }
+.utility.in-app {
+  justify-content: center;
+  padding: 0 14px;
+}
+.utility.in-app .trans-toggle {
+  margin: 0;
+}
 .stage.is-home .util-btn {
   text-shadow: 0 1px 8px rgba(0, 0, 0, 0.5);
 }
