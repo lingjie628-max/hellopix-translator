@@ -291,6 +291,48 @@ function currentLine() {
   return lines.find(l => l.id === lineId) || lines.find(l => l.url === apiBase) || lines[0] || normalizeLine({ id: 'cn', name: '国内线路', url: apiBase, region: '国内' }, 0)
 }
 
+// --- 窗口尺寸记忆 -------------------------------------------------------------
+// 竞品有 scheduleSaveWindowBounds；我们此前每次启动都用自适应尺寸覆盖，
+// 用户调好的窗口大小无法保留。这里做同样的持久化，并在恢复时校验窗口仍在
+// 可见显示器范围内（拔掉外接屏后不至于把窗口恢复到屏幕外）。
+const WINDOW_BOUNDS_FILE = 'window-bounds.json'
+let boundsSaveTimer = null
+
+function scheduleSaveWindowBounds() {
+  if (boundsSaveTimer) clearTimeout(boundsSaveTimer)
+  boundsSaveTimer = setTimeout(() => {
+    boundsSaveTimer = null
+    if (!win || win.isDestroyed() || win.isFullScreen() || win.isMaximized()) return
+    try { writeJson(userFile(WINDOW_BOUNDS_FILE), win.getBounds()) } catch (error) {}
+  }, 500)
+}
+
+function restoreWindowBounds(fallback) {
+  const saved = readJson(userFile(WINDOW_BOUNDS_FILE), null)
+  if (!saved) return fallback
+  const width = Math.round(Number(saved.width))
+  const height = Math.round(Number(saved.height))
+  const x = Math.round(Number(saved.x))
+  const y = Math.round(Number(saved.y))
+  if (![width, height, x, y].every(Number.isFinite)) return fallback
+  try {
+    const { screen: electronScreen } = require('electron')
+    const visible = electronScreen.getAllDisplays().some(display => {
+      const area = display.workArea
+      return x + width > area.x + 120 && x < area.x + area.width - 40 &&
+             y + height > area.y + 80 && y < area.y + area.height - 40
+    })
+    if (!visible) return fallback
+  } catch (error) {
+    return fallback
+  }
+  return {
+    x, y,
+    width: Math.min(Math.max(width, 1160), 3200),
+    height: Math.min(Math.max(height, 680), 2000)
+  }
+}
+
 function saveConfig() {
   writeJson(userFile('config.json'), {
     apiBase: apiBase,
@@ -1370,13 +1412,20 @@ function createWindow() {
   const { workAreaSize } = electronScreen.getPrimaryDisplay()
   // 高度优先：顶部设置区两行需要空间，因此尽量吃满可用高度（只留 16px 余量），
   // 而不是按比例缩。1280x800 这类逻辑分辨率下可用高度约 775px，这就是物理上限。
-  const width = Math.max(1100, Math.min(1920, workAreaSize.width - 16))
-  const height = Math.max(680, Math.min(1600, workAreaSize.height - 16))
+  // 竞品的设计最小宽 ≈1150（4 列 ×(70 标签 + 215 控件) + 内边距），我们取 1160
+  const MIN_WIDTH = 1160
+  const fallback = {
+    width: Math.max(MIN_WIDTH, Math.min(1920, workAreaSize.width - 16)),
+    height: Math.max(680, Math.min(1600, workAreaSize.height - 16))
+  }
+  const saved = restoreWindowBounds(fallback)
+  const width = saved.width
+  const height = saved.height
   win = new BrowserWindow({
     width,
     height,
     center: true,
-    minWidth: 1100,
+    minWidth: 1160,
     minHeight: 680,
     title: 'Hello Pix',
     icon: APP_ICON,
@@ -1391,10 +1440,18 @@ function createWindow() {
   win.setMenuBarVisibility(false)
   // macOS 会恢复上次的窗口框架，覆盖构造时的 width/height。
   // 这里显式再设一次并居中，确保"吃满可用区域"的尺寸真正生效。
-  win.setBounds({ x: win.getBounds().x, y: win.getBounds().y, width, height })
-  win.center()
+  const hasSavedPosition = Number.isFinite(saved.x) && Number.isFinite(saved.y)
+  win.setBounds({
+    x: hasSavedPosition ? saved.x : win.getBounds().x,
+    y: hasSavedPosition ? saved.y : win.getBounds().y,
+    width,
+    height
+  })
+  if (!hasSavedPosition) win.center()
   win.on('resize', layoutViews)
   win.on('resized', layoutViews)
+  win.on('resize', scheduleSaveWindowBounds)
+  win.on('move', scheduleSaveWindowBounds)
   win.on('enter-full-screen', layoutViews)
   win.on('leave-full-screen', layoutViews)
   win.webContents.on('did-finish-load', layoutViews)
