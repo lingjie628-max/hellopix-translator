@@ -16,6 +16,10 @@
      列的区分交给 70px 标签本身，不再额外加左边距。 */
   --cell-pad-left: 0px;
   --row-h: 34px;              /* 行高 = 24 控件 + 5 + 5 */
+  /* 工具条自身的内边距与下边框。折叠动画会过渡 .trans-bar 的 padding/border，
+     计算样式在过渡期间是中间值，所以 JS 需要从这里读"规范终值"。 */
+  --bar-pad-y: 8px;
+  --bar-border-w: 1px;
   --row-gap: 5px;             /* 行距（竞品 5px） */
   /* 列距：竞品列宽 25% 已含留白，但它另有 70px 单元格左边距做列间分隔。
      我们去掉了那 70px（见 --cell-pad-left），若这里再留 0，最小窗宽下列与列
@@ -29,14 +33,12 @@
   --fs-panel-body: 13px;      /* 面板正文 */
   --fs-meta: 12px;            /* 次要说明、页脚、标签页名字 */
   --lh-label: 17px;
-  --lh-ctl: 15px;
 
   /* 主题色（沿用深色背景下的既有取值，非竞品数值） */
   --c-label: #9eb3c9;
   --c-ctl-text: #e8eef8;
   --c-ctl-border: rgba(255, 255, 255, 0.12);
   --c-ctl-bg: rgba(7, 16, 30, 0.55);
-  --c-accent: #22d3ee;
 }
 
 html, body {
@@ -884,10 +886,10 @@ button {
   z-index: 2;
   flex-shrink: 0;
   height: auto;
-  padding: 8px 12px;
+  padding: var(--bar-pad-y) 12px;
   overflow: hidden;
   background: linear-gradient(180deg, #1a3354 0%, #142846 100%);
-  border-bottom: 1px solid rgba(34, 211, 238, 0.12);
+  border-bottom: var(--bar-border-w) solid rgba(34, 211, 238, 0.12);
   color: #dbe7f3;
   font-size: var(--fs-ctl);
   transition: padding 0.26s cubic-bezier(0.33, 1, 0.68, 1),
@@ -918,7 +920,7 @@ button {
 }
 
 /* 工具栏网格：4 列 × N 行，列宽 25%（竞品 checkboxgroup columns:4）。
-   单元格 = 70px 标签 + 最多 215px 控件，另有 70px 左边距与竞品一致。 */
+   单元格 = 70px 标签 + 最多 215px 控件；竞品的 70px 左边距我们取 0（见 :root 说明）。 */
 .trans-grid {
   min-height: 0;
   display: grid;
@@ -1037,8 +1039,10 @@ button {
 
 .workspace {
   position: absolute;
-  /* 顶部 chrome 的底边，由 app.js 用哨兵实测写入 --chrome-end。
-     此前硬编码 112px，工具条一涨高就会盖住 Home 首屏内容。 */
+  /* 顶部 chrome 的底边，由 app.js 实测后写入 --chrome-end。
+     注：工作区只在 Home 显示，而 Home 下工具条必收起 → 该值恒为 112，与旧的
+     硬编码等值；这个变量真正的消费者是主进程（定位嵌入的原生视图）。
+     保留变量写法是为了不把 112 再写死一次，而不是因为这里会变。 */
   top: var(--chrome-end, 112px);
   left: 0;
   right: 0;
@@ -2214,4 +2218,15 @@ button {
   .login-video, .home-video { display: none; }
   .login-bg { background: url('login-bg.png') center / cover no-repeat; }
   .announce-track { animation: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* 折叠动画此前没被 reduced-motion 覆盖：三个 reduce 块都只写 animation:none，
+     从不处理 transition。而这条动画是 0.34s 高度 + 12 格错峰（最长 156ms 延迟
+     + 0.28s transform，合计约 0.5s）全量播放。 */
+  .trans-bar,
+  .trans-bar-rows,
+  .trans-cell {
+    transition: none;
+  }
 }

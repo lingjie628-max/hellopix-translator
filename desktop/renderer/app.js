@@ -1068,7 +1068,10 @@ function paintOperationMenus(home, rows) {
   const utilityEl = document.querySelector('.utility')
   if (utilityEl) utilityEl.classList.toggle('in-app', hasActiveApp)
   if (appOpsWrap) appOpsWrap.classList.toggle('hidden', !hasActiveApp)
-  if (!hasActiveApp && appOpsWrap) appOpsWrap.classList.remove('open')
+  // 进/出应用时把两个下拉都收掉：此前只清 appOpsWrap 的 open，systemOpsWrap
+  // 从不清理，实测"主页打开系统操作 → 进应用 → 回主页"后菜单自己还开着
+  // （wrapOpen=true、opacity=1）。closeOperationMenus() 不带参数即关全部。
+  if (!hasActiveApp) closeOperationMenus()
   if (!rows || !rows.length) closeOperationMenus()
 }
 
@@ -1961,12 +1964,19 @@ if (!usernameEl.value) usernameEl.focus()
   let chromeFallback = 0
 
   // 工具条自身占位（不含它上方的标签栏/工具行）= 内容高 + 上下 padding + 下边框。
-  // 这些值一律从计算样式读，不写死（此前硬编码 16+1，CSS 一改就静默错位）。
+  //
+  // 这两个值从**自定义属性**读，不能读计算样式：padding 和 border 都在做过渡
+  // （.trans-bar 过渡 padding .26s、is-collapsed 把 border 归零），冷加载时
+  // 计算值是过渡中间值 —— 实测折叠态冷加载读到 padding=1px，于是把 113 当成
+  // 展开态占位缓存了下来（应为 129），chrome 随之少 16px。
+  // :root 里的变量是规范定义的终值，不参与过渡。
+  const pxVar = (name, fallback) => {
+    const v = parseFloat(getComputedStyle(root).getPropertyValue(name))
+    return Number.isFinite(v) ? v : fallback
+  }
   const barFrame = () => {
-    const cs = getComputedStyle(bar)
-    const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0)
-    const border = parseFloat(cs.borderBottomWidth) || 0
-    // 折叠态下 padding/border 都被归零，直接用当前计算值即可
+    const pad = 2 * pxVar('--bar-pad-y', 8)          // 上下各一份
+    const border = pxVar('--bar-border-w', 1)
     return pad + border
   }
 
