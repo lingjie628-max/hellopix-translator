@@ -2108,3 +2108,30 @@ button {
   .login-bg { background: url('login-bg.png') center / cover no-repeat; }
   .announce-track { animation: none; }
 }
+
+/* 翻译工具条：放宽上下间距，避免两行挤在一起 */
+.trans-bar {
+  max-height: 124px;
+  padding: 12px 14px;
+  row-gap: 10px;
+}
+.trans-bar-main {
+  gap: 10px 14px;
+}
+.trans-bar-extra {
+  margin-top: 10px;
+  padding-top: 10px;
+  gap: 10px 14px;
+}
+.trans-bar select,
+.trans-bar .trans-mini select {
+  min-height: 30px;
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+.trans-bar .trans-mini {
+  gap: 7px;
+}
+.trans-cluster {
+  gap: 10px;
+}
