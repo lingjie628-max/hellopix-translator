@@ -6,6 +6,27 @@
   <title>Hello Pix</title>
   <link rel="icon" href="icon.png">
   <link rel="stylesheet" href="styles.css">
+<style>
+/* 可搜索语言下拉 */
+.langpick { position: relative; }
+.langpick > select { display: none; }
+.langpick > input {
+  width: 100%; box-sizing: border-box; padding: 8px 28px 8px 10px;
+  background: rgba(255,255,255,.06); color: inherit; border: 1px solid rgba(255,255,255,.18);
+  border-radius: 8px; font-size: 13px; outline: none;
+}
+.langpick > input:focus { border-color: #409eff; }
+.langpick-caret { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); pointer-events: none; opacity: .6; font-size: 12px; }
+.langpick-list {
+  position: absolute; z-index: 60; left: 0; right: 0; top: calc(100% + 4px);
+  max-height: 260px; overflow-y: auto; padding: 4px;
+  background: #1f2733; border: 1px solid rgba(255,255,255,.18); border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0,0,0,.45);
+}
+.langpick-list .lp-item { padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.langpick-list .lp-item:hover, .langpick-list .lp-item.on { background: #2f6fd0; color: #fff; }
+.langpick-list .lp-empty { padding: 8px 10px; opacity: .6; font-size: 12px; }
+</style>
 </head>
 <body>
   <div id="login" class="screen login-screen">
@@ -188,12 +209,22 @@
         <label class="opt"><input id="includeZh" type="checkbox"><span class="toggle"></span>翻译含中文的消息</label>
         <p class="trans-tip">关闭群聊自动翻译时，群消息需点一下才翻译（半自动）。默认不翻译已经是中文的气泡。</p>
         <div class="field">
-          <label for="langMine">我的语言</label>
-          <select id="langMine"></select>
+          <label for="langMineInput">我的语言</label>
+          <div class="langpick">
+            <input id="langMineInput" type="text" autocomplete="off" placeholder="搜索语言…">
+            <span class="langpick-caret">▾</span>
+            <select id="langMine"></select>
+            <div class="langpick-list" id="langMineList" hidden></div>
+          </div>
         </div>
         <div class="field">
-          <label for="langOther">对方语言</label>
-          <select id="langOther"></select>
+          <label for="langOtherInput">对方语言</label>
+          <div class="langpick">
+            <input id="langOtherInput" type="text" autocomplete="off" placeholder="搜索语言…">
+            <span class="langpick-caret">▾</span>
+            <select id="langOther"></select>
+            <div class="langpick-list" id="langOtherList" hidden></div>
+          </div>
         </div>
         <div class="field">
           <label for="transEngine">翻译通道</label>

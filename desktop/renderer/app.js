@@ -1656,9 +1656,55 @@ const LANGS = [
   { id: 'zu', name: '祖鲁语' }
 ]
 
+function initLangPick(inputId, listId, selectId) {
+  const input = document.getElementById(inputId)
+  const list = document.getElementById(listId)
+  const select = document.getElementById(selectId)
+  if (!input || !list || !select) return
+  let filtered = []
+
+  const nameOf = code => {
+    const hit = LANGS.find(l => l.id === code)
+    return hit ? hit.name : ''
+  }
+  const render = keyword => {
+    const kw = String(keyword || '').trim().toLowerCase()
+    filtered = LANGS.filter(l => !kw || l.name.toLowerCase().includes(kw) || l.id.toLowerCase().includes(kw))
+    list.innerHTML = filtered.length
+      ? filtered.map(l => '<div class="lp-item' + (l.id === select.value ? ' on' : '') + '" data-code="' + l.id + '">' + l.name + '</div>').join('')
+      : '<div class="lp-empty">没有匹配的语言</div>'
+  }
+  const open = () => { render(input.value === nameOf(select.value) ? '' : input.value); list.hidden = false }
+  const close = () => { list.hidden = true; input.value = nameOf(select.value) }
+  const pick = code => {
+    select.value = code
+    input.value = nameOf(code)
+    list.hidden = true
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+  }
+
+  input.addEventListener('focus', () => { input.select(); open() })
+  input.addEventListener('input', () => { render(input.value); list.hidden = false })
+  input.addEventListener('keydown', event => {
+    if (event.key === 'Escape') { close(); input.blur() }
+    if (event.key === 'Enter' && filtered.length) { event.preventDefault(); pick(filtered[0].id) }
+  })
+  input.addEventListener('blur', () => setTimeout(close, 150))
+  list.addEventListener('mousedown', event => {
+    const item = event.target.closest('.lp-item')
+    if (item) { event.preventDefault(); pick(item.dataset.code) }
+  })
+  // 原生 select 被其它代码改动时（如 applyTransPrefs），同步显示名
+  select.addEventListener('change', () => { if (list.hidden) input.value = nameOf(select.value) })
+  input.value = nameOf(select.value)
+  select._syncPickDisplay = () => { input.value = nameOf(select.value) }
+}
+
 function fillLangs() {
   langMine.innerHTML = LANGS.filter(l => l.id !== 'auto').map(l => '<option value="' + l.id + '">' + l.name + '</option>').join('')
   langOther.innerHTML = LANGS.map(l => '<option value="' + l.id + '">' + l.name + '</option>').join('')
+  initLangPick('langMineInput', 'langMineList', 'langMine')
+  initLangPick('langOtherInput', 'langOtherList', 'langOther')
 }
 
 function applyTransPrefs(data) {
@@ -1667,8 +1713,8 @@ function applyTransPrefs(data) {
   transSend.checked = data.transSend !== 0
   transGroup.checked = !!data.transGroup
   includeZh.checked = !!Number(data.includeZh)
-  if (data.langMine) langMine.value = data.langMine
-  if (data.langOther) langOther.value = data.langOther
+  if (data.langMine) { langMine.value = data.langMine; if (langMine._syncPickDisplay) langMine._syncPickDisplay() }
+  if (data.langOther) { langOther.value = data.langOther; if (langOther._syncPickDisplay) langOther._syncPickDisplay() }
   if (data.activeEngine) transEngine.value = data.activeEngine
 }
 
