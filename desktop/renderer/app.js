@@ -514,8 +514,36 @@ async function openApp(id) {
   await window.pix.open({ platformId: id, multi: true })
 }
 
-function langOptionHtml() {
-  return LANGS.map(l => '<option value="' + l.id + '">' + (l.id === 'auto' ? '自动识别' : l.id === 'zh' ? '简体中文' : l.name) + '</option>').join('')
+// 语言选项：常用语种置顶，其余按代码字母序跟在后面。
+// LANGS 本身是按语言代码排的（aa 阿法尔语、ace 亚齐语…），直接用会让最常用的
+// 中文落到第 186 位、俄语第 136 位 —— 用户每选一次都要滚过上百个冷门语种。
+// 这里只改**展示顺序**，不动 LANGS 数据本身。
+const LANG_PRIORITY = ['zh', 'en', 'ja', 'ko', 'fr', 'de', 'es', 'ru', 'pt', 'it', 'ar', 'th', 'vi', 'id', 'hi']
+function langDisplayName(l) {
+  if (l.id === 'auto') return '自动识别'
+  if (l.id === 'zh') return '简体中文'
+  return l.name
+}
+function orderedLangs(rows) {
+  const rank = new Map(LANG_PRIORITY.map((id, i) => [id, i]))
+  return rows.slice().sort((a, b) => {
+    // 'auto'（自动识别）永远置顶：它是发/收翻译的默认值，排到中间会让
+    // 用户以为默认值变了
+    if (a.id === 'auto' || b.id === 'auto') return a.id === 'auto' ? -1 : 1
+    const ra = rank.has(a.id) ? rank.get(a.id) : Infinity
+    const rb = rank.has(b.id) ? rank.get(b.id) : Infinity
+    return ra - rb
+  })
+}
+function langOptionHtml(rows) {
+  const list = orderedLangs(rows || LANGS)
+  // 常用语种与其余部分之间插一条分隔线：让"下面还有一长串"这件事可见。
+  // 用空值 + disabled，避免它被当成可选项选中。
+  const topCount = list.filter(l => l.id === 'auto' || LANG_PRIORITY.includes(l.id)).length
+  return list
+    .map((l, i) => '<option value="' + l.id + '">' + langDisplayName(l) + '</option>' +
+      (i === topCount - 1 ? '<option value="" disabled>──────────</option>' : ''))
+    .join('')
 }
 
 function defaultAppSettings() {
@@ -1076,10 +1104,7 @@ let transBarTabId = ''
 let engineRows = []
 
 function barLangOptions() {
-  return LANGS.map(l => {
-    const name = l.id === 'auto' ? '自动识别' : l.id === 'zh' ? '简体中文' : l.name
-    return '<option value="' + l.id + '">' + name + '</option>'
-  }).join('')
+  return langOptionHtml()
 }
 
 function ensureTransBarOptions() {
@@ -1664,8 +1689,8 @@ const LANGS = [
 ]
 
 function fillLangs() {
-  langMine.innerHTML = LANGS.filter(l => l.id !== 'auto').map(l => '<option value="' + l.id + '">' + l.name + '</option>').join('')
-  langOther.innerHTML = LANGS.map(l => '<option value="' + l.id + '">' + l.name + '</option>').join('')
+  langMine.innerHTML = langOptionHtml(LANGS.filter(l => l.id !== 'auto'))
+  langOther.innerHTML = langOptionHtml()
 }
 
 function applyTransPrefs(data) {
