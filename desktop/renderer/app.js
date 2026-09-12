@@ -1947,7 +1947,10 @@ if (!usernameEl.value) usernameEl.focus()
 ;(function reportTransBarHeight() {
   const bar = document.getElementById('transBar')
   const end = document.getElementById('chromeEnd')
-  if (!bar || !window.pix || typeof window.pix.reportBarHeight !== 'function') return
+  // 两个上报通道都要在才跑：只 guard 一个、另一个直接调，缺哪个都会在每次
+  // ResizeObserver 回调里抛错
+  if (!bar || !window.pix) return
+  if (typeof window.pix.reportBarHeight !== 'function' || typeof window.pix.reportChromeHeight !== 'function') return
   const rows = bar.querySelector('.trans-bar-rows')
   const grid = bar.querySelector('.trans-grid')
   const root = document.documentElement
@@ -1956,6 +1959,16 @@ if (!usernameEl.value) usernameEl.focus()
   let contentH = 0        // 内容自然高
   let topOffset = 0       // 工具条顶边 = 标签栏 + 工具行的合计高，只在展开态记录
   let chromeFallback = 0
+
+  // 工具条自身占位（不含它上方的标签栏/工具行）= 内容高 + 上下 padding + 下边框。
+  // 这些值一律从计算样式读，不写死（此前硬编码 16+1，CSS 一改就静默错位）。
+  const barFrame = () => {
+    const cs = getComputedStyle(bar)
+    const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0)
+    const border = parseFloat(cs.borderBottomWidth) || 0
+    // 折叠态下 padding/border 都被归零，直接用当前计算值即可
+    return pad + border
+  }
 
   // 内容自然高不能读 rows.offsetHeight：折叠时它是被裁剪值、过渡中是插值
   // （实测把过渡中的 1px 当成内容高写进 --bar-rows-h，工具条就此卡死收不回来）。
@@ -1988,10 +2001,11 @@ if (!usernameEl.value) usernameEl.focus()
     // 和工具行 —— 也就是 topOffset 本身。
     // 注意别把 topOffset 和工具条高度相加两次：topOffset 已经含了它上方的部分。
     const collapsed = bar.classList.contains('is-collapsed')
-    const barOuter = collapsed ? 0 : contentH + 16 + 1   // 展开：内容 + 上下 padding + 边框
+    const frameVal = barFrame()
+    const barOuter = collapsed ? 0 : contentH + frameVal
     const chrome = topOffset + barOuter
     // 调试用：把内部量到的值挂到 DOM 上，方便用 CDP 核对（不影响布局）
-    bar.dataset.metrics = JSON.stringify({ contentH, topOffset, barOuter, chrome, collapsed })
+    bar.dataset.metrics = JSON.stringify({ contentH, topOffset, frame: frameVal, barOuter, chrome, collapsed })
     const nextChrome = chrome > 0 ? chrome : chromeFallback
     if (nextChrome > 0 && nextChrome !== lastChrome) {
       lastChrome = nextChrome

@@ -1475,10 +1475,15 @@ ipcMain.on('chrome:height', (event, height) => {
   const value = Math.round(Number(height))
   if (!Number.isFinite(value) || value < 0 || value > 1000) return
   if (value === measuredChromeHeight && hasMeasuredChrome) return
+  const firstMeasure = !hasMeasuredChrome
   measuredChromeHeight = value
   hasMeasuredChrome = true
-  if (activeWantsTransBar()) animateChromeTo(chromeOffset())
-  else layoutViews()
+  // 首帧没有"上一个位置"可缓动，直接落位，免得开窗时看到一次滑动。
+  // 其余情况一律走缓动：收起时 showTransBar 已置 false，若按 activeWantsTransBar()
+  // 判断就会走瞬跳分支，原生视图一帧内跳到新位置、盖掉渲染层 340ms 的收起动画，
+  // 而展开方向却是缓动的 —— 同一个开关两个方向表现不一致。
+  if (firstMeasure || overlayOpen || showHome) layoutViews()
+  else animateChromeTo(chromeOffset())
 })
 
 ipcMain.on('chrome:barHeight', (event, height) => {
