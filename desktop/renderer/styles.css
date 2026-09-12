@@ -821,8 +821,8 @@ button {
   position: relative;
   z-index: 2;
   flex-shrink: 0;
-  max-height: 96px;
-  padding: 8px 12px 8px;
+  max-height: 120px;
+  padding: 12px 14px;
   overflow: hidden;
   background: linear-gradient(180deg, #1a3354 0%, #142846 100%);
   border-bottom: 1px solid rgba(34, 211, 238, 0.12);
@@ -866,8 +866,8 @@ button {
   gap: 8px 12px;
 }
 .trans-bar-extra {
-  margin-top: 7px;
-  padding-top: 7px;
+  margin-top: 10px;
+  padding-top: 10px;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
   opacity: 0.96;
 }
@@ -2111,8 +2111,7 @@ button {
 
 /* ==========================================================================
    翻译设置区：保持原有上下两行布局，只重新分配宽度与间距
-   约束：纯 CSS；不动 HTML/JS/事件；不用 space-between；不加卡片边框背景；
-        整体高度与改版前基本一致（max-height 保持 96px）。
+   约束：纯 CSS；不动 HTML/JS/事件；不用 space-between；不加卡片边框背景。
    ========================================================================== */
 
 /* 第一行：核心设置。整行靠左连续排列，剩余空间留在右侧 */
@@ -2141,11 +2140,13 @@ button {
   align-items: center;
   justify-content: flex-start;
   gap: 0 14px;
+  margin-top: 10px;
+  padding-top: 10px;
 }
 
-/* 控件尺寸统一（高度回到紧凑值，保证两行仍能装进 96px） */
+/* 控件尺寸统一；上下内边距已加宽，高度略抬一点更易点按 */
 .trans-bar select {
-  height: 26px;
+  height: 28px;
   box-sizing: border-box;
   border-radius: 6px;
   padding: 0 24px 0 9px;
@@ -2153,8 +2154,11 @@ button {
 }
 .trans-bar .pix-switch,
 .trans-bar input[type="color"] {
-  height: 26px;
+  height: 28px;
   box-sizing: border-box;
+}
+.trans-bar .pix-switch span {
+  height: 28px;
 }
 .trans-bar .trans-mini { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
 
@@ -2165,3 +2169,18 @@ button {
 #barGroupMode              { width: 74px; }    /* 手动 */
 #barFontSize               { width: 96px; }    /* 15号字体 */
 #barServer                 { width: 108px; }   /* 国内线路 */
+
+/* 借鉴参考产品：标签在上、控件在下，形成整齐的列阵 */
+.trans-bar .trans-mini {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  font-size: 11px;
+  line-height: 1.2;
+}
+.trans-bar .trans-mini > span,
+.trans-bar .trans-mini { color: #9eb3c9; }
+.trans-bar .trans-mini > select { width: 100%; }
+/* 让两行内的标签化控件对齐同一基线 */
+.trans-bar-main .trans-mini,
+.trans-bar-extra .trans-mini { align-self: flex-start; }
