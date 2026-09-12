@@ -16,6 +16,9 @@
   border-radius: 8px; font-size: 13px; outline: none;
 }
 .langpick > input:focus { border-color: #409eff; }
+.langpick-mini > input { padding: 3px 18px 3px 6px; font-size: 12px; border-radius: 6px; }
+.langpick-mini > .langpick-caret { right: 6px; font-size: 10px; }
+.langpick-mini > .langpick-list { min-width: 150px; max-height: 220px; font-size: 12px; }
 .langpick-caret { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); pointer-events: none; opacity: .6; font-size: 12px; }
 .langpick-list {
   position: absolute; z-index: 60; left: 0; right: 0; top: calc(100% + 4px);
@@ -127,15 +130,15 @@
         <div class="trans-bar-main">
           <div class="trans-cluster">
             <label class="pix-switch"><input id="barSendOn" type="checkbox" checked><span>发出</span></label>
-            <select id="barSendFrom"></select>
+            <span class="langpick langpick-mini"><input id="barSendFromInput" type="text" autocomplete="off" placeholder="搜索…"><span class="langpick-caret">▾</span><select id="barSendFrom"></select><div class="langpick-list" id="barSendFromList" hidden></div></span>
             <i class="trans-arrow">→</i>
-            <select id="barSendTo"></select>
+            <span class="langpick langpick-mini"><input id="barSendToInput" type="text" autocomplete="off" placeholder="搜索…"><span class="langpick-caret">▾</span><select id="barSendTo"></select><div class="langpick-list" id="barSendToList" hidden></div></span>
           </div>
           <div class="trans-cluster">
             <label class="pix-switch"><input id="barRecvOn" type="checkbox" checked><span>气泡</span></label>
-            <select id="barRecvFrom"></select>
+            <span class="langpick langpick-mini"><input id="barRecvFromInput" type="text" autocomplete="off" placeholder="搜索…"><span class="langpick-caret">▾</span><select id="barRecvFrom"></select><div class="langpick-list" id="barRecvFromList" hidden></div></span>
             <i class="trans-arrow">→</i>
-            <select id="barRecvTo"></select>
+            <span class="langpick langpick-mini"><input id="barRecvToInput" type="text" autocomplete="off" placeholder="搜索…"><span class="langpick-caret">▾</span><select id="barRecvTo"></select><div class="langpick-list" id="barRecvToList" hidden></div></span>
           </div>
           <label class="trans-mini">通道<select id="barEngine"></select></label>
         </div>

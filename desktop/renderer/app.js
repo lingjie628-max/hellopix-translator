@@ -1079,12 +1079,22 @@ function barLangOptions() {
   }).join('')
 }
 
+function syncBarLang(id, code) {
+  const select = document.getElementById(id)
+  if (!select) return
+  select.value = code
+  if (select._syncPickDisplay) select._syncPickDisplay()
+}
+
 function ensureTransBarOptions() {
   if (!transBarInited) {
     barSendFrom.innerHTML = barLangOptions()
     barSendTo.innerHTML = barLangOptions()
     barRecvFrom.innerHTML = barLangOptions()
     barRecvTo.innerHTML = barLangOptions()
+    ;['barSendFrom', 'barSendTo', 'barRecvFrom', 'barRecvTo'].forEach(id => {
+      initLangPick(id + 'Input', id + 'List', id)
+    })
     barFontSize.innerHTML = [
       [11, '小号字体'],
       [12, '12号字体'],
@@ -1153,10 +1163,10 @@ function paintTransBar(state, home, rows) {
   transBarTabId = tab.id
   barSendOn.checked = trans.enableSend !== false
   barRecvOn.checked = trans.enableRecv !== false
-  barSendFrom.value = trans.sendFrom || 'auto'
-  barSendTo.value = trans.sendTo || 'en'
-  barRecvFrom.value = trans.recvFrom || 'auto'
-  barRecvTo.value = trans.recvTo || 'zh'
+  syncBarLang('barSendFrom', trans.sendFrom || 'auto')
+  syncBarLang('barSendTo', trans.sendTo || 'en')
+  syncBarLang('barRecvFrom', trans.recvFrom || 'auto')
+  syncBarLang('barRecvTo', trans.recvTo || 'zh')
   barGroupMode.value = trans.groupMode === 'auto' ? 'auto' : 'manual'
   barFontSize.value = String(trans.fontSize || 15)
   if (trans.server) barServer.value = trans.server
