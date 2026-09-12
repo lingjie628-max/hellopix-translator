@@ -7,19 +7,35 @@
   <link rel="icon" href="icon.png">
   <link rel="stylesheet" href="styles.css">
 <style>
-/* 可搜索语言下拉：用原生 datalist 提示，不用自定义浮层（避免遮挡界面） */
+/* 语言下拉：点击展开面板（含搜索框），列表可滚动，不会铺满界面 */
 .langpick { position: relative; display: block; }
 .langpick > select { display: none; }
 .langpick > input {
-  width: 100%; box-sizing: border-box; padding: 8px 24px 8px 10px;
+  width: 100%; box-sizing: border-box; padding: 8px 24px 8px 10px; cursor: pointer;
   background: rgba(255,255,255,.06); color: inherit; border: 1px solid rgba(255,255,255,.18);
   border-radius: 8px; font-size: 13px; outline: none;
 }
-.langpick > input:focus { border-color: #409eff; }
+.langpick.open > input { border-color: #409eff; }
 .langpick-caret { position: absolute; right: 9px; top: 50%; transform: translateY(-50%); pointer-events: none; opacity: .55; font-size: 11px; }
+.langpick-panel {
+  position: absolute; z-index: 9999; left: 0; top: calc(100% + 4px); width: 220px;
+  background: #1b2430; border: 1px solid rgba(255,255,255,.2); border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0,0,0,.5); padding: 6px;
+}
+.langpick-search {
+  width: 100%; box-sizing: border-box; margin-bottom: 6px; padding: 5px 8px;
+  background: rgba(255,255,255,.08); color: inherit; border: 1px solid rgba(255,255,255,.18);
+  border-radius: 6px; font-size: 12px; outline: none;
+}
+.langpick-items { max-height: 220px; overflow-y: auto; }
+.langpick-items .lp { padding: 5px 8px; border-radius: 5px; cursor: pointer; font-size: 12px; white-space: nowrap; }
+.langpick-items .lp:hover { background: rgba(255,255,255,.1); }
+.langpick-items .lp.on { background: #2f6fd0; color: #fff; }
+.langpick-items .lp-empty { padding: 8px; opacity: .6; font-size: 12px; }
 .langpick-mini { display: inline-block; min-width: 110px; }
 .langpick-mini > input { padding: 3px 18px 3px 6px; font-size: 12px; border-radius: 6px; }
 .langpick-mini > .langpick-caret { right: 5px; font-size: 10px; }
+.langpick-mini > .langpick-panel { width: 200px; }
 </style>
 </head>
 <body>
@@ -121,15 +137,15 @@
         <div class="trans-bar-main">
           <div class="trans-cluster">
             <label class="pix-switch"><input id="barSendOn" type="checkbox" checked><span>发出</span></label>
-            <span class="langpick langpick-mini"><input id="barSendFromInput" type="text" autocomplete="off" placeholder="搜索…"><span class="langpick-caret">▾</span><select id="barSendFrom"></select><datalist id="barSendFromList"></datalist></span>
+            <span class="langpick langpick-mini"><input id="barSendFromInput" type="text" autocomplete="off" placeholder="选择语言"><span class="langpick-caret">▾</span><select id="barSendFrom"></select><div class="langpick-panel" id="barSendFromPanel" hidden><input class="langpick-search" id="barSendFromSearch" type="text" autocomplete="off" placeholder="选择语言"><div class="langpick-items" id="barSendFromList"></div></div></span>
             <i class="trans-arrow">→</i>
-            <span class="langpick langpick-mini"><input id="barSendToInput" type="text" autocomplete="off" placeholder="搜索…"><span class="langpick-caret">▾</span><select id="barSendTo"></select><datalist id="barSendToList"></datalist></span>
+            <span class="langpick langpick-mini"><input id="barSendToInput" type="text" autocomplete="off" placeholder="选择语言"><span class="langpick-caret">▾</span><select id="barSendTo"></select><div class="langpick-panel" id="barSendToPanel" hidden><input class="langpick-search" id="barSendToSearch" type="text" autocomplete="off" placeholder="选择语言"><div class="langpick-items" id="barSendToList"></div></div></span>
           </div>
           <div class="trans-cluster">
             <label class="pix-switch"><input id="barRecvOn" type="checkbox" checked><span>气泡</span></label>
-            <span class="langpick langpick-mini"><input id="barRecvFromInput" type="text" autocomplete="off" placeholder="搜索…"><span class="langpick-caret">▾</span><select id="barRecvFrom"></select><datalist id="barRecvFromList"></datalist></span>
+            <span class="langpick langpick-mini"><input id="barRecvFromInput" type="text" autocomplete="off" placeholder="选择语言"><span class="langpick-caret">▾</span><select id="barRecvFrom"></select><div class="langpick-panel" id="barRecvFromPanel" hidden><input class="langpick-search" id="barRecvFromSearch" type="text" autocomplete="off" placeholder="选择语言"><div class="langpick-items" id="barRecvFromList"></div></div></span>
             <i class="trans-arrow">→</i>
-            <span class="langpick langpick-mini"><input id="barRecvToInput" type="text" autocomplete="off" placeholder="搜索…"><span class="langpick-caret">▾</span><select id="barRecvTo"></select><datalist id="barRecvToList"></datalist></span>
+            <span class="langpick langpick-mini"><input id="barRecvToInput" type="text" autocomplete="off" placeholder="选择语言"><span class="langpick-caret">▾</span><select id="barRecvTo"></select><div class="langpick-panel" id="barRecvToPanel" hidden><input class="langpick-search" id="barRecvToSearch" type="text" autocomplete="off" placeholder="选择语言"><div class="langpick-items" id="barRecvToList"></div></div></span>
           </div>
           <label class="trans-mini">通道<select id="barEngine"></select></label>
         </div>
@@ -205,19 +221,19 @@
         <div class="field">
           <label for="langMineInput">我的语言</label>
           <div class="langpick">
-            <input id="langMineInput" type="text" autocomplete="off" placeholder="搜索语言…">
+            <input id="langMineInput" type="text" autocomplete="off" placeholder="选择语言">
             <span class="langpick-caret">▾</span>
             <select id="langMine"></select>
-            <datalist id="langMineList"></datalist>
+            <div class="langpick-panel" id="langMinePanel" hidden><input class="langpick-search" id="langMineSearch" type="text" autocomplete="off" placeholder="选择语言"><div class="langpick-items" id="langMineList"></div></div>
           </div>
         </div>
         <div class="field">
           <label for="langOtherInput">对方语言</label>
           <div class="langpick">
-            <input id="langOtherInput" type="text" autocomplete="off" placeholder="搜索语言…">
+            <input id="langOtherInput" type="text" autocomplete="off" placeholder="选择语言">
             <span class="langpick-caret">▾</span>
             <select id="langOther"></select>
-            <datalist id="langOtherList"></datalist>
+            <div class="langpick-panel" id="langOtherPanel" hidden><input class="langpick-search" id="langOtherSearch" type="text" autocomplete="off" placeholder="选择语言"><div class="langpick-items" id="langOtherList"></div></div>
           </div>
         </div>
         <div class="field">

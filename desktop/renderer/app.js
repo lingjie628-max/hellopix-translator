@@ -1670,25 +1670,49 @@ function initLangPick(inputId, listId, selectId) {
   const input = document.getElementById(inputId)
   const list = document.getElementById(listId)
   const select = document.getElementById(selectId)
-  if (!input || !list || !select) return
-  // 用原生 datalist：系统级下拉提示，输入即筛选，不会像自定义浮层那样盖住界面
-  input.setAttribute('list', listId)
-  list.innerHTML = LANGS.map(l => '<option value="' + l.name + '"></option>').join('')
+  const wrap = input && input.closest('.langpick')
+  const panel = list && list.closest('.langpick-panel')
+  const search = panel && panel.querySelector('.langpick-search')
+  if (!input || !list || !select || !wrap || !panel || !search) return
 
   const nameOf = code => { const hit = LANGS.find(l => l.id === code); return hit ? hit.name : '' }
-  const codeOf = name => { const hit = LANGS.find(l => l.name === String(name || '').trim()); return hit ? hit.id : '' }
-  const sync = () => { input.value = nameOf(select.value) }
-
-  const commit = () => {
-    const code = codeOf(input.value)
-    if (code) {
-      select.value = code
-      select.dispatchEvent(new Event('change', { bubbles: true }))
-    }
-    sync()
+  const render = keyword => {
+    const kw = String(keyword || '').trim().toLowerCase()
+    const rows = LANGS.filter(l => !kw || l.name.toLowerCase().includes(kw) || l.id.toLowerCase().includes(kw))
+    list.innerHTML = rows.length
+      ? rows.map(l => '<div class="lp' + (l.id === select.value ? ' on' : '') + '" data-code="' + l.id + '">' + l.name + '</div>').join('')
+      : '<div class="lp-empty">没有匹配的语言</div>'
   }
-  input.addEventListener('change', commit)
-  input.addEventListener('blur', commit)
+  const sync = () => { input.value = nameOf(select.value) }
+  const close = () => { panel.hidden = true; wrap.classList.remove('open'); search.value = '' }
+  const open = () => {
+    render('')
+    panel.hidden = false
+    wrap.classList.add('open')
+    search.focus()
+  }
+
+  input.addEventListener('mousedown', event => { event.preventDefault(); panel.hidden ? open() : close() })
+  search.addEventListener('input', () => render(search.value))
+  search.addEventListener('keydown', event => {
+    if (event.key === 'Escape') { close(); input.focus() }
+    if (event.key === 'Enter') {
+      const first = list.querySelector('.lp')
+      if (first) { select.value = first.dataset.code; sync(); close() }
+    }
+  })
+  list.addEventListener('mousedown', event => {
+    const item = event.target.closest('.lp')
+    if (!item) return
+    event.preventDefault()
+    select.value = item.dataset.code
+    sync()
+    close()
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+  })
+  document.addEventListener('mousedown', event => {
+    if (!wrap.contains(event.target)) close()
+  })
   select.addEventListener('change', sync)
   select._syncPickDisplay = sync
   sync()
