@@ -1907,8 +1907,11 @@ if (!usernameEl.value) usernameEl.focus()
   if (!bar || !window.pix || typeof window.pix.reportBarHeight !== 'function') return
   let last = -1
   const push = () => {
-    const height = Math.max(bar.offsetHeight, bar.scrollHeight)
-    const value = Math.round(height)
+    // 折叠态下 .is-collapsed 会把 padding/border 归零，此时无论 offsetHeight 还是
+    // scrollHeight 都小于展开态真实高度（实测 71 vs 88）。上报这种缩水值会让
+    // 下次展开的头几帧按错误高度定位，所以折叠时直接跳过，保留最近一次展开态的值。
+    if (bar.classList.contains('is-collapsed')) return
+    const value = Math.round(Math.max(bar.offsetHeight, bar.scrollHeight))
     if (value > 0 && value !== last) {
       last = value
       window.pix.reportBarHeight(value)

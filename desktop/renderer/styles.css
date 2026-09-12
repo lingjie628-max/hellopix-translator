@@ -661,7 +661,7 @@ button {
   transition:
     opacity 0.2s ease,
     visibility 0.2s ease,
-    transform 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+    transform 0.25s cubic-bezier(0.33, 1, 0.68, 1);
 }
 .op-wrap.open .op-menu {
   opacity: 1;
@@ -746,7 +746,7 @@ button {
     0 0 30px rgba(34, 211, 238, 0.07),
     0 0 0 1px rgba(255, 255, 255, 0.025) inset;
   transform-origin: top left;
-  animation: contextIn 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+  animation: contextIn 0.2s cubic-bezier(0.33, 1, 0.68, 1);
 }
 .pix-context-title {
   display: flex;
@@ -831,11 +831,11 @@ button {
   transform: translateY(0) scaleY(1);
   transform-origin: top center;
   transition:
-    max-height 0.42s cubic-bezier(0.22, 1, 0.36, 1),
+    max-height 0.42s cubic-bezier(0.33, 1, 0.68, 1),
     opacity 0.34s ease,
-    padding 0.42s cubic-bezier(0.22, 1, 0.36, 1),
+    padding 0.42s cubic-bezier(0.33, 1, 0.68, 1),
     border-width 0.3s ease,
-    transform 0.42s cubic-bezier(0.22, 1, 0.36, 1);
+    transform 0.42s cubic-bezier(0.33, 1, 0.68, 1);
 }
 .trans-bar.is-collapsed {
   max-height: 0;
@@ -856,7 +856,7 @@ button {
 }
 .trans-bar-extra,
 .trans-cluster {
-  transition: opacity 0.22s ease, transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: opacity 0.22s ease, transform 0.28s cubic-bezier(0.33, 1, 0.68, 1);
 }
 .trans-bar-main,
 .trans-bar-extra {
@@ -1669,9 +1669,9 @@ button {
     0 28px 90px rgba(0, 0, 0, 0.58),
     0 0 0 1px rgba(125, 211, 252, 0.04) inset,
     0 0 46px rgba(34, 211, 238, 0.08);
-  animation: addCardEnter 0.46s cubic-bezier(0.22, 1, 0.36, 1);
+  animation: addCardEnter 0.46s cubic-bezier(0.33, 1, 0.68, 1);
   transition:
-    width 0.32s cubic-bezier(0.22, 1, 0.36, 1),
+    width 0.32s cubic-bezier(0.33, 1, 0.68, 1),
     box-shadow 0.3s ease,
     border-color 0.3s ease;
 }
@@ -1957,7 +1957,7 @@ button {
   box-shadow:
     0 28px 80px rgba(0, 0, 0, 0.58),
     0 0 42px rgba(34, 211, 238, 0.08);
-  animation: updateCardIn 0.42s cubic-bezier(0.22, 1, 0.36, 1);
+  animation: updateCardIn 0.42s cubic-bezier(0.33, 1, 0.68, 1);
 }
 .update-logo {
   position: relative;

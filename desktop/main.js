@@ -25,6 +25,7 @@ const UTILITY_HEIGHT = 40
 const TRANS_BAR_HEIGHT = 78
 // 渲染层上报的工具条真实高度（CSS 实测约 88px，与上面的常量不一致时会用到）
 let measuredTransBarHeight = 0
+let hasMeasuredBarHeight = false
 const STATUS_HEIGHT = 22
 const FOOTER_HEIGHT = 30
 const DEFAULT_API = process.env.PIX_API || process.env.PIX_PUBLIC_URL || 'http://127.0.0.1:8080'
@@ -737,7 +738,7 @@ function activeWantsTransBar() {
 }
 
 function chromeOffset() {
-  return TABS_HEIGHT + UTILITY_HEIGHT + (activeWantsTransBar() ? (measuredTransBarHeight || TRANS_BAR_HEIGHT) : 0) + (activeWantsStatus() ? STATUS_HEIGHT : 0)
+  return TABS_HEIGHT + UTILITY_HEIGHT + (activeWantsTransBar() ? (hasMeasuredBarHeight ? measuredTransBarHeight : TRANS_BAR_HEIGHT) : 0) + (activeWantsStatus() ? STATUS_HEIGHT : 0)
 }
 
 let chromeAnim = null
@@ -1399,6 +1400,7 @@ ipcMain.on('chrome:barHeight', (event, height) => {
   if (!Number.isFinite(value) || value < 0 || value > 400) return
   if (value === measuredTransBarHeight) return
   measuredTransBarHeight = value
+  hasMeasuredBarHeight = true
   // animateChromeTo 内部会 stopChromeAnim()，这里不要手动置空动画句柄
   if (activeWantsTransBar()) {
     animateChromeTo(chromeOffset())
