@@ -821,8 +821,8 @@ button {
   position: relative;
   z-index: 2;
   flex-shrink: 0;
-  max-height: 120px;
-  padding: 12px 14px;
+  max-height: 96px;
+  padding: 8px 12px 8px;
   overflow: hidden;
   background: linear-gradient(180deg, #1a3354 0%, #142846 100%);
   border-bottom: 1px solid rgba(34, 211, 238, 0.12);
@@ -866,8 +866,8 @@ button {
   gap: 8px 12px;
 }
 .trans-bar-extra {
-  margin-top: 10px;
-  padding-top: 10px;
+  margin-top: 7px;
+  padding-top: 7px;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
   opacity: 0.96;
 }
@@ -2108,79 +2108,3 @@ button {
   .login-bg { background: url('login-bg.png') center / cover no-repeat; }
   .announce-track { animation: none; }
 }
-
-/* ==========================================================================
-   翻译设置区：保持原有上下两行布局，只重新分配宽度与间距
-   约束：纯 CSS；不动 HTML/JS/事件；不用 space-between；不加卡片边框背景。
-   ========================================================================== */
-
-/* 第一行：核心设置。整行靠左连续排列，剩余空间留在右侧 */
-.trans-bar-main {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: flex-start;   /* 明确禁用 space-between */
-  gap: 0 24px;                   /* 接收组↔通道 / 发出组↔接收组 的横向间距 */
-}
-
-/* 功能组：只用间距区分，不加外框、不加背景、不加内边距 */
-.trans-cluster {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0;
-  background: none;
-  border: 0;
-}
-
-/* 第二行：辅助设置。同样靠左，统一间距 */
-.trans-bar-extra {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 0 14px;
-  margin-top: 10px;
-  padding-top: 10px;
-}
-
-/* 控件尺寸统一；上下内边距已加宽，高度略抬一点更易点按 */
-.trans-bar select {
-  height: 28px;
-  box-sizing: border-box;
-  border-radius: 6px;
-  padding: 0 24px 0 9px;
-  font-size: 12px;
-}
-.trans-bar .pix-switch,
-.trans-bar input[type="color"] {
-  height: 28px;
-  box-sizing: border-box;
-}
-.trans-bar .pix-switch span {
-  height: 28px;
-}
-.trans-bar .trans-mini { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
-
-/* 按内容分配宽度：语言类中等，功能类更短，避免一律等宽或过宽 */
-#barSendFrom, #barRecvFrom { width: 160px; }   /* 自动识别 */
-#barSendTo,   #barRecvTo   { width: 150px; }   /* 英语 / 简体中文 */
-#barEngine                 { width: 150px; }   /* 有道翻译 */
-#barGroupMode              { width: 74px; }    /* 手动 */
-#barFontSize               { width: 96px; }    /* 15号字体 */
-#barServer                 { width: 108px; }   /* 国内线路 */
-
-/* 借鉴参考产品：标签在上、控件在下，形成整齐的列阵 */
-.trans-bar .trans-mini {
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 3px;
-  font-size: 11px;
-  line-height: 1.2;
-}
-.trans-bar .trans-mini > span,
-.trans-bar .trans-mini { color: #9eb3c9; }
-.trans-bar .trans-mini > select { width: 100%; }
-/* 让两行内的标签化控件对齐同一基线 */
-.trans-bar-main .trans-mini,
-.trans-bar-extra .trans-mini { align-self: flex-start; }
