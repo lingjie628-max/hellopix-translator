@@ -102,29 +102,34 @@
           </div>
         </div>
       </div>
+      <!-- 翻译设置：4 列网格（列宽 25%），单元格 = 70px 标签 + 215px 控件。
+           行列顺序按《桌面端设计规范》对齐竞品的「发送 / 接收 / 外观」三段式。
+           控件 id 一个没动 —— 交互全在 app.js 里按 id 取，重排不影响逻辑。
+           .trans-bar-rows 是折叠动画用的收缩轨道：只动它一个网格轨道，格子尺寸
+           全程不变，避免逐帧重排整个子树（那正是卡顿感的来源）。
+           每个格子的 --d / --d-rev 是错峰延迟，做出「逐格收拾 / 铺开」的次序感。 -->
       <div id="transBar" class="trans-bar is-collapsed">
-        <div class="trans-bar-main">
-          <div class="trans-cluster">
-            <label class="pix-switch"><input id="barSendOn" type="checkbox" checked><span>发出翻译</span></label>
-            <select id="barSendFrom"></select>
-            <i class="trans-arrow">→</i>
-            <select id="barSendTo"></select>
+        <div class="trans-bar-rows">
+        <div class="trans-grid">
+          <div class="trans-cell" style="--d:0ms;--d-rev:150ms"><label class="pix-switch"><input id="barSendOn" type="checkbox" checked><span>发出翻译</span></label></div>
+          <div class="trans-cell" style="--d:16ms;--d-rev:134ms"><span class="trans-label">你的语种</span><select id="barSendFrom"></select></div>
+          <div class="trans-cell" style="--d:32ms;--d-rev:118ms"><span class="trans-label">翻译语种</span><select id="barSendTo"></select></div>
+          <div class="trans-cell" style="--d:48ms;--d-rev:102ms"><span class="trans-label">翻译通道</span><select id="barEngine"></select></div>
+
+          <div class="trans-cell" style="--d:54ms;--d-rev:96ms"><label class="pix-switch"><input id="barRecvOn" type="checkbox" checked><span>接收翻译</span></label></div>
+          <div class="trans-cell" style="--d:70ms;--d-rev:80ms"><span class="trans-label">消息语种</span><select id="barRecvFrom"></select></div>
+          <div class="trans-cell" style="--d:86ms;--d-rev:64ms"><span class="trans-label">接收语种</span><select id="barRecvTo"></select></div>
+          <div class="trans-cell" style="--d:102ms;--d-rev:48ms"><span class="trans-label">群组翻译</span><select id="barGroupMode"><option value="manual">手动</option><option value="auto">自动</option></select></div>
+
+          <div class="trans-cell" style="--d:108ms;--d-rev:42ms"><span class="trans-label">字体大小</span><select id="barFontSize"></select></div>
+          <div class="trans-cell" style="--d:124ms;--d-rev:26ms"><span class="trans-label">字体颜色</span><input id="barFontColor" type="color" value="#22c55e" title="译文颜色"></div>
+          <div class="trans-cell" style="--d:140ms;--d-rev:10ms"><span class="trans-label">翻译线路</span><select id="barServer"></select></div>
+          <!-- 两个短开关合成一格：独立成行会把工具栏再撑高 34px -->
+          <div class="trans-cell is-pair" style="--d:156ms;--d-rev:0ms">
+            <label class="pix-switch slim"><input id="barIncludeZh" type="checkbox"><span>含中文也译</span></label>
+            <label class="pix-switch slim"><input id="barQuickReply" type="checkbox"><span>快捷回复</span></label>
           </div>
-          <div class="trans-cluster">
-            <label class="pix-switch"><input id="barRecvOn" type="checkbox" checked><span>接收翻译</span></label>
-            <select id="barRecvFrom"></select>
-            <i class="trans-arrow">→</i>
-            <select id="barRecvTo"></select>
-          </div>
-          <label class="trans-mini">通道<select id="barEngine"></select></label>
         </div>
-        <div class="trans-bar-extra">
-          <label class="trans-mini">群组<select id="barGroupMode"><option value="manual">手动</option><option value="auto">自动</option></select></label>
-          <label class="pix-switch slim"><input id="barIncludeZh" type="checkbox"><span>含中文也译</span></label>
-          <label class="pix-switch slim"><input id="barQuickReply" type="checkbox"><span>快捷回复</span></label>
-          <label class="trans-mini">字体<select id="barFontSize"></select></label>
-          <input id="barFontColor" type="color" value="#22c55e" title="译文颜色">
-          <label class="trans-mini">线路<select id="barServer"></select></label>
         </div>
       </div>
       <div id="appStatus" class="app-status hidden">

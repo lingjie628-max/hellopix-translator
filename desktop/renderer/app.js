@@ -1122,6 +1122,8 @@ function setTransBarOpen(open, instant) {
     void transBar.offsetHeight
     transBar.classList.remove('no-anim')
     transBarPainted = true
+    // 立即上报新的占位高度，嵌入式原生视图才能跟着一起让出/收回空间
+    if (typeof window.__syncPixChrome === 'function') window.__syncPixChrome()
     return
   }
   if (open) {
@@ -1132,6 +1134,8 @@ function setTransBarOpen(open, instant) {
     transBar.classList.add('is-collapsed')
   }
   transBarPainted = true
+  // 报的是目标态（收起=归零），主进程自己会做缓动动画
+  if (typeof window.__syncPixChrome === 'function') window.__syncPixChrome()
 }
 
 function paintTransBar(state, home, rows) {
@@ -1901,46 +1905,99 @@ if (!usernameEl.value) usernameEl.focus()
 
 // --- 工具条真实高度上报 -------------------------------------------------------
 // 原生嵌入视图的位置由主进程按高度计算；此前用的是硬编码常量，改样式就会错位。
-// 这里用 ResizeObserver 把实测高度报上去（折叠时 offsetHeight 为 0，取 scrollHeight）。
+// 这里用 ResizeObserver 把实测高度报上去。
+//
+// 同时维护两个 CSS 变量：
+//   --bar-rows-h  折叠动画的像素高。折叠只过渡这一个数字，内容尺寸全程锁死，
+//                 避免逐帧重排整个网格子树（那正是卡顿感的来源）。用显式像素
+//                 而不是 fr/1fr 轨道 —— 自动高度容器里的 fr 解析不可靠，实测会
+//                 出现"类名已切回展开、高度却还是 0"。
+//   --chrome-end  嵌入原生视图的起始 y = 顶部 chrome 总高（标签栏 + 工具行 + 工具条），
+//                 主进程按同一个值定位视图，工作区顶边也用它。
+//                 注意它**含**工具条上方的部分，别再把工具条顶边偏移加一次；
+//                 收起时工具条整项归零，它就等于"标签栏 + 工具行"。
 ;(function reportTransBarHeight() {
   const bar = document.getElementById('transBar')
+  const end = document.getElementById('chromeEnd')
   if (!bar || !window.pix || typeof window.pix.reportBarHeight !== 'function') return
-  let last = -1
+  const rows = bar.querySelector('.trans-bar-rows')
+  const grid = bar.querySelector('.trans-grid')
+  const root = document.documentElement
+  let lastBar = -1
+  let lastChrome = -1
+  let contentH = 0        // 内容自然高
+  let topOffset = 0       // 工具条顶边 = 标签栏 + 工具行的合计高，只在展开态记录
+  let chromeFallback = 0
+
+  // 内容自然高不能读 rows.offsetHeight：折叠时它是被裁剪值、过渡中是插值。
+  // 实测把过渡中的 1px 当成内容高写进了 --bar-rows-h，工具条就此卡死收不回来。
+  // 改成量一个脱离文档流的克隆：它不参与折叠，也不受过渡影响。
+  const measureContent = () => {
+    if (!grid) return 0
+    const probe = grid.cloneNode(true)
+    probe.removeAttribute('id')
+    probe.style.cssText =
+      'position:absolute;left:-99999px;top:0;visibility:hidden;pointer-events:none;width:' +
+      Math.round(grid.getBoundingClientRect().width) + 'px'
+    bar.appendChild(probe)
+    const h = probe.offsetHeight
+    probe.remove()
+    return h
+  }
+
+  const measure = () => {
+    // 顶边只在展开态记录：折叠时它等于标签栏下沿，不是有效锚点
+    if (!bar.classList.contains('is-collapsed')) {
+      topOffset = Math.round(bar.getBoundingClientRect().top)
+    }
+    if (end) chromeFallback = Math.round(end.getBoundingClientRect().bottom)
+  }
+
   const push = () => {
-    // 折叠态下 .is-collapsed 会把 padding/border 归零，此时无论 offsetHeight 还是
-    // scrollHeight 都小于展开态真实高度（实测 71 vs 88）。上报这种缩水值会让
-    // 下次展开的头几帧按错误高度定位，所以折叠时直接跳过，保留最近一次展开态的值。
-    if (bar.classList.contains('is-collapsed')) return
-    const value = Math.round(Math.max(bar.offsetHeight, bar.scrollHeight))
-    if (value > 0 && value !== last) {
-      last = value
+    measure()
+    const natural = measureContent()
+    if (natural > 0) contentH = natural
+    if (contentH > 0) root.style.setProperty('--bar-rows-h', contentH + 'px')
+
+    // chrome = 嵌入视图的起始 y = 顶部 chrome 的总高（标签栏 + 工具行 + 工具条）。
+    // 收起时工具条整体消失（0 高、无 padding、无边框），这一项就只剩前面的标签栏
+    // 和工具行 —— 也就是 topOffset 本身。
+    // 注意别把 topOffset 和工具条高度相加两次：topOffset 已经含了它上方的部分。
+    const collapsed = bar.classList.contains('is-collapsed')
+    const barOuter = collapsed ? 0 : contentH + 16 + 1   // 展开：内容 + 上下 padding + 边框
+    const chrome = topOffset + barOuter
+    // 调试用：把内部量到的值挂到 DOM 上，方便用 CDP 核对（不影响布局）
+    bar.dataset.metrics = JSON.stringify({ contentH, topOffset, barOuter, chrome, collapsed })
+    const nextChrome = chrome > 0 ? chrome : chromeFallback
+    if (nextChrome > 0 && nextChrome !== lastChrome) {
+      lastChrome = nextChrome
+      // 工作区是绝对定位的，不跟着 chrome 走就会在工具条变高时被盖住
+      root.style.setProperty('--chrome-end', nextChrome + 'px')
+      window.pix.reportChromeHeight(nextChrome)
+    }
+
+    // 原生视图定位用的工具条高度（主进程在 chrome 值缺失时的回退）
+    const value = barOuter > 0 ? barOuter : Math.round(Math.max(bar.offsetHeight, bar.scrollHeight))
+    if (value > 0 && value !== lastBar) {
+      lastBar = value
       window.pix.reportBarHeight(value)
     }
   }
-  if (typeof ResizeObserver === 'function') new ResizeObserver(push).observe(bar)
+
+  if (typeof ResizeObserver === 'function') {
+    new ResizeObserver(push).observe(bar)
+    if (rows) new ResizeObserver(push).observe(rows)
+  }
   window.addEventListener('resize', push)
   document.addEventListener('DOMContentLoaded', push)
-  setTimeout(push, 0)
-  setTimeout(push, 300)
-})()
-
-
-// --- 顶部 chrome 底边上报（哨兵方案）-----------------------------------------
-// 原生视图的起始 y 直接取哨兵的 bottom，不再依赖任何硬编码高度常量。
-// 这样标签栏/工具条/状态栏的高度怎么变，嵌入视图都会自动跟随。
-;(function reportChromeHeight() {
-  const end = document.getElementById('chromeEnd')
-  if (!end || !window.pix || typeof window.pix.reportChromeHeight !== 'function') return
-  let last = -1
-  const push = () => {
-    const value = Math.round(end.getBoundingClientRect().bottom)
-    if (value > 0 && value !== last) {
-      last = value
-      window.pix.reportChromeHeight(value)
-    }
-  }
-  if (typeof ResizeObserver === 'function') new ResizeObserver(push).observe(end)
-  window.addEventListener('resize', push)
+  // 过渡中途量到的是插值，落定后再补一次
+  bar.addEventListener('transitionend', event => {
+    if (event.propertyName === 'height') push()
+  })
+  // 折叠切换必须主动调一次：收起后工具条高度为 0 且内容全被裁掉，
+  // 这种不可渲染状态下 ResizeObserver 不会报告尺寸变化（实测完全不触发），
+  // 只靠它会让嵌入视图留在原地、空间让不出来。
+  window.__syncPixChrome = push
   setTimeout(push, 0)
   setTimeout(push, 300)
 })()

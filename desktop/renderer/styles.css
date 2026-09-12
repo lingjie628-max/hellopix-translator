@@ -1,4 +1,35 @@
 * { box-sizing: border-box; }
+
+/* --- 设计变量（数值取自《桌面端设计规范》竞品实测）---------------------------
+   竞品自己没有变量体系（全部 px 硬编码），这是我们的改进项：把规范里的数值
+   集中一处，后续调版式只改这里，不用在 2000 行 CSS 里挨个找。
+   来源：docs/桌面端设计规范.md 二、关键数值 / 主题数值。 */
+:root {
+  /* 控件度量 */
+  --ctl-h: 24px;              /* 控件高度（双方已一致） */
+  --ctl-w: 215px;             /* 控件固定宽（竞品值） */
+  --label-w: 70px;            /* 中文标签固定宽（竞品值） */
+  --cell-pad-left: 70px;      /* 单元格左边距，等价竞品 margin-left:70px */
+  --row-h: 34px;              /* 行高 = 24 控件 + 5 + 5 */
+  --row-gap: 5px;             /* 行距（竞品 5px） */
+  --cell-gap: 0px;            /* 列距：竞品列宽 25% 已含留白 */
+
+  /* 字号阶梯（竞品实测） */
+  --fs-label: 14px;           /* 标签 14px/17px 字重 500 #666 */
+  --fs-ctl: 13px;             /* 控件文字 13px/15px 字重 300 */
+  --fs-panel-title: 15px;     /* 面板标题 */
+  --fs-panel-body: 13px;      /* 面板正文 */
+  --lh-label: 17px;
+  --lh-ctl: 15px;
+
+  /* 主题色（沿用深色背景下的既有取值，非竞品数值） */
+  --c-label: #9eb3c9;
+  --c-ctl-text: #e8eef8;
+  --c-ctl-border: rgba(255, 255, 255, 0.12);
+  --c-ctl-bg: rgba(7, 16, 30, 0.55);
+  --c-accent: #22d3ee;
+}
+
 html, body {
   margin: 0;
   height: 100%;
@@ -817,74 +848,107 @@ button {
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
+/* 折叠：过渡外层这一个 height（0 ↔ 实测内容高），格子尺寸全程不变、被裁不被压。
+   为什么不像原来那样动 max-height：max-height 每帧重排整个子树，12 个带渐变/
+   圆角/阴影的格子逐帧重排，就是用户感觉到的「卡顿感」；这里内容尺寸锁死，
+   每帧只改一个数字。 */
 .trans-bar {
   position: relative;
   z-index: 2;
   flex-shrink: 0;
-  max-height: 96px;
-  padding: 8px 12px 8px;
+  height: auto;
+  padding: 8px 12px;
   overflow: hidden;
   background: linear-gradient(180deg, #1a3354 0%, #142846 100%);
   border-bottom: 1px solid rgba(34, 211, 238, 0.12);
   color: #dbe7f3;
-  font-size: 12px;
-  transform: translateY(0) scaleY(1);
-  transform-origin: top center;
-  transition:
-    max-height 0.42s cubic-bezier(0.33, 1, 0.68, 1),
-    opacity 0.34s ease,
-    padding 0.42s cubic-bezier(0.33, 1, 0.68, 1),
-    border-width 0.3s ease,
-    transform 0.42s cubic-bezier(0.33, 1, 0.68, 1);
+  font-size: var(--fs-ctl);
+  transition: padding 0.26s cubic-bezier(0.33, 1, 0.68, 1),
+              border-bottom-color 0.26s ease;
 }
 .trans-bar.is-collapsed {
-  max-height: 0;
-  opacity: 0;
   padding-top: 0;
   padding-bottom: 0;
+  /* 收起就收干净：留 1px 边框会在下方留一条蓝线，视图上移后尤其明显 */
   border-bottom-width: 0;
-  transform: translateY(-8px) scaleY(0.96);
   pointer-events: none;
 }
-.trans-bar.no-anim {
+.trans-bar.no-anim,
+.trans-bar.no-anim * {
   transition: none !important;
 }
-.trans-bar.is-collapsed .trans-bar-extra,
-.trans-bar.is-collapsed .trans-cluster {
-  opacity: 0;
-  transform: translateY(-6px);
+
+/* 收缩轨道：高度由 --bar-rows-h（app.js 实测写入）驱动，收起时压到 0。
+   用显式像素高而不是 1fr/0fr —— 自动高度容器里的 fr 轨道解析不可靠，
+   实测会出现"类名切回展开、高度却还是 0"的情况。 */
+.trans-bar-rows {
+  height: var(--bar-rows-h, auto);
+  overflow: hidden;
+  transition: height 0.34s cubic-bezier(0.22, 1, 0.36, 1);
 }
-.trans-bar-extra,
-.trans-cluster {
-  transition: opacity 0.22s ease, transform 0.28s cubic-bezier(0.33, 1, 0.68, 1);
+.trans-bar.is-collapsed .trans-bar-rows {
+  height: 0;
 }
-.trans-bar-main,
-.trans-bar-extra {
+
+/* 工具栏网格：4 列 × N 行，列宽 25%（竞品 checkboxgroup columns:4）。
+   单元格 = 70px 标签 + 最多 215px 控件，另有 70px 左边距与竞品一致。 */
+.trans-grid {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-auto-rows: var(--row-h);
+  column-gap: var(--cell-gap);
+  row-gap: var(--row-gap);
+}
+.trans-cell {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 8px 12px;
+  gap: 0;
+  min-width: 0;
+  padding-left: var(--cell-pad-left);
+  /* 错峰延迟由 HTML 上的 --d 提供，让 12 个格子像被逐格收拾/铺开。
+     收起用减速曲线（快速退场），展开用加速曲线（干脆落位）。 */
+  transition:
+    opacity 0.2s cubic-bezier(0.33, 1, 0.68, 1) var(--d, 0ms),
+    transform 0.28s cubic-bezier(0.33, 1, 0.68, 1) var(--d, 0ms);
 }
-.trans-bar-extra {
-  margin-top: 7px;
-  padding-top: 7px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
-  opacity: 0.96;
+.trans-bar.is-collapsed .trans-cell {
+  opacity: 0;
+  transform: translateY(-7px);
+  transition:
+    opacity 0.14s ease var(--d-rev, 0ms),
+    transform 0.2s cubic-bezier(0.4, 0, 1, 1) var(--d-rev, 0ms);
 }
-.trans-cluster {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 8px 3px 4px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(34, 211, 238, 0.1);
+/* 一个格子里放两个短控件时用（不占额外行，避免工具栏过高） */
+.trans-cell.is-pair {
+  gap: 10px;
+  padding-left: 0;
+  justify-content: flex-start;
 }
-.trans-arrow {
-  font-style: normal;
-  color: #67e8f9;
-  opacity: 0.7;
-  font-size: 12px;
+.trans-label {
+  flex: 0 0 var(--label-w);
+  width: var(--label-w);
+  font-size: var(--fs-label);
+  line-height: var(--lh-label);
+  font-weight: 500;
+  color: var(--c-label);
+  white-space: nowrap;
+}
+/* 控件宽：竞品为固定 215px。这里用 min() 让它在窗口退到最小宽（1160px）时
+   能自动收几像素，而不是把四列挤溢出 —— 满宽时仍是实打实的 215px。 */
+/* 控件宽：竞品固定 215px。窗口退到最小宽（1160px）时列宽只有 284px，
+   减去 70 标签后剩 214px —— 差 1px。让它可以收缩到列宽以内，
+   满宽时仍然是实打实的 215px，不会把四列挤到溢出。 */
+.trans-cell > select {
+  flex: 0 1 auto;
+  width: min(var(--ctl-w), 100%);
+  min-width: 0;
+  max-width: 100%;
+}
+.trans-cell > input[type="color"] {
+  /* 取色控件是色块不是输入框，按色块尺寸走，不撑到 215px */
+  width: 52px;
+  flex: 0 0 auto;
 }
 .pix-switch {
   position: relative;
@@ -900,14 +964,17 @@ button {
 .pix-switch span {
   display: inline-flex;
   align-items: center;
-  height: 24px;
+  justify-content: center;
+  width: 100%;
+  height: var(--ctl-h);
   padding: 0 10px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  border: 1px solid var(--c-ctl-border);
   background: rgba(255, 255, 255, 0.04);
   color: #c5d4e4;
-  font-size: 12px;
-  font-weight: 600;
+  font-size: var(--fs-ctl);
+  font-weight: 500;
+  white-space: nowrap;
 }
 .pix-switch input:checked + span {
   border-color: rgba(34, 211, 238, 0.45);
@@ -915,33 +982,37 @@ button {
   color: #a5f3fc;
   box-shadow: 0 0 12px rgba(34, 211, 238, 0.12);
 }
+/* 成对摆放时按内容宽度，不撑满 215px */
+.trans-cell.is-pair .pix-switch {
+  width: auto;
+}
 .pix-switch.slim span { font-weight: 500; padding: 0 8px; }
-.trans-mini {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: #9eb3c9;
-  white-space: nowrap;
+/* 开关按内容宽度走，不套用 215px 的输入控件宽度：
+   拉宽到 215px 会让开关右侧多出一片点不动的死区，手感是坏的。 */
+.trans-cell > label.pix-switch {
+  width: auto;
+  max-width: 100%;
 }
 .trans-bar select,
 .trans-bar input[type="color"] {
-  height: 24px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  height: var(--ctl-h);
+  border: 1px solid var(--c-ctl-border);
   border-radius: 7px;
-  background: rgba(7, 16, 30, 0.55);
-  color: #e8eef8;
-  font-size: 12px;
+  background: var(--c-ctl-bg);
+  color: var(--c-ctl-text);
+  font-size: var(--fs-ctl);
 }
-.trans-bar select { min-width: 84px; max-width: 140px; padding: 0 6px; }
+.trans-bar select { padding: 0 6px; }
 .trans-bar input[type="color"] {
-  width: 26px;
   padding: 2px;
   cursor: pointer;
 }
 
 .workspace {
   position: absolute;
-  top: 112px;
+  /* 顶部 chrome 的底边，由 app.js 用哨兵实测写入 --chrome-end。
+     此前硬编码 112px，工具条一涨高就会盖住 Home 首屏内容。 */
+  top: var(--chrome-end, 112px);
   left: 0;
   right: 0;
   bottom: 0;
