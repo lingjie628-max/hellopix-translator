@@ -245,7 +245,7 @@ function restoreOpenApps(username) {
   else if (tabs.length) activeId = tabs[0].id
   showHome = data.showHome !== false
   if (!tabs.length) showHome = true
-  layoutViews()
+  animateChromeTo(chromeOffset())
   sendTabs()
 }
 
@@ -853,7 +853,10 @@ function switchTab(id) {
   if (!tab) return { success: false, msg: '窗口不存在' }
   activeId = id
   showHome = false
-  layoutViews()
+  // 切换标签会改变顶部 chrome 高度（不同标签的工具条/状态栏偏好不同），
+  // CSS 有 420ms 过渡动画，这里必须同样走动画，否则原生视图瞬间跳变造成错位。
+  // animateChromeTo 在高度未变时会自行回退到 layoutViews。
+  animateChromeTo(chromeOffset())
   sendTabs()
   saveOpenApps()
   return { success: true }
