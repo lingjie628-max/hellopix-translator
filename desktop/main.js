@@ -23,6 +23,8 @@ const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/5
 const TABS_HEIGHT = 72
 const UTILITY_HEIGHT = 40
 const TRANS_BAR_HEIGHT = 78
+// 渲染层上报的工具条真实高度（CSS 实测约 88px，与上面的常量不一致时会用到）
+let measuredTransBarHeight = 0
 const STATUS_HEIGHT = 22
 const FOOTER_HEIGHT = 30
 const DEFAULT_API = process.env.PIX_API || process.env.PIX_PUBLIC_URL || 'http://127.0.0.1:8080'
@@ -735,7 +737,7 @@ function activeWantsTransBar() {
 }
 
 function chromeOffset() {
-  return TABS_HEIGHT + UTILITY_HEIGHT + (activeWantsTransBar() ? TRANS_BAR_HEIGHT : 0) + (activeWantsStatus() ? STATUS_HEIGHT : 0)
+  return TABS_HEIGHT + UTILITY_HEIGHT + (activeWantsTransBar() ? (measuredTransBarHeight || TRANS_BAR_HEIGHT) : 0) + (activeWantsStatus() ? STATUS_HEIGHT : 0)
 }
 
 let chromeAnim = null
@@ -1384,6 +1386,22 @@ function isMainSender(event) {
 function rejectUntrustedSender() {
   return { success: false, msg: '不允许的 IPC 来源' }
 }
+
+// 工具条高度由渲染层实测上报：改样式后无需再同步硬编码常量。
+// 只在数值真正变化时重排，避免频繁触发原生视图跳动。
+ipcMain.on('chrome:barHeight', (event, height) => {
+  if (!isMainSender(event)) return
+  const value = Math.round(Number(height))
+  if (!Number.isFinite(value) || value < 0 || value > 400) return
+  if (value === measuredTransBarHeight) return
+  measuredTransBarHeight = value
+  // animateChromeTo 内部会 stopChromeAnim()，这里不要手动置空动画句柄
+  if (activeWantsTransBar()) {
+    animateChromeTo(chromeOffset())
+  } else {
+    layoutViews()
+  }
+})
 
 ipcMain.handle('config:get', () => ({
   apiBase: apiBase,

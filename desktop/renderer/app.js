@@ -1897,3 +1897,26 @@ window.pix.getConfig().then(async cfg => {
   }
 })
 if (!usernameEl.value) usernameEl.focus()
+
+
+// --- 工具条真实高度上报 -------------------------------------------------------
+// 原生嵌入视图的位置由主进程按高度计算；此前用的是硬编码常量，改样式就会错位。
+// 这里用 ResizeObserver 把实测高度报上去（折叠时 offsetHeight 为 0，取 scrollHeight）。
+;(function reportTransBarHeight() {
+  const bar = document.getElementById('transBar')
+  if (!bar || !window.pix || typeof window.pix.reportBarHeight !== 'function') return
+  let last = -1
+  const push = () => {
+    const height = Math.max(bar.offsetHeight, bar.scrollHeight)
+    const value = Math.round(height)
+    if (value > 0 && value !== last) {
+      last = value
+      window.pix.reportBarHeight(value)
+    }
+  }
+  if (typeof ResizeObserver === 'function') new ResizeObserver(push).observe(bar)
+  window.addEventListener('resize', push)
+  document.addEventListener('DOMContentLoaded', push)
+  setTimeout(push, 0)
+  setTimeout(push, 300)
+})()

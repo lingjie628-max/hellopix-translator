@@ -2,6 +2,8 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('pix', {
   getConfig: () => ipcRenderer.invoke('config:get'),
+  // 渲染层把工具条真实高度上报给主进程，供原生视图定位使用
+  reportBarHeight: (height) => ipcRenderer.send('chrome:barHeight', height),
   getAuth: () => ipcRenderer.invoke('auth:get'),
   saveAuth: (payload) => ipcRenderer.invoke('auth:save', payload),
   autoLogin: () => ipcRenderer.invoke('auth:autoLogin'),
