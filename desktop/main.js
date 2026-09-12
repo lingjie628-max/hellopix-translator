@@ -1364,11 +1364,18 @@ function openPlatform(payload) {
 }
 
 function createWindow() {
+  // 按屏幕可用区域自适应开窗：此前固定 1280x820，小屏尚可、大屏浪费，
+  // 而窄屏下顶部翻译设置区会被挤压换行。取下 92% 并设上下限，保证完整显示。
+  const { screen: electronScreen } = require('electron')
+  const { workAreaSize } = electronScreen.getPrimaryDisplay()
+  const width = Math.max(1280, Math.min(1920, Math.round(workAreaSize.width * 0.92)))
+  const height = Math.max(820, Math.min(1280, Math.round(workAreaSize.height * 0.92)))
   win = new BrowserWindow({
-    width: 1280,
-    height: 820,
-    minWidth: 960,
-    minHeight: 640,
+    width,
+    height,
+    center: true,
+    minWidth: 1100,
+    minHeight: 680,
     title: 'Hello Pix',
     icon: APP_ICON,
     backgroundColor: '#070b14',
