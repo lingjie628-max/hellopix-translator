@@ -2111,7 +2111,9 @@ button {
 
 /* 翻译工具条：放宽上下间距，避免两行挤在一起 */
 .trans-bar {
-  max-height: 124px;
+  /* 展开态要高到能容纳两行（此前 124px 会把第二行裁掉）。
+     折叠动画由 .is-collapsed{max-height:0} 负责，与此无关。 */
+  max-height: 240px;
   padding: 12px 14px;
   row-gap: 10px;
 }
