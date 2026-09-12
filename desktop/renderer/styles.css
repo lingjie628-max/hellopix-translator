@@ -17,7 +17,10 @@
   --cell-pad-left: 0px;
   --row-h: 34px;              /* 行高 = 24 控件 + 5 + 5 */
   --row-gap: 5px;             /* 行距（竞品 5px） */
-  --cell-gap: 0px;            /* 列距：竞品列宽 25% 已含留白 */
+  /* 列距：竞品列宽 25% 已含留白，但它另有 70px 单元格左边距做列间分隔。
+     我们去掉了那 70px（见 --cell-pad-left），若这里再留 0，最小窗宽下列与列
+     会完全贴上（实测 1160 下间距恰好 0px）。补 12px 恢复分隔。 */
+  --cell-gap: 12px;
 
   /* 字号阶梯（竞品实测） */
   --fs-label: 14px;           /* 标签 14px/17px 字重 500 #666 */
@@ -1058,11 +1061,12 @@ button {
   z-index: 4;
   height: 30px;
   display: grid;
-  /* 两侧 1fr 让版本块保持在正中；配合下面按钮的 flex:0 0 auto，
-     窗口够宽时网格会把两条 1fr 撑到各自内容宽（右组 6 个按钮比左组宽），
-     不会再像原来那样强行等宽、把右组文字挤断。
-     实测最小窗宽 1160 下总需 1157px，放得开。 */
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  /* 两侧 minmax(max-content, 1fr)：既不会窄于各自内容（右组 6 个按钮需 554px，
+     左组 3 个只需 280px —— 纯 1fr 会强制等分剩余空间，把右组裁掉 42px），
+     又会等宽增长，从而让中间的版本块真正落在页脚正中。
+     纯 max-content 两侧不等宽，版本块会偏左 137px（实测）。
+     按总宽校验（1157 < 1160）会漏掉"每侧轨道只有 512"这个真约束。 */
+  grid-template-columns: minmax(max-content, 1fr) auto minmax(max-content, 1fr);
   align-items: center;
   gap: 8px;
   padding: 0 8px;
@@ -1084,7 +1088,7 @@ button {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 0;
   overflow: hidden;
 }
 .footer-right { justify-content: flex-end; }
@@ -1094,8 +1098,8 @@ button {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 0 7px;
+  gap: 3px;
+  padding: 0 4px;
   overflow: hidden;
   border: 1px solid transparent;
   border-radius: 5px;
@@ -1116,6 +1120,7 @@ button {
   height: 20px;
   display: inline-flex;
   align-items: center;
+  justify-self: center;   /* 中间列可变宽，版本块在其中居中 */
   gap: 3px;
   padding: 0 9px;
   border: 1px solid rgba(125, 211, 252, 0.16);
