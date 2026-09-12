@@ -98,6 +98,15 @@ async function createRuntime(options) {
   app.use(express.urlencoded({ extended: false, limit: '256kb' }))
   app.use(express.json({ limit: '256kb' }))
 
+  // 诊断用请求日志：/apis 下每个请求的方法、路径、状态码、耗时
+  app.use('/apis', (req, res, next) => {
+    const started = Date.now()
+    res.on('finish', () => {
+      console.log(`[api] ${req.method} ${req.originalUrl} -> ${res.statusCode} ${Date.now() - started}ms`)
+    })
+    next()
+  })
+
   let services
   try {
     // 公共翻译网络（"谷歌极速"这类免费公共端点）默认关闭，需显式开启；

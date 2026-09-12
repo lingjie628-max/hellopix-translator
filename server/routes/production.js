@@ -593,7 +593,6 @@ function productionRouter(context) {
     }, {})
     const packages = await repo.packages()
     res.json({
-      data: {
         rows: rows.map(row => ({
           id: row.id,
           name: row.name,
@@ -616,7 +615,6 @@ function productionRouter(context) {
         packageBill: packages
           .map(item => `${item.title} ¥${Number(item.price || 0)}/${Math.round(Number(item.chars || 0) / 10000)}万`)
           .join(' · ')
-      }
     })
   }))
 
@@ -683,6 +681,89 @@ function productionRouter(context) {
     ok(res, `默认通道已设为 ${engine.name}`)
   }))
 
+  // 提交的 JSON 字段（features/engines/clients/notices/lines…）统一解析，
+  // 解析失败一律 400，不要冒成 500
+  // ---- FAQ / 分流短链 / 话术库（超管运营菜单）--------------------------------
+  router.get('/admin/faqs', asyncRoute(async (_req, res) => {
+    res.json(mapRows((await repo.query(
+      'SELECT id,question,answer,sort_order AS sort,enabled FROM faqs ORDER BY sort_order,id'
+    )).rows))
+  }))
+
+  router.post('/admin/faqs/save', asyncRoute(async (req, res) => {
+    const data = input(req)
+    const question = String(data.question || '').trim()
+    if (!question) throw new ApiError(400, '问题不能为空', 'FAQ_QUESTION_REQUIRED')
+    const answer = String(data.answer || '').slice(0, 10000)
+    const sort = Math.max(0, Math.floor(Number(data.sort) || 0))
+    const enabled = Number(data.enabled) ? true : false
+    if (data.id) {
+      const updated = await repo.query(
+        `UPDATE faqs SET question=$2,answer=$3,sort_order=$4,enabled=$5,updated_at=NOW()
+         WHERE id=$1 RETURNING id`, [Number(data.id), question, answer, sort, enabled])
+      if (!updated.rows[0]) throw new ApiError(404, 'FAQ 不存在', 'FAQ_NOT_FOUND')
+    } else {
+      await repo.query(
+        'INSERT INTO faqs(question,answer,sort_order,enabled) VALUES($1,$2,$3,$4)',
+        [question, answer, sort, enabled])
+    }
+    await repo.audit(null, req.pixAdmin, data.id ? '编辑FAQ' : '新增FAQ', question.slice(0, 60), req.ip, { type: 'faq', id: data.id || null })
+    ok(res, data.id ? 'FAQ 已更新' : 'FAQ 已新增')
+  }))
+
+  router.get('/admin/links', asyncRoute(async (req, res) => {
+    const data = input(req)
+    const paging = pagination(req, { size: 50 })
+    const values = []
+    let filter = ''
+    if (data.keyword) {
+      values.push(`%${data.keyword}%`)
+      filter = ' AND (l.code ILIKE $1 OR l.message ILIKE $1 OR u.username ILIKE $1)'
+    }
+    const total = await repo.query(
+      `SELECT count(*)::bigint AS total FROM short_links l LEFT JOIN users u ON u.id=l.user_id WHERE TRUE${filter}`, values)
+    const rows = await repo.query(
+      `SELECT l.id, COALESCE(u.username,'') AS username, l.order_serial AS "orderNum", l.code,
+              l.target, l.hits, l.accounts, l.message
+       FROM short_links l LEFT JOIN users u ON u.id=l.user_id
+       WHERE TRUE${filter} ORDER BY l.id DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+      values.concat([paging.size, paging.offset]))
+    res.json(Object.assign(page(mapRows(rows.rows), total.rows[0].total, paging), {
+      rows: rows.rows.map(row => Object.assign(row, {
+        orderNum: row.orderNum || '',
+        shareLink: row.target
+      }))
+    }))
+  }))
+
+  router.get('/admin/scripts', asyncRoute(async (req, res) => {
+    const data = input(req)
+    const paging = pagination(req, { size: 50 })
+    const values = []
+    let filter = ''
+    if (data.keyword) {
+      values.push(`%${data.keyword}%`)
+      filter = ' AND (s.keyword ILIKE $1 OR s.source ILIKE $1 OR s.target ILIKE $1 OR u.username ILIKE $1)'
+    }
+    const total = await repo.query(
+      `SELECT count(*)::bigint AS total FROM scripts s LEFT JOIN users u ON u.id=s.user_id WHERE TRUE${filter}`, values)
+    const rows = await repo.query(
+      `SELECT s.id, COALESCE(u.username,'') AS username, s.group_title AS "groupTitle",
+              s.keyword, s.source, s.target
+       FROM scripts s LEFT JOIN users u ON u.id=s.user_id
+       WHERE TRUE${filter} ORDER BY s.id DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+      values.concat([paging.size, paging.offset]))
+    res.json(page(mapRows(rows.rows), total.rows[0].total, paging))
+  }))
+
+  function safeParse(value) {
+    try {
+      return JSON.parse(value)
+    } catch (error) {
+      throw new ApiError(400, '提交的数据不是合法 JSON', 'BAD_JSON')
+    }
+  }
+
   // ---- 套餐管理（后台「套餐管理」页）------------------------------------------
   async function packagesWithEngines() {
     const rows = await repo.packages()
@@ -697,18 +778,11 @@ function productionRouter(context) {
   }
 
   router.get('/admin/packages', asyncRoute(async (_req, res) => {
-    res.json({ success: 'success', data: await packagesWithEngines() })
+    res.json(await packagesWithEngines())
   }))
 
   router.post('/admin/packages/save', asyncRoute(async (req, res) => {
     const data = input(req)
-    const safeParse = value => {
-      try {
-        return JSON.parse(value)
-      } catch (error) {
-        throw new ApiError(400, '提交的数据不是合法 JSON', 'BAD_JSON')
-      }
-    }
     const parseJson = (value, fallback, kind) => {
       if (value === undefined || value === null || value === '') return fallback
       const parsed = typeof value === 'string' ? safeParse(value) : value
@@ -827,7 +901,7 @@ function productionRouter(context) {
   }
 
   router.get('/admin/settings', asyncRoute(async (_req, res) => {
-    res.json({ success: 'success', data: await readSettings() })
+    res.json(await readSettings())
   }))
 
   router.post('/admin/settings/save', asyncRoute(async (req, res) => {
@@ -942,7 +1016,7 @@ function productionRouter(context) {
         hasKey: false
       })
     })
-    res.json({ data: { rows, smtpReady: false, note: '邮件/短信服务尚未迁移，注册与找回密码接口保持 503' } })
+    res.json({ rows, smtpReady: false, note: '邮件/短信服务尚未迁移，注册与找回密码接口保持 503' })
   }))
 
   router.post('/admin/verify/save', asyncRoute(async (req, res) => {
@@ -988,9 +1062,7 @@ function productionRouter(context) {
     '/assistant/getAssistantGroup', '/assistant/getAssistantDetails', '/assistant/deleteAssistantDetails',
     '/assistant/deleteAssistantGroup', '/assistant/selectAssistantGroupById', '/assistant/editAssistant',
     '/assistant/editAssistantGroup', '/weixin/weixinPay', '/weixin/checkStatus', '/zfb/alipay',
-    '/admin/accounts', '/admin/fans', '/admin/links',
-    '/admin/scripts',
-    '/admin/faqs', '/admin/faqs/save',
+    '/admin/accounts', '/admin/fans',
     '/admin/notices', '/admin/notices/save', '/admin/notices/delete'
   ]
   unmigrated.forEach(path => router.all(path, stub(path.slice(1), '该兼容模块尚未迁移到 PostgreSQL')))
