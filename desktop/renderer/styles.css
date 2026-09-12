@@ -1046,9 +1046,13 @@ button {
   z-index: 4;
   height: 30px;
   display: grid;
+  /* 两侧 1fr 让版本块保持在正中；配合下面按钮的 flex:0 0 auto，
+     窗口够宽时网格会把两条 1fr 撑到各自内容宽（右组 6 个按钮比左组宽），
+     不会再像原来那样强行等宽、把右组文字挤断。
+     实测最小窗宽 1160 下总需 1157px，放得开。 */
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
-  gap: 12px;
+  gap: 8px;
   padding: 0 8px;
   box-sizing: border-box;
   color: #b8cde0;
@@ -1074,7 +1078,8 @@ button {
 .footer-right { justify-content: flex-end; }
 .footer-group button {
   height: 22px;
-  flex: 0 1 auto;
+  /* 不收缩：宁可让 1fr 撑开，也不要切掉按钮文字 */
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   gap: 4px;
