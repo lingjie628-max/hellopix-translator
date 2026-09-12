@@ -1083,7 +1083,6 @@ function syncBarLang(id, code) {
   const select = document.getElementById(id)
   if (!select) return
   select.value = code
-  if (select._syncPickDisplay) select._syncPickDisplay()
 }
 
 function ensureTransBarOptions() {
@@ -1093,7 +1092,7 @@ function ensureTransBarOptions() {
     barRecvFrom.innerHTML = barLangOptions()
     barRecvTo.innerHTML = barLangOptions()
     ;['barSendFrom', 'barSendTo', 'barRecvFrom', 'barRecvTo'].forEach(id => {
-      initLangPick(id + 'Input', id + 'List', id)
+      initLangPick(id + 'Search', id)
     })
     barFontSize.innerHTML = [
       [11, '小号字体'],
@@ -1666,63 +1665,51 @@ const LANGS = [
   { id: 'zu', name: '祖鲁语' }
 ]
 
-function initLangPick(inputId, listId, selectId) {
-  const input = document.getElementById(inputId)
-  const list = document.getElementById(listId)
+// 原生 select 保持原样，搜索框只负责筛选它的选项
+const LANG_SELECTS = [
+  ['langMineSearch', 'langMine'],
+  ['langOtherSearch', 'langOther'],
+  ['barSendFromSearch', 'barSendFrom'],
+  ['barSendToSearch', 'barSendTo'],
+  ['barRecvFromSearch', 'barRecvFrom'],
+  ['barRecvToSearch', 'barRecvTo']
+]
+
+function initLangPick(searchId, selectId) {
+  const search = document.getElementById(searchId)
   const select = document.getElementById(selectId)
-  const wrap = input && input.closest('.langpick')
-  const panel = list && list.closest('.langpick-panel')
-  const search = panel && panel.querySelector('.langpick-search')
-  if (!input || !list || !select || !wrap || !panel || !search) return
-
-  const nameOf = code => { const hit = LANGS.find(l => l.id === code); return hit ? hit.name : '' }
-  const render = keyword => {
+  if (!search || !select) return
+  const allowAuto = selectId === 'langOther' || selectId.indexOf('barSendFrom') === 0 ||
+    selectId.indexOf('barRecvFrom') === 0
+  const pool = LANGS.filter(l => allowAuto || l.id !== 'auto')
+  const fill = keyword => {
     const kw = String(keyword || '').trim().toLowerCase()
-    const rows = LANGS.filter(l => !kw || l.name.toLowerCase().includes(kw) || l.id.toLowerCase().includes(kw))
-    list.innerHTML = rows.length
-      ? rows.map(l => '<div class="lp' + (l.id === select.value ? ' on' : '') + '" data-code="' + l.id + '">' + l.name + '</div>').join('')
-      : '<div class="lp-empty">没有匹配的语言</div>'
-  }
-  const sync = () => { input.value = nameOf(select.value) }
-  const close = () => { panel.hidden = true; wrap.classList.remove('open'); search.value = '' }
-  const open = () => {
-    render('')
-    panel.hidden = false
-    wrap.classList.add('open')
-    search.focus()
-  }
-
-  input.addEventListener('mousedown', event => { event.preventDefault(); panel.hidden ? open() : close() })
-  search.addEventListener('input', () => render(search.value))
-  search.addEventListener('keydown', event => {
-    if (event.key === 'Escape') { close(); input.focus() }
-    if (event.key === 'Enter') {
-      const first = list.querySelector('.lp')
-      if (first) { select.value = first.dataset.code; sync(); close() }
+    const current = select.value
+    const rows = pool.filter(l => !kw || l.name.toLowerCase().includes(kw) || l.id.toLowerCase().includes(kw))
+    // 当前值即使被筛掉也要保留，否则会把用户已选的语言弄丢
+    if (current && !rows.some(l => l.id === current)) {
+      const hit = LANGS.find(l => l.id === current)
+      if (hit) rows.unshift(hit)
     }
-  })
-  list.addEventListener('mousedown', event => {
-    const item = event.target.closest('.lp')
-    if (!item) return
-    event.preventDefault()
-    select.value = item.dataset.code
-    sync()
-    close()
-    select.dispatchEvent(new Event('change', { bubbles: true }))
-  })
-  document.addEventListener('mousedown', event => {
-    if (!wrap.contains(event.target)) close()
-  })
-  select.addEventListener('change', sync)
-  select._syncPickDisplay = sync
-  sync()
+    select.innerHTML = rows.map(l => '<option value="' + l.id + '">' + l.name + '</option>').join('')
+    select.value = current
+    if (select.value !== current && rows.length) select.value = rows[0].id
+  }
+  search.addEventListener('input', () => fill(search.value))
+  search.addEventListener('keydown', event => { if (event.key === 'Escape') { search.value = ''; fill('') } })
+  fill('')
+}
+
+function refreshLangSearch(selectId) {
+  const pair = LANG_SELECTS.find(item => item[1] === selectId)
+  if (pair) initLangPick(pair[0], pair[1])
 }
 
 function fillLangs() {
   langMine.innerHTML = LANGS.filter(l => l.id !== 'auto').map(l => '<option value="' + l.id + '">' + l.name + '</option>').join('')
   langOther.innerHTML = LANGS.map(l => '<option value="' + l.id + '">' + l.name + '</option>').join('')
-  initLangPick('langMineInput', 'langMineList', 'langMine')
-  initLangPick('langOtherInput', 'langOtherList', 'langOther')
+  initLangPick('langMineSearch', 'langMine')
+  initLangPick('langOtherSearch', 'langOther')
 }
 
 function applyTransPrefs(data) {
@@ -1731,8 +1718,8 @@ function applyTransPrefs(data) {
   transSend.checked = data.transSend !== 0
   transGroup.checked = !!data.transGroup
   includeZh.checked = !!Number(data.includeZh)
-  if (data.langMine) { langMine.value = data.langMine; if (langMine._syncPickDisplay) langMine._syncPickDisplay() }
-  if (data.langOther) { langOther.value = data.langOther; if (langOther._syncPickDisplay) langOther._syncPickDisplay() }
+  if (data.langMine) langMine.value = data.langMine
+  if (data.langOther) langOther.value = data.langOther
   if (data.activeEngine) transEngine.value = data.activeEngine
 }
 
