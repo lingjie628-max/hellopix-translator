@@ -1389,6 +1389,10 @@ function createWindow() {
     }
   })
   win.setMenuBarVisibility(false)
+  // macOS 会恢复上次的窗口框架，覆盖构造时的 width/height。
+  // 这里显式再设一次并居中，确保"吃满可用区域"的尺寸真正生效。
+  win.setBounds({ x: win.getBounds().x, y: win.getBounds().y, width, height })
+  win.center()
   win.on('resize', layoutViews)
   win.on('resized', layoutViews)
   win.on('enter-full-screen', layoutViews)
