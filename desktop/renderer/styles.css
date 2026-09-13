@@ -107,11 +107,12 @@
   --c-black-rgb: 0 0 0;
   --c-slate-rgb: 148 180 207;
 
-  /* 日间/夜间背景图挂钩。
-     深色：留空（沿用现有的 home-bg.mp4 视频与渐变底）。
-     浅色：把图片放 desktop/renderer/ 下，然后只需取消下面 [data-theme="light"]
-     里的注释即可 —— 不用改任何组件规则。 */
-  --bg-image: none;
+  /* 背景图：两种主题各一张静态图（原来的 21MB 视频已不再使用）。
+     夜间 night-bg.webp 由 home-bg.mp4 抽帧转码而来（同一画面，青色光弧与主题色呼应）；
+     日间 day-bg.webp 由用户提供的原图转码。 */
+  --bg-image: url('night-bg.webp');
+  --bg-image-night: url('night-bg.webp');
+  --bg-image-day: url('day-bg.webp');
   --bg-image-size: cover;
   --bg-image-position: center;
 
@@ -209,10 +210,8 @@
   --c-white-rgb: 15 23 42;
   --c-slate-rgb: 100 116 139;
 
-  /* 日间模式背景图：由用户提供的 2732x1535 原图转码而来（WebP，2560 宽，
-     127KB vs 原 JPG 396KB）。2560 宽在 1512 逻辑宽 + 2x 屏下足够锐利，
-     再大对背景没有可见收益。源图 day-bg.jpg 一并留在目录里备查。 */
-  --bg-image: url('day-bg.webp');
+  /* 日间换用日间图（day-bg.webp 由用户原图转码；2560 宽在 2x 屏下足够锐利） */
+  --bg-image: var(--bg-image-day);
   --bg-image-size: cover;
   --bg-image-position: center;
 
@@ -2443,10 +2442,10 @@ button {
    为什么不用变量统一控制：这些是"同一元素不同主题下换一套表现形式"，
    用变量会需要在 :root 里塞一堆阴影/渐变字符串，反而更难读。集中放在这里，
    与上面的变量覆盖块相邻，改日间观感只改这一处。 */
-/* 日间用静态背景图，视频停止播放（元素不渲染即不播）。
-   深色仍然保留 home-bg.mp4 / 登录页视频。 */
-[data-theme="light"] .home-video,
-[data-theme="light"] .login-video {
+/* 两种主题都用静态背景图，视频不再渲染（元素不渲染即不播）。
+   原来的 home-bg.mp4(11MB) 与 login-bg.m4v/mp4(9.9MB) 已由抽帧转码的 WebP 取代。 */
+.home-video,
+.login-video {
   display: none;
 }
 
