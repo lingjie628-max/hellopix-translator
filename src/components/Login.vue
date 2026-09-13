@@ -1,6 +1,7 @@
 <template>
   <div class="pix-login">
     <div class="pix-login-card">
+      <div class="pix-login-topbar"><theme-toggle></theme-toggle></div>
       <div class="pix-login-brand">Hello Pix</div>
       <el-form :rules="rules" :model="loginForm" ref="loginFormTable" class="login-container" label-position="left"
                label-width="0px" v-loading="loading">
@@ -31,8 +32,9 @@
 </template>
 <script>
 import AuthSupport from './AuthSupport.vue'
+import ThemeToggle from './ThemeToggle.vue'
 export default {
-  components: { AuthSupport },
+  components: { AuthSupport, ThemeToggle },
   data() {
     return {
       loginForm: {
@@ -112,14 +114,21 @@ export default {
 <style>
 .pix-login {
   min-height: 100%;
-  background: linear-gradient(160deg, #122033 0%, #1b3a4b 42%, #2563eb 100%);
+  /* 日间为浅色渐变、夜间为深色渐变，见 assets/theme.css 的 --w-bg-grad */
+  background: var(--w-bg-grad);
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
+.pix-login-topbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 10px;
+}
+
 .pix-login-brand {
-  color: #f8fafc;
+  color: var(--w-logo-text);
   font-size: 28px;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -131,16 +140,16 @@ export default {
   border-radius: 16px;
   background-clip: padding-box;
   width: 320px;
-  padding: 28px 28px 16px 28px;
-  background: #fff;
-  border: 1px solid #eaeaea;
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.18);
+  padding: 20px 28px 16px 28px;
+  background: var(--w-surface);
+  border: 1px solid var(--w-border);
+  box-shadow: var(--w-shadow);
 }
 
 .login_title {
   margin: 0 auto 18px auto;
   text-align: center;
-  color: #1f2937;
+  color: var(--w-text-strong);
 }
 
 .auth-links {
@@ -171,9 +180,9 @@ export default {
   cursor: pointer;
   display: block;
   flex-shrink: 0;
-  border: 1px solid #dcdfe6;
+  border: 1px solid var(--w-border-strong);
   border-radius: 4px;
-  background: #eef3fb;
+  background: var(--w-surface-3);
   object-fit: cover;
 }
 </style>

@@ -1,6 +1,6 @@
 <template>
   <el-container class="admin-shell">
-    <el-menu class="admin-menu" unique-opened router background-color="#111827" text-color="#d1d5db" active-text-color="#fca5a5">
+    <el-menu class="admin-menu" unique-opened router :background-color="menuBg" :text-color="menuText" :active-text-color="menuActive">
       <div class="admin-logo">Hello Pix 超管</div>
       <el-menu-item index="/admin/dashboard"><i class="el-icon-data-analysis"></i><span slot="title">总览</span></el-menu-item>
       <el-menu-item index="/admin/users"><i class="el-icon-user"></i><span slot="title">商户管理</span></el-menu-item>
@@ -33,7 +33,8 @@
     <el-container>
       <el-header class="admin-header">
         <span>{{ $route.name }}</span>
-        <span>
+        <span class="admin-header-right">
+          <theme-toggle></theme-toggle>
           {{ admin.nickname || admin.username }}
           <el-button type="text" @click="logout">退出</el-button>
         </span>
@@ -45,18 +46,43 @@
   </el-container>
 </template>
 <script>
+import ThemeToggle from '../ThemeToggle.vue'
+// 侧栏配色跟随主题：日间用浅色侧栏，夜间用深色（原来的固定深色）
 export default {
+  components: { ThemeToggle },
+  data() {
+    return { dark: document.documentElement.getAttribute('data-theme') === 'dark' }
+  },
   computed: {
     admin() {
       return this.$store.state.admin || {}
+    },
+    menuBg() {
+      return this.dark ? '#111827' : '#ffffff'
+    },
+    menuText() {
+      return this.dark ? '#cbd5e1' : '#5b6675'
+    },
+    menuActive() {
+      return this.dark ? '#fca5a5' : '#1677ff'
     }
   },
   methods: {
+    // 主题变化时同步侧栏配色（ThemeToggle 直接改的是 <html> 属性）
+    syncDark() {
+      this.dark = document.documentElement.getAttribute('data-theme') === 'dark'
+    },
     logout() {
       this.postRequest('/admin/logout')
       this.$store.commit('adminLogout')
       this.$router.replace('/admin/login')
     }
+  },
+  mounted() {
+    document.addEventListener('pix-theme-change', this.syncDark)
+  },
+  beforeDestroy() {
+    document.removeEventListener('pix-theme-change', this.syncDark)
   }
 }
 </script>
@@ -73,7 +99,7 @@ export default {
   overflow-y: auto;
 }
 .admin-logo {
-  color: #fecaca;
+  color: var(--w-logo-text);
   font-weight: 700;
   padding: 20px 16px 12px;
   letter-spacing: 0.04em;
@@ -84,5 +110,12 @@ export default {
   justify-content: space-between;
   box-shadow: 0 1px 4px rgba(0,0,0,.08);
   font-size: 15px;
+  background: var(--w-surface);
+  border-bottom: 1px solid var(--w-border);
+}
+.admin-header-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
 }
 </style>

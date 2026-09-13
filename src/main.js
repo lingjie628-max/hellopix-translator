@@ -4,6 +4,8 @@ import router from './router'
 import store from './store'
 import ElementUI from 'element-ui'
 import 'element-ui/lib/theme-chalk/index.css'
+// 全局主题变量：必须排在 element-ui 之后，才能覆盖它的 --el-* 变量
+import './assets/theme.css'
 import { postRequest, getRequest, putRequest, deleteRequest } from './utils/api'
 import { formatDateTime, formateStatus } from './utils/filters'
 
