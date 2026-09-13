@@ -35,14 +35,75 @@ function dockScript() {
   return path.join(__dirname, 'win-dock.ps1')
 }
 
+// 翻译通道不再写死 youdao/google/deepl。
+//
+// 后台 /apis/translate/engines 会按套餐返回通道，并标出哪些 wired（后台填好厂商
+// 凭据、真正调得通）。只有 wired 的通道翻得出结果，其它一律 503
+// ENGINE_NOT_CONFIGURED；而魔改电报里的 Provider 按设计"失败就不写译文、不弹错、
+// 不崩电报"，所以桥接文件里写一个没接通的通道 = 气泡永远静默不出 [译文]，
+// 从外面看跟"编译没成功"一模一样。
+//
+// 三级兜底：
+//   1) 问到了后台 -> 沿用用户存的通道；它不在已接通列表里就换成后台的 activeEngine
+//      （core-service 也是优先挑"已接通且启用"的），再不行取第一个已接通的。
+//   2) 只有本地缓存（离线/后台挂了）-> 用缓存里的通道列表做同样的挑选。
+//   3) 什么都没有 -> 写空串。C++ 侧会原样发 engine= 空值，服务端
+//      `String(data.engine || session.account.activeEngineId || ...)` 里空串是 falsy，
+//      会回退到账号当前通道 —— 比硬编码一个死通道安全。
+let engines = null
+
+function usableEngines() {
+  const rows = (engines && engines.rows) || []
+  return rows.filter(row => row && row.wired && row.enabled)
+}
+
+function resolveEngine(saved) {
+  const rows = usableEngines()
+  if (!rows.length) return String(saved || '')
+  const active = String((engines && engines.activeEngine) || '')
+  const keep = rows.find(row => String(row.id) === String(saved))
+  const pick = keep || rows.find(row => String(row.id) === active) || rows[0]
+  return String(pick.id)
+}
+
+function engineState() {
+  const rows = usableEngines().map(row => ({
+    id: String(row.id),
+    name: String(row.name || row.id)
+  }))
+  return {
+    known: Boolean(engines),
+    wired: rows.length > 0,
+    rows
+  }
+}
+
+async function loadEngines() {
+  try {
+    const result = await pix.request('/translate/engines')
+    if (result && result.success !== false && Array.isArray(result.rows)) {
+      engines = result
+      const data = store.read()
+      data.engines = result
+      store.write(data)
+      return result
+    }
+  } catch (_error) {}
+  engines = store.read().engines || null
+  return engines
+}
+
 function prefs() {
-  return Object.assign({
+  const data = store.read()
+  const saved = Object.assign({
     transRecv: true,
     transSend: true,
     transGroup: true,
-    engine: 'youdao',
+    engine: '',
     lang: 'zh'
-  }, store.read().prefs || {})
+  }, data.prefs || {})
+  saved.engine = resolveEngine(saved.engine)
+  return saved
 }
 
 function instances() {
@@ -81,6 +142,7 @@ function publicState() {
   return {
     pix: data.pix || null,
     prefs: prefs(),
+    engines: engineState(),
     instances: instances(),
     lastUsername: data.lastUsername || '',
     apiBase: data.apiBase || process.env.PIX_API || 'http://127.0.0.1:8080',
@@ -205,7 +267,15 @@ app.whenReady().then(() => {
       store.write(next)
     }
   })
+  // 先把上次问到的通道列表装载进来（离线也能挑对通道），再开窗口 ——
+  // 顺序反了的话，渲染进程第一次 app:state 会拿到还没解析的 engine，
+  // 首帧就会把死通道写进桥接文件。
+  engines = data.engines || null
   createWindow()
+  // 已登录过就顺手重新问一次后台并重写桥接文件。
+  if (data.pix) {
+    loadEngines().then(() => writeAllBridges()).catch(() => {})
+  }
 })
 
 app.on('window-all-closed', () => {
@@ -244,6 +314,9 @@ ipcMain.handle('pix:login', async (_event, payload) => {
     data.pix = result.obj || {}
     data.lastUsername = String(body.username || '')
     store.write(data)
+    // 先问清这台账号能用哪个通道，再写桥接文件 —— 顺序反了就会先写进一个
+    // 没接通的通道，魔改电报整个会话都不出译文。
+    await loadEngines()
     writeAllBridges()
     return data.pix
   } catch (error) {
@@ -272,6 +345,12 @@ ipcMain.handle('pix:prefs', (_event, payload) => {
   store.write(data)
   writeAllBridges()
   return data.prefs
+})
+
+// 打开「翻译设置」时重新问一次后台：商户刚在后台把通道接通，这里不用重启就能看到。
+ipcMain.handle('pix:engines', async () => {
+  await loadEngines()
+  return engineState()
 })
 
 ipcMain.handle('pix:translate', async (_event, payload) => {

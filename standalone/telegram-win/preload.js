@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('app', {
   login: payload => ipcRenderer.invoke('pix:login', payload),
   logout: () => ipcRenderer.invoke('pix:logout'),
   savePrefs: payload => ipcRenderer.invoke('pix:prefs', payload),
+  engines: () => ipcRenderer.invoke('pix:engines'),
   translate: payload => ipcRenderer.invoke('pix:translate', payload),
   openTelegram: id => ipcRenderer.invoke('tg:open', id),
   addInstance: name => ipcRenderer.invoke('tg:add', name),

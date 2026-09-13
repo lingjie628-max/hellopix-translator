@@ -12,7 +12,10 @@ function buildBridge(input) {
     apiBase: String(data.apiBase || '').replace(/\/+$/, ''),
     deviceId: String(data.deviceId || ''),
     cookies: Object.assign({}, data.cookies || {}),
-    engine: String(prefs.engine || 'youdao'),
+    // 空串要原样写出去，不能兜底成 'youdao'：C++ 侧拿到空串会发 engine= 空值，
+    // 服务端按 falsy 回退到账号当前通道；硬编码一个没接通的通道只会 503 静默失败，
+    // 表现出来就是气泡永远不出 [译文]。
+    engine: String(prefs.engine || ''),
     lang: String(prefs.lang || 'zh'),
     transRecv: prefs.transRecv !== false,
     transSend: prefs.transSend !== false,

@@ -27,7 +27,10 @@ test('bridge json keeps api, cookies and translation prefs', () => {
 
 test('bridge defaults stay on for receive, send and group', () => {
   const data = buildBridge({ apiBase: 'http://127.0.0.1:8080' })
-  assert.equal(data.engine, 'youdao')
+  // 引擎默认是空串，不是某个具体通道名：
+  // 空串会被原样写进 bridge 文件，服务端按 falsy 回退到账号当前通道。
+  // 硬编码 'youdao' 在未接通该通道时会 503 静默失败（气泡永远不出译文）。
+  assert.equal(data.engine, '')
   assert.equal(data.lang, 'zh')
   assert.equal(data.transRecv, true)
   assert.equal(data.transSend, true)

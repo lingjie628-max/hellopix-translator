@@ -116,16 +116,28 @@ function profileHtml() {
 
 function transHtml() {
   const prefs = state.prefs || {}
+  const engines = state.engines || { known: false, wired: false, rows: [] }
+  const rows = engines.rows || []
+  // 通道列表来自后台 /apis/translate/engines，只有 wired（后台已配好凭据）的才列出来。
+  // 以前这里写死 youdao/google/deepl，而这三个通道在后台都没接通，
+  // 桥接文件写进去后魔改电报每次翻译都撞 503，气泡永远不出 [译文]。
+  const picker = rows.length
+    ? `<select id="prefEngine">${rows.map(row => (
+        `<option value="${esc(row.id)}" ${String(prefs.engine) === String(row.id) ? 'selected' : ''}>${esc(row.name)}</option>`
+      )).join('')}</select>`
+    : `<select id="prefEngine" disabled><option>${engines.known ? '套餐内没有已接通的通道' : '还没取到通道列表'}</option></select>`
+  const engineHint = rows.length
+    ? ''
+    : `<p class="hint">${engines.known
+        ? '这个账号的套餐里没有已接通的翻译通道，气泡不会出现 [译文]。请到后台「翻译通道」页填好厂商凭据并设为使用中。'
+        : '还没连上 Hello Pix 后台，取不到可用通道。气泡译文需要后台在运行。'}</p>`
   return `
     <h3>翻译设置</h3>
     <div class="field">
       <label>翻译通道</label>
-      <select id="prefEngine">
-        <option value="youdao" ${prefs.engine === 'youdao' ? 'selected' : ''}>有道翻译</option>
-        <option value="google" ${prefs.engine === 'google' ? 'selected' : ''}>谷歌翻译</option>
-        <option value="deepl" ${prefs.engine === 'deepl' ? 'selected' : ''}>DeepL</option>
-      </select>
+      ${picker}
     </div>
+    ${engineHint}
     <div class="field">
       <label>语言</label>
       <select id="prefLang">
@@ -175,13 +187,19 @@ function bindFlyout(kind) {
   const saveBtn = document.getElementById('savePrefs')
   if (saveBtn) {
     saveBtn.onclick = async () => {
+      // 通道下拉在没有已接通通道时是 disabled 的，此时不能把占位文案当成 engine 存下去。
+      const engineEl = document.getElementById('prefEngine')
       state.prefs = await window.app.savePrefs({
-        engine: document.getElementById('prefEngine').value,
+        engine: engineEl && !engineEl.disabled ? engineEl.value : (state.prefs || {}).engine || '',
         lang: document.getElementById('prefLang').value,
         transGroup: document.getElementById('prefGroup').checked,
         transRecv: document.getElementById('prefRecv').checked,
         transSend: document.getElementById('prefSend').checked
       })
+      const err = document.getElementById('transErr')
+      err.textContent = state.prefs.engine
+        ? '已保存，并已写入各电报实例的数据目录。'
+        : '已保存，但当前没有已接通的翻译通道，气泡不会出现 [译文]。'
     }
   }
   const transBtn = document.getElementById('doTrans')
@@ -218,6 +236,14 @@ function bindFlyout(kind) {
 
 async function showKind(kind) {
   state = await window.app.state()
+  if (kind === 'trans') {
+    // 每次打开都重新拉通道列表，后台刚接通的通道不用重启就能选到；
+    // 拉完再取一次 state，因为主进程可能刚把 engine 重新解析成已接通的通道。
+    try {
+      await window.app.engines()
+      state = await window.app.state()
+    } catch (_error) {}
+  }
   if (kind === 'profile') await openFlyout(profileHtml())
   if (kind === 'trans') await openFlyout(transHtml())
   if (kind === 'multi' || kind === 'add') {
