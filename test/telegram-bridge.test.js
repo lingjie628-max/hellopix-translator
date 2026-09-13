@@ -102,6 +102,7 @@ const TRACKER_CPP = [
   '',
   'bool TranslateTracker::shouldTranslate(not_null<Element*> view) {',
   '\tconst auto item = view->data();',
+  '\tExpects(_addedInBunch >= 0);',
   '\tif ((item->out() && !item->history()->peer->autoTranslation())',
   '\t\t|| item->isService()',
   '\t\t|| !item->isRegular()',
@@ -163,6 +164,15 @@ test('tdesktop apply script inserts Hello Pix hooks', () => {
   assert.match(tracker, /HelloPixShouldTranslateIncoming/)
   assert.match(tracker, /HelloPixShouldTranslateGroup/)
   assert.match(tracker, /HelloPixShouldTranslateSend/)
+  // 追踪开关必须用 ShouldTrackTranslation（transRecv || transSend），不能用
+  // ShouldTranslateIncoming：后者只认 transRecv，会让"关掉接收翻译、只留发送
+  // 翻译"的用户连自己发出去的消息也翻不了，而且是静默的。
+  assert.match(tracker, /HelloPixShouldTrackTranslation/)
+  assert.doesNotMatch(
+    tracker,
+    /if \(Ui::HelloPixShouldTranslateIncoming\(\)\) \{\n\t\t_trackingLanguage/,
+    '追踪开关不能退回只认 transRecv 的版本'
+  )
   assert.equal(fs.existsSync(path.join(lang, 'hello_pix_translate_provider.cpp')), true)
   assert.equal(fs.existsSync(path.join(lang, 'hello_pix_translate_provider.h')), true)
 
