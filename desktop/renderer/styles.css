@@ -209,9 +209,8 @@
   --c-white-rgb: 15 23 42;
   --c-slate-rgb: 100 116 139;
 
-  /* 日间模式背景图：把图片文件放到 desktop/renderer/ 下（例如 day-bg.jpg），
-     然后取消下面这行注释即可启用。不要图就保持 none（纯浅色底）。 */
-  /* --bg-image: url('day-bg.jpg'); */
+  /* 日间模式背景图（用户在 2026-09 提供的静态图，2732x1535）。 */
+  --bg-image: url('day-bg.jpg');
   --bg-image-size: cover;
   --bg-image-position: center;
 
@@ -2442,6 +2441,13 @@ button {
    为什么不用变量统一控制：这些是"同一元素不同主题下换一套表现形式"，
    用变量会需要在 :root 里塞一堆阴影/渐变字符串，反而更难读。集中放在这里，
    与上面的变量覆盖块相邻，改日间观感只改这一处。 */
+/* 日间用静态背景图，视频停止播放（元素不渲染即不播）。
+   深色仍然保留 home-bg.mp4 / 登录页视频。 */
+[data-theme="light"] .home-video,
+[data-theme="light"] .login-video {
+  display: none;
+}
+
 [data-theme="light"] .home-panel::before {
   /* 旋转光晕边框：白底上发光无意义 → 换成 1px 淡描边（仍是同一个盒子、同一个
      mask 技法，只是不再发光、不再转动） */
