@@ -292,13 +292,34 @@ function deepseekLanguage(code, fallback) {
   return String(code)
 }
 
+/**
+ * 补全对话端点：后台那个"接口地址"字段很容易只填到域名
+ * （例如 https://api.deepseek.com），而实际要打的是 /chat/completions ——
+ * 实测只填域名会返回 404，且错误体不是 JSON、看不出原因。
+ * 这里对"裸域名或根路径"自动补上路径；已经写了完整路径或自定义网关的原样保留。
+ */
+function deepseekEndpoint(raw) {
+  const value = String(raw || '').trim() || DEEPSEEK_URL
+  if (/\/chat\/completions\/?$/.test(value)) return value
+  try {
+    const url = new URL(value)
+    if (url.pathname === '/' || url.pathname === '') {
+      url.pathname = '/chat/completions'
+      return url.toString()
+    }
+  } catch (error) {
+    return value
+  }
+  return value
+}
+
 function deepseekCredentials(engine, credentials) {
   const fromAdmin = credentials || {}
   const apiKey = String(fromAdmin.apiKey || '').trim() || envValue('PIX_DEEPSEEK_API_KEY')
   // 模型：后台配置优先，其次迁移种下的默认值，最后兜底常量
   const model = String(fromAdmin.model || (engine && engine.model) || '').trim() || DEEPSEEK_MODEL
-  // 后台可覆盖接口地址（便于自建网关/代理），默认官方端点
-  const endpoint = String((engine && engine.endpoint) || '').trim() || DEEPSEEK_URL
+  // 后台可覆盖接口地址（便于自建网关/代理），默认官方端点；裸域名自动补路径
+  const endpoint = deepseekEndpoint((engine && engine.endpoint) || '')
   return { apiKey, model, endpoint }
 }
 

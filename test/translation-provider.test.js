@@ -382,6 +382,26 @@ test('deepseek：接口地址可在后台覆盖（自建网关/代理）', async
   })
 })
 
+test('deepseek：接口地址只填域名时自动补 /chat/completions', async () => {
+  // 实测踩过：后台"接口地址"只填 https://api.deepseek.com 会 404，
+  // 且错误体不是 JSON，光看现象排查不出来。
+  await withDeepseekKey('sk-test', async () => {
+    const { calls, impl } = captureFetch(jsonResponse({ choices: [{ message: { content: 'x' } }] }))
+    const bare = Object.assign({}, deepseek, { endpoint: 'https://api.deepseek.com' })
+    await provider.translate(bare, payload, { fetch: impl })
+    assert.equal(calls[0].url, 'https://api.deepseek.com/chat/completions')
+
+    // 已写完整路径的原样保留
+    await provider.translate(deepseek, payload, { fetch: impl })
+    assert.equal(calls[1].url, 'https://api.deepseek.com/chat/completions')
+
+    // 自定义网关的非根路径不被改写
+    const gateway = Object.assign({}, deepseek, { endpoint: 'https://gw.example.com/v1/proxy' })
+    await provider.translate(gateway, payload, { fetch: impl })
+    assert.equal(calls[2].url, 'https://gw.example.com/v1/proxy')
+  })
+})
+
 test('deepseek：模型可用后台配置覆盖，缺省回落 deepseek-flash', async () => {
   await withDeepseekKey('sk-test', async () => {
     const { calls, impl } = captureFetch(jsonResponse({ choices: [{ message: { content: 'x' } }] }))
