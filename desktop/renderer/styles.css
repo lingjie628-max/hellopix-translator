@@ -107,6 +107,14 @@
   --c-black-rgb: 0 0 0;
   --c-slate-rgb: 148 180 207;
 
+  /* 日间/夜间背景图挂钩。
+     深色：留空（沿用现有的 home-bg.mp4 视频与渐变底）。
+     浅色：把图片放 desktop/renderer/ 下，然后只需取消下面 [data-theme="light"]
+     里的注释即可 —— 不用改任何组件规则。 */
+  --bg-image: none;
+  --bg-image-size: cover;
+  --bg-image-position: center;
+
   /* 控件用色（语义别名，浅色主题里可单独覆盖） */
   --c-label: #9eb3c9;
   --c-ctl-border: rgb(var(--c-white-rgb) / 0.12);
@@ -187,6 +195,12 @@
   --c-white-rgb: 15 23 42;
   --c-slate-rgb: 100 116 139;
 
+  /* 日间模式背景图：把图片文件放到 desktop/renderer/ 下（例如 day-bg.jpg），
+     然后取消下面这行注释即可启用。不要图就保持 none（纯浅色底）。 */
+  /* --bg-image: url('day-bg.jpg'); */
+  --bg-image-size: cover;
+  --bg-image-position: center;
+
   /* 控件用色：白底上的输入框 */
   --c-label: #475569;
   --c-ctl-border: rgba(15, 23, 42, 0.16);
@@ -225,6 +239,11 @@ button, input, select, textarea {
   position: absolute;
   inset: 0;
   z-index: 0;
+  /* 有 --bg-image 时用它当背景（日间模式），否则沿用登录页视频 */
+  background-image: var(--bg-image);
+  background-size: var(--bg-image-size);
+  background-position: var(--bg-image-position);
+  background-repeat: no-repeat;
 }
 .login-video {
   position: absolute;
@@ -1307,6 +1326,11 @@ button {
   z-index: 0;
   opacity: 0;
   visibility: hidden;
+  /* 日间模式背景图：与登录页共用 --bg-image 挂钩 */
+  background-image: var(--bg-image);
+  background-size: var(--bg-image-size);
+  background-position: var(--bg-image-position);
+  background-repeat: no-repeat;
 }
 .stage.is-home .home-bg {
   opacity: 1;
