@@ -293,7 +293,12 @@ class CoreService {
 
   async engines(session) {
     const rows = await this.repo.packageEngines(session.parent.packageId)
-    const active = session.account.activeEngineId || session.parent.activeEngineId || (rows[0] && rows[0].id)
+    // 默认通道优先取"已接通且启用"的：套餐里按 id 排在前面的通道很可能还没配
+    // 凭据，若把它当默认，商户第一次翻译必然撞 503「通道尚未配置」，得手动去
+    // 下拉里翻出可用通道。没有已接通的才退回原行为（首个通道）。
+    const usable = rows.filter(row => row.wired && row.enabled)
+    const fallbackId = (usable[0] || rows[0] || {}).id
+    const active = session.account.activeEngineId || session.parent.activeEngineId || fallbackId
     return {
       wired: rows.some(row => row.wired),
       packageTitle: session.parent.packageTitle || '',
