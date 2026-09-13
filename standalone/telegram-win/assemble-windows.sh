@@ -41,6 +41,14 @@ mkdir -p "$APP/resources/app"
 cp "$ROOT/main.js" "$ROOT/preload.js" "$ROOT/package.json" "$ROOT/win-dock.ps1" "$APP/resources/app/"
 cp -R "$ROOT/lib" "$ROOT/renderer" "$APP/resources/app/"
 cp "$ROOT/使用说明.txt" "$APP/"
+# 这条路径拿的是官方原版 Telegram，气泡不会出译文；而 使用说明.txt 描述的是
+# 魔改版（assemble-from-build.sh 组装的）。这里显式追一句，别让用户拿着
+# 原版包去对照说明里"气泡会显示 [译文]"，又变成一次"没报错但没效果"。
+cat >> "$APP/使用说明.txt" <<'EOF'
+
+【本包说明】本包里的 Telegram 是官方原版，不含气泡译文魔改。
+要气泡里直接出 [译文]，请用 assemble-from-build.sh 组装云编译产出的魔改 Telegram.exe。
+EOF
 mkdir -p "$APP/Telegram" "$CACHE/telegram-unpack"
 unzip -q -o "$TG_ZIP" -d "$CACHE/telegram-unpack"
 if [ -f "$CACHE/telegram-unpack/Telegram.exe" ]; then
