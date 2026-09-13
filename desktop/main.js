@@ -65,9 +65,9 @@ let win
 let cookieJar = {}
 let apiBase = DEFAULT_API
 // 界面主题：'dark' | 'light'。存 config.json，随窗口一起持久化。
-// 之所以不放 localStorage：渲染层每次都是新页面，靠 IPC 读主进程更可靠，
-// 也方便将来在主进程侧决定窗口底色（避免浅色主题下开窗先闪一下深色）。
-let theme = 'dark'
+// 默认日间（新用户首屏就是日间）；用户手动切到夜间后才记住用夜间。
+// 之所以不放 localStorage：渲染层每次都是新页面，靠 IPC 读主进程更可靠。
+let theme = 'light'
 let lineId = 'cn'
 let lines = builtinLines.slice()
 let profile = null
@@ -363,7 +363,7 @@ function applyLine(id) {
 
 function loadConfig() {
   const cfg = readJson(userFile('config.json'), {})
-  theme = cfg.theme === 'light' ? 'light' : 'dark'
+  theme = cfg.theme === 'dark' ? 'dark' : 'light'   // 默认日间
   const cached = Array.isArray(cfg.lines) ? cfg.lines.filter(l => !isLegacyLine(l)) : []
   lines = builtinLines.slice()
   if (cached.length) mergeLines(cached)
@@ -1517,7 +1517,7 @@ ipcMain.handle('config:get', () => ({
 // 主题切换：只接受两个合法值，落盘后回执，渲染层据此更新 data-theme
 ipcMain.handle('config:setTheme', (event, value) => {
   if (!isMainSender(event)) return rejectUntrustedSender()
-  const next = value === 'light' ? 'light' : 'dark'
+  const next = value === 'dark' ? 'dark' : 'light'
   theme = next
   saveConfig()
   return { success: true, theme: theme }

@@ -1633,10 +1633,10 @@ function applyTheme(mode) {
 // 校正（换机/清缓存后仍正确），并把结果回写缓存供下次首帧使用。
 if (themeBtn) {
   ;(async () => {
-    let saved = 'dark'
+    let saved = 'light'
     try {
       const cfg = await window.pix.getConfig()
-      saved = (cfg && cfg.theme) || 'dark'
+      saved = (cfg && cfg.theme) || 'light'
     } catch (e) {}
     applyTheme(saved)
     try { localStorage.setItem('pix-theme', saved) } catch (e) {}
