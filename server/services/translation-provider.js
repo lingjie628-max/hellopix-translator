@@ -246,12 +246,19 @@ async function googleFastTranslate(engine, payload, options) {
 // DeepSeek 没有翻译专用端点，走 /chat/completions 让模型按指令翻译。
 // 与有道/谷歌那类"专用翻译 API"的区别：
 //   - 返回体是对话补全结构，译文在 choices[0].message.content；
-//   - 需要同时给 model（默认 deepseek-chat）与 API Key；
+//   - 需要同时给 model（默认 deepseek-flash）与 API Key；
 //   - 语言控制靠 system 提示词，而不是厂商的语言码参数。
 // 仍未配置凭据时一律 ok:false，不返回任何演示译文（沿用本文件第 12 行的硬规则）。
+//
+// 两个容易踩的坑（依据官方文档 2026-09）：
+//   1. 模型名已换代：有效名是 `deepseek-flash` / `deepseek-v4-pro`。
+//      旧的 deepseek-chat 不再是有效名，配错会直接报"模型不存在"。
+//   2. 思考模式**默认开启**且 effort=high。翻译场景必须显式关闭，否则延迟显著
+//      变长、token 翻倍；而且官方明确思考模式下 temperature 不生效 ——
+//      翻译要的稳定性（temperature=0）就没了。
 
 const DEEPSEEK_URL = 'https://api.deepseek.com/chat/completions'
-const DEEPSEEK_MODEL = 'deepseek-chat'
+const DEEPSEEK_MODEL = 'deepseek-flash'
 
 const DEEPSEEK_LANGUAGES = {
   auto: '',
@@ -342,6 +349,9 @@ async function deepseekTranslate(engine, payload, options) {
       body: JSON.stringify({
         model,
         messages: built.messages,
+        // 关闭思考模式：翻译不需要思维链，开着会显著变慢并让 token 翻倍，
+        // 且会让下面的 temperature 失效（官方：思考模式不支持该参数）
+        thinking: { type: 'disabled' },
         temperature: 0,        // 翻译要稳定，不要发挥
         stream: false
       }),

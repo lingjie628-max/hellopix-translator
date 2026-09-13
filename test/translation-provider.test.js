@@ -335,7 +335,7 @@ test('channelStatus reflects admin-configured credentials', async () => {
 // 契约差异：返回体是对话补全结构（choices[0].message.content），
 // 语言控制靠 system 提示词，且必须同时有 apiKey 与 model。
 
-const deepseek = { id: 'deepseek', name: 'DeepSeek 翻译', enabled: true, wired: true, model: 'deepseek-chat' }
+const deepseek = { id: 'deepseek', name: 'DeepSeek 翻译', enabled: true, wired: true, model: 'deepseek-flash' }
 
 test('deepseek：凭据缺失时 fail-closed，不发任何请求', async () => {
   await withDeepseekKey(null, async () => {
@@ -361,9 +361,11 @@ test('deepseek：成功时取 choices[0].message.content', async () => {
     assert.equal(calls[0].options.method, 'POST')
     assert.equal(calls[0].options.headers.Authorization, 'Bearer sk-test')
     const body = JSON.parse(calls[0].options.body)
-    assert.equal(body.model, 'deepseek-chat')
+    assert.equal(body.model, 'deepseek-flash')
     assert.equal(body.stream, false)
     assert.equal(body.temperature, 0, '翻译要稳定，温度必须为 0')
+    // 思考模式默认开启且会让 temperature 失效（官方文档明确），翻译场景必须显式关闭
+    assert.deepEqual(body.thinking, { type: 'disabled' }, '必须显式关闭思考模式')
     assert.equal(body.messages.length, 2)
     assert.equal(body.messages[0].role, 'system')
     assert.equal(body.messages[1].content, 'hello world')
@@ -380,7 +382,7 @@ test('deepseek：接口地址可在后台覆盖（自建网关/代理）', async
   })
 })
 
-test('deepseek：模型可用后台配置覆盖，缺省回落 deepseek-chat', async () => {
+test('deepseek：模型可用后台配置覆盖，缺省回落 deepseek-flash', async () => {
   await withDeepseekKey('sk-test', async () => {
     const { calls, impl } = captureFetch(jsonResponse({ choices: [{ message: { content: 'x' } }] }))
     await provider.translate(Object.assign({}, deepseek, { model: 'deepseek-reasoner' }), payload, { fetch: impl })
@@ -388,7 +390,7 @@ test('deepseek：模型可用后台配置覆盖，缺省回落 deepseek-chat', a
 
     // 行里没有 model 时用常量兜底
     await provider.translate({ id: 'deepseek', name: 'x', enabled: true, wired: true }, payload, { fetch: impl })
-    assert.equal(JSON.parse(calls[1].options.body).model, 'deepseek-chat')
+    assert.equal(JSON.parse(calls[1].options.body).model, 'deepseek-flash')
   })
 })
 

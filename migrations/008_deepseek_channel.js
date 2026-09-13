@@ -5,7 +5,10 @@
  * /chat/completions，由 system 提示词控制目标语言，译文取 choices[0].message.content。
  *
  * 与有道/百度那类专用翻译 API 的差异（已在本迁移的 note 里写明）：
- *   - 需要两项配置：API Key 与 model（默认 deepseek-chat）；
+ *   - 需要两项配置：API Key 与 model（默认 deepseek-flash）；
+ *   - 模型名用现行有效名 deepseek-flash（旧的 deepseek-chat 已不是有效模型名）。
+ *     请求里显式关闭思考模式：官方默认开启且 effort=high，翻译场景开着会显著变慢、
+ *     token 翻倍，且会让 temperature 失效。
  *   - 厂商计费按 token 而非字符，所以 cost_per_million 只是换算后的近似值，
  *     上线后应拿真实账单在后台「翻译通道」页校准 —— 它是计费侧的定价输入，
  *     不参与调用是否成功。
@@ -18,9 +21,13 @@ exports.up = pgm => {
     INSERT INTO engines
       (id, name, provider, tier, enabled, wired, cost_per_million, model, note)
     VALUES
-      ('deepseek', 'DeepSeek 翻译', 'DeepSeek', 'pro', true, false, 8, 'deepseek-chat',
-       '对话式翻译（OpenAI 兼容 /chat/completions）。需在后台配置 API Key；按 token 计费，此处成本为折算近似值，请按真实账单校准')
-    ON CONFLICT (id) DO NOTHING;
+      ('deepseek', 'DeepSeek 翻译', 'DeepSeek', 'pro', true, false, 6, 'deepseek-flash',
+       '对话式翻译（OpenAI 兼容 /chat/completions），已关闭思考模式。需在后台配置 API Key；按 token 计费（flash 空闲时段 输入1元/输出4元 每百万tokens），此处成本为折算近似值，请按真实账单校准')
+    ON CONFLICT (id) DO UPDATE
+      SET model = EXCLUDED.model,
+          cost_per_million = EXCLUDED.cost_per_million,
+          note = EXCLUDED.note,
+          updated_at = now();
 
     INSERT INTO package_engines (package_id, engine_id)
     SELECT p.id, mapping.engine_id
