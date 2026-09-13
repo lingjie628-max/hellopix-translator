@@ -6,6 +6,7 @@ const fs = require('fs')
 const crypto = require('crypto')
 const { spawn, execFile } = require('child_process')
 const { createStore } = require('./lib/store')
+const enginesLib = require('./lib/engines')
 const { createPixApi } = require('./lib/pix-api')
 const { writeBridge, writeBridges } = require('./lib/bridge')
 
@@ -35,48 +36,10 @@ function dockScript() {
   return path.join(__dirname, 'win-dock.ps1')
 }
 
-// 翻译通道不再写死 youdao/google/deepl。
-//
-// 后台 /apis/translate/engines 会按套餐返回通道，并标出哪些 wired（后台填好厂商
-// 凭据、真正调得通）。只有 wired 的通道翻得出结果，其它一律 503
-// ENGINE_NOT_CONFIGURED；而魔改电报里的 Provider 按设计"失败就不写译文、不弹错、
-// 不崩电报"，所以桥接文件里写一个没接通的通道 = 气泡永远静默不出 [译文]，
-// 从外面看跟"编译没成功"一模一样。
-//
-// 三级兜底：
-//   1) 问到了后台 -> 沿用用户存的通道；它不在已接通列表里就换成后台的 activeEngine
-//      （core-service 也是优先挑"已接通且启用"的），再不行取第一个已接通的。
-//   2) 只有本地缓存（离线/后台挂了）-> 用缓存里的通道列表做同样的挑选。
-//   3) 什么都没有 -> 写空串。C++ 侧会原样发 engine= 空值，服务端
-//      `String(data.engine || session.account.activeEngineId || ...)` 里空串是 falsy，
-//      会回退到账号当前通道 —— 比硬编码一个死通道安全。
+// 翻译通道不再写死 youdao/google/deepl。挑选规则在 lib/engines.js ——
+// 单独成模块是为了让 scripts/verify-telegram-bridge-e2e.js 能 require 同一份实现，
+// 而不是自己抄一份（抄的话脚本验的是它假想的启动器，这里改坏了也一样全绿）。
 let engines = null
-
-function usableEngines() {
-  const rows = (engines && engines.rows) || []
-  return rows.filter(row => row && row.wired && row.enabled)
-}
-
-function resolveEngine(saved) {
-  const rows = usableEngines()
-  if (!rows.length) return String(saved || '')
-  const active = String((engines && engines.activeEngine) || '')
-  const keep = rows.find(row => String(row.id) === String(saved))
-  const pick = keep || rows.find(row => String(row.id) === active) || rows[0]
-  return String(pick.id)
-}
-
-function engineState() {
-  const rows = usableEngines().map(row => ({
-    id: String(row.id),
-    name: String(row.name || row.id)
-  }))
-  return {
-    known: Boolean(engines),
-    wired: rows.length > 0,
-    rows
-  }
-}
 
 async function loadEngines() {
   try {
@@ -102,7 +65,7 @@ function prefs() {
     engine: '',
     lang: 'zh'
   }, data.prefs || {})
-  saved.engine = resolveEngine(saved.engine)
+  saved.engine = enginesLib.resolveEngine(engines, saved.engine)
   return saved
 }
 
@@ -142,7 +105,7 @@ function publicState() {
   return {
     pix: data.pix || null,
     prefs: prefs(),
-    engines: engineState(),
+    engines: enginesLib.engineState(engines),
     instances: instances(),
     lastUsername: data.lastUsername || '',
     apiBase: data.apiBase || process.env.PIX_API || 'http://127.0.0.1:8080',
@@ -350,7 +313,7 @@ ipcMain.handle('pix:prefs', (_event, payload) => {
 // 打开「翻译设置」时重新问一次后台：商户刚在后台把通道接通，这里不用重启就能看到。
 ipcMain.handle('pix:engines', async () => {
   await loadEngines()
-  return engineState()
+  return enginesLib.engineState(engines)
 })
 
 ipcMain.handle('pix:translate', async (_event, payload) => {

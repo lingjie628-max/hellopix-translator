@@ -91,19 +91,11 @@ function makeJar() {
   }
 }
 
-/**
- * 和 standalone/telegram-win/main.js 的 resolveEngine() 保持同一套规则：
- * 只在 wired && enabled 的通道里挑，优先用户存的，其次后台 activeEngine，最后第一个。
- * 这个函数必须和启动器一起改，否则脚本会替一个假想的实现背书。
- */
-function resolveEngine(engines, saved) {
-  const rows = (engines.rows || []).filter(row => row && row.wired && row.enabled)
-  if (!rows.length) return ''
-  const active = String(engines.activeEngine || '')
-  const keep = rows.find(row => String(row.id) === String(saved))
-  const pick = keep || rows.find(row => String(row.id) === active) || rows[0]
-  return String(pick.id)
-}
+// 直接 require 启动器真正在跑的那份实现。
+// 之前这里抄了一份等价逻辑，等于"脚本替一个假想的启动器背书"——启动器改坏了，
+// 只要抄的这份没跟着改，脚本照样全绿。现在只有一处实现（lib/engines.js），
+// 启动器、单测、本脚本共用。
+const { resolveEngine } = require('../standalone/telegram-win/lib/engines')
 
 /** 完全照抄 hello_pix_translate_provider.cpp 的请求形状。 */
 async function providerRequest(jar, deviceId, options) {
