@@ -1628,7 +1628,9 @@ function applyTheme(mode) {
   return next
 }
 
-// 启动时按主进程存的偏好应用（拿不到就保持深色）
+// 启动时按主进程存的偏好应用（拿不到就保持深色）。
+// 注意 theme.js 已在首帧前用 localStorage 预热过一次；这里用主进程的权威值
+// 校正（换机/清缓存后仍正确），并把结果回写缓存供下次首帧使用。
 if (themeBtn) {
   ;(async () => {
     let saved = 'dark'
@@ -1637,12 +1639,14 @@ if (themeBtn) {
       saved = (cfg && cfg.theme) || 'dark'
     } catch (e) {}
     applyTheme(saved)
+    try { localStorage.setItem('pix-theme', saved) } catch (e) {}
 
     themeBtn.onclick = async () => {
       const current = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark'
       const next = current === 'light' ? 'dark' : 'light'
-      applyTheme(next)                       // 先切，界面立刻响应
-      try { await window.pix.setTheme(next) } catch (e) {}   // 再落盘
+      applyTheme(next)                                      // 先切，界面立刻响应
+      try { localStorage.setItem('pix-theme', next) } catch (e) {}   // 供下次首帧预热
+      try { await window.pix.setTheme(next) } catch (e) {}  // 权威值落盘
     }
   })()
 }

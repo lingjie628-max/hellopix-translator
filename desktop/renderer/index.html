@@ -5,6 +5,8 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'none'; object-src 'none'; base-uri 'none'">
   <title>Hello Pix</title>
   <link rel="icon" href="icon.png">
+  <!-- 主题预热必须在样式表之前：首帧就要带上 data-theme，否则浅色会先闪深色 -->
+  <script src="theme.js"></script>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>

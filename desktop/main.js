@@ -1461,14 +1461,6 @@ function createWindow() {
   win.on('enter-full-screen', layoutViews)
   win.on('leave-full-screen', layoutViews)
   win.webContents.on('did-finish-load', layoutViews)
-  // 主题防闪：渲染层是异步拿配置的，若等它应用，浅色用户每次开窗会先闪一下
-  // 深色。这里在文档一就绪（脚本执行前）就把 data-theme 打上去。
-  win.webContents.on('dom-ready', () => {
-    if (theme !== 'light') return
-    win.webContents.executeJavaScript(
-      "document.documentElement.setAttribute('data-theme','light')"
-    ).catch(() => {})
-  })
   win.webContents.on('will-navigate', event => event.preventDefault())
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'))
