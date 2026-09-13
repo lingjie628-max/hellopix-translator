@@ -11,11 +11,9 @@
 </head>
 <body>
   <div id="login" class="screen login-screen">
+    <!-- 背景已改为静态图（当年是 login-bg 视频，21MB，抽帧转 WebP 后移除）。
+         图由 styles.css 的 --bg-image 按主题切换。 -->
     <div class="login-bg" aria-hidden="true">
-      <video id="loginBgVideo" class="login-video" autoplay muted loop playsinline preload="auto" poster="login-bg.png">
-        <source src="login-bg.m4v" type="video/mp4">
-        <source src="login-bg.mp4" type="video/mp4">
-      </video>
       <div class="login-grid"></div>
       <div class="login-scan"></div>
     </div>
@@ -74,11 +72,8 @@
 
   <div id="shell" class="screen hidden">
     <div class="stage">
-      <div class="home-bg" aria-hidden="true">
-        <video id="homeBgVideo" class="home-video" autoplay muted loop playsinline preload="auto">
-          <source src="home-bg.mp4" type="video/mp4">
-        </video>
-      </div>
+      <!-- 背景静态图同上；原 home-bg.mp4 已抽帧转 WebP 后移除 -->
+      <div class="home-bg" aria-hidden="true"></div>
       <div id="tabs" class="tabs"></div>
       <div class="utility">
         <button id="dndBtn" type="button" class="util-btn"><span class="util-ico">🔔</span>勿扰模式：<b id="dndText">关</b></button>

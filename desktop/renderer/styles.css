@@ -157,28 +157,28 @@
   --c-surface-3: #eaf0f8;
   --c-surface-4: #dde5f0;
   /* 文字层次：越靠后越浅 */
-  --c-text-strong: #0f172a;
-  --c-text-1: #1f2937;
-  --c-text-2: #111827;
-  --c-text-3: #0f172a;
-  --c-text-4: #1f2937;
-  --c-text-5: #0f172a;
-  --c-text-6: #0f172a;
-  --c-text-7: #334155;
+  --c-text-strong: #000000;
+  --c-text-1: #111111;
+  --c-text-2: #0a0a0a;
+  --c-text-3: #000000;
+  --c-text-4: #111111;
+  --c-text-5: #000000;
+  --c-text-6: #000000;
+  --c-text-7: #1f1f1f;
   --c-text-8: #1e3a8a;
   --c-text-9: #155e75;
-  --c-text-10: #334155;
-  --c-text-11: #334155;
-  --c-text-12: #475569;
-  --c-text-13: #475569;
-  --c-text-14: #475569;
+  --c-text-10: #1f1f1f;
+  --c-text-11: #1f1f1f;
+  --c-text-12: #262626;
+  --c-text-13: #262626;
+  --c-text-14: #262626;
   --c-text-15: #0e7490;
-  --c-text-17: #64748b;
-  --c-text-18: #64748b;
-  --c-text-19: #64748b;
-  --c-text-20: #7c8ba1;
-  --c-text-muted: #475569;
-  --c-text-faint: #64748b;
+  --c-text-17: #3f3f3f;
+  --c-text-18: #3f3f3f;
+  --c-text-19: #3f3f3f;
+  --c-text-20: #4a4a4a;
+  --c-text-muted: #262626;
+  --c-text-faint: #3f3f3f;
   /* 强调色：白底上需要足够的对比度，整体压深 */
   --c-accent: #0e7490;
   --c-accent-deep: #155e75;
@@ -230,7 +230,7 @@
   --bg-login-vignette: radial-gradient(circle at 50% 46%, rgba(255, 255, 255, 0.1) 0%, rgba(220, 232, 246, 0.5) 100%);
 
   /* 控件用色：白底上的输入框 */
-  --c-label: #475569;
+  --c-label: #262626;
   --c-ctl-border: rgba(15, 23, 42, 0.16);
   --c-ctl-bg: rgb(var(--c-white-rgb) / 0.9);
 }
@@ -2418,9 +2418,10 @@ button {
 
 @media (prefers-reduced-motion: reduce) {
   .login-grid, .login-scan, .mark i, .led { animation: none; }
-  .login-video, .home-video { display: none; }
-  .login-bg { background: url('login-bg.png') center / cover no-repeat; }
   .announce-track { animation: none; }
+  /* 这里原本还有 .login-video/.home-video 隐藏与 login-bg.png 兜底背景：
+     视频与那张海报图已随静态背景改造一并删除，规则成为死代码，故移除。
+     背景现在由 --bg-image 按主题提供，本身不动，无需在此特殊处理。 */
 }
 
 @media (prefers-reduced-motion: reduce) {
