@@ -209,8 +209,10 @@
   --c-white-rgb: 15 23 42;
   --c-slate-rgb: 100 116 139;
 
-  /* 日间模式背景图（用户在 2026-09 提供的静态图，2732x1535）。 */
-  --bg-image: url('day-bg.jpg');
+  /* 日间模式背景图：由用户提供的 2732x1535 原图转码而来（WebP，2560 宽，
+     127KB vs 原 JPG 396KB）。2560 宽在 1512 逻辑宽 + 2x 屏下足够锐利，
+     再大对背景没有可见收益。源图 day-bg.jpg 一并留在目录里备查。 */
+  --bg-image: url('day-bg.webp');
   --bg-image-size: cover;
   --bg-image-position: center;
 
