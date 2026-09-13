@@ -117,6 +117,20 @@
 
   /* 控件用色（语义别名，浅色主题里可单独覆盖） */
   --c-label: #9eb3c9;
+  /* 页脚与弹窗的底色渐变。它们是"深色专属"的写死渐变，浅色下必须换掉，
+     否则会出现深底 + 深字的不可读组合（实测页脚 1.35:1、弹窗同类）。 */
+  --bg-footer: linear-gradient(90deg, rgba(12, 38, 65, 0.98), rgba(19, 58, 91, 0.98) 50%, rgba(12, 38, 65, 0.98));
+  --bg-tabs: var(--bg-tabs);
+  --bg-menu: var(--bg-menu);
+  --bg-menu-2: var(--bg-menu-2);
+  --bg-login-card: var(--bg-login-card);
+  --bg-update-card: var(--bg-update-card);
+  --bg-add-card: var(--bg-add-card);
+  --bg-add-head: var(--bg-add-head);
+  --bg-add-sec: var(--bg-add-sec);
+  --bg-login-vignette: var(--bg-login-vignette);
+  --bg-footer-home: linear-gradient(90deg, rgba(8, 28, 49, 0.84), rgba(17, 54, 84, 0.78) 50%, rgba(8, 28, 49, 0.84));
+  --bg-modal: linear-gradient(180deg, rgba(10, 18, 32, 0.96), rgba(6, 10, 20, 0.98));
   --c-ctl-border: rgb(var(--c-white-rgb) / 0.12);
   --c-ctl-bg: rgba(7, 16, 30, 0.55);
 }
@@ -200,6 +214,20 @@
   /* --bg-image: url('day-bg.jpg'); */
   --bg-image-size: cover;
   --bg-image-position: center;
+
+  /* 页脚/弹窗底色：浅色下改成浅色渐变 + 白底 */
+  --bg-footer: linear-gradient(90deg, rgba(255, 255, 255, 0.96), rgba(240, 246, 253, 0.96) 50%, rgba(255, 255, 255, 0.96));
+  --bg-footer-home: linear-gradient(90deg, rgba(255, 255, 255, 0.82), rgba(244, 249, 255, 0.78) 50%, rgba(255, 255, 255, 0.82));
+  --bg-modal: linear-gradient(180deg, #ffffff, #f7fafd);
+  --bg-tabs: linear-gradient(180deg, #ffffff, #f4f7fc);
+  --bg-menu: linear-gradient(145deg, #ffffff, #f6f9fd);
+  --bg-menu-2: linear-gradient(145deg, #ffffff, #f5f8fd);
+  --bg-login-card: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(244, 249, 255, 0.97));
+  --bg-update-card: linear-gradient(155deg, #ffffff, #f4f8fd);
+  --bg-add-card: linear-gradient(145deg, #ffffff, #f5f9fd);
+  --bg-add-head: linear-gradient(90deg, rgba(240, 247, 255, 0.9), rgba(248, 251, 255, 0.9));
+  --bg-add-sec: linear-gradient(90deg, rgba(238, 245, 253, 0.8), rgba(246, 250, 255, 0.8));
+  --bg-login-vignette: radial-gradient(circle at 50% 46%, rgba(255, 255, 255, 0.1) 0%, rgba(220, 232, 246, 0.5) 100%);
 
   /* 控件用色：白底上的输入框 */
   --c-label: #475569;
@@ -610,7 +638,7 @@ button {
   overflow-x: auto;
   align-items: flex-end;
   background:
-    linear-gradient(180deg, rgba(17, 38, 65, 0.99), rgba(11, 27, 48, 0.99));
+    var(--bg-tabs);
   border-bottom: 1px solid rgb(var(--c-accent-rgb) / 0.1);
   box-shadow: 0 8px 24px rgba(2, 8, 18, 0.12);
   flex-shrink: 0;
@@ -880,7 +908,7 @@ button {
   border: 1px solid rgb(var(--c-accent-rgb) / 0.2);
   border-radius: 13px;
   background:
-    linear-gradient(145deg, rgba(17, 38, 64, 0.985), rgba(6, 17, 32, 0.99));
+    var(--bg-menu);
   box-shadow:
     0 18px 46px rgb(var(--c-black-rgb) / 0.42),
     0 0 28px rgb(var(--c-accent-rgb) / 0.06),
@@ -972,7 +1000,7 @@ button {
   border: 1px solid rgb(var(--c-accent-rgb) / 0.22);
   border-radius: 13px;
   background:
-    linear-gradient(145deg, rgba(17, 38, 64, 0.99), rgba(5, 15, 29, 0.995));
+    var(--bg-menu-2);
   box-shadow:
     0 20px 56px rgb(var(--c-black-rgb) / 0.5),
     0 0 30px rgb(var(--c-accent-rgb) / 0.07),
@@ -1248,16 +1276,14 @@ button {
   padding: 0 8px;
   box-sizing: border-box;
   color: var(--c-text-13);
-  background:
-    linear-gradient(90deg, rgba(12, 38, 65, 0.98), rgba(19, 58, 91, 0.98) 50%, rgba(12, 38, 65, 0.98));
+  background: var(--bg-footer);
   border-top: 1px solid rgba(56, 189, 248, 0.22);
   box-shadow: 0 -5px 18px rgba(2, 10, 22, 0.2), 0 1px 0 rgba(125, 211, 252, 0.08) inset;
   font-size: var(--fs-meta);
   user-select: none;
 }
 .stage.is-home .pix-footer {
-  background:
-    linear-gradient(90deg, rgba(8, 28, 49, 0.84), rgba(17, 54, 84, 0.78) 50%, rgba(8, 28, 49, 0.84));
+  background: var(--bg-footer-home);
   backdrop-filter: blur(12px);
 }
 .footer-group {
@@ -1947,7 +1973,7 @@ button {
 #addApp .add-card {
   position: relative;
   background:
-    linear-gradient(145deg, rgba(17, 34, 57, 0.98), rgba(7, 16, 31, 0.99));
+    var(--bg-add-card);
   color: #e8f1fa;
   border: 1px solid rgba(71, 203, 236, 0.24);
   border-radius: 18px;
@@ -2221,7 +2247,7 @@ button {
 
 .modal-card {
   width: 420px;
-  background: linear-gradient(180deg, rgba(10, 18, 32, 0.96), rgba(6, 10, 20, 0.98));
+  background: var(--bg-modal);
   border: 1px solid rgb(var(--c-accent-rgb) / 0.22);
   border-radius: 16px;
   padding: 22px;
@@ -2237,7 +2263,7 @@ button {
   border-radius: 20px;
   background:
     radial-gradient(circle at 50% 0, rgb(var(--c-accent-rgb) / 0.15), transparent 42%),
-    linear-gradient(155deg, rgba(17, 38, 64, 0.99), rgba(5, 14, 28, 0.99));
+    var(--bg-update-card);
   color: #eef8ff;
   text-align: center;
   box-shadow:
@@ -2406,4 +2432,45 @@ button {
   .trans-cell {
     transition: none;
   }
+}
+
+/* ===== 浅色主题的"影"替代方案 =====
+   深色下这套界面靠"光"表达层次：青色发光、旋转光晕、呼吸起伏、文字阴影、
+   背景压暗层。这些在浅色下要么看不见，要么发脏（白底上吃不出光，只剩灰影）。
+   这里把光的表达逐项换成影的表达 —— 布局、配色语言、圆角字号一律不动。
+
+   为什么不用变量统一控制：这些是"同一元素不同主题下换一套表现形式"，
+   用变量会需要在 :root 里塞一堆阴影/渐变字符串，反而更难读。集中放在这里，
+   与上面的变量覆盖块相邻，改日间观感只改这一处。 */
+[data-theme="light"] .home-panel::before {
+  /* 旋转光晕边框：白底上发光无意义 → 换成 1px 淡描边（仍是同一个盒子、同一个
+     mask 技法，只是不再发光、不再转动） */
+  background: rgb(var(--c-black-rgb) / 0.06);
+  animation: none;
+}
+
+[data-theme="light"] .home-panel {
+  /* 去掉青色发光投影，改为纸张感的柔和落影 */
+  box-shadow:
+    0 0 0 1px rgb(var(--c-black-rgb) / 0.04) inset,
+    0 6px 20px rgb(var(--c-black-rgb) / 0.07),
+    0 1px 3px rgb(var(--c-black-rgb) / 0.05);
+  animation: none;                       /* 呼吸起伏在浅色下会显脏，去掉 */
+}
+
+[data-theme="light"] .home-bg::after {
+  /* 这一层原本是把背景压暗（让白字浮起来）。浅色下要反过来：不再压暗，
+     交给背景图与卡片的落影去建立层次 */
+  background: none;
+}
+
+/* 文字阴影全部关掉：浅色下文字是深色，不需要阴影托底，留着只会发虚。
+   深色下它们是有用的（让白字压在视频/渐变上仍可读），所以只覆盖浅色。 */
+[data-theme="light"] .stage.is-home .util-btn,
+[data-theme="light"] .login-title,
+[data-theme="light"] .home-add h2,
+[data-theme="light"] .home-enabled h2,
+[data-theme="light"] .enabled-meta,
+[data-theme="light"] .app-card .name {
+  text-shadow: none;
 }
