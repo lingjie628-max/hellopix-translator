@@ -1,17 +1,26 @@
 #!/bin/zsh
 # 本地后端重启脚本。
 #
-# 背景：本机后端原先是用手工注入的环境变量跑的（仓库里没有 .env，且它被 gitignore），
-# 进程一停就没人知道该怎么起。这里把需要注入的变量集中一处，避免以后再靠记忆。
+# 背景：本机后端原先是用手工注入的环境变量跑的，仓库里没有记录，进程一停就
+# 无从恢复（数据库密码与厂商密钥加密密钥都随进程一起没了）。配置现在集中到
+# .env.local（已 gitignore），脚本自动读取。
 #
-# 用法：DATABASE_URL='postgres://...' [REDIS_URL='redis://...'] ./scripts/dev-backend.sh
-#   DATABASE_URL 必填（不写进仓库，由调用者注入）。
+# 用法：
+#   ./scripts/dev-backend.sh                                 # 读 .env.local
+#   DATABASE_URL='postgres://...' ./scripts/dev-backend.sh   # 临时覆盖
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+ENV_FILE="$ROOT/.env.local"
+if [ -f "$ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  echo "已加载 $ENV_FILE"
+fi
+
 if [ -z "$DATABASE_URL" ]; then
-  echo "缺少 DATABASE_URL。示例："
+  echo "缺少 DATABASE_URL。请先创建 .env.local（参考 .env.example），或临时注入："
   echo "  DATABASE_URL='postgres://user:pass@127.0.0.1:55432/hello_pix' ./scripts/dev-backend.sh"
   exit 1
 fi
@@ -28,6 +37,7 @@ echo "启动后端 -> $LOG"
 echo "  PORT=$PORT"
 echo "  DATABASE_URL=$(echo "$DATABASE_URL" | sed 's/:[^:@]*@/:***@/')"
 echo "  REDIS_URL=$REDIS_URL"
+echo "  PIX_CREDENTIAL_KEY=$([ -n "$PIX_CREDENTIAL_KEY" ] && echo '已配置' || echo '未配置（后台将无法保存厂商密钥）')"
 
 nohup node server/index.js >> "$LOG" 2>&1 &
 echo "PID: $!"
