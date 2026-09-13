@@ -32,6 +32,7 @@
  */
 
 const fs = require('fs')
+const os = require('os')
 const path = require('path')
 const crypto = require('crypto')
 
@@ -240,6 +241,102 @@ async function main() {
       again.status === 200 && balanceAfter === balanceBefore,
       '重复请求同一条消息不重复扣费（幂等键生效）',
       `余额 ${balanceBefore} -> ${balanceAfter}，第二次 translation=${JSON.stringify(String((again.body && again.body.translation) || ''))}`
+    )
+
+    // ── 阶段四：启动器真实数据通路 ───────────────────────────────────────────
+    // 上面三个阶段用的是本脚本自己的 cookie jar 和请求头，验的是"魔改电报的 C++
+    // Provider 会发什么"。这一段换成启动器真正在用的 lib/pix-api.js + lib/bridge.js，
+    // 验"启动器自己会不会把桥接文件写对"—— 两份实现任何一份坏了都要能拦住。
+    //
+    // 注意顺序：这里会重新登录，服务端 createSession 前会 destroySession，
+    // 上面那个 jar 会立刻失效。所以必须放在所有 C++ 阶段之后。
+    const { createPixApi } = require('../standalone/telegram-win/lib/pix-api')
+    const { writeBridge } = require('../standalone/telegram-win/lib/bridge')
+
+    const launcher = createPixApi({ base: BASE, deviceId, cookies: {} })
+    const launcherLogin = await launcher.request('/client/login', {
+      method: 'POST',
+      form: { username, password, deviceId }
+    })
+    check(
+      Boolean(launcherLogin && launcherLogin.success),
+      '启动器自己的 pix-api 客户端能登录（cookie jar / CSRF 头由它维护）',
+      launcherLogin && launcherLogin.msg
+    )
+
+    const launcherEngines = await launcher.request('/translate/engines')
+    const launcherResolved = resolveEngine(launcherEngines, '')
+    check(
+      launcherResolved === resolved,
+      'pix-api 取回的通道列表与直连一致',
+      `pix-api=${launcherResolved} 直连=${resolved}`
+    )
+
+    // 用真实 writeBridge 写一份桥接文件（C++ 侧读的就是这个名字和这个目录）
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'pix-tg-workdir-'))
+    const bridgePath = writeBridge(workdir, {
+      apiBase: BASE,
+      deviceId: launcher.state.deviceId,
+      cookies: launcher.state.cookies,
+      prefs: {
+        engine: launcherResolved,
+        lang: 'zh',
+        transRecv: true,
+        transSend: true,
+        transGroup: true
+      }
+    })
+    const bridge = JSON.parse(fs.readFileSync(bridgePath, 'utf8'))
+    check(
+      path.basename(bridgePath) === 'hello-pix-bridge.json' && bridge.apiBase === BASE,
+      '桥接文件落盘正确（文件名与 apiBase 是 C++ ReadBridge() 直接拼接的）',
+      `${bridgePath}\n       apiBase=${bridge.apiBase} engine=${bridge.engine}`
+    )
+    check(
+      Boolean(bridge.deviceId) && Boolean(bridge.cookies && bridge.cookies.pix_csrf),
+      '桥接文件里带上了 deviceId 与 CSRF cookie（Provider 靠它们过鉴权）',
+      `cookies=[${Object.keys(bridge.cookies || {}).join(', ')}]`
+    )
+    check(
+      bridge.engine === launcherResolved && bridge.engine === resolved,
+      '桥接文件里的通道就是已接通的那个',
+      `engine=${bridge.engine}`
+    )
+
+    // 完全照 C++ ReadBridge() 的取值方式：把所有 cookie 拼成 Cookie 头，
+    // 名字里含 csrf 的那个解出来当 X-CSRF-Token。
+    const bridgeCookieHeader = Object.entries(bridge.cookies || {})
+      .filter(([, value]) => value)
+      .map(([name, value]) => `${name}=${value}`)
+      .join('; ')
+    const csrfEntry = Object.entries(bridge.cookies || {})
+      .find(([name]) => /csrf/i.test(name))
+    const bridgeCsrf = csrfEntry ? decodeURIComponent(csrfEntry[1]) : ''
+
+    const viaBridgeResponse = await fetch(`${bridge.apiBase}/apis/translate/run`, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Pix-Device': bridge.deviceId,
+        Cookie: bridgeCookieHeader,
+        'X-CSRF-Token': bridgeCsrf,
+        'Idempotency-Key': `tg:888000:2002:${crypto.createHash('sha1').update('bridge').digest('hex').slice(0, 8)}`
+      },
+      body: new URLSearchParams({
+        text: 'The bridge file is what the patched Telegram actually reads.',
+        from: 'auto',
+        to: bridge.lang,
+        engine: bridge.engine
+      }).toString()
+    })
+    const viaBridge = await viaBridgeResponse.json().catch(() => null)
+    check(
+      viaBridgeResponse.status === 200 && viaBridge && viaBridge.success === true && viaBridge.translation,
+      '照 C++ 的方式从桥接文件取值发请求，真能翻出译文',
+      viaBridge && viaBridge.success
+        ? `translation=${JSON.stringify(viaBridge.translation)}`
+        : `HTTP ${viaBridgeResponse.status} ${(viaBridge && (viaBridge.code || viaBridge.msg)) || ''}`
     )
 
     return finish(userId)
