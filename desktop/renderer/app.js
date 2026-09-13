@@ -1604,6 +1604,49 @@ lockBtn.onclick = () => {
   showOverlay(lockScreen, true)
   lockPwd.focus()
 }
+
+// --- 主题切换（日间 / 夜间）---------------------------------------------------
+// 主题只做一件事：给 <html> 加/去 data-theme="light"，剩下全靠 CSS 变量覆盖。
+// 持久化在主进程（config.json），所以重启、换窗口都记得住。
+const themeBtn = document.getElementById('themeBtn')
+const themeIco = document.getElementById('themeIco')
+const themeText = document.getElementById('themeText')
+
+function paintThemeButton(mode) {
+  const light = mode === 'light'
+  // 图标表示"当前模式"，文字也跟随；title 说明点下去会切到哪边
+  themeIco.textContent = light ? '☀️' : '🌙'
+  themeText.textContent = light ? '日间' : '夜间'
+  themeBtn.title = light ? '当前：日间模式，点击切换到夜间' : '当前：夜间模式，点击切换到日间'
+}
+
+function applyTheme(mode) {
+  const next = mode === 'light' ? 'light' : 'dark'
+  if (next === 'light') document.documentElement.setAttribute('data-theme', 'light')
+  else document.documentElement.removeAttribute('data-theme')
+  paintThemeButton(next)
+  return next
+}
+
+// 启动时按主进程存的偏好应用（拿不到就保持深色）
+if (themeBtn) {
+  ;(async () => {
+    let saved = 'dark'
+    try {
+      const cfg = await window.pix.getConfig()
+      saved = (cfg && cfg.theme) || 'dark'
+    } catch (e) {}
+    applyTheme(saved)
+
+    themeBtn.onclick = async () => {
+      const current = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark'
+      const next = current === 'light' ? 'dark' : 'light'
+      applyTheme(next)                       // 先切，界面立刻响应
+      try { await window.pix.setTheme(next) } catch (e) {}   // 再落盘
+    }
+  })()
+}
+
 unlockBtn.onclick = async () => {
   lockError.textContent = ''
   const pwd = lockPwd.value

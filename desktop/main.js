@@ -64,6 +64,10 @@ function applyAppIdentity() {
 let win
 let cookieJar = {}
 let apiBase = DEFAULT_API
+// 界面主题：'dark' | 'light'。存 config.json，随窗口一起持久化。
+// 之所以不放 localStorage：渲染层每次都是新页面，靠 IPC 读主进程更可靠，
+// 也方便将来在主进程侧决定窗口底色（避免浅色主题下开窗先闪一下深色）。
+let theme = 'dark'
 let lineId = 'cn'
 let lines = builtinLines.slice()
 let profile = null
@@ -336,6 +340,7 @@ function restoreWindowBounds(fallback) {
 function saveConfig() {
   writeJson(userFile('config.json'), {
     apiBase: apiBase,
+    theme: theme,
     lineId: lineId,
     lines: lines.map(l => ({
       id: l.id,
@@ -358,6 +363,7 @@ function applyLine(id) {
 
 function loadConfig() {
   const cfg = readJson(userFile('config.json'), {})
+  theme = cfg.theme === 'light' ? 'light' : 'dark'
   const cached = Array.isArray(cfg.lines) ? cfg.lines.filter(l => !isLegacyLine(l)) : []
   lines = builtinLines.slice()
   if (cached.length) mergeLines(cached)
@@ -1455,6 +1461,14 @@ function createWindow() {
   win.on('enter-full-screen', layoutViews)
   win.on('leave-full-screen', layoutViews)
   win.webContents.on('did-finish-load', layoutViews)
+  // 主题防闪：渲染层是异步拿配置的，若等它应用，浅色用户每次开窗会先闪一下
+  // 深色。这里在文档一就绪（脚本执行前）就把 data-theme 打上去。
+  win.webContents.on('dom-ready', () => {
+    if (theme !== 'light') return
+    win.webContents.executeJavaScript(
+      "document.documentElement.setAttribute('data-theme','light')"
+    ).catch(() => {})
+  })
   win.webContents.on('will-navigate', event => event.preventDefault())
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'))
@@ -1503,9 +1517,19 @@ ipcMain.on('chrome:barHeight', (event, height) => {
 
 ipcMain.handle('config:get', () => ({
   apiBase: apiBase,
+  theme: theme,
   lineId: currentLine().id,
   lines: lines
 }))
+
+// 主题切换：只接受两个合法值，落盘后回执，渲染层据此更新 data-theme
+ipcMain.handle('config:setTheme', (event, value) => {
+  if (!isMainSender(event)) return rejectUntrustedSender()
+  const next = value === 'light' ? 'light' : 'dark'
+  theme = next
+  saveConfig()
+  return { success: true, theme: theme }
+})
 
 ipcMain.handle('auth:get', event => isMainSender(event) ? publicAuth() : rejectUntrustedSender())
 ipcMain.handle('auth:save', (event, payload) => isMainSender(event) ? saveAuth(payload || {}) : rejectUntrustedSender())
