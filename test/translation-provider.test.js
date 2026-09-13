@@ -11,7 +11,7 @@ const path = require('node:path')
 const test = require('node:test')
 const provider = require('../server/services/translation-provider')
 
-const CREDENTIAL_KEYS = ['PIX_YOUDAO_APP_KEY', 'PIX_YOUDAO_APP_SECRET']
+const CREDENTIAL_KEYS = ['PIX_YOUDAO_APP_KEY', 'PIX_YOUDAO_APP_SECRET', 'PIX_DEEPSEEK_API_KEY']
 
 async function withCredentials(values, run) {
   const saved = {}
@@ -37,6 +37,11 @@ function jsonResponse(body, status = 200) {
     status,
     json: async () => body
   }
+}
+
+/** 与 withCredentials 同一套隔离，只是针对 DeepSeek 的单个环境变量。 */
+function withDeepseekKey(value, run) {
+  return withCredentials({ PIX_DEEPSEEK_API_KEY: value === null ? undefined : value }, run)
 }
 
 function captureFetch(response) {
@@ -323,5 +328,115 @@ test('channelStatus reflects admin-configured credentials', async () => {
     const rows = provider.channelStatus({ youdao: { apiKey: 'k', secret: 's' } })
     assert.equal(rows.find(row => row.id === 'youdao').credentialReady, true)
     assert.equal(provider.channelStatus({}).find(row => row.id === 'youdao').credentialReady, false)
+  })
+})
+
+// --- DeepSeek（对话式翻译，与有道那类专用翻译 API 的约定不同）------------------
+// 契约差异：返回体是对话补全结构（choices[0].message.content），
+// 语言控制靠 system 提示词，且必须同时有 apiKey 与 model。
+
+const deepseek = { id: 'deepseek', name: 'DeepSeek 翻译', enabled: true, wired: true, model: 'deepseek-chat' }
+
+test('deepseek：凭据缺失时 fail-closed，不发任何请求', async () => {
+  await withDeepseekKey(null, async () => {
+    const { calls, impl } = captureFetch(jsonResponse({ choices: [{ message: { content: '你好' } }] }))
+    const result = await provider.translate(deepseek, payload, { fetch: impl })
+    assert.equal(result.ok, false)
+    assert.match(result.msg, /凭据未配置/)
+    assert.equal(calls.length, 0, '凭据缺失时不允许发出任何请求')
+  })
+})
+
+test('deepseek：成功时取 choices[0].message.content', async () => {
+  await withDeepseekKey('sk-test', async () => {
+    const { calls, impl } = captureFetch(jsonResponse({
+      choices: [{ message: { role: 'assistant', content: '  你好世界  ' } }]
+    }))
+    const result = await provider.translate(deepseek, Object.assign({}, payload, { text: 'hello world' }), { fetch: impl })
+    assert.equal(result.ok, true)
+    assert.equal(result.text, '你好世界', '译文应去掉首尾空白')
+
+    // 请求形状：官方端点、Bearer 鉴权、模型与温度
+    assert.equal(calls[0].url, 'https://api.deepseek.com/chat/completions')
+    assert.equal(calls[0].options.method, 'POST')
+    assert.equal(calls[0].options.headers.Authorization, 'Bearer sk-test')
+    const body = JSON.parse(calls[0].options.body)
+    assert.equal(body.model, 'deepseek-chat')
+    assert.equal(body.stream, false)
+    assert.equal(body.temperature, 0, '翻译要稳定，温度必须为 0')
+    assert.equal(body.messages.length, 2)
+    assert.equal(body.messages[0].role, 'system')
+    assert.equal(body.messages[1].content, 'hello world')
+    assert.match(body.messages[0].content, /中文/, '目标语言应出现在提示词里')
+  })
+})
+
+test('deepseek：接口地址可在后台覆盖（自建网关/代理）', async () => {
+  await withDeepseekKey('sk-test', async () => {
+    const { calls, impl } = captureFetch(jsonResponse({ choices: [{ message: { content: 'x' } }] }))
+    const custom = Object.assign({}, deepseek, { endpoint: 'https://gateway.example.com/v1/chat/completions' })
+    await provider.translate(custom, payload, { fetch: impl })
+    assert.equal(calls[0].url, 'https://gateway.example.com/v1/chat/completions')
+  })
+})
+
+test('deepseek：模型可用后台配置覆盖，缺省回落 deepseek-chat', async () => {
+  await withDeepseekKey('sk-test', async () => {
+    const { calls, impl } = captureFetch(jsonResponse({ choices: [{ message: { content: 'x' } }] }))
+    await provider.translate(Object.assign({}, deepseek, { model: 'deepseek-reasoner' }), payload, { fetch: impl })
+    assert.equal(JSON.parse(calls[0].options.body).model, 'deepseek-reasoner')
+
+    // 行里没有 model 时用常量兜底
+    await provider.translate({ id: 'deepseek', name: 'x', enabled: true, wired: true }, payload, { fetch: impl })
+    assert.equal(JSON.parse(calls[1].options.body).model, 'deepseek-chat')
+  })
+})
+
+test('deepseek：HTTP 错误带出厂商原因，且不产生译文', async () => {
+  await withDeepseekKey('sk-test', async () => {
+    const unauthorized = captureFetch(jsonResponse({ error: { message: 'Authentication Fails' } }, 401))
+    const r1 = await provider.translate(deepseek, payload, { fetch: unauthorized.impl })
+    assert.equal(r1.ok, false)
+    assert.match(r1.msg, /HTTP 401/)
+    assert.match(r1.msg, /Authentication Fails/, '厂商原因应透出，便于排查')
+    assert.equal(r1.text, undefined)
+
+    const insufficient = captureFetch(jsonResponse({ error: { message: 'Insufficient Balance' } }, 402))
+    const r2 = await provider.translate(deepseek, payload, { fetch: insufficient.impl })
+    assert.equal(r2.ok, false)
+    assert.match(r2.msg, /Insufficient Balance/)
+  })
+})
+
+test('deepseek：超时/网络错误/返回体损坏/空译文都转成 ok:false', async () => {
+  await withDeepseekKey('sk-test', async () => {
+    const timeout = Object.assign(new Error('timed out'), { name: 'TimeoutError' })
+    const r1 = await provider.translate(deepseek, payload, { fetch: captureFetch(timeout).impl })
+    assert.equal(r1.ok, false)
+    assert.match(r1.msg, /超时/)
+
+    const r2 = await provider.translate(deepseek, payload, { fetch: async () => { throw new Error('ECONNREFUSED') } })
+    assert.equal(r2.ok, false)
+    assert.match(r2.msg, /ECONNREFUSED/)
+
+    const broken = captureFetch({ ok: true, status: 200, json: async () => { throw new Error('bad json') } })
+    const r3 = await provider.translate(deepseek, payload, { fetch: broken.impl })
+    assert.equal(r3.ok, false)
+    assert.match(r3.msg, /无法解析/)
+
+    const empty = captureFetch(jsonResponse({ choices: [{ message: { content: '   ' } }] }))
+    const r4 = await provider.translate(deepseek, payload, { fetch: empty.impl })
+    assert.equal(r4.ok, false)
+    assert.match(r4.msg, /未返回译文/)
+  })
+})
+
+test('deepseek：登进注册表、凭据状态可查', async () => {
+  await withDeepseekKey(null, () => {
+    assert.equal(provider.providers.deepseek.name, 'DeepSeek 翻译')
+    assert.equal(provider.providers.deepseek.configured({}), false)
+    assert.equal(provider.providers.deepseek.configured({ apiKey: 'k' }), true)
+    const rows = provider.channelStatus({ deepseek: { apiKey: 'k' } })
+    assert.equal(rows.find(row => row.id === 'deepseek').credentialReady, true)
   })
 })

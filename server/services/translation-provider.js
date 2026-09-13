@@ -242,6 +242,145 @@ async function googleFastTranslate(engine, payload, options) {
   return { ok: true, text: translated }
 }
 
+// --- DeepSeek 翻译（OpenAI 兼容的对话接口）-----------------------------------
+// DeepSeek 没有翻译专用端点，走 /chat/completions 让模型按指令翻译。
+// 与有道/谷歌那类"专用翻译 API"的区别：
+//   - 返回体是对话补全结构，译文在 choices[0].message.content；
+//   - 需要同时给 model（默认 deepseek-chat）与 API Key；
+//   - 语言控制靠 system 提示词，而不是厂商的语言码参数。
+// 仍未配置凭据时一律 ok:false，不返回任何演示译文（沿用本文件第 12 行的硬规则）。
+
+const DEEPSEEK_URL = 'https://api.deepseek.com/chat/completions'
+const DEEPSEEK_MODEL = 'deepseek-chat'
+
+const DEEPSEEK_LANGUAGES = {
+  auto: '',
+  zh: '简体中文',
+  'zh-cn': '简体中文',
+  'zh-tw': '繁体中文',
+  en: '英语',
+  ja: '日语',
+  ko: '韩语',
+  fr: '法语',
+  de: '德语',
+  es: '西班牙语',
+  pt: '葡萄牙语',
+  ru: '俄语',
+  ar: '阿拉伯语',
+  th: '泰语',
+  vi: '越南语',
+  id: '印尼语',
+  hi: '印地语',
+  it: '意大利语',
+  tr: '土耳其语',
+  ms: '马来语',
+  fil: '菲律宾语'
+}
+
+/** 语言码 → 提示词里的语言名；未收录的原样回退（DeepSeek 是 LLM，认语言码）。 */
+function deepseekLanguage(code, fallback) {
+  const key = String(code || '').trim().toLowerCase()
+  if (!key) return deepseekLanguage(fallback, '')
+  if (key in DEEPSEEK_LANGUAGES) return DEEPSEEK_LANGUAGES[key]
+  return String(code)
+}
+
+function deepseekCredentials(engine, credentials) {
+  const fromAdmin = credentials || {}
+  const apiKey = String(fromAdmin.apiKey || '').trim() || envValue('PIX_DEEPSEEK_API_KEY')
+  // 模型：后台配置优先，其次迁移种下的默认值，最后兜底常量
+  const model = String(fromAdmin.model || (engine && engine.model) || '').trim() || DEEPSEEK_MODEL
+  // 后台可覆盖接口地址（便于自建网关/代理），默认官方端点
+  const endpoint = String((engine && engine.endpoint) || '').trim() || DEEPSEEK_URL
+  return { apiKey, model, endpoint }
+}
+
+function deepseekMessages(payload) {
+  const to = deepseekLanguage(payload.to, 'zh')
+  if (!to) return { ok: false, msg: 'DeepSeek 翻译缺少目标语言' }
+  const from = deepseekLanguage(payload.from, 'auto') || deepseekLanguage(payload.detected, '')
+  const source = from ? `源语言是${from}。` : '源语言未指定，请自行判断。'
+
+  const system = [
+    '你是专业翻译引擎。',
+    `把用户给出的文本翻译成${to}。${source}`,
+    '要求：',
+    '1. 只输出译文本身，不要解释、不要加引号、不要重复原文；',
+    '2. 保留原文的换行、标点风格与占位符（如 {name}、%s、\\n）；',
+    '3. 专有名词、代码、链接、@用户名 原样保留；',
+    '4. 文本已是目标语言时原样返回。'
+  ].join('\n')
+
+  return {
+    ok: true,
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: String(payload.text || '') }
+    ]
+  }
+}
+
+async function deepseekTranslate(engine, payload, options) {
+  const { apiKey, model, endpoint } = deepseekCredentials(engine, options.credentials)
+  if (!apiKey) {
+    return { ok: false, msg: 'DeepSeek 凭据未配置（管理后台填写 API Key，或设置 PIX_DEEPSEEK_API_KEY）' }
+  }
+  const text = String(payload.text || '')
+  if (!text) return { ok: false, msg: '请输入要翻译的文本' }
+
+  const built = deepseekMessages(payload)
+  if (!built.ok) return built
+
+  let response
+  try {
+    response = await options.fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model,
+        messages: built.messages,
+        temperature: 0,        // 翻译要稳定，不要发挥
+        stream: false
+      }),
+      signal: AbortSignal.timeout(options.timeoutMs)
+    })
+  } catch (error) {
+    const reason = (error && error.name === 'TimeoutError')
+      ? '请求超时'
+      : ((error && error.message) || error)
+    return { ok: false, msg: `DeepSeek 请求失败：${reason}` }
+  }
+
+  if (!response.ok) {
+    // 厂商的错误体里通常有可读原因（欠费、key 无效、模型不存在），尽力透出
+    let detail = ''
+    try {
+      const body = await response.json()
+      detail = String((body && body.error && body.error.message) || '').trim()
+    } catch (error) {}
+    return { ok: false, msg: `DeepSeek 返回 HTTP ${response.status}${detail ? '：' + detail : ''}` }
+  }
+
+  let data
+  try {
+    data = await response.json()
+  } catch (error) {
+    return { ok: false, msg: 'DeepSeek 返回体无法解析为 JSON' }
+  }
+
+  const choice = Array.isArray(data && data.choices) ? data.choices[0] : null
+  const translated = String(
+    (choice && choice.message && choice.message.content) || ''
+  ).trim()
+  if (!translated) {
+    return { ok: false, msg: `DeepSeek 未返回译文${data && data.error ? '：' + data.error.message : ''}` }
+  }
+  return { ok: true, text: translated }
+}
+
 // --- 通道注册表 --------------------------------------------------------------
 // 未接入的通道保留 stub：即使有人把 wired 误置为 true，也不会拿到任何"演示译文"。
 
@@ -268,7 +407,14 @@ const providers = {
   deepl: { name: 'DeepL 翻译', translate: notWired('DeepL 翻译'), configured: () => false },
   aws: { name: '亚马逊 AWS 翻译', translate: notWired('亚马逊 AWS 翻译'), configured: () => false },
   gpt: { name: 'GPT 翻译', translate: notWired('GPT 翻译'), configured: () => false },
-  grok: { name: 'Grok 翻译', translate: notWired('Grok 翻译'), configured: () => false }
+  grok: { name: 'Grok 翻译', translate: notWired('Grok 翻译'), configured: () => false },
+  deepseek: {
+    name: 'DeepSeek 翻译',
+    translate: deepseekTranslate,
+    configured: (credentials) => Boolean(
+      String(((credentials || {}).apiKey) || '').trim() || envValue('PIX_DEEPSEEK_API_KEY')
+    )
+  }
 }
 
 /** 供后台/运维查看哪些通道已具备凭据（不代表计费侧已放开）。
