@@ -68,7 +68,7 @@ let apiBase = DEFAULT_API
 // 默认日间（新用户首屏就是日间）；用户手动切到夜间后才记住用夜间。
 // 之所以不放 localStorage：渲染层每次都是新页面，靠 IPC 读主进程更可靠。
 let theme = 'light'
-let lineId = 'cn'
+let lineId = 'overseas'   // 内置首条线路的 id（见 desktop/lines.js）
 let lines = builtinLines.slice()
 let profile = null
 let tabs = []
@@ -257,8 +257,15 @@ function restoreOpenApps(username) {
   sendTabs()
 }
 
+// 已下线的分区线路：服务器上这些节点并未部署，之前五条都指向同一地址，
+// 切换无实际作用、延迟条还会误导用户。这里显式挡掉，避免老的本地配置
+// （config.json 里存过 cn/hk/sg/jp/us）在改版后又被当成"额外线路"合并回来。
+const RETIRED_LINE_IDS = new Set(['cn', 'hk', 'sg', 'jp', 'us'])
+
 function isLegacyLine(item) {
-  return /^线路\d+$/.test(String(item && item.name || '')) || /^line\d+$/.test(String(item && item.id || ''))
+  const id = String(item && item.id || '')
+  if (RETIRED_LINE_IDS.has(id)) return true
+  return /^线路\d+$/.test(String(item && item.name || '')) || /^line\d+$/.test(id)
 }
 
 function normalizeLine(item, index) {
@@ -292,7 +299,8 @@ function mergeLines(remote) {
 }
 
 function currentLine() {
-  return lines.find(l => l.id === lineId) || lines.find(l => l.url === apiBase) || lines[0] || normalizeLine({ id: 'cn', name: '国内线路', url: apiBase, region: '国内' }, 0)
+  return lines.find(l => l.id === lineId) || lines.find(l => l.url === apiBase) || lines[0] ||
+    normalizeLine({ id: 'overseas', name: '海外线路', url: apiBase, region: '海外' }, 0)
 }
 
 // --- 窗口尺寸记忆 -------------------------------------------------------------
@@ -368,13 +376,16 @@ function loadConfig() {
   lines = builtinLines.slice()
   if (cached.length) mergeLines(cached)
   apiBase = safeApiUrl(cfg.apiBase || DEFAULT_API) || safeApiUrl(DEFAULT_API) || ''
-  lineId = isLegacyLine({ id: cfg.lineId }) ? 'cn' : String(cfg.lineId || 'cn')
+  // 默认落到内置首条（现在是"海外线路"）。不能再写死 'cn' —— 它已被列为
+  // 下线的分区线路，写死会指向一个不存在的 id。
+  const fallbackId = (builtinLines[0] && builtinLines[0].id) || 'overseas'
+  lineId = isLegacyLine({ id: cfg.lineId }) ? fallbackId : String(cfg.lineId || fallbackId)
   const matched = lines.find(l => l.id === lineId) || lines.find(l => l.url === apiBase) || lines[0]
   if (matched) {
     lineId = matched.id
     apiBase = matched.url
   } else {
-    lineId = 'cn'
+    lineId = fallbackId
   }
 }
 

@@ -1,9 +1,22 @@
-const defaultUrl = String(process.env.PIX_PUBLIC_URL || 'http://127.0.0.1:8080').replace(/\/+$/, '')
+/**
+ * 客户端内置线路。
+ *
+ * 现在只有一条「海外线路」—— 服务器在海外（128.241.245.172 那台）。
+ * 国内/香港/新加坡/日本/美国这些分区节点**服务器尚未部署**，先不展示：
+ * 五条都指向同一地址时，切换没有任何实际作用，延迟条显示的差异也只是
+ * 同一台机器的网络抖动，会误导用户（实测过这个问题）。
+ *
+ * 以后要加分区，两条路：
+ *   1. 在这里追加条目（改了要重启客户端）；
+ *   2. 用后台的 client_lines 表下发 —— 客户端会合并远程线路，见 main.js 的 mergeLines。
+ *
+ * URL 取 PIX_PUBLIC_URL（生产环境变量）；没设置时回落到本地后端，
+ * 方便在尚未配置生产环境的机器上直接跑开发。
+ */
+const defaultUrl = String(
+  process.env.PIX_PUBLIC_URL || 'http://127.0.0.1:3000'
+).replace(/\/+$/, '')
 
 module.exports = [
-  { id: 'cn', name: '国内线路', url: defaultUrl, region: '国内' },
-  { id: 'hk', name: '香港线路', url: defaultUrl, region: '香港' },
-  { id: 'sg', name: '新加坡线路', url: defaultUrl, region: '新加坡' },
-  { id: 'jp', name: '日本线路', url: defaultUrl, region: '日本' },
-  { id: 'us', name: '美国线路', url: defaultUrl, region: '美国' }
+  { id: 'overseas', name: '海外线路', url: defaultUrl, region: '海外' }
 ]

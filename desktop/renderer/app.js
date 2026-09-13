@@ -324,6 +324,21 @@ function renderTrigger() {
 
 function renderLines() {
   lineMenu.innerHTML = ''
+  // 只有一条线路时不展示选择器：既没有可选项，"自动选择"也没有意义。
+  // 多线路（服务器部署了分区节点）时自动恢复显示，不需要改代码。
+  const single = lineRows.length === 1
+  const dd = lineDd
+  // 连"线路"标签所在的外层 field 一起隐藏，否则会留下一个空标签
+  const field = dd && dd.closest ? dd.closest('.field') : null
+  if (field) field.classList.toggle('hidden', single)
+  else if (dd) dd.classList.toggle('hidden', single)
+  if (single) {
+    // 只有一条就固定用它，跳过测速与"自动选择"逻辑
+    preferAuto = false
+    selectedId = lineRows[0].id
+    renderTrigger()
+    return
+  }
   addLineRow('auto', '自动选择', '', '')
   lineRows.forEach(line => {
     addLineRow(line.id, line.name || '线路', speedText(line), speedClass(line))
