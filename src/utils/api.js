@@ -49,12 +49,17 @@ axios.interceptors.response.use(
   success => success,
   error => {
     const status = error.response && error.response.status
+    // 后端给的 msg 优先于按状态码写死的文案。
+    // 403 至少有两种成因：真的越权（该操作仅限超级管理员）、以及 CSRF 校验失败
+    // （后端会提示"请刷新页面后重试"）。此前 403 一律显示"权限不足，请联系管理员"，
+    // 把后者真正有用的指引吞掉了 —— 用户以为是权限问题，其实刷新页面就好。
+    const serverMsg = error.response && error.response.data && error.response.data.msg
     if (status === 429) {
-      Message.error({ message: '请求过于频繁，请稍后再试' })
+      Message.error({ message: serverMsg || '请求过于频繁，请稍后再试' })
     } else if (status === 504 || status === 404) {
-      Message.error({ message: '服务器连接失败' })
+      Message.error({ message: serverMsg || '服务器连接失败' })
     } else if (status === 403) {
-      Message.error({ message: '权限不足，请联系管理员' })
+      Message.error({ message: serverMsg || '权限不足，请联系管理员' })
     } else if (status === 401) {
       const onAdmin = router.currentRoute.path.indexOf('/admin') === 0
       Message.error({ message: onAdmin ? '超管尚未登录' : '尚未登录，请登录' })

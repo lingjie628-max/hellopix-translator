@@ -1062,9 +1062,15 @@ function productionRouter(context) {
     '/assistant/getAssistantGroup', '/assistant/getAssistantDetails', '/assistant/deleteAssistantDetails',
     '/assistant/deleteAssistantGroup', '/assistant/selectAssistantGroupById', '/assistant/editAssistant',
     '/assistant/editAssistantGroup', '/weixin/weixinPay', '/weixin/checkStatus', '/zfb/alipay',
-    '/admin/accounts', '/admin/fans',
-    '/admin/notices', '/admin/notices/save', '/admin/notices/delete'
+    '/admin/accounts', '/admin/fans'
   ]
+  // 公告没有独立接口：它以 site.notices 存在站点设置里，读写都走
+  // /admin/settings 与 /admin/settings/save（前端 AdminNotices.vue 正是这么调的）。
+  // 这三个遗留路径用准确的说明注册，而不是笼统的"尚未迁移"—— 功能其实早就有，
+  // 只是不在这些路径上，含糊的提示会把排查引向错误方向。
+  ;['/admin/notices', '/admin/notices/save', '/admin/notices/delete'].forEach(path => {
+    router.all(path, stub('admin.notices', '公告没有独立接口：请用 /admin/settings 读取、/admin/settings/save 保存（site.notices）'))
+  })
   unmigrated.forEach(path => router.all(path, stub(path.slice(1), '该兼容模块尚未迁移到 PostgreSQL')))
   router.all(/^\/export2?\//, stub('export', '正式导出任务与对象存储尚未迁移'))
 
