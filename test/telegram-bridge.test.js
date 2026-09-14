@@ -8,6 +8,28 @@ const test = require('node:test')
 const { spawnSync } = require('node:child_process')
 const { BRIDGE_NAME, buildBridge, writeBridge, writeBridges } = require('../standalone/telegram-win/lib/bridge')
 
+// 随包发出的 Windows 诊断脚本必须满足两个容易在编辑中被破坏的条件。
+// 两个都是实测踩过的：$args 是 PowerShell 自动变量；无 BOM 的 UTF-8 会被
+// PowerShell 5.1 按 ANSI 解析，脚本里二十多处中文输出会全变乱码。
+test('诊断.ps1 保持 UTF-8 BOM 且不占用 PowerShell 自动变量', () => {
+  const file = path.join(__dirname, '..', 'standalone', 'telegram-win', '诊断.ps1')
+  const raw = fs.readFileSync(file)
+  assert.equal(
+    raw.subarray(0, 3).toString('hex'),
+    'efbbbf',
+    '诊断.ps1 的 UTF-8 BOM 丢了：PowerShell 5.1 会把中文按 ANSI 解析成乱码。'
+      + '很多编辑器保存时会静默去掉 BOM，改完这个文件请确认前三个字节是 ef bb bf'
+  )
+  const text = raw.toString('utf8').replace(/^\uFEFF/, '')
+  assert.doesNotMatch(
+    text,
+    /\$args\b/,
+    '$args 是 PowerShell 的自动变量，不能拿来存自己的参数（用 $reqArgs）'
+  )
+  assert.match(text, /GetResponseStream/, '要保留 5.1 的响应体读取路径')
+  assert.match(text, /ReadAsStringAsync/, '要保留 7.x 的响应体读取路径')
+})
+
 test('bridge json keeps api, cookies and translation prefs', () => {
   const data = buildBridge({
     apiBase: 'http://192.168.21.136:8080/',

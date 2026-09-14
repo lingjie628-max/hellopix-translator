@@ -1,4 +1,4 @@
-# 诊断.ps1 — Hello Pix Telegram 链路诊断
+﻿# 诊断.ps1 — Hello Pix Telegram 链路诊断
 #
 # 为什么需要它：这条链路上每一段失败都是【静默的】——
 #   Provider 失败就不写译文、不弹错；启动器只在登录层报错；服务端只回状态码。
