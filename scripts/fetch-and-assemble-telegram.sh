@@ -21,11 +21,22 @@ WORK="$(mktemp -d)"
 
 RUN_ID="${1:-}"
 if [ -z "$RUN_ID" ]; then
-  echo ">> 找最近一次成功的运行"
-  RUN_ID="$(gh run list --repo "$REPO" --workflow build-hellopix-telegram \
-    --status success --limit 1 --json databaseId --jq '.[0].databaseId')"
-  if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
-    echo "没有成功的运行。先确认仓库密钥 TDESKTOP_API_ID / TDESKTOP_API_HASH 已配置，"
+  # 不能只看 --status success：一轮运行可以"成功"但没有 artifact ——
+  # 比如测试凭据模式（按设计要求不上传），或者上传守卫因为某种原因没生效。
+  # 直接取最近一次成功运行会挑到这种空轮，然后下载失败。
+  # 所以按时间倒序找第一个"确实带 Telegram-exe 产物"的成功运行。
+  echo ">> 找最近一次带 Telegram-exe 产物的成功运行"
+  for candidate in $(gh run list --repo "$REPO" --workflow build-hellopix-telegram \
+      --status success --limit 10 --json databaseId --jq '.[].databaseId'); do
+    if gh api "repos/$REPO/actions/runs/$candidate/artifacts" \
+        --jq '.artifacts[].name' 2>/dev/null | grep -qx 'Telegram-exe'; then
+      RUN_ID="$candidate"
+      break
+    fi
+    echo "   run $candidate 成功但没有 Telegram-exe 产物，跳过"
+  done
+  if [ -z "$RUN_ID" ]; then
+    echo "没有带产物的成功运行。先确认仓库密钥 TDESKTOP_API_ID / TDESKTOP_API_HASH 已配置，"
     echo "再触发一轮：gh workflow run build-hellopix-telegram --repo $REPO"
     exit 1
   fi
