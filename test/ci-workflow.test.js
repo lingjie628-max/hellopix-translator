@@ -91,14 +91,26 @@ test('凭据门禁必须拦在编译之前，且测试凭据模式不产出 arti
     '缺少凭据门禁：官方测试凭据编出来的包用户一登录就报内部错误'
   )
   has(/exit \/b 1/, '门禁必须真的让步骤失败')
+
+  // 判定结果要写两处：$GITHUB_ENV 给 shell 用，$GITHUB_OUTPUT 给 if 用。
+  // 官方文档只承诺 GITHUB_ENV 的变量"后续步骤能访问"，没明确 if 里的 env 上下文
+  // 能不能看到；押错的代价是编了 2 小时却没有 artifact。所以两条路都留着。
+  has(/echo PIX_CRED_MODE=production>> %GITHUB_ENV%/, '要写 $GITHUB_ENV')
+  has(/echo mode=production>> %GITHUB_OUTPUT%/, '要写 $GITHUB_OUTPUT')
+
   has(
-    /if: env\.PIX_CRED_MODE == 'production'/,
-    'artifact 上传必须限定真凭据模式，否则测试凭据的包会被顺手拿去发给用户'
+    /if: env\.PIX_CRED_MODE == 'production' \|\| steps\.creds\.outputs\.mode == 'production'/,
+    'artifact 上传必须限定真凭据模式，且 env 与 steps.outputs 取或，任一机制生效即可'
   )
   has(
     /name: Fail loudly when no artifact was produced/,
     '测试凭据模式最后要显式报错，避免"绿色的失败"'
   )
+  has(
+    /if: env\.PIX_CRED_MODE != 'production' && steps\.creds\.outputs\.mode != 'production'/,
+    '报错条件要与上传条件严格互补，否则会出现"没上传也不报错"的绿色失败'
+  )
+  has(/id: creds/, '门禁步骤要有 id，步骤输出才有地方挂')
 })
 
 test('缓存守卫：命中就跳过 prepare，且保存条件不能误触发', () => {
