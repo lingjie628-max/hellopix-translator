@@ -158,4 +158,14 @@ test('必须限制并发编译器数，否则多核 runner 会内存耗尽', () 
     '要有调大页面文件的步骤：错误信息明说 "The paging file is too small"，'
       + '这是唯一能直接抬高提交上限的手段'
   )
+  // 四轮失败都停在 qrc_*.cpp —— 构建的最后一阶段、紧挨链接。
+  // 那些文件是 rcc 生成的纯字节数组，却被 ForcedIncludeFiles 强制包含了
+  // stdafx.h（带整个 Qt）。改生成的 vcxproj 让它们不碰 PCH，是这一步唯一
+  // 能大幅降内存的改法。
+  has(
+    /name: Relax memory pressure \(qrc without PCH, Defender off\)/,
+    '要有针对 qrc 禁用 PCH 的步骤（失败点就在那里）'
+  )
+  has(/PrecompiledHeader/, 'qrc 的 PCH 要改成 NotUsing')
+  has(/ForcedIncludeFiles/, 'qrc 的 ForcedIncludeFiles 要移除，否则 PCH 头照样被塞进来')
 })
