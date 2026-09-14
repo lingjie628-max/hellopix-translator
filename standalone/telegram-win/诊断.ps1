@@ -1,4 +1,4 @@
-﻿# 诊断.ps1 — Hello Pix Telegram 链路诊断
+# 诊断.ps1 — Hello Pix Telegram 链路诊断
 #
 # 为什么需要它：这条链路上每一段失败都是【静默的】——
 #   Provider 失败就不写译文、不弹错；启动器只在登录层报错；服务端只回状态码。
@@ -148,9 +148,20 @@ function Invoke-Api {
         $code = 0; $body = $null
         if ($_.Exception.Response) {
             $code = [int]$_.Exception.Response.StatusCode
+            # 取响应体要兼容两版 PowerShell：
+            #   5.1 的 Response 是 HttpWebResponse，用 GetResponseStream()
+            #   7.x 的是 HttpResponseMessage，没有那个方法，要用 .Content.ReadAsStringAsync()
+            # 只写前者的话，在 PS7 下会静默丢掉服务端的 code/msg —— 而这个脚本的价值
+            # 恰恰在于把服务端说了什么原样带出来。
             try {
-                $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
-                $body = $reader.ReadToEnd() | ConvertFrom-Json
+                $resp = $_.Exception.Response
+                if ($resp.PSObject.Methods['GetResponseStream']) {
+                    $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+                    $body = $reader.ReadToEnd() | ConvertFrom-Json
+                } elseif ($resp.Content) {
+                    $text = $resp.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+                    $body = $text | ConvertFrom-Json
+                }
             } catch { }
         }
         return [pscustomobject]@{ Status = $code; Body = $body }
