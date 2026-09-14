@@ -41,6 +41,7 @@ mkdir -p "$APP/resources/app"
 cp "$ROOT/main.js" "$ROOT/preload.js" "$ROOT/package.json" "$ROOT/win-dock.ps1" "$APP/resources/app/"
 cp -R "$ROOT/lib" "$ROOT/renderer" "$APP/resources/app/"
 cp "$ROOT/使用说明.txt" "$APP/"
+cp "$ROOT/诊断.ps1" "$APP/"
 # 这条路径拿的是官方原版 Telegram，气泡不会出译文；而 使用说明.txt 描述的是
 # 魔改版（assemble-from-build.sh 组装的）。这里显式追一句，别让用户拿着
 # 原版包去对照说明里"气泡会显示 [译文]"，又变成一次"没报错但没效果"。

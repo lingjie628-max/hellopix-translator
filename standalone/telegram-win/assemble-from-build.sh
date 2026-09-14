@@ -35,6 +35,7 @@ mkdir -p "$APP/resources/app"
 cp "$ROOT/main.js" "$ROOT/preload.js" "$ROOT/package.json" "$ROOT/win-dock.ps1" "$APP/resources/app/"
 cp -R "$ROOT/lib" "$ROOT/renderer" "$APP/resources/app/"
 cp "$ROOT/使用说明.txt" "$APP/"
+cp "$ROOT/诊断.ps1" "$APP/"
 
 echo ">> 放入魔改 Telegram.exe（云编译产物）"
 mkdir -p "$APP/Telegram"
