@@ -131,3 +131,16 @@ test('三方库缓存路径必须在 repo 的上一级（prepare.py 的 rootDir 
   has(/D:\\ThirdParty/, '缓存必须包含 D:\\ThirdParty')
   has(/LIBS_CACHE_KEY:/, '缓存 key 要集中在一处，换版本时只改一个地方')
 })
+
+test('必须限制并发编译器数，否则多核 runner 会内存耗尽', () => {
+  // run 34848304108 / 34851186939 都死在编译阶段，错误码只有内存类三种、
+  // 没有任何真实编译错误：55× C1060 / 2× C3859 / 2× C1076，C3859 附带
+  // "code 1455: The paging file is too small"（ERROR_COMMITMENT_LIMIT）。
+  // 真因是 CMake 默认按逻辑核数设 /MP，公开仓库给了 4 核就同时跑 4 个 cl.exe，
+  // 而 tdesktop 的 PCH 极大，4 份 PCH + 各自堆撑爆了提交上限。
+  has(
+    /CMAKE_CXX_MP_PROCESSOR_COUNT=2/,
+    'configure 必须限制 /MP 并发数：默认按核数并发会在 4 核 runner 上 OOM，'
+      + '而 OOM 的报错长得像编译错误，很容易被误判'
+  )
+})
