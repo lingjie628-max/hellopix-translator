@@ -133,14 +133,29 @@ test('三方库缓存路径必须在 repo 的上一级（prepare.py 的 rootDir 
 })
 
 test('必须限制并发编译器数，否则多核 runner 会内存耗尽', () => {
-  // run 34848304108 / 34851186939 都死在编译阶段，错误码只有内存类三种、
-  // 没有任何真实编译错误：55× C1060 / 2× C3859 / 2× C1076，C3859 附带
-  // "code 1455: The paging file is too small"（ERROR_COMMITMENT_LIMIT）。
-  // 真因是 CMake 默认按逻辑核数设 /MP，公开仓库给了 4 核就同时跑 4 个 cl.exe，
-  // 而 tdesktop 的 PCH 极大，4 份 PCH + 各自堆撑爆了提交上限。
+  // run 34848304108 / 34851186939 / 34861189904 连续三轮都死在编译阶段，
+  // 错误码只有内存类三种、没有任何真实编译错误：
+  //   C1060 compiler is out of heap space
+  //   C3859 Failed to create virtual memory for PCH
+  //         → system returned code 1455: The paging file is too small
+  //   C1076 compiler limit: internal heap limit reached
+  // 1455 = ERROR_COMMITMENT_LIMIT。
+  //
+  // 关键是**并发层数有两层，会相乘**：
+  //   msbuild 的 /m 不带数字 -> 同时编多个【项目】
+  //   CMake 的 /MP           -> 每个项目内再同时编多个【文件】
+  // 最坏能同时跑 8 个 cl.exe，每个都要映射那份巨大的 PCH。
   has(
-    /CMAKE_CXX_MP_PROCESSOR_COUNT=2/,
-    'configure 必须限制 /MP 并发数：默认按核数并发会在 4 核 runner 上 OOM，'
-      + '而 OOM 的报错长得像编译错误，很容易被误判'
+    /CMAKE_CXX_MP_PROCESSOR_COUNT=1/,
+    'configure 必须把 /MP 压到 1：tdesktop 的 PCH 极大，并发映射会撑爆提交上限'
+  )
+  has(
+    /msbuild Telegram\.slnx[^\n]*\/m:2/,
+    'msbuild 必须用 /m:2 而不是裸 /m —— 裸 /m 会并发多个项目，和 /MP 相乘'
+  )
+  has(
+    /name: Report and enlarge the page file/,
+    '要有调大页面文件的步骤：错误信息明说 "The paging file is too small"，'
+      + '这是唯一能直接抬高提交上限的手段'
   )
 })
