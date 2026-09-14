@@ -1,0 +1,276 @@
+name: build-hellopix-telegram
+
+# 触发方式：仓库页面 Actions → 左侧 build-hellopix-telegram → Run workflow
+#
+# 默认必须先配好仓库密钥 TDESKTOP_API_ID / TDESKTOP_API_HASH（见下方 env 注释）。
+# 只想验证补丁编不编得过时，用 Run workflow 勾上 allow_test_credentials。
+on:
+  workflow_dispatch:
+    inputs:
+      allow_test_credentials:
+        description: '用官方 TEST ONLY 凭据编译（产物登不上真实账号，只做编译验证，不会上传产物）'
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+
+env:
+  # 三方库缓存 key（内容 = D:\Libraries + D:\ThirdParty）。
+  # 2026-09-12 run 34649615155 已经把 34/34 个依赖全部编完并成功保存成这个 key，
+  # 所以这里把 key 钉死在那一份上。下次运行 restore 精确命中 ->
+  # cache-hit == 'true' -> 跳过 prepare 和 save，把整个 6 小时配额留给 msbuild。
+  #
+  # 历史教训（别再踩）：
+  #   1) 之前 restore 只按前缀匹配，命中了也算 cache-hit == 'false'，
+  #      于是每轮都把 4h08m 的 prepare 从头再跑一遍。等轮到 msbuild 只剩 1h32m，
+  #      被 6 小时硬上限砍掉 -> run 34649615155 就是这么废掉的。
+  #      2026-09-13 修好后实测：restore 5 分钟，prepare/save 均正确跳过。
+  #   2) 缓存 save 只在 prepare 真跑过的时候做。精确命中还去 save，
+  #      白等 12 分钟压缩上传，还会把仓库缓存配额挤爆（免费额度 10GB）。
+  #   3) 2026-09-13 清掉了一份永远取不到的废缓存 tdesktop-libs-v7.2.8-Windows，
+  #      当时两份 6GB 合计 13GB 已超配额，随时会把好缓存挤掉。
+  #
+  # 需要重编三方库时（换 tdesktop 版本 / 换工具集 / 缓存被逐出）改这里的名字即可；
+  # 缓存被逐出的情况下也会自动退化：精确 miss -> 前缀 miss -> 全量 prepare -> 用这个名字重存。
+  LIBS_CACHE_KEY: tdesktop-libs-v7.2.8-v143-34649615155
+
+  # 真实 Telegram api_id / api_hash（my.telegram.org 申请）走仓库 Secrets。
+  #
+  # 为什么是硬门禁而不是"有就用、没有就兜底"：
+  # tdesktop 的 Telegram/cmake/telegram_options.cmake 里写着
+  #     if (TDESKTOP_API_TEST)
+  #         set(TDESKTOP_API_ID 17349)
+  #         set(TDESKTOP_API_HASH 344583e45741c457fe1862106095a5eb)
+  # 并在同一个文件的 FATAL_ERROR 里明说：
+  #     "Your users will start getting internal server errors on login
+  #      if you deploy an app using those 'api_id' and 'api_hash'."
+  # 用测试凭据编出来的 Telegram.exe，编译和启动都正常，但一登录就报内部错误 ——
+  # 从外面看和"编译失败"没有任何区别，最容易白白再烧一周。
+  # 所以这里选择在 configure 阶段直接失败，并且永不上传测试凭据产物。
+  PIX_TG_API_ID: ${{ secrets.TDESKTOP_API_ID }}
+  PIX_TG_API_HASH: ${{ secrets.TDESKTOP_API_HASH }}
+  PIX_ALLOW_TEST: ${{ github.event.inputs.allow_test_credentials }}
+
+jobs:
+  build:
+    runs-on: windows-2025
+    # GitHub 托管 runner 单个 job 硬上限 6 小时(360 分钟), 这里留 5 分钟余量。
+    # 时间预算(缓存命中时)：checkout+patch ~2min, restore ~5min, configure ~1min,
+    # 剩下 ~5h45m 全给 msbuild —— 实测 msbuild Release 需要 ~2.5h(92 分钟编完
+    # 989/1387 个 SourceFiles 单元, 再加其余目标和链接), 余量充足。
+    timeout-minutes: 355
+    defaults:
+      run:
+        shell: cmd
+    steps:
+      - name: Checkout hellopix patch kit
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # 凭据门禁放最前面：没配密钥就在 10 秒内失败，不浪费 5 分钟的缓存 restore
+      # 和 1.5 分钟的 clone。判定结果写进 $GITHUB_ENV，后面两步直接用。
+      # cmd 的 set 放进 if(...) 括号块会有延迟展开的坑，这里全部用单行 if + goto。
+      - name: Check api credentials
+        run: |
+          set "APIID=%PIX_TG_API_ID%"
+          set "APIHASH=%PIX_TG_API_HASH%"
+          if not "%APIID%"=="" if not "%APIHASH%"=="" goto :realcreds
+          if "%PIX_ALLOW_TEST%"=="true" goto :testcreds
+          echo ##[error] 仓库密钥 TDESKTOP_API_ID / TDESKTOP_API_HASH 没有配置。官方测试凭据(17349)编出来的 Telegram.exe 用户一登录就报内部错误，所以这里直接拦下。配置方式（值不会进日志）：gh secret set TDESKTOP_API_ID --repo %GITHUB_REPOSITORY% 与 gh secret set TDESKTOP_API_HASH --repo %GITHUB_REPOSITORY%
+          exit /b 1
+          :testcreds
+          echo ##[warning] 本次用官方 TEST ONLY 凭据(17349)编译，仅供验证补丁能否编过；产物不会上传，最后一步会显式报错。
+          echo PIX_API_ID=17349>> %GITHUB_ENV%
+          echo PIX_API_HASH=344583e45741c457fe1862106095a5eb>> %GITHUB_ENV%
+          echo PIX_CRED_MODE=test>> %GITHUB_ENV%
+          goto :done
+          :realcreds
+          echo 凭据检查通过：使用仓库密钥里的真实 api_id / api_hash。
+          echo PIX_API_ID=%APIID%>> %GITHUB_ENV%
+          echo PIX_API_HASH=%APIHASH%>> %GITHUB_ENV%
+          echo PIX_CRED_MODE=production>> %GITHUB_ENV%
+          :done
+
+      # 工作目录在 D:（runner 磁盘大），clone 官方 tdesktop 到 D:\tdesktop
+      # 每一行都要显式判 errorlevel：cmd 的退出码只取整段脚本最后一条命令，
+      # 之前 checkout 一个不存在的 commit 失败后被 submodule update 的成功码吞掉，
+      # 结果一直在编 dev 分支快照。apply.py 的 [pin] 会二次把关，
+      # 但这里也不许再静默。
+      #
+      # 注意 D:\tdesktop 不在缓存里，每轮都要重新 clone（~1.5min）。
+      # 三方库在 repo 的上一级：prepare.py 里 rootDir = D:\,
+      # 所以 libsDir = D:\Libraries\win64、thirdPartyDir = D:\ThirdParty，
+      # 与下面缓存的两条路径一致。
+      - name: Clone tdesktop (pinned tag v7.2.8)
+        run: |
+          git clone --recursive https://github.com/telegramdesktop/tdesktop.git D:\tdesktop
+          if errorlevel 1 exit /b 1
+          cd D:\tdesktop
+          git checkout -f refs/tags/v7.2.8
+          if errorlevel 1 exit /b 1
+          git submodule update --init --recursive
+          if errorlevel 1 exit /b 1
+
+      - name: Apply Hello Pix patch
+        env:
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: "1"
+        run: |
+          cd %GITHUB_WORKSPACE%
+          python tdesktop-fork\apply.py D:\tdesktop
+
+      # 精确命中 LIBS_CACHE_KEY 时 cache-hit == 'true'。
+      # 前缀兜底保留：万一主 key 被逐出，还能退化到任意一份 v143 的旧缓存，
+      # 由 prepare 自己按 cache_keys 补齐缺的那几个库（不会全量重编）。
+      - name: Restore third-party libraries
+        id: libs-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            D:\Libraries
+            D:\ThirdParty
+          key: ${{ env.LIBS_CACHE_KEY }}
+          restore-keys: |
+            tdesktop-libs-v7.2.8-v143-
+
+      # tdesktop prepare/configure/build 都需要 VS x64 环境；每步先初始化 vcvars。
+      # 必须带 -vcvars_ver=14.44: 官方 docs/building-win.md 明确要求 —— VS2026
+      # 默认的 v145 不支持 Win7, 而 CMake 最终构建走的是 14.44(v143)。若 prepare
+      # 用默认 v145 编 Qt/libjxl/tg_angle, 链接时因 STL 实现差异报 11 个
+      # LNK2001/LNK2019: unresolved external symbol __std_rotate / __std_min_element_*
+      # (2026-09-11 run 34603406709 实测)。
+      #
+      # prepare.py 的每个 stage 都会先查 <dir>\cache_keys\<name>：
+      # 目录在 + key 文件内容一致 -> 直接 SKIPPING；都不是 -> 直接重编。
+      # 但**唯独 'Stale'（key 文件在、内容不一致）这一种会走交互式分支**：
+      #     print('(r)ebuild, rebuild (a)ll, (s)kip, (p)rint, (q)uit?: ')
+      #     while True:
+      #         ch = 'r' if rebuildStale else getch()   # ← 阻塞等键盘
+      # CI 上没有 stdin，于是一挂就是到步骤超时，日志里什么都看不到。
+      #
+      # 2026-09-13 run 34791050283 实测：挂了 37 分钟没有任何输出。
+      # 之所以一直没暴露，是因为之前每次缓存命中 prepare 都被整步跳过，
+      # 那是第一次让它在热缓存下真正跑起来。
+      #
+      # 传 `silent` 是 prepare.py 自己支持的非交互模式（win.bat 会把参数透传）：
+      #     elif arg == 'silent': rebuildStale = True
+      # 之后 Stale 的 stage 直接重建，不再问人。**必须带这个参数**。
+      - name: Prepare third-party libraries (skipped on exact cache hit)
+        if: steps.libs-cache.outputs.cache-hit != 'true'
+        run: |
+          call "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath > vsdir.tmp
+          set /p VSDIR=<vsdir.tmp
+          call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.44
+          cd D:\tdesktop
+          call D:\tdesktop\Telegram\build\prepare\win.bat silent
+        timeout-minutes: 300
+
+      # 只有 prepare 真跑过才需要重存。条件用 cache-hit == 'false'（而不是 != 'true'）：
+      # restore 步骤被跳过时这个输出是空串，用 != 'true' 会让 always() 把保存也拉起来，
+      # 在 D:\Libraries 根本不存在的情况下白试一次并报 "Cache save failed" 警告
+      # （2026-09-13 run 34775428376 实测）。
+      #   - cache-hit == 'false'（前缀兜底命中或缺缓存）-> 保存，下次精确命中
+      #   - cache-hit == 'true' -> 跳过，省 12 分钟压缩上传和配额
+      #   - 空串（restore 没跑，比如凭据门禁提前失败）-> 跳过
+      # key 已存在时保存会报 already exists，由 continue-on-error 吞掉，不影响构建。
+      - name: Save third-party libraries (only when prepare ran)
+        if: always() && steps.libs-cache.outputs.cache-hit == 'false'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            D:\Libraries
+            D:\ThirdParty
+          key: ${{ env.LIBS_CACHE_KEY }}
+
+      # 凭据是上一步「Check api credentials」校验过的，这里直接用。
+      - name: Configure CMake
+        run: |
+          call "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath > vsdir.tmp
+          set /p VSDIR=<vsdir.tmp
+          call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.44
+          cd D:\tdesktop\Telegram
+          call configure.bat x64 -D TDESKTOP_API_ID=%PIX_API_ID% -D TDESKTOP_API_HASH=%PIX_API_HASH%
+        timeout-minutes: 60
+
+      # msbuild 是整个流程里唯一没有缓存兜底、也最耗时的一步，超时给足。
+      #
+      # 实测推算（run 34649615155 的日志按分钟重算）：
+      #   92 分钟编了 1009 个编译单元，其中 SourceFiles 511/1376、子模块/ThirdParty 478。
+      #   稳态速率约 10 个/分钟，剩 865 个 SourceFiles -> 还要 ~86 分钟，
+      #   加链接总计约 185~215 分钟。
+      #
+      # 所以这里必须是 330 而不是 210：210 盖得住估算的低端、盖不住高端，
+      # 一旦超时就是白烧 3 小时 + 约 700 计费分钟（Windows runner 按 2 倍计费）。
+      # 330 让作业级的 355 分钟成为唯一约束，而 355 已经是 6 小时平台硬限下留 5 分钟余量的上限。
+      #
+      # 上一版写 210 是因为把分母算错了：误以为 989/1387=71% 已完成，
+      # 实际那 989 里有 478 个是子模块的，SourceFiles 只完成了 511/1376=37%。
+      # 2026-09-13 在 run 34789706874 跑起来 10 分钟后发现并按上述修正，取消重跑 ——
+      # 那时重跑只损失 10 分钟，赌输则损失 3 小时。
+      #
+      # 【为什么输出重定向到文件，不再直接打给 runner】
+      # run 34793229857 在 02:51 挂了，不是编译错，是 runner 自己崩了：
+      #     X Stack overflow.
+      #        at GitHub.DistributedTask.Logging.SecretMasker.MaskSecrets(System.String)
+      #        at GitHub.Runner.Worker.ExecutionContext.Write(...)
+      # runner 每写一行日志都要过一遍密钥脱敏，而 /v:m 编 2600 多个源文件会产出
+      # 几万行、单行还动辄上千字符（cl.exe 命令行）。这些全都喂给脱敏器，
+      # 它一栈溢出，整个作业连同已经跑了 2h15m 的成果一起没了。
+      # 而且崩在 runner 里，日志都取不回来（这次重试三次都下载失败），等于白烧。
+      #
+      # 改成：msbuild 输出写进文件，只回显有界摘要（成功 40 行 / 失败 120 行）。
+      # 脱敏器再也看不到那几万行；失败时该看到的尾部信息一条不少，
+      # 并且把完整日志作为 artifact 传上来，省得为了看一行报错再烧三小时。
+      - name: Build Telegram.exe (Release x64)
+        run: |
+          call "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath > vsdir.tmp
+          set /p VSDIR=<vsdir.tmp
+          call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.44
+          cd D:\tdesktop\out
+          msbuild Telegram.slnx /p:Configuration=Release /p:Platform=x64 /m /v:m /nologo > "%GITHUB_WORKSPACE%\msbuild.log" 2>&1
+          set "MSB=%ERRORLEVEL%"
+          echo msbuild exit code: %MSB%
+          powershell -NoProfile -Command "Write-Host ('msbuild log lines: ' + (Get-Content -LiteralPath '%GITHUB_WORKSPACE%\msbuild.log' | Measure-Object -Line).Lines)"
+          if not "%MSB%"=="0" goto :buildfailed
+          powershell -NoProfile -Command "Get-Content -LiteralPath '%GITHUB_WORKSPACE%\msbuild.log' -Tail 40"
+          echo build ok
+          exit /b 0
+          :buildfailed
+          echo ##[error] msbuild 失败（退出码 %MSB%），下面是日志尾部，完整日志见 artifact msbuild-log
+          powershell -NoProfile -Command "Get-Content -LiteralPath '%GITHUB_WORKSPACE%\msbuild.log' -Tail 120"
+          exit /b %MSB%
+        timeout-minutes: 330
+
+      # 失败时把完整 msbuild 日志带出来。否则 runner 一崩、日志取不回，
+      # 就只剩"再烧三小时复现一次"这一条路。
+      - name: Upload msbuild log when the build failed
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: msbuild-log
+          path: ${{ github.workspace }}\msbuild.log
+          if-no-files-found: ignore
+
+      # 只有真凭据编出来的包才上传。测试凭据的产物不落 artifact，
+      # 免得后面有人顺手拿它去组装安装包发给用户。
+      - name: Upload Telegram.exe artifact
+        if: env.PIX_CRED_MODE == 'production'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Telegram-exe
+          path: D:\tdesktop\out\Release\Telegram.exe
+          if-no-files-found: error
+
+      # 测试凭据编译时上传步骤会被跳过，工作流看起来"成功"但其实没有产物。
+      # 这里显式变红，避免出现"绿色的失败"。
+      - name: Fail loudly when no artifact was produced
+        if: env.PIX_CRED_MODE != 'production'
+        run: |
+          echo ##[error] 本次用官方 TEST ONLY 凭据编译，产物登不上真实账号，因此没有上传。要拿到可发布的 Telegram.exe，请先配置仓库密钥 TDESKTOP_API_ID / TDESKTOP_API_HASH。
+          exit /b 1
