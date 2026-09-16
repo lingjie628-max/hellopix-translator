@@ -487,6 +487,7 @@ function productionRouter(context) {
       pass: smtp.pass ? '********' : '',
       from: smtp.from || '',
       fromName: smtp.fromName || 'Hello Pix',
+      alertTo: (settings.mail && settings.mail.alertTo) || '',
       configured: ready,
       missing: (await accounts.mailer.config()).missing
     })
@@ -514,6 +515,13 @@ function productionRouter(context) {
         `INSERT INTO app_settings(key,value,description) VALUES($1,$2::jsonb,$3)
          ON CONFLICT (key) DO UPDATE SET value=$2::jsonb`,
         ['mail.smtp', JSON.stringify(smtp), 'SMTP 服务器配置'], client
+      )
+      // 告警收件地址单独存：它可以在 SMTP 还没配好之前就先填上，
+      // 而巡检脚本正是靠它把"服务挂了"这类消息发出去
+      await repo.query(
+        `INSERT INTO app_settings(key,value,description) VALUES($1,$2::jsonb,$3)
+         ON CONFLICT (key) DO UPDATE SET value=$2::jsonb`,
+        ['mail.alertTo', JSON.stringify(String(data.alertTo || '').trim()), '运维告警收件地址'], client
       )
       await repo.audit(client, req.pixAdmin, '修改邮件服务配置',
         smtp.host + ' / ' + smtp.from, req.ip, { type: 'settings' })

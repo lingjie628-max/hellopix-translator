@@ -40,6 +40,13 @@
             否则邮件会进垃圾箱甚至被拒收
           </div>
         </el-form-item>
+        <el-form-item label="告警收件地址">
+          <el-input v-model="form.alertTo" placeholder="ops@yourdomain.com" style="width:280px"></el-input>
+          <div class="hint">
+            服务异常、备份失败、磁盘告急会发到这里。**不填就没有告警** ——
+            出问题时只能等用户投诉才知道
+          </div>
+        </el-form-item>
         <el-form-item label="发件人名称">
           <el-input v-model="form.fromName" placeholder="Hello Pix" style="width:240px"></el-input>
         </el-form-item>
@@ -68,7 +75,7 @@ export default {
   name: 'AdminMail',
   data() {
     return {
-      form: { host: '', port: 465, secure: true, user: '', pass: '', from: '', fromName: 'Hello Pix' },
+      form: { host: '', port: 465, secure: true, user: '', pass: '', from: '', fromName: 'Hello Pix', alertTo: '' },
       configured: false,
       missing: [],
       saving: false,
