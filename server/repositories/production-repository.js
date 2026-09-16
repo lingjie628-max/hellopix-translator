@@ -22,6 +22,20 @@ function camel(key) {
   return key.replace(/_([a-z])/g, (_match, letter) => letter.toUpperCase())
 }
 
+const totpSecret = require('../lib/totp-secret')
+
+/**
+ * 管理员读取时把 TOTP 密钥解出来给上层用。
+ *
+ * 解密放在仓储层而不是服务层：服务层只关心"验码"，
+ * 不该知道密钥是密文还是明文存的 —— 那是存储细节。
+ */
+function decryptAdminTotp(admin) {
+  if (!admin) return admin
+  admin.totpSecret = totpSecret.decryptTotpSecret(admin.totpSecret)
+  return admin
+}
+
 function mapRow(row) {
   if (!row) return null
   return Object.keys(row).reduce((out, key) => {
@@ -96,11 +110,12 @@ class ProductionRepository {
       'SELECT * FROM admins WHERE lower(username)=lower($1) AND status=1 LIMIT 1',
       [username]
     )
-    return mapRow(result.rows[0])
+    return decryptAdminTotp(mapRow(result.rows[0]))
   }
 
   async adminById(id) {
-    return mapRow((await this.query('SELECT * FROM admins WHERE id=$1 AND status=1', [id])).rows[0])
+    return decryptAdminTotp(mapRow((await this.query(
+      'SELECT * FROM admins WHERE id=$1 AND status=1', [id])).rows[0]))
   }
 
   /* ---------------------------------------------------------------- 超管两步验证 */
@@ -109,7 +124,7 @@ class ProductionRepository {
   async setAdminTotpSecret(adminId, secret) {
     await this.query(
       'UPDATE admins SET totp_secret=$2,updated_at=NOW() WHERE id=$1',
-      [adminId, secret]
+      [adminId, totpSecret.encryptTotpSecret(secret)]
     )
   }
 
@@ -124,7 +139,7 @@ class ProductionRepository {
       await client.query(
         `UPDATE admins SET totp_secret=$2,totp_enabled=true,totp_confirmed_at=NOW(),updated_at=NOW()
          WHERE id=$1`,
-        [adminId, secret]
+        [adminId, totpSecret.encryptTotpSecret(secret)]
       )
       await client.query('DELETE FROM admin_recovery_codes WHERE admin_id=$1', [adminId])
       for (const hash of codeHashes) {

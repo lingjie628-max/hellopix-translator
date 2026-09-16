@@ -139,3 +139,53 @@ test('常量与文档一致', () => {
   assert.equal(SEND_INTERVAL_SECONDS, 60, '60 秒间隔')
   assert.equal(MAX_ATTEMPTS, 5, '5 次尝试上限')
 })
+
+// ---------------------------------------------------------------------------
+// TOTP 密钥加密（修复明文存储）
+// ---------------------------------------------------------------------------
+
+// 加密测试需要凭据密钥。这里自己设一个（64 位十六进制 = 32 字节），
+// 与身份测试设 PIX_IDENTITY_KEY 同一个做法 —— 测试不该依赖外部环境。
+process.env.PIX_CREDENTIAL_KEY =
+  process.env.PIX_CREDENTIAL_KEY || 'a'.repeat(64)
+
+const totpSecret = require('../server/lib/totp-secret')
+
+test('TOTP 密钥必须加密后落盘，且能原样解回', () => {
+  const plain = 'JBSWY3DPEHPK3PXP'
+  const stored = totpSecret.encryptTotpSecret(plain)
+  assert.ok(stored.startsWith('enc:'), '必须带 enc: 前缀，读取时据此判断格式')
+  assert.doesNotMatch(stored, /JBSWY3DPEHPK3PXP/, '密文里不得残留明文')
+  assert.equal(totpSecret.decryptTotpSecret(stored), plain, '必须能解回原值')
+})
+
+test('每次加密结果不同（随机 IV）', () => {
+  const a = totpSecret.encryptTotpSecret('JBSWY3DPEHPK3PXP')
+  const b = totpSecret.encryptTotpSecret('JBSWY3DPEHPK3PXP')
+  assert.notEqual(a, b, '相同明文两次加密必须不同 —— 否则相同密钥可被识别')
+})
+
+test('兼容存量明文：否则现有管理员会被锁在门外', () => {
+  // 2FA 锁死无法自助恢复，所以迁移完成前必须能读旧的明文
+  assert.equal(totpSecret.decryptTotpSecret('JBSWY3DPEHPK3PXP'), 'JBSWY3DPEHPK3PXP')
+  assert.equal(totpSecret.isPlaintextSecret('JBSWY3DPEHPK3PXP'), true)
+  assert.equal(totpSecret.isPlaintextSecret('enc:abc'), false)
+})
+
+test('解密失败一律返回空串，不抛错 —— 2FA 读取失败不该让登录崩掉', () => {
+  assert.equal(totpSecret.decryptTotpSecret('enc:这不是合法密文'), '')
+  assert.equal(totpSecret.decryptTotpSecret(''), '')
+  assert.equal(totpSecret.decryptTotpSecret(null), '')
+  assert.equal(totpSecret.decryptTotpSecret('乱码不是base32'), '')
+})
+
+test('未配置凭据密钥时拒绝保存，而不是退回明文', () => {
+  const saved = process.env.PIX_CREDENTIAL_KEY
+  delete process.env.PIX_CREDENTIAL_KEY
+  try {
+    assert.throws(() => totpSecret.encryptTotpSecret('JBSWY3DPEHPK3PXP'),
+      /PIX_CREDENTIAL_KEY/, '缺密钥时必须报错，绝不能明文落库')
+  } finally {
+    if (saved !== undefined) process.env.PIX_CREDENTIAL_KEY = saved
+  }
+})

@@ -121,7 +121,21 @@ class AdminTotpService {
     const looksLikeRecovery = /[A-Za-z-]/.test(normalized)
 
     if (!looksLikeRecovery) {
-      const result = totpLib.verify(admin.totpSecret, normalized)
+      // verify 在密钥为空时会**抛错**（"base32 内容为空"），
+      // 而这恰好发生在「密钥解密失败或数据损坏」时 —— 那是最不该崩的场景：
+      // 管理员会看到一个 500 而不是"验证码不正确"，只能靠恢复码自救。
+      // 这里降级成一次普通的验证失败，让恢复码那条路始终是通的。
+      let result
+      try {
+        result = totpLib.verify(admin.totpSecret, normalized)
+      } catch (error) {
+        await this.repository.recordAdminTotpEvent(admin.id, 'verify_failed',
+          '密钥不可用（解密失败或未绑定）', ip)
+        const { remaining } = await this.returnTicket(ticket, payload)
+        throw new ApiError(401,
+          `两步验证暂不可用（密钥异常），请改用恢复码登录（剩余 ${remaining} 次机会）`,
+          'TOTP_SECRET_UNAVAILABLE')
+      }
       if (result.ok && await this.consumeCounter(admin.id, result.counter)) {
         return { admin, usedRecovery: false }
       }
