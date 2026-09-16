@@ -3,7 +3,6 @@ exports.up = pgm => {
     INSERT INTO engines
       (id, name, provider, tier, enabled, wired, cost_per_million, model, note)
     VALUES
-      ('baidu', '百度翻译', '百度', 'basic', true, false, 49, NULL, '凭据未配置，默认不接通厂商'),
       ('niutrans', '小牛翻译', '小牛', 'basic', true, false, 50, NULL, '凭据未配置，默认不接通厂商'),
       ('google', '谷歌翻译', 'Google', 'advanced', true, false, 134, NULL, '凭据未配置，默认不接通厂商'),
       ('deepl', 'DeepL 翻译', 'DeepL', 'pro', true, false, 168, NULL, '凭据未配置，默认不接通厂商'),
@@ -41,10 +40,10 @@ exports.up = pgm => {
     SELECT p.id, mapping.engine_id
     FROM (
       VALUES
-        ('basic', 'baidu'), ('basic', 'niutrans'),
-        ('advanced', 'baidu'), ('advanced', 'niutrans'),
+        ('basic', 'niutrans'),
+        ('advanced', 'niutrans'),
         ('advanced', 'google'),
-        ('pro', 'baidu'), ('pro', 'niutrans'),
+        ('pro', 'niutrans'),
         ('pro', 'google'), ('pro', 'deepl'), ('pro', 'aws')
     ) AS mapping(package_code, engine_id)
     JOIN packages p ON p.code = mapping.package_code;
@@ -83,6 +82,6 @@ exports.down = pgm => {
     WHERE package_id IN (SELECT id FROM packages WHERE code IN ('basic', 'advanced', 'pro'));
     DELETE FROM packages WHERE code IN ('basic', 'advanced', 'pro');
     DELETE FROM engines
-    WHERE id IN ('baidu', 'niutrans', 'google', 'deepl', 'aws', 'gpt', 'grok');
+    WHERE id IN ('niutrans', 'google', 'deepl', 'aws', 'gpt', 'grok');
   `)
 }

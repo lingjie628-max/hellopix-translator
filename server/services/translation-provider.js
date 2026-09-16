@@ -19,6 +19,11 @@
 
 const crypto = require('node:crypto')
 
+const {
+  gptAdapter, grokAdapter, deeplAdapter, papagoAdapter, niutransAdapter
+} = require('./translation-adapters')
+const { awsAdapter } = require('./translation-adapters-aws')
+
 const DEFAULT_TIMEOUT_MS = 8000
 
 function detectLang(text) {
@@ -465,9 +470,6 @@ async function deepseekTranslate(engine, payload, options) {
 // 未接入的通道保留 stub：即使有人把 wired 误置为 true，也不会拿到任何"演示译文"。
 
 const providers = {
-  papago: { name: 'Papago 翻译', translate: notWired('Papago 翻译'), configured: () => false },
-  baidu: { name: '百度翻译', translate: notWired('百度翻译'), configured: () => false },
-  niutrans: { name: '小牛翻译', translate: notWired('小牛翻译'), configured: () => false },
   // 谷歌只保留一条通道（原「稳定 / 极速」两条已合并）。
   // 实现走的是公共端点 —— 那是唯一真实可用的实现：原「谷歌稳定」（官方付费 API）
   // 一直是个 notWired 空壳，从未接过线，合并时直接去掉，不留假通道。
@@ -490,10 +492,12 @@ const providers = {
       String(((credentials || {}).apiKey) || '').trim() || envValue('PIX_GEMINI_API_KEY')
     )
   },
-  deepl: { name: 'DeepL 翻译', translate: notWired('DeepL 翻译'), configured: () => false },
-  aws: { name: '亚马逊 AWS 翻译', translate: notWired('亚马逊 AWS 翻译'), configured: () => false },
-  gpt: { name: 'GPT 翻译', translate: notWired('GPT 翻译'), configured: () => false },
-  grok: { name: 'Grok 翻译', translate: notWired('Grok 翻译'), configured: () => false },
+  deepl: deeplAdapter,
+  gpt: gptAdapter,
+  grok: grokAdapter,
+  papago: papagoAdapter,
+  niutrans: niutransAdapter,
+  aws: awsAdapter,
   deepseek: {
     name: 'DeepSeek 翻译',
     translate: deepseekTranslate,

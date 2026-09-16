@@ -85,27 +85,51 @@ test('unknown and disabled channels are rejected', async () => {
   assert.match(disabled.msg, /已关闭/)
 })
 
-test('unwired channels stay fail-closed even if wired is mistakenly true', async () => {
-  const result = await provider.translate(
-    { id: 'papago', name: 'Papago 翻译', enabled: true, wired: true },
-    payload,
-    {}
-  )
-  assert.equal(result.ok, false)
-  assert.match(result.msg, /尚未接入/)
+// 这条原来的语义是「未实现的通道即使被误标 wired=true 也必须失败」。
+// 现在 9 个通道**全部实现了**，没有「未实现」的通道可测，
+// 所以改成更根本的一条：**没有凭据时，即使 wired=true 也必须失败**。
+// 这才是 fail-closed 的真正含义 —— 标了接通不等于真能调通。
+test('没有凭据时即使 wired=true 也必须失败（fail-closed）', async () => {
+  for (const id of Object.keys(provider.providers)) {
+    const result = await provider.translate(
+      { id, name: provider.providers[id].name, enabled: true, wired: true },
+      payload,
+      {}   // 刻意不传 credentials
+    )
+    assert.equal(result.ok, false, `${id} 在无凭据时不该成功`)
+    assert.ok(result.msg && result.msg.length > 0, `${id} 失败时必须有可读原因`)
+  }
+})
+
+test('每个通道都必须是真实现，不能留着 notWired 占位', () => {
+  // 占位通道的表现是 configured() 恒为 false —— 填了 key 也用不了，
+  // 但界面上看起来「有这个选项」。这正是之前百度的问题。
+  for (const [id, p] of Object.entries(provider.providers)) {
+    assert.equal(typeof p.translate, 'function', `${id} 缺 translate`)
+    assert.equal(typeof p.configured, 'function', `${id} 缺 configured`)
+    // 传一个假凭据进去，真实现会认，占位会一律返回 false
+    assert.equal(p.configured({ apiKey: 'x', secret: 'y' }), true,
+      `${id} 收到凭据后仍判定未配置 —— 很可能还是 notWired 占位`)
+  }
 })
 
 test('every engine seeded in migrations has an adapter entry', () => {
   const dir = path.join(__dirname, '../migrations')
   const seeded = new Set()
   for (const file of fs.readdirSync(dir).filter(name => name.endsWith('.js'))) {
-    const sql = fs.readFileSync(path.join(dir, file), 'utf8')
+    const raw = fs.readFileSync(path.join(dir, file), 'utf8')
+    // **只扫 exports.up**：只有 up 会真正往库里种数据。
+    // 回滚函数里出现的通道（例如 018 的 down 会把百度放回去）
+    // 不该被当成「已种下的通道」，否则删掉一个通道就会让这个测试永久失败。
+    const upAt = raw.indexOf('exports.up')
+    const downAt = raw.indexOf('exports.down')
+    const sql = upAt < 0 ? '' : raw.slice(upAt, downAt > upAt ? downAt : raw.length)
     // 形如 ('papago', 'Papago 翻译', ...) 的 engines 插入行
     for (const match of sql.matchAll(/\(\s*'([a-z0-9_-]+)',\s*'[^']*',\s*'[^']*',\s*'(?:basic|advanced|pro)'/g)) {
       seeded.add(match[1])
     }
   }
-  assert.ok(seeded.size >= 10, `解析到的通道数偏少(${seeded.size})，迁移写法可能变了`)
+  assert.ok(seeded.size >= 9, `解析到的通道数偏少(${seeded.size})，迁移写法可能变了`)
   const missing = [...seeded].filter(id => !provider.providers[id])
   assert.deepEqual(missing, [], `这些通道在数据库里有、适配层没有: ${missing.join(', ')}`)
 })
