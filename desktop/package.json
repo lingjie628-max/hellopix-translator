@@ -1,28 +1,120 @@
 {
   "name": "hello-pix-desktop",
   "productName": "Hello Pix",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Hello Pix 桌面客户端",
+  "author": "Hello Pix",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "pack:mac": "electron-builder --mac --publish never",
+    "pack:win": "electron-builder --win --publish never",
+    "pack:all": "electron-builder --mac --win --publish never",
+    "pack:dir": "electron-builder --dir --publish never"
   },
   "devDependencies": {
-    "electron": "^33.2.1"
+    "electron": "^33.2.1",
+    "electron-builder": "^26.15.3"
   },
   "build": {
     "appId": "com.hellopix.desktop",
     "productName": "Hello Pix",
+    "copyright": "Copyright © 2026 Hello Pix",
+    "extraMetadata": {
+      "pixPublicUrl": "https://pixfanyi.com"
+    },
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "guest-inject.js",
+      "lines.js",
+      "api-default.js",
+      "platforms.js",
+      "security-policy.js",
+      "proxy-presets.js",
+      "package.json",
+      "renderer/**/*",
+      "!renderer/*.mp4",
+      "!renderer/*.m4v",
+      "!renderer/icon.iconset/**",
+      "!**/.DS_Store",
+      "!**/.stage/**",
+      "!**/.cache/**"
+    ],
     "mac": {
       "icon": "build/icon.icns",
-      "category": "public.app-category.business"
+      "category": "public.app-category.business",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "darkModeSupport": true,
+      "identity": null
+    },
+    "dmg": {
+      "title": "Hello Pix ${version}",
+      "contents": [
+        {
+          "x": 140,
+          "y": 200,
+          "type": "file"
+        },
+        {
+          "x": 400,
+          "y": 200,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
     },
     "win": {
-      "icon": "build/icon.png"
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Hello Pix",
+      "artifactName": "HelloPix-Setup-${version}.${ext}"
     },
     "linux": {
-      "icon": "build/icon.png"
+      "icon": "build/icon.png",
+      "category": "Network",
+      "target": [
+        "AppImage"
+      ]
     }
   }
 }

@@ -170,12 +170,12 @@ export default {
 
 .pix-quota {
   margin-left: auto;
-  color: #606266;
+  color: var(--w-text-muted);
   font-size: 13px;
 }
 
 .pix-pane {
-  background: #fff;
+  background: var(--w-surface);
   border: 1px solid #ebeef5;
   border-radius: 10px;
   overflow: hidden;
@@ -186,9 +186,9 @@ export default {
   display: flex;
   justify-content: space-between;
   padding: 10px 14px;
-  color: #909399;
+  color: var(--w-text-faint);
   font-size: 13px;
-  background: #f8fafc;
+  background: var(--w-surface-2);
 }
 
 .pix-pane ::v-deep .el-textarea__inner {

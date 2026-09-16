@@ -93,7 +93,11 @@ class AuthService {
     return session
   }
 
-  async loginAdmin(req, res, data) {
+  /**
+   * 只校验超管账号密码，**不建立会话**。
+   * 拆出来是为了两步验证：密码通过后若该账号开了 2FA，此时还不能给会话。
+   */
+  async verifyAdminCredentials(req, data) {
     const username = String(data.username || '').trim()
     const admin = username.length <= 64
       ? await this.repository.adminByUsername(username)
@@ -102,6 +106,11 @@ class AuthService {
       await this.recordLoginFailure(req, username, 'admin', 'BAD_CREDENTIALS')
       throw new ApiError(401, '超管账号或密码错误', 'BAD_CREDENTIALS')
     }
+    return admin
+  }
+
+  /** 凭据（含第二因子）都通过后，才真正发放会话并记账 */
+  async startAdminSession(req, res, admin, action) {
     await this.security.destroySession(req, res, 'admin')
     await this.security.createSession(res, 'admin', admin.id, { remember: false })
     await this.repository.query(
@@ -113,8 +122,13 @@ class AuthService {
        VALUES($1,$2,'admin',true,NULLIF($3,'')::inet,$4)`,
       [admin.id, admin.username, req.ip || '', String(req.headers['user-agent'] || '').slice(0, 1000)]
     )
-    await this.repository.audit(null, admin, '登录超管后台', '', req.ip)
+    await this.repository.audit(null, admin, action || '登录超管后台', '', req.ip)
     return admin
+  }
+
+  async loginAdmin(req, res, data) {
+    const admin = await this.verifyAdminCredentials(req, data)
+    return this.startAdminSession(req, res, admin)
   }
 
   async resolve(req, type) {
@@ -135,6 +149,10 @@ class AuthService {
         const path = String(req.path || '').replace(/\/+$/, '') || '/'
         const publicPaths = new Set([
           '/site/info', '/client/lines', '/login', '/client/login', '/admin/login',
+          // 官网内容：未登录的访客必须能看到
+          '/site/packages', '/site/faqs', '/site/platforms',
+          // 两步验证的第二步：此时还没有会话，靠一次性票据放行
+          '/admin/login/totp',
           '/user/captcha', '/user/emailCode', '/user/register', '/user/forgot',
           '/order/selectOrderBySerialNumber', '/order/checkSharePwd',
           '/orderDetails/shareOrder', '/orderDetails/getOrderFans', '/orderDetails/getTodayFansCount'
@@ -148,6 +166,10 @@ class AuthService {
           if (!found) throw new ApiError(401, '超管尚未登录', 'ADMIN_AUTH_REQUIRED')
           req.pixAdmin = found.admin
           req.pixSessionType = 'admin'
+          // 两步验证是"每个管理员管自己的账号"，不该被角色限制挡住 ——
+          // 否则 operator/admin 角色永远无法为自己的账号开启 2FA。
+          // 这里只是豁免角色判断，登录态校验照旧（上面已经强制过）。
+          if (path === '/admin/totp' || path.startsWith('/admin/totp/')) return next()
           const superOnly = ['/admin/staff', '/admin/users', '/admin/subs', '/admin/translate/grant']
           if (found.admin.role !== 'superadmin' &&
               (superOnly.some(prefix => path.startsWith(prefix)) || !['GET', 'HEAD'].includes(req.method))) {

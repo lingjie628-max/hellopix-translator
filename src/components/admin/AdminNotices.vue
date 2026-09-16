@@ -152,5 +152,5 @@ export default {
 </script>
 <style scoped>
 .admin-page { text-align: left; }
-.current { color: #e6a23c; line-height: 1.7; min-height: 24px; white-space: pre-wrap; }
+.current { color: var(--w-warning); line-height: 1.7; min-height: 24px; white-space: pre-wrap; }
 </style>

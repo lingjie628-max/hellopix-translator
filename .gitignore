@@ -26,3 +26,13 @@ standalone/telegram-win/tdesktop-fork/build-credentials.txt
 # Python 缓存
 __pycache__/
 *.pyc
+
+# 桌面客户端的打包产物（合计约 2GB，只发布到服务器 downloads/，不进版本库）
+desktop/release/
+desktop/release-win/
+desktop/dists/
+安装包/
+
+# 独立客户端构建（tdesktop 源码树与产物，体积过大）
+standalone/build/
+standalone/telegram-win/tdesktop-fork/out/

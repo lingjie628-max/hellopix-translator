@@ -5,7 +5,7 @@
         <div :class="['pay-card', { current: isCurrent(pack), active: isActive(pack) }]" @click="selectPack(pack)">
           <div class="pay-title">-{{ displayTitle(pack) }}{{ isCurrent(pack) ? '(当前)' : '' }}-</div>
           <div class="pay-line">字符数：{{ displayChars(pack) }}</div>
-          <div class="pay-line">价格：¥ {{ pack.price }}</div>
+          <div class="pay-line">价格：{{ currencySymbol }} {{ pack.price }}</div>
           <div class="pay-off">购买1组及以上 {{ fold(discount1) }}</div>
           <div class="pay-off">购买10组及以上 {{ fold(discount10) }}</div>
           <div class="pay-off">购买50组及以上 {{ fold(discount50) }}</div>
@@ -21,18 +21,63 @@
       </div>
       <div class="pay-row">
         <span>支付方式</span>
-        <el-radio-group v-model="form.type">
-          <el-radio label="支付宝">支付宝支付</el-radio>
-          <el-radio label="微信">微信支付</el-radio>
+        <!-- 支付方式从后台「收款方式」读取，页面不再写死。
+             原先写死支付宝/微信，而客户在海外根本用不了这两种。 -->
+        <el-radio-group v-if="channels.length" v-model="form.channelId">
+          <el-radio v-for="c in channels" :key="c.id" :label="c.id">{{ c.name }}（{{ c.network }}）</el-radio>
         </el-radio-group>
+        <span v-else class="warn">收款方式尚未配置，请联系客服</span>
       </div>
       <div class="pay-row">
         <span>订单总计</span>
-        <b class="total">¥ {{ quote.paidAmount }}</b>
-        <span v-if="quote.discountAmount" class="off">已优惠 ¥ {{ quote.discountAmount }}</span>
+        <b class="total">{{ currencySymbol }} {{ quote.paidAmount }}</b>
+        <span v-if="quote.discountAmount" class="off">已优惠 {{ currencySymbol }} {{ quote.discountAmount }}</span>
       </div>
       <p class="warn">注意：如果购买版本与当前使用版本不一致，充值成功后当前版本字符余额会按规则折算成充值版本字符。</p>
-      <el-button type="primary" style="width: 180px" @click="onSubmit">提交订单</el-button>
+      <el-button type="primary" style="width: 180px" :loading="submitting"
+                 :disabled="!channels.length" @click="onSubmit">提交订单</el-button>
+
+      <!-- 下单后的收款信息。加密转账靠人工核对，所以三个要素必须一眼可见：
+           订单号、**准确金额**（含匹配尾数）、收款地址 -->
+      <el-card v-if="order" class="pay-panel">
+        <div slot="header" class="panel-head">
+          <span>请完成转账</span>
+          <el-tag type="warning" size="mini">待支付</el-tag>
+        </div>
+        <div class="pay-fields">
+          <div class="field-row">
+            <label>订单号</label>
+            <code>{{ order.orderNum }}</code>
+            <el-button type="text" @click="copy(order.orderNum)">复制</el-button>
+          </div>
+          <div class="field-row amount-row">
+            <label>转账金额</label>
+            <b class="pay-amount">{{ order.payAmount }} USDT</b>
+            <el-button type="text" @click="copy(String(order.payAmount))">复制</el-button>
+          </div>
+          <div class="suffix-hint" v-if="order.matchSuffix">
+            其中 <b>{{ order.matchSuffix }}</b> 是<b>匹配尾数</b> —— 请务必按这个金额转账（不要凑整），
+            这是我们识别你这笔款的唯一依据。
+          </div>
+          <div class="field-row addr-row">
+            <label>收款地址</label>
+            <code>{{ order.channel.address }}</code>
+            <el-button type="text" @click="copy(order.channel.address)">复制</el-button>
+          </div>
+          <div class="qr-wrap" v-if="qrSvg" v-html="qrSvg"></div>
+          <el-alert type="error" :closable="false" show-icon style="margin-top:12px">
+            <template slot="title">必须使用 {{ order.channel.network }} 网络转账</template>
+            <div class="tip-body">
+              用错网络（如 ERC20）资金将无法找回。<b>转账金额务必与本页显示的完全一致</b>，
+              否则无法自动匹配到你的订单。
+            </div>
+          </el-alert>
+          <div class="note" v-if="order.channel.note">{{ order.channel.note }}</div>
+          <div class="next-step">
+            转账完成后，请把<b>订单号</b>和<b>交易哈希（TxID）</b>发给客服，我们核对后立即为你充值。
+          </div>
+        </div>
+      </el-card>
     </div>
   </div>
 </template>
@@ -42,15 +87,17 @@ export default {
     return {
       version: [],
       currentVersionId: '',
-      out_trade_no: '',
-      timer: '',
       discount1: 0.9,
       discount10: 0.8,
       discount50: 0.75,
+      channels: [],
+      order: null,
+      qrSvg: '',
+      submitting: false,
       form: {
         id: '',
         month: 1,
-        type: '支付宝'
+        channelId: ''
       }
     }
   },
@@ -83,6 +130,9 @@ export default {
       this.discount1 = Number(resp.data.discount1 || 0.9)
       this.discount10 = Number(resp.data.discount10 || 0.8)
       this.discount50 = Number(resp.data.discount50 || 0.75)
+      // 收款渠道完全由后台配置决定，前端不写死任何支付方式
+      this.channels = Array.isArray(resp.data.paymentChannels) ? resp.data.paymentChannels : []
+      if (this.channels.length && !this.form.channelId) this.form.channelId = this.channels[0].id
     })
     this.getVersion()
   },
@@ -90,6 +140,27 @@ export default {
     if (this.timer) clearInterval(this.timer)
   },
   methods: {
+    /** 复制到剪贴板。加密地址复制错一位就是资金损失，所以尽量走剪贴板而不是手抄 */
+    copy(text) {
+      const value = String(text || '')
+      if (!value) return
+      const done = () => this.$message.success('已复制')
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(value).then(done).catch(() => this.copyFallback(value, done))
+      } else {
+        this.copyFallback(value, done)
+      }
+    },
+    copyFallback(value, done) {
+      const el = document.createElement('textarea')
+      el.value = value
+      el.style.position = 'fixed'
+      el.style.opacity = '0'
+      document.body.appendChild(el)
+      el.select()
+      try { document.execCommand('copy'); done() } catch (e) { this.$message.warning('复制失败，请手动选择文本') }
+      document.body.removeChild(el)
+    },
     fold(n) {
       return (Math.round(Number(n || 0) * 100) / 10) + '折'
     },
@@ -121,41 +192,29 @@ export default {
       })
     },
     onSubmit() {
-      this.out_trade_no = this.formatDateTimeValue()
-      if (this.form.type == '微信') {
-        const params = new URLSearchParams({
-          baseid: String(this.form.id || ''),
-          month: String(Math.max(1, Number(this.form.month) || 1)),
-          type: '微信',
-          out_trade_no: this.out_trade_no
-        })
-        const src = '/apis/weixin/weixinPay?' + params.toString()
-        const h = this.$createElement
-        const content = h('div', { style: { fontSize: '16px', textAlign: 'center' } }, [
-          h('p', ['订单号：', h('strong', { style: { color: '#d33' } }, this.out_trade_no)]),
-          h('p', ['支付金额：', h('strong', { style: { color: '#d33' } }, '¥' + this.quote.paidAmount)]),
-          h('img', { attrs: { src: src, alt: '微信支付二维码' }, style: { maxWidth: '280px' } })
-        ])
-        this.$alert(content, '微信扫码支付').catch(() => {})
-        if (this.timer) clearInterval(this.timer)
-        this.timer = setInterval(this.checkPayStatus, 5000)
-      } else {
-        window.open('/apis/zfb/alipay?baseid=' + this.form.id + '&type=' + this.form.type + '&month=' + this.form.month + '&out_trade_no=' + this.out_trade_no, '_blank')
-      }
+      if (this.submitting) return
+      if (!this.form.id) { this.$message.warning('请先选择套餐'); return }
+      if (!this.channels.length) { this.$message.warning('收款方式尚未配置，请联系客服'); return }
+      this.submitting = true
+      this.postRequest('/userRecharge/create', {
+        baseid: this.form.id,
+        month: Math.max(1, Number(this.form.month) || 1),
+        channelId: this.form.channelId
+      }).then(resp => {
+        this.submitting = false
+        if (!resp || resp.status !== 200) return // 失败提示由拦截器统一弹出
+        this.order = resp.data
+        this.renderQr(resp.data.channel && resp.data.channel.address)
+      }).catch(() => { this.submitting = false })
     },
-    checkPayStatus() {
-      this.postRequest('/weixin/checkStatus', { out_trade_no: this.out_trade_no }).then(resp => {
-        if (resp && resp.status == 200 && resp.data == 1) {
-          clearInterval(this.timer)
-          this.$message.success('充值成功')
-          this.$router.push('/user/Recharge')
-        }
-      })
-    },
-    formatDateTimeValue() {
-      const d = new Date()
-      const p = n => (n < 10 ? '0' + n : '' + n)
-      return '' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds())
+    /** 二维码内容只放地址本身：带 amount 的 tron: URI 各家钱包支持不一，只放地址最通用 */
+    renderQr(address) {
+      this.qrSvg = ''
+      if (!address) return
+      const QRCode = require('qrcode')
+      QRCode.toString(String(address), { type: 'svg', margin: 1, width: 180 })
+        .then(svg => { this.qrSvg = svg })
+        .catch(() => { this.qrSvg = '' })
     }
   }
 }
@@ -163,23 +222,54 @@ export default {
 <style scoped>
 .recharge-center { text-align: left; }
 .pay-card {
-  background: #fff;
+  background: var(--w-surface);
   border: 1px solid #ebeef5;
   border-radius: 4px;
   padding: 18px 20px;
   cursor: pointer;
   min-height: 180px;
 }
-.pay-card.current { background: #fff7ed; }
-.pay-card.active { border-color: #409EFF; box-shadow: 0 0 0 1px #409EFF inset; }
+.pay-card.current { background: var(--w-accent-soft-bg); }
+.pay-card.active { border-color: var(--w-accent); box-shadow: 0 0 0 1px var(--w-accent) inset; }
 .pay-title { text-align: center; font-weight: 700; margin-bottom: 12px; }
-.pay-line { color: #303133; margin: 6px 0; }
-.pay-off { color: #67c23a; font-size: 13px; margin-top: 4px; }
-.pay-form { background: #fff; margin-top: 20px; padding: 24px; }
+.pay-line { color: var(--w-text); margin: 6px 0; }
+.pay-off { color: var(--w-success); font-size: 13px; margin-top: 4px; }
+.pay-form { background: var(--w-surface); margin-top: 20px; padding: 24px; }
 .pay-row { margin-bottom: 18px; display: flex; align-items: center; gap: 16px; }
-.pay-row > span:first-child { width: 80px; color: #606266; }
-.hint { color: #409EFF; font-size: 13px; }
-.total { color: #f56c6c; font-size: 22px; }
-.off { color: #67c23a; font-size: 13px; }
-.warn { color: #f56c6c; font-size: 13px; line-height: 1.6; }
+.pay-row > span:first-child { width: 80px; color: var(--w-text-muted); }
+.hint { color: var(--w-accent); font-size: 13px; }
+.total { color: var(--w-danger); font-size: 22px; }
+.off { color: var(--w-success); font-size: 13px; }
+.warn { color: var(--w-danger); font-size: 13px; line-height: 1.6; }
+
+/* 收款信息面板：加密转账靠人工核对，关键信息要足够醒目 */
+.pay-panel { margin-top: 18px; max-width: 720px; }
+.panel-head { display: flex; align-items: center; gap: 8px; }
+.pay-fields { font-size: 13px; }
+.field-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 0; border-bottom: 1px dashed #ebeef5; flex-wrap: wrap;
+}
+.field-row label { width: 72px; color: var(--w-text-faint); flex: none; }
+.field-row code {
+  background: var(--w-surface-2); padding: 3px 8px; border-radius: 4px;
+  word-break: break-all; font-size: 13px; flex: 1; min-width: 200px;
+}
+.amount-row { border-bottom: none; }
+.pay-amount { font-size: 24px; font-weight: 700; color: var(--w-danger); }
+.suffix-hint {
+  background: var(--w-warning-soft); color: var(--w-warning); border-radius: 4px;
+  padding: 8px 10px; font-size: 12px; line-height: 1.7; margin: 4px 0 8px;
+}
+.qr-wrap { margin-top: 10px; line-height: 0; }
+.qr-wrap >>> svg { background: var(--w-surface); padding: 6px; border-radius: 6px; }
+.tip-body { font-size: 12px; line-height: 1.7; }
+.note {
+  margin-top: 10px; padding: 8px 10px; background: var(--w-surface-2);
+  border-radius: 4px; font-size: 12px; color: var(--w-text-muted); white-space: pre-wrap;
+}
+.next-step {
+  margin-top: 12px; padding-top: 10px; border-top: 1px solid #ebeef5;
+  font-size: 13px; line-height: 1.8;
+}
 </style>

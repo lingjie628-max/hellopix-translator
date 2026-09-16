@@ -5,7 +5,7 @@
       <el-form :model="form" label-width="120px" style="max-width: 640px">
         <el-form-item label="显示按钮">
           <el-switch v-model="form.supportShow" :active-value="1" :inactive-value="0"></el-switch>
-          <span style="margin-left:8px;color:#909399;font-size:12px">商户登录、注册、找回密码底部</span>
+          <span style="margin-left:8px;color:var(--w-text-faint);font-size:12px">商户登录、注册、找回密码底部</span>
         </el-form-item>
         <el-form-item label="按钮文字">
           <el-input v-model="form.supportBtnText" placeholder="联系客服"></el-input>
@@ -18,6 +18,14 @@
         </el-form-item>
         <el-form-item label="防诈说明">
           <el-input type="textarea" :rows="3" v-model="form.supportNote"></el-input>
+        </el-form-item>
+        <!-- 官网页脚的两处外链。原先这两个设置后端能存、官网会读，
+             但后台没有任何编辑入口，等于永远填不上（死设置）。 -->
+        <el-form-item label="官方渠道">
+          <el-input v-model="form.officialUrl" placeholder="https://… 官网页脚「联系我们」里显示"></el-input>
+        </el-form-item>
+        <el-form-item label="帮助中心">
+          <el-input v-model="form.guideUrl" placeholder="https://… 使用教程/帮助文档，官网页脚「服务支持」里显示"></el-input>
         </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="saveSupport">保存客服</el-button>
@@ -67,7 +75,7 @@
 export default {
   data() {
     return {
-      form: { telegram: '', telegramUrl: '', supportNote: '', supportBtnText: '联系客服', supportShow: 1 },
+      form: { telegram: '', telegramUrl: '', supportNote: '', supportBtnText: '联系客服', supportShow: 1, officialUrl: '', guideUrl: '' },
       faqs: [],
       visible: false,
       faq: {}
@@ -83,7 +91,9 @@ export default {
           telegramUrl: resp.data.telegramUrl || '',
           supportNote: resp.data.supportNote || '',
           supportBtnText: resp.data.supportBtnText || '联系客服',
-          supportShow: Number(resp.data.supportShow) !== 0 ? 1 : 0
+          supportShow: Number(resp.data.supportShow) !== 0 ? 1 : 0,
+          officialUrl: resp.data.officialUrl || '',
+          guideUrl: resp.data.guideUrl || ''
         }
       })
       this.getRequest('/admin/faqs').then(resp => { if (resp) this.faqs = resp.data })

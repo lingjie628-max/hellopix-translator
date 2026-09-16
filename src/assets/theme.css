@@ -24,18 +24,63 @@
   --w-text-muted: #5b6675;
   --w-text-faint: #8a94a3;
 
-  /* 强调与状态 */
-  --w-accent: #1677ff;
-  --w-accent-text: #0958d9;
-  --w-accent-soft: rgba(22, 119, 255, 0.12);
-  --w-danger: #dc2626;
-  --w-success: #16a34a;
-  --w-warning: #d97706;
+  /* ------------------------------------------------------------------
+     间距与圆角刻度
+     排查前实际用了 17 种间距、7 种圆角，含 7px / 9px / 22px / 46px 这类
+     脱离任何刻度的魔法值 —— 属于"有 token 但分散"的状态，改一处就得猜一次。
+     这里定两套刻度，新代码一律取用；例外只有"光学微调"（如图标与文字
+     基线对齐用的 2px），那种要写明理由。
+     ------------------------------------------------------------------ */
+  --w-space-1: 4px;
+  --w-space-2: 8px;
+  --w-space-3: 12px;
+  --w-space-4: 16px;
+  --w-space-5: 24px;
+  --w-space-6: 32px;
+  --w-space-7: 48px;
+  --w-space-8: 64px;
+
+  --w-radius-sm: 8px;     /* 小控件：标签、图标、输入框 */
+  --w-radius-md: 12px;    /* 中等：气泡、小卡片 */
+  --w-radius-lg: 16px;    /* 大：卡片、面板 */
+  --w-radius-pill: 999px; /* 胶囊：徽章、圆角标签 */
+
+  /* 强调与状态。
+     accent 与 accent-bg 刻意分开：同一支蓝没法同时满足两个方向 ——
+       · 当**文字**压在浅底上，要够深（>=4.5:1）
+       · 当**底色**托白字，要够暗（白字 >=4.5:1）
+     #1677ff 两个方向都不达标（白底 4.10:1、白字压其上 4.10:1），
+     #2563eb 两个方向都过（5.17:1）。之前只用一支蓝，导致按钮、
+     徽章、页脚链接同时踩两个坑。 */
+  --w-accent: #2563eb;
+  --w-accent-bg: #2563eb;
+  --w-accent-text: #1d4ed8;
+  --w-accent-soft: rgba(37, 99, 235, 0.12);
+  /* 语义色同样拆成两个字：不带后缀的当**文字/描边**，-bg 的当**底色托白字**。
+     理由与 accent 一致 —— 一个字没法同时满足两个方向。
+     深色主题下文字要浅、底色仍要深，所以 -bg 在两套主题里是同一组值。 */
+  --w-danger: #dc2626;    /* 白底 4.83:1 */
+  --w-success: #15803d;   /* 白底 5.02:1 —— 原 #16a34a 只有 3.30:1 */
+  --w-warning: #b45309;   /* 白底 5.02:1 —— 原 #d97706 只有 3.19:1 */
+  --w-danger-bg: #dc2626;   /* 白字 4.83:1 */
+  --w-success-bg: #15803d;  /* 白字 5.02:1 */
+  --w-warning-bg: #b45309;  /* 白字 5.02:1 */
+  --w-warning-soft: #fdf6ec;
   --w-sidebar: #ffffff;
   --w-sidebar-text: #5b6675;
   --w-sidebar-active: #1677ff;
   --w-logo-text: #1677ff;
   --w-shadow: 0 18px 50px rgba(15, 23, 42, 0.14);
+
+  /* 官网落地页专用 */
+  --w-nav-bg: rgba(255, 255, 255, 0.86);
+  --w-hero-grad: linear-gradient(180deg, #f6faff 0%, #ffffff 100%);
+  --w-accent-soft-bg: rgba(22, 119, 255, 0.08);
+  --w-accent-soft-border: rgba(22, 119, 255, 0.18);
+  /* 分节色带：铺在渐变背景上的半透明层，用来区分区块又不遮住背景 */
+  --w-band: rgba(255, 255, 255, 0.55);
+  --w-card-shadow: 0 6px 24px rgba(15, 23, 42, 0.07);
+  --w-card-shadow-hover: 0 16px 40px rgba(15, 23, 42, 0.13);
 
   /* Element UI 变量对齐（浅色下就是它自己的默认值，这里只做统一出口） */
   --el-color-primary: #1677ff;
@@ -51,6 +96,36 @@
 }
 
 /* ===== 夜间 ===== */
+/* ------------------------------------------------------------------
+   Element 主按钮配色覆盖（**必要**，不是可选美化）
+   Element 2.15 把 #409EFF 直接写死在 .el-button--primary 上，
+   **不读 --el-color-primary**，所以只改 token 对它完全无效。后果有两个：
+     1) 按钮是 Element 默认蓝，而徽章/链接是品牌蓝 —— 同一页面两种蓝；
+     2) 白字压 #409EFF 只有 2.78:1，低于正文 4.5:1 的要求。
+   交互态一并覆盖：漏掉 hover/active 的话，鼠标一上去就跳回 Element 的蓝。
+   悬停用**加深**而不是提亮 —— 提亮会重新掉到 4.5:1 以下。
+   ------------------------------------------------------------------ */
+.el-button--primary {
+  background-color: var(--w-accent-bg);
+  border-color: var(--w-accent-bg);
+}
+.el-button--primary:hover,
+.el-button--primary:focus {
+  background-color: #1d4ed8;
+  border-color: #1d4ed8;
+}
+.el-button--primary:active {
+  background-color: #1e40af;
+  border-color: #1e40af;
+}
+/* 禁用态按 WCAG 豁免不算对比度，但仍要跟主题走，不能是 Element 的浅蓝 */
+.el-button--primary.is-disabled,
+.el-button--primary.is-disabled:hover,
+.el-button--primary.is-disabled:focus {
+  background-color: #9db8ea;
+  border-color: #9db8ea;
+}
+
 [data-theme='dark'] {
   --w-bg: #0f1420;
   --w-bg-grad: linear-gradient(160deg, #0b1220 0%, #10243a 45%, #143a63 100%);
@@ -63,19 +138,39 @@
   --w-text: #e6ebf2;
   --w-text-strong: #ffffff;
   --w-text-muted: #9aa7b8;
-  --w-text-faint: #6c7a8c;
+  --w-text-faint: #8a94a3;  /* #6c7a8c 在深色卡片上 3.86:1、#7d8a9c 在 surface-2 上 4.49:1，都差一点 */
 
-  --w-accent: #3b82f6;
+  /* 暗色下 #3b82f6 当**文字**合格（卡片上 4.59:1），但托白字只有 3.68:1 ——
+     所以底色仍用与浅色相同的 #2563eb（白字 5.17:1），与页面底色无关。 */
+  /* #3b82f6 在 --w-surface-2(#1b2333) 上只有 4.28:1，提亮一档到 6.4:1。
+     底色用的 -bg 不变（浅色蓝托白字会掉到 2:1）。 */
+  --w-accent: #60a5fa;
+  --w-accent-bg: #2563eb;
   --w-accent-text: #7dd3fc;
   --w-accent-soft: rgba(59, 130, 246, 0.18);
-  --w-danger: #f87171;
-  --w-success: #4ade80;
-  --w-warning: #fbbf24;
+  /* 文字用：浅色才看得清 */
+  --w-danger: #f87171;   /* 深底 6.10:1 */
+  --w-success: #4ade80;  /* 深底 9.68:1 */
+  --w-warning: #fbbf24;  /* 深底 10.11:1 */
+  /* 底色用：仍用深色，否则白字压上去只有 1.7~2.8:1（实测按钮就是这个毛病） */
+  --w-danger-bg: #dc2626;
+  --w-success-bg: #15803d;
+  --w-warning-bg: #b45309;
+  --w-warning-soft: rgba(251, 191, 36, 0.14);
   --w-sidebar: #111827;
   --w-sidebar-text: #cbd5e1;
   --w-sidebar-active: #fca5a5;
   --w-logo-text: #fecaca;
   --w-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+
+  /* 官网落地页专用 */
+  --w-nav-bg: rgba(15, 20, 32, 0.82);
+  --w-hero-grad: linear-gradient(180deg, #101a2b 0%, #0f1420 100%);
+  --w-accent-soft-bg: rgba(59, 130, 246, 0.16);
+  --w-accent-soft-border: rgba(59, 130, 246, 0.32);
+  --w-band: rgba(255, 255, 255, 0.035);
+  --w-card-shadow: 0 6px 24px rgba(0, 0, 0, 0.28);
+  --w-card-shadow-hover: 0 16px 40px rgba(0, 0, 0, 0.42);
 
   /* Element UI：覆盖它的变量即可让绝大多数组件跟随。
      颜色值参考 Element 官方暗色方案。 */
@@ -140,6 +235,246 @@ body {
   color: var(--w-text);
 }
 
+/* 折叠面板（el-collapse）在 Element 2.15 里是**硬编码** background-color:#FFF，
+   不走 --el-* 变量，所以变量覆盖对它无效 —— 夜间模式下会在深色页面上
+   留下一块刺眼的白，实测就是这个现象。这里显式覆盖。 */
+[data-theme='dark'] .el-collapse,
+[data-theme='dark'] .el-collapse-item__header,
+[data-theme='dark'] .el-collapse-item__wrap {
+  background-color: transparent;
+  border-color: var(--w-border);
+  color: var(--w-text);
+}
+[data-theme='dark'] .el-collapse-item__header {
+  color: var(--w-text-strong);
+}
+[data-theme='dark'] .el-collapse-item__header.is-active {
+  border-bottom-color: var(--w-border);
+}
+[data-theme='dark'] .el-collapse-item__header:hover {
+  color: var(--w-accent);
+}
+[data-theme='dark'] .el-collapse-item__content {
+  color: var(--w-text-muted);
+}
+[data-theme='dark'] .el-collapse-item__arrow {
+  color: var(--w-text-muted);
+}
+
+/* ------------------------------------------------------------------
+   Element 2.15 里有一批组件把颜色**写死**在 CSS 里（不走 --el-* 变量），
+   变量覆盖对它们无效，夜间模式下会在深色页面上留下白色块。
+   下面按"实际会看到的白块"逐个显式覆盖。
+   注意选择器权重：必须精确到变体（如 --default / is-plain），
+   只写 .el-button 会因权重更高把 primary 的蓝色一起盖掉（实测过）。
+   ------------------------------------------------------------------ */
+
+/* 默认按钮：写死 background:#FFF / color:#606266 */
+[data-theme='dark'] .el-button--default {
+  background-color: var(--w-surface);
+  border-color: var(--w-border-strong);
+  color: var(--w-text);
+}
+[data-theme='dark'] .el-button--default:focus,
+[data-theme='dark'] .el-button--default:hover {
+  background-color: var(--w-surface-2);
+  border-color: var(--w-accent);
+  color: var(--w-accent);
+}
+[data-theme='dark'] .el-button--default.is-disabled,
+[data-theme='dark'] .el-button--default.is-disabled:focus,
+[data-theme='dark'] .el-button--default.is-disabled:hover {
+  background-color: var(--w-surface-2);
+  border-color: var(--w-border);
+  color: var(--w-text-faint);
+}
+[data-theme='dark'] .el-button--text {
+  background-color: transparent;
+  color: var(--w-accent);
+}
+[data-theme='dark'] .el-button--text:focus,
+[data-theme='dark'] .el-button--text:hover {
+  background-color: transparent;
+  color: var(--w-accent);
+  opacity: 0.82;
+}
+/* plain 变体：Element 给的是 #ecf5ff / #f0f9eb 这类极浅底，夜间是亮块 */
+[data-theme='dark'] .el-button.is-plain {
+  background-color: var(--w-surface-2);
+  border-color: var(--w-border-strong);
+}
+[data-theme='dark'] .el-button--primary.is-plain { color: #79bbff; }
+[data-theme='dark'] .el-button--success.is-plain { color: #85ce61; }
+[data-theme='dark'] .el-button--warning.is-plain { color: #eebe77; }
+[data-theme='dark'] .el-button--danger.is-plain { color: #f89898; }
+[data-theme='dark'] .el-button--info.is-plain { color: #b1b3b8; }
+
+/* 标签：默认写死 #ecf5ff */
+[data-theme='dark'] .el-tag {
+  background-color: var(--w-surface-2);
+  border-color: var(--w-border);
+  color: var(--w-text);
+}
+[data-theme='dark'] .el-tag--light,
+[data-theme='dark'] .el-tag--plain {
+  background-color: var(--w-surface-2);
+  border-color: var(--w-border);
+}
+
+/* 勾选框 / 单选框的方块与圆点，写死白色 */
+[data-theme='dark'] .el-checkbox__inner,
+[data-theme='dark'] .el-radio__inner {
+  background-color: var(--w-surface-2);
+  border-color: var(--w-border-strong);
+}
+[data-theme='dark'] .el-switch__core {
+  background-color: var(--w-surface-3);
+  border-color: var(--w-border-strong);
+}
+
+/* 弹出层：下拉菜单 / 选择器 / 日期面板 / 气泡，写死白色 */
+[data-theme='dark'] .el-dropdown-menu,
+[data-theme='dark'] .el-select-dropdown,
+[data-theme='dark'] .el-picker-panel,
+[data-theme='dark'] .el-autocomplete-suggestion,
+[data-theme='dark'] .el-table-filter,
+[data-theme='dark'] .el-time-panel {
+  background-color: var(--w-surface);
+  border-color: var(--w-border);
+}
+[data-theme='dark'] .el-dropdown-menu__item:hover,
+[data-theme='dark'] .el-select-dropdown__item.hover,
+[data-theme='dark'] .el-select-dropdown__item:hover {
+  background-color: var(--w-surface-2);
+}
+[data-theme='dark'] .el-tooltip__popper.is-dark {
+  background-color: #303133;
+  border-color: #303133;
+}
+
+/* 提示条：is-light 各类型都是极浅底 */
+[data-theme='dark'] .el-alert--success.is-light { background-color: rgba(103, 194, 58, 0.14); color: #85ce61; }
+[data-theme='dark'] .el-alert--warning.is-light { background-color: rgba(230, 162, 60, 0.14); color: #eebe77; }
+[data-theme='dark'] .el-alert--error.is-light { background-color: rgba(245, 108, 108, 0.14); color: #f89898; }
+[data-theme='dark'] .el-alert--info.is-light { background-color: var(--w-surface-2); color: var(--w-text-muted); }
+[data-theme='dark'] .el-alert__title { color: inherit; }
+
+/* 描述列表 / 步骤条图标 / 卡片 */
+[data-theme='dark'] .el-descriptions,
+[data-theme='dark'] .el-descriptions__body,
+[data-theme='dark'] .el-descriptions__table {
+  background-color: transparent;
+  color: var(--w-text);
+}
+[data-theme='dark'] .el-descriptions__label,
+[data-theme='dark'] .el-descriptions-item__cell {
+  background-color: var(--w-surface-2) !important;
+  color: var(--w-text-muted);
+  border-color: var(--w-border) !important;
+}
+[data-theme='dark'] .el-descriptions__content,
+[data-theme='dark'] .el-descriptions-item__content {
+  background-color: var(--w-surface);
+  color: var(--w-text);
+  border-color: var(--w-border) !important;
+}
+[data-theme='dark'] .el-step__icon {
+  background-color: var(--w-surface-2);
+  border-color: var(--w-border-strong);
+}
+[data-theme='dark'] .el-step__title,
+[data-theme='dark'] .el-step__description { color: var(--w-text-muted); }
+
+/* 未单独设色的链接兜底。
+   浏览器 UA 样式表给 a 定了 #0000EE（深蓝）且优先级高于继承，
+   在深色背景上几乎看不见 —— 超管登录页的「返回商户前台」就踩过这个。
+   具体组件仍可用更高优先级覆盖。 */
+a {
+  color: var(--w-accent);
+  text-decoration: none;
+}
+a:hover { text-decoration: underline; }
+
+/* 选项卡 */
+[data-theme='dark'] .el-tabs__header,
+[data-theme='dark'] .el-tabs--border-card {
+  background-color: transparent;
+  border-color: var(--w-border);
+}
+
+/* ------------------------------------------------------------------
+   以下五项是把后台 19 个页面**逐个跑夜间模式审计**后查出来的。
+   都是 Element 写死的**近白色**（#FAFAFA / #F5F7FA / rgba(255,255,255,.9)），
+   上一轮只搜纯白 #FFF，全漏了 —— 教训：扫描阈值不能只盯纯白。
+   ------------------------------------------------------------------ */
+
+/* 表格斑马纹：影响面最大，后台每个列表页都有。
+   之前只覆盖了 th，td 漏了，于是深色页面上出现大片浅灰行。 */
+[data-theme='dark'] .el-table td.el-table__cell {
+  background-color: var(--w-surface);
+}
+[data-theme='dark'] .el-table--striped .el-table__body tr.el-table__row--striped td.el-table__cell {
+  background-color: var(--w-surface-2);
+}
+[data-theme='dark'] .el-table__body tr:hover > td.el-table__cell,
+[data-theme='dark'] .el-table--enable-row-hover .el-table__body tr:hover > td.el-table__cell {
+  background-color: var(--w-surface-3);
+}
+[data-theme='dark'] .el-table::before,
+[data-theme='dark'] .el-table__fixed::before,
+[data-theme='dark'] .el-table__fixed-right::before {
+  background-color: var(--w-border);
+}
+[data-theme='dark'] .el-table__empty-block { background-color: var(--w-surface); }
+[data-theme='dark'] .el-table__empty-text { color: var(--w-text-muted); }
+
+/* 分页：页码与翻页按钮写死白底 */
+[data-theme='dark'] .el-pagination,
+[data-theme='dark'] .el-pagination button,
+[data-theme='dark'] .el-pager li {
+  background-color: transparent;
+  color: var(--w-text-muted);
+}
+[data-theme='dark'] .el-pager li:hover { color: var(--w-accent); }
+[data-theme='dark'] .el-pagination button:disabled { color: var(--w-text-faint); }
+[data-theme='dark'] .el-pagination__total,
+[data-theme='dark'] .el-pagination__jump { color: var(--w-text-muted); }
+
+/* 数字输入框两侧的加减按钮，写死 #F5F7FA */
+[data-theme='dark'] .el-input-number__decrease,
+[data-theme='dark'] .el-input-number__increase {
+  background-color: var(--w-surface-2);
+  border-color: var(--w-border);
+  color: var(--w-text-muted);
+}
+[data-theme='dark'] .el-input-number__decrease:hover,
+[data-theme='dark'] .el-input-number__increase:hover { color: var(--w-accent); }
+[data-theme='dark'] .el-input-number__decrease.is-disabled,
+[data-theme='dark'] .el-input-number__increase.is-disabled { color: var(--w-text-faint); }
+
+/* 加载遮罩：rgba(255,255,255,.9)，每次切页都会闪一下白 */
+[data-theme='dark'] .el-loading-mask { background-color: rgba(15, 20, 32, 0.72); }
+[data-theme='dark'] .el-loading-spinner .path { stroke: var(--w-accent); }
+[data-theme='dark'] .el-loading-spinner .el-loading-text { color: var(--w-text-muted); }
+
+/* 全局提示（$message / $confirm）：白底，夜间下是刺眼的白条 */
+[data-theme='dark'] .el-message {
+  background-color: var(--w-surface);
+  border-color: var(--w-border);
+  color: var(--w-text);
+}
+[data-theme='dark'] .el-message--error { background-color: #2b1a1c; border-color: #4d2c2f; }
+[data-theme='dark'] .el-message--success { background-color: #16281b; border-color: #2a4a31; }
+[data-theme='dark'] .el-message--warning { background-color: #2b2416; border-color: #4d4228; }
+[data-theme='dark'] .el-message__content { color: inherit; }
+[data-theme='dark'] .el-message-box {
+  background-color: var(--w-surface);
+  border-color: var(--w-border);
+}
+[data-theme='dark'] .el-message-box__title,
+[data-theme='dark'] .el-message-box__content { color: var(--w-text); }
+[data-theme='dark'] .el-message-box__headerbtn .el-message-box__close { color: var(--w-text-muted); }
+
 [data-theme='dark'] .el-table th.el-table__cell {
   background-color: var(--w-surface-2);
 }
@@ -193,6 +528,12 @@ body {
   color: var(--w-text-muted);
   font-size: 13px;
   cursor: pointer;
+  /* nowrap + 不收缩，缺一不可：
+     内容需要约 68px，而窄屏下 .nav-actions 这个 flex 行会把它压到 58px，
+     「夜间」就被挤成竖排。这与是否触控无关，所以必须放在基础规则里，
+     不能只写在 @media (pointer: coarse) 内（那样只有触屏才生效）。 */
+  white-space: nowrap;
+  flex-shrink: 0;
   transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease;
 }
 
@@ -200,4 +541,221 @@ body {
   color: var(--w-accent-text);
   border-color: var(--w-accent);
   background: var(--w-accent-soft);
+}
+
+/* ==================================================================
+   Element 硬编码配色覆盖（系统性排查结果）
+   ------------------------------------------------------------------
+   Element 2.15 把品牌蓝 #409EFF 及其派生色**写死**在 CSS 里，不读
+   --el-color-primary。排查发现 60 个组件带这套蓝，其中项目实际用到的
+   里可达的有下面这些 —— 不覆盖的话：
+     · 对比度失败：白字压 #409EFF 只有 2.78:1（正文需 >=4.5）；
+     · 品牌不一致：输入框聚焦、勾选框选中、页签激活全是 Element 蓝，
+       与页面品牌蓝并存，同一界面出现两种蓝。
+   （is-background 分页、checkbox-button、radio-button 等项目未使用，
+     已核实不可达，故不覆盖 —— 只处理真正会出现的。）
+   ------------------------------------------------------------------
+   用 token 而不是写死色值：明暗两态自动跟随，不必再写一套按主题的覆盖。
+   底色（托白字）用 --w-accent-bg，文字与描边用 --w-accent。
+   ================================================================== */
+
+/* A. 对比度失败：白字压蓝底 */
+.el-tag--dark {
+  background-color: var(--w-accent-bg);
+  border-color: var(--w-accent-bg);
+}
+.el-table-filter__list-item.is-active {
+  background-color: var(--w-accent-bg);
+  color: #fff;
+}
+.el-tag .el-tag__close:hover,
+.el-tag--plain .el-tag__close:hover {
+  background-color: var(--w-accent-bg);
+}
+
+/* A2. 语义按钮：success / warning / danger
+   Element 同样写死了这三种色（#67c23a / #e6a23c / #f56c6c），
+   白字压上去分别是 2.24:1、2.19:1、2.90:1 —— 全部低于 4.5:1。
+   换成 token 后：success 5.02:1、warning 5.02:1、danger 4.83:1。
+   悬停用加深而非提亮，避免又掉回不达标。 */
+.el-button--success {
+  background-color: var(--w-success-bg);
+  border-color: var(--w-success-bg);
+}
+.el-button--warning {
+  background-color: var(--w-warning-bg);
+  border-color: var(--w-warning-bg);
+}
+.el-button--danger {
+  background-color: var(--w-danger-bg);
+  border-color: var(--w-danger-bg);
+}
+.el-button--success:hover,
+.el-button--success:focus,
+.el-button--warning:hover,
+.el-button--warning:focus,
+.el-button--danger:hover,
+.el-button--danger:focus {
+  filter: brightness(0.88);
+}
+
+/* A3. Element 的默认文字色
+   Element 把正文/次要文字写死为 #303133 / #606266 / #909399，全部不跟主题：
+     浅色下 #909399 只有 3.08:1（不足 4.5）
+     深色下 #303133 只有 1.3~1.4:1，几乎不可见（后台页签、表格实测）
+   下面统一换成 token。只列项目实际用到的组件。 */
+.el-tabs__item,
+.el-card,
+.el-collapse-item__header {
+  color: var(--w-text);
+}
+.el-table,
+.el-form-item__label,
+.el-descriptions__label,
+.el-checkbox__label,
+.el-radio__label {
+  color: var(--w-text);
+}
+.el-table thead,
+.el-table__empty-text,
+.el-pagination__sizes,
+.el-pagination__total,
+.el-pagination__jump,
+.el-pagination .btn-next,
+.el-pagination .btn-prev {
+  color: var(--w-text-muted);
+}
+
+/* A4. 日期 / 时间选择器与零散组件的文字色
+   这些是逐个探针找出来的（例如工单页搜索栏那个范围的「-」就是
+   .el-range-separator，Element 写死 #303133，深色下 1.3:1 几乎不可见）。
+   只列项目实际会渲染到的。 */
+.el-date-editor .el-range-input,
+.el-date-editor .el-range-separator,
+.el-picker-panel,
+.el-picker-panel__shortcut,
+.el-picker-panel__icon-btn,
+.el-date-picker__header-label,
+.el-date-table th,
+.el-date-table td.week,
+.el-time-spinner__item,
+.el-time-panel__btn {
+  color: var(--w-text);
+}
+.el-date-table td.next-month,
+.el-date-table td.prev-month,
+.el-time-spinner__arrow,
+.el-timeline-item__timestamp {
+  color: var(--w-text-faint);
+}
+.el-date-editor .el-range-input::placeholder {
+  color: var(--w-text-faint);
+}
+
+/* A5. 表格内的纯文字按钮
+   "子账号"这类列的内容可能只有一个数字（如 0），实测热区只有 10×40 —— 宽
+   低于桌面最小 20px，鼠标不容易点中。给它一个最小宽度。 */
+.el-table .el-button--text {
+  min-width: 20px;
+  padding: 0 2px;
+}
+
+/* B. 表单聚焦态：输入框、文本域、下拉、日期区间 */
+.el-input__inner:focus,
+.el-textarea__inner:focus,
+.el-select .el-input.is-focus .el-input__inner,
+.el-select .el-input__inner:focus,
+.el-range-editor.is-active,
+.el-range-editor.is-active:hover {
+  border-color: var(--w-accent);
+}
+
+/* C. 勾选类控件：勾选框、单选框、开关 */
+.el-checkbox__input.is-checked .el-checkbox__inner,
+.el-checkbox__input.is-indeterminate .el-checkbox__inner,
+.el-radio__input.is-checked .el-radio__inner,
+.el-switch.is-checked .el-switch__core {
+  background-color: var(--w-accent-bg);
+  border-color: var(--w-accent-bg);
+}
+.el-checkbox__input.is-checked + .el-checkbox__label,
+.el-radio__input.is-checked + .el-radio__label {
+  color: var(--w-accent);
+}
+
+/* D. 导航与文本类：页签、菜单、文字按钮、链接、页码、折叠面板 */
+.el-tabs__item.is-active,
+.el-tabs__item:hover,
+.el-menu-item.is-active,
+.el-menu--horizontal > .el-menu-item.is-active,
+.el-collapse-item__header.focusing:focus:not(:hover) {
+  color: var(--w-accent);
+}
+.el-button--text {
+  color: var(--w-accent);
+}
+.el-button--text:focus,
+.el-button--text:hover {
+  color: var(--w-accent-text);
+}
+.el-link.el-link--primary {
+  color: var(--w-accent);
+}
+.el-link.el-link--primary:hover {
+  color: var(--w-accent-text);
+}
+/* 当前页统一做"填充胶囊"。
+   原先只有暗色是填充、光明只是蓝字，同一组件两套表现（项目内不一致），
+   而且填充的可见性更好（可供性）。 */
+.el-pager li.active {
+  background-color: var(--w-accent-bg);
+  color: #fff;
+}
+.el-pager li:hover {
+  color: var(--w-accent);
+}
+.el-menu--horizontal > .el-menu-item.is-active {
+  border-bottom-color: var(--w-accent);
+}
+
+/* ------------------------------------------------------------------
+   动效降级（可访问性要求）
+   系统开启"减少动态效果"时，把动画与过渡压到近乎瞬时。
+   本项目的动效全部是 hover / 入场反馈，**没有任何信息只靠动画承载**，
+   所以整体关掉是安全降级，不会丢信息。
+   放在 theme.css 而不是各组件里，是为了覆盖全站（官网 + 商户端 + 后台）。
+   ------------------------------------------------------------------ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ------------------------------------------------------------------
+   触控目标 >=44×44（可访问性要求）
+   实测（390px 视口，官网）可点元素高度：
+     主 CTA 36px · 顶栏登录/注册 32px · 主题切换 30px · 页脚链接 15-18px
+   全部低于 44px 的最小可点尺寸 —— 手指点不准，是真实的可用性问题。
+   用 pointer: coarse 而不是宽度断点：触控与屏幕宽度不是一回事，
+   平板和触屏笔记本同样需要放大，而桌面鼠标端保持紧凑更好看。
+   ------------------------------------------------------------------ */
+@media (pointer: coarse) {
+  .theme-toggle { height: 44px; padding: 0 14px; }
+  .brand { min-height: 44px; }
+  .nav-actions .el-button { min-height: 44px; padding: 0 18px; }
+  .hero-cta .el-button,
+  .cta-band .el-button,
+  .price-card .el-button { min-height: 44px; padding: 0 22px; }
+  /* 页脚与下载链接：改成 flex 撑高，保证点击热区覆盖整行 */
+  .foot-col a,
+  .extra-dl a {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+  }
 }

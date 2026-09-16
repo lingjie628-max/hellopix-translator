@@ -60,7 +60,7 @@ const defaultSettings = {
   clientDownloadUrl: '',
   officialUrl: '',
   guideUrl: '',
-  activeEngine: 'youdao',
+  activeEngine: 'deepseek',
   trialChars: 10000,
   enterpriseMinPacks: 2,
   discount1: 0.9,
@@ -139,33 +139,32 @@ module.exports = function registerMock(app, options) {
 
   const db = {
     users: [
-      { id: 10001, username: 'pix', password: '123456', nickname: '皮克斯商户', status: 1, basename: 'Hello Pix 专业版', versionId: 3, port: 0, userPorts: 2, expireTime: later(90), createTime: now(), charBalance: 186000, autoReply: 1, phone: '13800000001', remarks: '主力商户', activeEngine: 'youdao', enterprise: 1, boundDevice: '', email: 'pix@hello.pix', subQuota: 5, autoAllocMaster: 0, translateCount: 128, charUsed: 42000 },
-      { id: 10002, username: 'demo', password: '123456', nickname: '演示商户', status: 1, basename: 'Hello Pix 基础版', versionId: 1, port: 0, userPorts: 0, expireTime: later(30), createTime: now(), charBalance: 45000, autoReply: 0, phone: '', remarks: '', activeEngine: 'youdao', enterprise: 0, boundDevice: '', email: 'demo@hello.pix', subQuota: 0, autoAllocMaster: 0, translateCount: 0, charUsed: 0 }
+      { id: 10001, username: 'pix', password: '123456', nickname: '皮克斯商户', status: 1, basename: 'Hello Pix 专业版', versionId: 3, port: 0, userPorts: 2, expireTime: later(90), createTime: now(), charBalance: 186000, autoReply: 1, phone: '13800000001', remarks: '主力商户', activeEngine: 'deepseek', enterprise: 1, boundDevice: '', email: 'pix@hello.pix', subQuota: 5, autoAllocMaster: 0, translateCount: 128, charUsed: 42000 },
+      { id: 10002, username: 'demo', password: '123456', nickname: '演示商户', status: 1, basename: 'Hello Pix 基础版', versionId: 1, port: 0, userPorts: 0, expireTime: later(30), createTime: now(), charBalance: 45000, autoReply: 0, phone: '', remarks: '', activeEngine: 'deepseek', enterprise: 0, boundDevice: '', email: 'demo@hello.pix', subQuota: 0, autoAllocMaster: 0, translateCount: 0, charUsed: 0 }
     ],
     admins: [
       { id: 1, username: 'admin', password: 'admin123', nickname: '超级管理员', role: 'superadmin' }
     ],
     versions: [
-      { id: 1, title: 'Hello Pix 基础版', subtitle: '基本功能，适合小型企业', port: 0, portUnlimited: 1, chars: 1500000, price: 200, engines: ['youdao', 'baidu', 'niutrans'], clients: { standalone: 1, mobile: 1, counter: 0 }, highlights: ['150万字符', '有道翻译', '百度翻译', '小牛翻译', '语种全，性价比高', '独立应用版', '手机版'], features: { autoFill: 1, export: 1, moveMaster: 1, fanStats: 1, autoReply: 1, assistant: 1, repeatFan: 1, rotate: 1, keepChat: 0, counterRepeat: 1, ssl: 1, aws: 0, support: 0, feedback: 1 } },
-      { id: 2, title: 'Hello Pix 高级版', subtitle: '高级功能，适合中大型企业', port: 0, portUnlimited: 1, chars: 1500000, price: 350, engines: ['youdao', 'baidu', 'niutrans', 'google', 'tencent'], clients: { standalone: 1, mobile: 1, counter: 0 }, highlights: ['150万字符', '谷歌翻译', '腾讯翻译', '+基础版各翻译通道', '语种全，翻译准确性高', '独立应用版', '手机版'], features: { autoFill: 1, export: 1, moveMaster: 1, fanStats: 1, autoReply: 1, assistant: 1, repeatFan: 1, rotate: 1, keepChat: 1, counterRepeat: 1, ssl: 1, aws: 0, support: 1, feedback: 1 } },
-      { id: 3, title: 'Hello Pix 专业版', subtitle: '定制化解决方案', port: 0, portUnlimited: 1, chars: 1500000, price: 850, engines: ['youdao', 'baidu', 'niutrans', 'google', 'tencent', 'deepl', 'aws'], clients: { standalone: 1, mobile: 1, counter: 1 }, highlights: ['150万字符', 'DEEPL翻译', '亚马逊AWS翻译', '+高级版各翻译通道', '语种全，通道多，翻译准确性高', '独立应用版', '手机版'], features: { autoFill: 1, export: 1, moveMaster: 1, fanStats: 1, autoReply: 1, assistant: 1, repeatFan: 1, rotate: 1, keepChat: 1, counterRepeat: 1, ssl: 1, aws: 1, support: 1, feedback: 1 } }
+      { id: 1, title: 'Hello Pix 基础版', subtitle: '基本功能，适合小型企业', port: 0, portUnlimited: 1, chars: 1500000, price: 200, engines: ['deepseek', 'baidu', 'niutrans'], clients: { standalone: 1, mobile: 1, counter: 0 }, highlights: ['150万字符', 'DeepSeek 翻译', '百度翻译', '小牛翻译', '语种全，性价比高', '独立应用版', '手机版'], features: { autoFill: 1, export: 1, moveMaster: 1, fanStats: 1, autoReply: 1, assistant: 1, repeatFan: 1, rotate: 1, keepChat: 0, counterRepeat: 1, ssl: 1, aws: 0, support: 0, feedback: 1 } },
+      { id: 2, title: 'Hello Pix 高级版', subtitle: '高级功能，适合中大型企业', port: 0, portUnlimited: 1, chars: 1500000, price: 350, engines: ['deepseek', 'baidu', 'niutrans', 'google'], clients: { standalone: 1, mobile: 1, counter: 0 }, highlights: ['150万字符', '谷歌翻译', '+基础版各翻译通道', '语种全，翻译准确性高', '独立应用版', '手机版'], features: { autoFill: 1, export: 1, moveMaster: 1, fanStats: 1, autoReply: 1, assistant: 1, repeatFan: 1, rotate: 1, keepChat: 1, counterRepeat: 1, ssl: 1, aws: 0, support: 1, feedback: 1 } },
+      { id: 3, title: 'Hello Pix 专业版', subtitle: '定制化解决方案', port: 0, portUnlimited: 1, chars: 1500000, price: 850, engines: ['deepseek', 'baidu', 'niutrans', 'google', 'deepl', 'aws'], clients: { standalone: 1, mobile: 1, counter: 1 }, highlights: ['150万字符', 'DEEPL翻译', '亚马逊AWS翻译', '+高级版各翻译通道', '语种全，通道多，翻译准确性高', '独立应用版', '手机版'], features: { autoFill: 1, export: 1, moveMaster: 1, fanStats: 1, autoReply: 1, assistant: 1, repeatFan: 1, rotate: 1, keepChat: 1, counterRepeat: 1, ssl: 1, aws: 1, support: 1, feedback: 1 } }
     ],
     settings: loadSettings(),
     engines: [
-      { id: 'youdao', name: '有道翻译', provider: '有道', tier: 'basic', enabled: 1, wired: 0, costPerMillion: 48, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
+      { id: 'deepseek', name: 'DeepSeek 翻译', provider: 'DeepSeek', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 6, model: 'deepseek-flash', apiKey: '', secret: '', endpoint: '', note: '需要 API Key 与模型名。' },
       { id: 'baidu', name: '百度翻译', provider: '百度', tier: 'basic', enabled: 1, wired: 0, costPerMillion: 49, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
       { id: 'niutrans', name: '小牛翻译', provider: '小牛', tier: 'basic', enabled: 1, wired: 0, costPerMillion: 50, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
       { id: 'google', name: '谷歌翻译', provider: 'Google', tier: 'advanced', enabled: 1, wired: 0, costPerMillion: 134, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
-      { id: 'tencent', name: '腾讯翻译', provider: '腾讯云', tier: 'advanced', enabled: 1, wired: 0, costPerMillion: 58, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
       { id: 'deepl', name: 'DeepL 翻译', provider: 'DeepL', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 168, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
       { id: 'aws', name: '亚马逊 AWS 翻译', provider: 'Amazon', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 100, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
       { id: 'gpt', name: 'GPT 翻译', provider: 'OpenAI', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 5, model: 'gpt-4o-mini', apiKey: '', secret: '', endpoint: '', note: 'Hello Pix 增补。成本超管手填，按 token 估算。未接厂商。' },
       { id: 'grok', name: 'Grok 翻译', provider: 'xAI', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 29, model: 'grok-4.3', apiKey: '', secret: '', endpoint: '', note: 'Hello Pix 增补。成本超管手填，按 token 估算。未接厂商。' }
     ],
     translateLogs: [
-      { id: 1, userId: 10001, username: 'pix', engine: 'youdao', direction: 'en→zh', chars: 86, cost: 0.0041, sell: 0.0487, snippet: 'Hello, I want to know the price', createTime: now() },
-      { id: 2, userId: 10001, username: 'pix', engine: 'youdao', direction: 'zh→en', chars: 42, cost: 0.002, sell: 0.0238, snippet: '您好，这是我们的套餐说明', createTime: later(-0.05) },
-      { id: 3, userId: 10002, username: 'demo', engine: 'youdao', direction: 'en→zh', chars: 120, cost: 0.0058, sell: 0.016, snippet: 'Can you send the catalog?', createTime: later(-1) }
+      { id: 1, userId: 10001, username: 'pix', engine: 'deepseek', direction: 'en→zh', chars: 86, cost: 0.0041, sell: 0.0487, snippet: 'Hello, I want to know the price', createTime: now() },
+      { id: 2, userId: 10001, username: 'pix', engine: 'deepseek', direction: 'zh→en', chars: 42, cost: 0.002, sell: 0.0238, snippet: '您好，这是我们的套餐说明', createTime: later(-0.05) },
+      { id: 3, userId: 10002, username: 'demo', engine: 'deepseek', direction: 'en→zh', chars: 120, cost: 0.0058, sell: 0.016, snippet: 'Can you send the catalog?', createTime: later(-1) }
     ],
     audits: [
       { id: 1, admin: 'admin', action: '登录超管后台', detail: '', createTime: now(), ip: '127.0.0.1' }
@@ -242,8 +241,8 @@ module.exports = function registerMock(app, options) {
       { orderNum: 'HP20260902001', wsid: '10001', insertTime: now(), account: '8613800000001', nickName: '演示主号A', completedDayTarget: 8, completedTotalTarget: 12, repeatQuantity: 1, dayTarget: 20, totalTarget: 100 }
     ],
     subAccounts: [
-      { id: 20001, parentId: 10001, username: 'pix_a', password: '123456', nickname: '员工A', email: 'pix_a@hello.pix', charBalance: 30000, charUsed: 8600, autoAlloc: 0, status: 1, boundDevice: '', activeEngine: 'youdao', createTime: now() },
-      { id: 20002, parentId: 10001, username: 'pix_b', password: '123456', nickname: '员工B', email: 'pix_b@hello.pix', charBalance: 15000, charUsed: 2100, autoAlloc: 0, status: 1, boundDevice: '', activeEngine: 'youdao', createTime: now() }
+      { id: 20001, parentId: 10001, username: 'pix_a', password: '123456', nickname: '员工A', email: 'pix_a@hello.pix', charBalance: 30000, charUsed: 8600, autoAlloc: 0, status: 1, boundDevice: '', activeEngine: 'deepseek', createTime: now() },
+      { id: 20002, parentId: 10001, username: 'pix_b', password: '123456', nickname: '员工B', email: 'pix_b@hello.pix', charBalance: 15000, charUsed: 2100, autoAlloc: 0, status: 1, boundDevice: '', activeEngine: 'deepseek', createTime: now() }
     ]
   }
 
@@ -544,7 +543,7 @@ module.exports = function registerMock(app, options) {
     const account = session.account
     const parent = session.parent
     const pack = packOf(parent)
-    const engineId = account.activeEngine || parent.activeEngine || db.settings.activeEngine || 'youdao'
+    const engineId = account.activeEngine || parent.activeEngine || db.settings.activeEngine || 'deepseek'
     const eng = engineOf(engineId)
     return {
       username: account.username,
@@ -843,7 +842,7 @@ module.exports = function registerMock(app, options) {
       autoReply: 0,
       phone: '',
       remarks: '',
-      activeEngine: 'youdao',
+      activeEngine: 'deepseek',
       enterprise: 0,
       boundDevice: '',
       email: email,
@@ -992,7 +991,7 @@ module.exports = function registerMock(app, options) {
     const user = session.parent
     const account = session.account
     const allowed = allowedEngineIds(user)
-    const active = account.activeEngine || user.activeEngine || 'youdao'
+    const active = account.activeEngine || user.activeEngine || 'deepseek'
     res.json({
       wired: false,
       msg: '翻译接口板块已就位，厂商请求尚未接入。成本由超管填写，不调取厂商计费。',
@@ -1056,7 +1055,7 @@ module.exports = function registerMock(app, options) {
       res.status(400).json({ success: false, msg: '语言参数无效' })
       return
     }
-    const engineId = String(query.engine || account.activeEngine || parent.activeEngine || 'youdao')
+    const engineId = String(query.engine || account.activeEngine || parent.activeEngine || 'deepseek')
     if (allowedEngineIds(parent).indexOf(engineId) === -1) {
       res.json({ success: false, msg: '当前套餐未包含此通道' })
       return
@@ -1547,7 +1546,7 @@ module.exports = function registerMock(app, options) {
       autoAlloc: 0,
       status: 1,
       boundDevice: '',
-      activeEngine: 'youdao',
+      activeEngine: 'deepseek',
       createTime: now()
     })
     okMsg(res, '子账号已创建。该账号可登录无限个 Telegram / WhatsApp 等聊天号')
@@ -1857,7 +1856,7 @@ module.exports = function registerMock(app, options) {
       autoReply: Number(query.autoReply || 0),
       phone: query.phone || '',
       remarks: query.remarks || '',
-      activeEngine: 'youdao',
+      activeEngine: 'deepseek',
       enterprise: Number(query.enterprise || 0) ? 1 : 0,
       boundDevice: '',
       email: query.email || '',

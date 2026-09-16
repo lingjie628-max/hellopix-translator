@@ -10,12 +10,10 @@
  *   1. 在这里追加条目（改了要重启客户端）；
  *   2. 用后台的 client_lines 表下发 —— 客户端会合并远程线路，见 main.js 的 mergeLines。
  *
- * URL 取 PIX_PUBLIC_URL（生产环境变量）；没设置时回落到本地后端，
- * 方便在尚未配置生产环境的机器上直接跑开发。
+ * URL 取 api-default 解析出的生产地址（运行时环境变量 > 包内内置域名 > 本机后端）。
+ * 发布出去的安装包因此开箱即指向正式域名，用户无需配置任何东西。
  */
-const defaultUrl = String(
-  process.env.PIX_PUBLIC_URL || 'http://127.0.0.1:3000'
-).replace(/\/+$/, '')
+const { PUBLIC_URL: defaultUrl } = require('./api-default')
 
 module.exports = [
   { id: 'overseas', name: '海外线路', url: defaultUrl, region: '海外' }

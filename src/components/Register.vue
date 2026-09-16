@@ -127,9 +127,9 @@ export default {
 <style scoped>
 .auth-card { width: 350px; }
 .auth-form { width: 100% !important; padding: 20px 24px 24px !important; }
-.auth-title { font-size: 20px; color: #303133; }
+.auth-title { font-size: 20px; color: var(--w-text); }
 .auth-links { display: flex; justify-content: space-between; }
-.auth-links a { color: #409EFF; font-size: 13px; text-decoration: none; }
+.auth-links a { color: var(--w-accent); font-size: 13px; text-decoration: none; }
 .captcha-row { display: flex; align-items: center; gap: 8px; }
 .captcha-row .el-input { flex: 1; }
 .captcha { width: 120px; height: 42px; cursor: pointer; display: block; flex-shrink: 0; border: 1px solid #dcdfe6; border-radius: 4px; background: #eef3fb; }

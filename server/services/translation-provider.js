@@ -6,7 +6,8 @@
  * 契约（core-service 调用）：translate(engine, payload, options) -> { ok, text, skipped?, msg? }
  *   - engine: package_engines 查出来的通道行（含 id / name / enabled / wired）
  *   - payload: { text, from, to, detected }
- *   - options: { allowPublicNetwork, fetch, timeoutMs }
+ *   - options: { fetch, timeoutMs }（allowPublicNetwork 已随公共端点实现一并移除，
+ *     该标志在生产环境本就被 config.js 列为禁止项，进程会拒绝启动）
  *
  * 三条硬规则：
  *   1. 凭据未配置一律 ok:false，绝不返回演示译文、绝不产生计费（fail-closed）。
@@ -46,201 +47,249 @@ function notWired(name) {
   }
 }
 
-// --- 有道翻译（v3 签名）-----------------------------------------------------
-// sign = sha256(appKey + truncate(q) + salt + curtime + appSecret)
-// truncate(q): 长度 <= 20 取原文，否则 前10 + 长度 + 后10
 
-const YOUDAO_URL = 'https://openapi.youdao.com/api'
+// --- 谷歌翻译（Cloud Translation 官方 API）-----------------------------------
+// 走官方付费端点，不再使用 translate.googleapis.com 公共接口。
+// 官方端点有 SLA、按量计费；这也是最初拆出的"谷歌稳定"本该有的样子
+// （拆分期间那条通道一直是个空壳，从未接线，所以这里等于把它补实）。
+//
+// 两个易踩的点（依据官方文档 2026-09）：
+//   1. v2 支持 API Key（?key=），v3 需要 OAuth 服务账号。这里用 v2 + key，
+//      与后台"API Key"字段对得上，管理员不必去弄服务账号 JSON。
+//   2. 请求体的 format **默认是 html** —— 不显式传 'text' 的话，
+//      译文里的引号、& 会被转义成 &quot; / &amp; 直接显示给商户。
 
-const YOUDAO_LANGUAGES = {
-  zh: 'zh-CHS',
-  'zh-cn': 'zh-CHS',
-  'zh-tw': 'zh-CHT',
-  auto: 'auto'
-}
+const GOOGLE_TRANSLATE_URL = 'https://translation.googleapis.com/language/translate/v2'
 
-// 只列会真实影响排查的报错码，其余按 code 原样回显
-const YOUDAO_ERRORS = {
-  101: '有道翻译：缺少必填参数',
-  102: '有道翻译：不支持的语言类型',
-  103: '有道翻译：翻译文本过长',
-  108: '有道翻译：应用 ID 无效（检查 PIX_YOUDAO_APP_KEY）',
-  110: '有道翻译：实例无效或未绑定服务',
-  111: '有道翻译：开发者账号无效',
-  112: '有道翻译：请求服务无效',
-  113: '有道翻译：翻译文本为空',
-  202: '有道翻译：签名校验失败（检查 PIX_YOUDAO_APP_SECRET）',
-  203: '有道翻译：访问 IP 不在白名单',
-  401: '有道翻译：账户余额不足',
-  411: '有道翻译：访问频率受限',
-  413: '有道翻译：文本大小超过限制'
-}
-
-function youdaoSign(appKey, appSecret, text, salt, curtime) {
-  const input = text.length <= 20
-    ? text
-    : `${text.slice(0, 10)}${text.length}${text.slice(-10)}`
-  return crypto
-    .createHash('sha256')
-    .update(appKey + input + salt + curtime + appSecret)
-    .digest('hex')
-}
-
-function youdaoLanguage(code, fallback) {
-  const value = String(code || '').toLowerCase()
-  if (!value) return fallback
-  return YOUDAO_LANGUAGES[value] || value
-}
-
-/**
- * 取厂商凭据：数据库里配置的（管理后台填写，落盘加密）优先，
- * 环境变量兜底。两者都没有 -> 空凭据 -> 上层 fail-closed。
- */
-function youdaoCredentials(credentials) {
-  const fromAdmin = credentials || {}
-  const apiKey = String(fromAdmin.apiKey || '').trim() || envValue('PIX_YOUDAO_APP_KEY')
-  const appSecret = String(fromAdmin.secret || '').trim() || envValue('PIX_YOUDAO_APP_SECRET')
-  return { appKey: apiKey, appSecret }
-}
-
-async function youdaoTranslate(engine, payload, options) {
-  const { appKey, appSecret } = youdaoCredentials(options.credentials)
-  if (!appKey || !appSecret) {
-    return { ok: false, msg: '有道翻译凭据未配置（管理后台填写，或设置 PIX_YOUDAO_APP_KEY / PIX_YOUDAO_APP_SECRET）' }
-  }
-  const text = String(payload.text || '')
-  if (!text) return { ok: false, msg: '请输入要翻译的文本' }
-
-  const salt = crypto.randomUUID()
-  const curtime = String(Math.floor(Date.now() / 1000))
-  const form = new URLSearchParams({
-    q: text,
-    from: youdaoLanguage(payload.from, 'auto'),
-    to: youdaoLanguage(payload.to, 'zh-CHS'),
-    appKey,
-    salt,
-    sign: youdaoSign(appKey, appSecret, text, salt, curtime),
-    signType: 'v3',
-    curtime
-  })
-
-  let response
-  try {
-    response = await options.fetch(YOUDAO_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: form.toString(),
-      signal: AbortSignal.timeout(options.timeoutMs)
-    })
-  } catch (error) {
-    const reason = (error && error.name === 'TimeoutError')
-      ? '请求超时'
-      : ((error && error.message) || error)
-    return { ok: false, msg: `有道翻译请求失败：${reason}` }
-  }
-  if (!response.ok) {
-    return { ok: false, msg: `有道翻译返回 HTTP ${response.status}` }
-  }
-
-  let data
-  try {
-    data = await response.json()
-  } catch (error) {
-    return { ok: false, msg: '有道翻译返回体无法解析为 JSON' }
-  }
-
-  const code = String((data && data.errorCode) || '')
-  if (code && code !== '0') {
-    return { ok: false, msg: YOUDAO_ERRORS[code] || `有道翻译错误码 ${code}` }
-  }
-  const translated = Array.isArray(data && data.translation)
-    ? data.translation.join('').trim()
-    : ''
-  if (!translated) return { ok: false, msg: '有道翻译未返回译文' }
-  return { ok: true, text: translated }
-}
-
-// --- 谷歌极速（公共端点，默认关闭）-------------------------------------------
-// translate.googleapis.com/translate_a/single?client=gtx 是公开的免费端点：
-// 无需凭据、延迟低，但没有 SLA、可能被限流或按来源封禁，且属于非官方接口。
-// 因此它必须由运行时的 PIX_ALLOW_PUBLIC_TRANSLATION 显式开启（默认关），
-// 未开启时一律 ok:false —— 与"公共翻译网络回退默认关闭"的既有安全约定一致。
-
-const GTX_URL = 'https://translate.googleapis.com/translate_a/single'
-
-const GTX_LANGUAGES = {
+const GOOGLE_LANGUAGES = {
   zh: 'zh-CN',
   'zh-cn': 'zh-CN',
   'zh-tw': 'zh-TW',
-  en: 'en',
-  ja: 'ja',
-  ko: 'ko',
-  es: 'es',
-  fr: 'fr',
-  pt: 'pt',
-  id: 'id',
-  vi: 'vi',
-  th: 'th'
+  'zh-hk': 'zh-TW',
+  en: 'en', ja: 'ja', ko: 'ko', fr: 'fr', de: 'de', es: 'es', pt: 'pt',
+  ru: 'ru', ar: 'ar', th: 'th', vi: 'vi', id: 'id', hi: 'hi', it: 'it',
+  tr: 'tr', ms: 'ms', nl: 'nl', pl: 'pl', sv: 'sv', da: 'da', fi: 'fi',
+  no: 'no', cs: 'cs', el: 'el', he: 'iw', uk: 'uk', fa: 'fa', bn: 'bn',
+  fil: 'tl', tl: 'tl'
 }
 
-function publicNetworkAllowed() {
-  return /^(1|true|yes)$/i.test(envValue('PIX_ALLOW_PUBLIC_TRANSLATION'))
+/** 语言码 → 谷歌语言码；未收录的原样透传（谷歌接受 BCP-47）。 */
+function googleLanguage(code, fallback) {
+  const key = String(code || '').trim().toLowerCase()
+  if (!key) return fallback ? googleLanguage(fallback, '') : ''
+  return GOOGLE_LANGUAGES[key] || key
 }
 
-function gtxLanguage(code, fallback) {
-  const value = String(code || '').toLowerCase()
-  if (!value) return fallback
-  if (value === 'auto') return 'auto'
-  return GTX_LANGUAGES[value] || value
+function googleCredentials(credentials) {
+  const fromAdmin = credentials || {}
+  const apiKey = String(fromAdmin.apiKey || '').trim() || envValue('PIX_GOOGLE_API_KEY')
+  return { apiKey }
 }
 
-async function googleFastTranslate(engine, payload, options) {
-  if (!options.allowPublicNetwork) {
-    return { ok: false, msg: '谷歌极速未启用（需显式开启 PIX_ALLOW_PUBLIC_TRANSLATION）' }
+async function googleTranslate(engine, payload, options) {
+  const { apiKey } = googleCredentials(options.credentials)
+  if (!apiKey) {
+    return { ok: false, msg: '谷歌翻译凭据未配置（管理后台填写 API Key，或设置 PIX_GOOGLE_API_KEY）' }
   }
   const text = String(payload.text || '')
   if (!text) return { ok: false, msg: '请输入要翻译的文本' }
 
-  const query = new URLSearchParams({
-    client: 'gtx',
-    sl: gtxLanguage(payload.from, 'auto'),
-    tl: gtxLanguage(payload.to, 'zh-CN'),
-    dt: 't',
-    q: text.slice(0, 4500)
-  })
+  const target = googleLanguage(payload.to, 'zh')
+  if (!target) return { ok: false, msg: '谷歌翻译缺少目标语言' }
+  const source = googleLanguage(payload.from, '')
+  const body = { q: [text], target, format: 'text' }
+  // 'auto' 是本站的内部约定，谷歌靠"不传 source"来表达自动识别
+  if (source && source !== 'auto') body.source = source
 
   let response
   try {
-    response = await options.fetch(`${GTX_URL}?${query.toString()}`, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
+    response = await options.fetch(`${GOOGLE_TRANSLATE_URL}?key=${encodeURIComponent(apiKey)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(options.timeoutMs)
     })
   } catch (error) {
     const reason = (error && error.name === 'TimeoutError')
       ? '请求超时'
       : ((error && error.message) || error)
-    return { ok: false, msg: `谷歌极速请求失败：${reason}` }
+    return { ok: false, msg: `谷歌翻译请求失败：${reason}` }
   }
-  if (!response.ok) return { ok: false, msg: `谷歌极速返回 HTTP ${response.status}` }
+
+  if (!response.ok) {
+    // 厂商错误体里有可读原因（key 无效、未开通计费、配额用尽），尽力透出
+    let detail = ''
+    try {
+      const body = await response.json()
+      detail = String((body && body.error && body.error.message) || '').trim()
+    } catch (error) {}
+    return { ok: false, msg: `谷歌翻译返回 HTTP ${response.status}${detail ? '：' + detail : ''}` }
+  }
 
   let data
   try {
     data = await response.json()
   } catch (error) {
-    return { ok: false, msg: '谷歌极速返回体无法解析为 JSON' }
+    return { ok: false, msg: '谷歌翻译返回体无法解析为 JSON' }
   }
-  // 形如 [[["译文","原文",null,null,10]],null,"en",...]
-  if (!Array.isArray(data) || !Array.isArray(data[0])) {
-    return { ok: false, msg: '谷歌极速返回结构异常' }
-  }
-  const translated = data[0]
-    .map(part => (Array.isArray(part) && part[0]) ? String(part[0]) : '')
-    .join('')
-    .trim()
-  if (!translated) return { ok: false, msg: '谷歌极速未返回译文' }
+
+  const list = data && data.data && Array.isArray(data.data.translations) ? data.data.translations : []
+  const translated = String((list[0] && list[0].translatedText) || '').trim()
+  if (!translated) return { ok: false, msg: '谷歌翻译未返回译文' }
   return { ok: true, text: translated }
 }
+
+// --- Gemini 翻译（Google 的对话模型）------------------------------------------
+// 与 DeepSeek 同属"用 LLM 按指令翻译"，但结构与约定差别很大（依据官方文档 2026-09）：
+//   1. 消息结构是 contents[].parts[].text，角色是 user / model，
+//      不是 messages[].content、也没有 assistant；
+//   2. system 指令是**顶层 systemInstruction 字段**，不占 contents 数组；
+//   3. 鉴权用 ?key= 查询参数，不是 Authorization 头；
+//   4. **2.5 系列默认开启思考**，翻译场景必须用 thinkingBudget: 0 关掉：
+//      开着延迟显著变长、token 翻倍，而且官方明确思考模式下 temperature 不生效 ——
+//      翻译要的稳定性（temperature=0）就没了；
+//   5. 一旦有思考，返回的 parts 里会混入 thought:true 的推理片段，
+//      提取译文必须过滤掉，否则会把模型的推理过程当译文发给商户。
+
+const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models'
+const GEMINI_MODEL = 'gemini-2.5-flash'
+
+const GEMINI_LANGUAGES = {
+  auto: '',
+  zh: '简体中文',
+  'zh-cn': '简体中文',
+  'zh-tw': '繁体中文',
+  en: '英语',
+  ja: '日语',
+  ko: '韩语',
+  fr: '法语',
+  de: '德语',
+  es: '西班牙语',
+  pt: '葡萄牙语',
+  ru: '俄语',
+  ar: '阿拉伯语',
+  th: '泰语',
+  vi: '越南语',
+  id: '印尼语',
+  hi: '印地语',
+  it: '意大利语',
+  tr: '土耳其语',
+  ms: '马来语',
+  fil: '菲律宾语'
+}
+
+/** 语言码 → 提示词里的语言名；未收录的原样回退（Gemini 是 LLM，认语言码）。 */
+function geminiLanguage(code, fallback) {
+  const key = String(code || '').trim().toLowerCase()
+  if (!key) return geminiLanguage(fallback, '')
+  if (key in GEMINI_LANGUAGES) return GEMINI_LANGUAGES[key]
+  return String(code)
+}
+
+/**
+ * 组装端点。后台那个"接口地址"字段很容易只填到域名，
+ * 而实际要打的是 /v1beta/models/{model}:generateContent ——
+ * 与 DeepSeek 那边同样的坑，这里一并处理。
+ */
+function geminiEndpoint(raw, model) {
+  const suffix = `${encodeURIComponent(model)}:generateContent`
+  const value = String(raw || '').trim()
+  if (!value) return `${GEMINI_URL}/${suffix}`
+  if (/:generateContent\/?$/.test(value)) return value
+  try {
+    const url = new URL(value)
+    if (url.pathname === '/' || url.pathname === '') {
+      url.pathname = `/v1beta/models/${suffix}`
+      return url.toString()
+    }
+  } catch (error) {
+    return value
+  }
+  return `${value.replace(/\/+$/, '')}/${suffix}`
+}
+
+function geminiCredentials(engine, credentials) {
+  const fromAdmin = credentials || {}
+  const apiKey = String(fromAdmin.apiKey || '').trim() || envValue('PIX_GEMINI_API_KEY')
+  // 模型：后台配置优先，其次迁移种下的默认值，最后兜底常量
+  const model = String(fromAdmin.model || (engine && engine.model) || '').trim() || GEMINI_MODEL
+  const endpoint = geminiEndpoint((engine && engine.endpoint) || '', model)
+  return { apiKey, model, endpoint }
+}
+
+async function geminiTranslate(engine, payload, options) {
+  const { apiKey, model, endpoint } = geminiCredentials(engine, options.credentials)
+  if (!apiKey) {
+    return { ok: false, msg: 'Gemini 凭据未配置（管理后台填写 API Key，或设置 PIX_GEMINI_API_KEY）' }
+  }
+  const text = String(payload.text || '')
+  if (!text) return { ok: false, msg: '请输入要翻译的文本' }
+
+  const to = geminiLanguage(payload.to, 'zh')
+  const from = geminiLanguage(payload.from, 'auto')
+  if (!to) return { ok: false, msg: 'Gemini 翻译缺少目标语言' }
+  const instruction = from && from !== 'auto'
+    ? `你是专业翻译引擎。把用户给出的文本从${from}翻译成${to}。只输出译文本身，不要解释、不要加引号、不要保留原文。`
+    : `你是专业翻译引擎。把用户给出的文本翻译成${to}。只输出译文本身，不要解释、不要加引号、不要保留原文。`
+
+  let response
+  try {
+    response = await options.fetch(`${endpoint}?key=${encodeURIComponent(apiKey)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: instruction }] },
+        contents: [{ role: 'user', parts: [{ text }] }],
+        generationConfig: {
+          temperature: 0,                        // 翻译要稳定，不要发挥
+          thinkingConfig: { thinkingBudget: 0 }  // 关思考：否则变慢、翻倍，且 temperature 失效
+        }
+      }),
+      signal: AbortSignal.timeout(options.timeoutMs)
+    })
+  } catch (error) {
+    const reason = (error && error.name === 'TimeoutError')
+      ? '请求超时'
+      : ((error && error.message) || error)
+    return { ok: false, msg: `Gemini 请求失败：${reason}` }
+  }
+
+  if (!response.ok) {
+    // 厂商错误体里有可读原因（key 无效、配额用尽、模型不存在），尽力透出。
+    // 这里的空 catch 是**有意**的：错误体不保证是 JSON，解析失败就只报状态码，
+    // 不影响"失败即 ok:false"的契约，绝不能因此抛出或返回译文。
+    let detail = ''
+    try {
+      const body = await response.json()
+      detail = String((body && body.error && body.error.message) || '').trim()
+    } catch (error) {}
+    return { ok: false, msg: `Gemini 返回 HTTP ${response.status}${detail ? '：' + detail : ''}` }
+  }
+
+  let data
+  try {
+    data = await response.json()
+  } catch (error) {
+    return { ok: false, msg: 'Gemini 返回体无法解析为 JSON' }
+  }
+
+  // 内容被安全策略拦下时没有 candidates，只有 promptFeedback，要给可读原因
+  const blocked = data && data.promptFeedback && data.promptFeedback.blockReason
+  if (blocked) return { ok: false, msg: `Gemini 拒绝了该内容（${blocked}）` }
+
+  const candidate = data && Array.isArray(data.candidates) ? data.candidates[0] : null
+  const parts = candidate && candidate.content && Array.isArray(candidate.content.parts)
+    ? candidate.content.parts
+    : []
+  const translated = parts
+    .filter(part => part && !part.thought)   // 丢掉推理片段，只取正文
+    .map(part => String(part.text || ''))
+    .join('')
+    .trim()
+  if (!translated) return { ok: false, msg: 'Gemini 未返回译文' }
+  return { ok: true, text: translated }
+}
+
 
 // --- DeepSeek 翻译（OpenAI 兼容的对话接口）-----------------------------------
 // DeepSeek 没有翻译专用端点，走 /chat/completions 让模型按指令翻译。
@@ -416,25 +465,31 @@ async function deepseekTranslate(engine, payload, options) {
 // 未接入的通道保留 stub：即使有人把 wired 误置为 true，也不会拿到任何"演示译文"。
 
 const providers = {
-  youdao: {
-    name: '有道翻译',
-    translate: youdaoTranslate,
-    configured: (credentials) => {
-      const { appKey, appSecret } = youdaoCredentials(credentials)
-      return Boolean(appKey && appSecret)
-    }
-  },
   papago: { name: 'Papago 翻译', translate: notWired('Papago 翻译'), configured: () => false },
   baidu: { name: '百度翻译', translate: notWired('百度翻译'), configured: () => false },
   niutrans: { name: '小牛翻译', translate: notWired('小牛翻译'), configured: () => false },
-  google: { name: '谷歌稳定', translate: notWired('谷歌稳定'), configured: () => false },
-  'google-fast': {
-    name: '谷歌极速',
-    translate: googleFastTranslate,
-    // 无需凭据，"就绪"取决于是否显式允许公共翻译网络
-    configured: () => publicNetworkAllowed()
+  // 谷歌只保留一条通道（原「稳定 / 极速」两条已合并）。
+  // 实现走的是公共端点 —— 那是唯一真实可用的实现：原「谷歌稳定」（官方付费 API）
+  // 一直是个 notWired 空壳，从未接过线，合并时直接去掉，不留假通道。
+  // 公共端点无 SLA、可能被限流甚至按来源封禁，所以**门禁照旧**：
+  // 未显式开启 PIX_ALLOW_PUBLIC_TRANSLATION 时一律 fail-closed。
+  // 合并只是去掉了重复的通道名，不放宽这个安全约定。
+  // 谷歌走官方 Cloud Translation API：有 SLA、按量计费，需要 API Key。
+  // （原公共端点实现已随本次改动移除，公共网络门禁的管线保留备用。）
+  google: {
+    name: '谷歌翻译',
+    translate: googleTranslate,
+    configured: (credentials) => Boolean(
+      String(((credentials || {}).apiKey) || '').trim() || envValue('PIX_GOOGLE_API_KEY')
+    )
   },
-  tencent: { name: '腾讯翻译', translate: notWired('腾讯翻译'), configured: () => false },
+  gemini: {
+    name: 'Gemini 翻译',
+    translate: geminiTranslate,
+    configured: (credentials) => Boolean(
+      String(((credentials || {}).apiKey) || '').trim() || envValue('PIX_GEMINI_API_KEY')
+    )
+  },
   deepl: { name: 'DeepL 翻译', translate: notWired('DeepL 翻译'), configured: () => false },
   aws: { name: '亚马逊 AWS 翻译', translate: notWired('亚马逊 AWS 翻译'), configured: () => false },
   gpt: { name: 'GPT 翻译', translate: notWired('GPT 翻译'), configured: () => false },

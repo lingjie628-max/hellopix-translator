@@ -1,50 +1,30 @@
 /**
- * 谷歌通道拆分：稳定（官方 API） / 极速（公共免费端点）
+ * 谷歌通道拆分（已作废 · 保留为历史空操作）
  *
- * 竞品把谷歌拆成两条线路，我们原来只有一个 `google`：
+ * 本迁移原本把谷歌拆成两条：
  *   - 谷歌稳定 = Google Cloud Translation 官方 API，按量计费、有 SLA，需要 key
- *   - 谷歌极速 = translate.googleapis.com 公共端点，无需 key、快，但无 SLA、
- *                可能被限流，属于"能用但不保证"的通道
+ *   - 谷歌极速 = translate.googleapis.com 公共端点，无需 key、快，但无 SLA、可能被限流
  *
- * 两者是不同的成本结构与稳定性承诺，因此做成两个引擎、各自接线。
+ * 实际运行一段时间后确认这个拆分没有价值，产品决定**合并回一条「谷歌翻译」**：
+ *   1. 「谷歌稳定」从来没有真正接过线 —— 适配层里它一直是个 notWired 空壳
+ *      （见 translation-provider.js 的历史），商户选中它只会得到"尚未接入"。
+ *      留一条永远不可用的通道比没有更糟：用户会以为是配置问题而不是产品缺陷。
+ *   2. 两条通道对商户而言是同一个"谷歌翻译"，多一个下拉项只增加选择成本。
  *
- * 套餐归属：`google-fast` 与 `google` 一样放在 advanced / pro。
- * （如果想把它下放到 basic 当作引流通道，只需在本迁移里往 mapping 加一行
- *   ('basic', 'google-fast')。）
+ * 因此：
+ *   - 本迁移改为空操作 —— 全新部署从第一步起就只有一条 google 通道；
+ *   - 存量库的合并由 011_merge_google_channels 完成（它已经在生产跑过拆分，
+ *     改本文件不会让它重跑）。
  *
- * 注意：极速通道不写死"公共网络"策略 —— 它要等运行时开关
- * PIX_ALLOW_PUBLIC_TRANSLATION 打开后才会真正发请求，默认 fail-closed。
+ * 为什么不直接删掉这个文件：迁移记录要和跑过的生产库对得上，
+ * 删除会让 `npm run db:migrate` 的历史与 pgmigrations 表不一致。
  */
 exports.up = pgm => {
-  pgm.sql(`
-    INSERT INTO engines
-      (id, name, provider, tier, enabled, wired, cost_per_million, model, note)
-    VALUES
-      ('google-fast', '谷歌极速', 'Google', 'advanced', true, false, 0, NULL,
-       '公共免费端点，无需凭据；无 SLA、可能被限流，需显式开启 PIX_ALLOW_PUBLIC_TRANSLATION')
-    ON CONFLICT (id) DO NOTHING;
-
-    UPDATE engines SET name = '谷歌稳定' WHERE id = 'google';
-
-    INSERT INTO package_engines (package_id, engine_id)
-    SELECT p.id, mapping.engine_id
-    FROM (
-      VALUES
-        ('advanced', 'google-fast'), ('pro', 'google-fast')
-    ) AS mapping(package_code, engine_id)
-    JOIN packages p ON p.code = mapping.package_code
-    ON CONFLICT (package_id, engine_id) DO NOTHING;
-  `)
+  // 有意为空：拆分已作废，见文件头说明
+  pgm.sql('SELECT 1')
 }
 
 exports.down = pgm => {
-  pgm.sql(`
-    DELETE FROM package_engines
-    WHERE engine_id = 'google-fast'
-      AND package_id IN (SELECT id FROM packages WHERE code IN ('advanced', 'pro'));
-
-    DELETE FROM engines WHERE id = 'google-fast';
-
-    UPDATE engines SET name = '谷歌翻译' WHERE id = 'google';
-  `)
+  // 有意为空：本迁移不再产生任何结构或数据变更
+  pgm.sql('SELECT 1')
 }

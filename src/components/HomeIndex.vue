@@ -136,8 +136,8 @@ export default {
 </script>
 <style scoped>
 .dash { text-align: left; }
-.hello-name { font-size: 22px; font-weight: 700; color: #303133; }
-.hello-mail { color: #909399; margin-top: 6px; }
+.hello-name { font-size: 22px; font-weight: 700; color: var(--w-text); }
+.hello-mail { color: var(--w-text-faint); margin-top: 6px; }
 .hello-stats {
   display: flex;
   margin-top: 18px;
@@ -145,14 +145,14 @@ export default {
   border-top: 1px solid #ebeef5;
 }
 .hello-stats div { flex: 1; }
-.hello-stats span { display: block; color: #909399; font-size: 13px; }
-.hello-stats b { display: block; margin-top: 6px; font-size: 20px; color: #303133; }
+.hello-stats span { display: block; color: var(--w-text-faint); font-size: 13px; }
+.hello-stats b { display: block; margin-top: 6px; font-size: 20px; color: var(--w-text); }
 .list-card { margin-top: 16px; }
 .list-head { display: flex; justify-content: space-between; align-items: center; }
-.auto-line { color: #909399; font-size: 13px; font-weight: 400; }
-.announce { color: #e6a23c; line-height: 1.7; }
+.auto-line { color: var(--w-text-faint); font-size: 13px; font-weight: 400; }
+.announce { color: var(--w-warning); line-height: 1.7; }
 .quick { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .quick .el-button { margin: 0; }
-.info-row { display: flex; justify-content: space-between; padding: 8px 0; color: #606266; }
+.info-row { display: flex; justify-content: space-between; padding: 8px 0; color: var(--w-text-muted); }
 .el-card { margin-bottom: 0; }
 </style>

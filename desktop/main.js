@@ -31,12 +31,14 @@ let measuredChromeHeight = 0
 let hasMeasuredChrome = false
 const STATUS_HEIGHT = 22
 const FOOTER_HEIGHT = 30
-const DEFAULT_API = process.env.PIX_API || process.env.PIX_PUBLIC_URL || 'http://127.0.0.1:8080'
+const DEFAULT_API = require('./api-default').PUBLIC_URL
 const DEVELOPMENT = !app.isPackaged && process.env.NODE_ENV !== 'production'
 const API_HOSTS = trustedApiHosts(DEFAULT_API, process.env.PIX_ALLOWED_API_HOSTS)
 const DOWNLOAD_HOSTS = Array.from(new Set(API_HOSTS.concat(csvHosts(process.env.PIX_ALLOWED_DOWNLOAD_HOSTS))))
 const EXTERNAL_HOSTS = Array.from(new Set(DOWNLOAD_HOSTS.concat(['t.me', 'telegram.me', 'scamalytics.com'])))
-const APP_ICON = path.join(__dirname, 'build', 'icon.png')
+// 应用图标走 renderer/ 下的那份：build/ 只是 electron-builder 的构建资源目录，
+// 不会进 app.asar，打包后按原路径读会拿到空图（原生图标静默丢失）。
+const APP_ICON = path.join(__dirname, 'renderer', 'icon.png')
 const APP_VERSION = require('./package.json').version
 
 function appIconImage() {
@@ -524,12 +526,19 @@ async function refreshLines() {
   return { lineId: currentLine().id, rows: lines }
 }
 
+// 首次探测给更宽的预算：冷启动要现做 DNS 解析与 TLS 握手（还隔着 Cloudflare），
+// 2.5 秒实测经常不够，会在登录页误报"超时"——新用户第一次打开就看见超时，
+// 会以为软件坏了。首轮过后回到正常预算，真断线仍能快速显示超时。
+const PING_TIMEOUT_FIRST = 8000
+const PING_TIMEOUT_NORMAL = 2500
+let hasPingedOnce = false
+
 async function pingLine(id) {
   const line = lines.find(l => String(l.id) === String(id))
   if (!line) return { id: id, ok: false, ms: null }
   const start = Date.now()
   try {
-    await fetchFrom(line.url, '/site/info', 2500)
+    await fetchFrom(line.url, '/site/info', hasPingedOnce ? PING_TIMEOUT_NORMAL : PING_TIMEOUT_FIRST)
     line.ms = Date.now() - start
     line.ok = true
   } catch (e) {
@@ -546,6 +555,7 @@ function fastestLine() {
 
 async function pingAllLines() {
   await Promise.all(lines.map(line => pingLine(line.id)))
+  hasPingedOnce = true
   const best = fastestLine()
   if (best) applyLine(best.id)
   return {
@@ -579,7 +589,8 @@ function tabTransPayload(tab) {
     recvFrom: s.recvFrom || 'auto',
     recvTo: s.recvTo || 'zh',
     server: s.server || '',
-    engine: s.engine || (profile && profile.activeEngine) || 'youdao',
+    // 不再写死通道名：留空时由渲染进程从后台下发的通道列表里选
+    engine: s.engine || (profile && profile.activeEngine) || '',
     groupMode: s.groupMode === 'auto' ? 'auto' : 'manual',
     includeZh: !!(s.includeZh && s.includeZh !== '0'),
     fontSize: Number(s.fontSize) || 15,

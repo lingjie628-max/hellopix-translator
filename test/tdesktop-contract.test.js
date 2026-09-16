@@ -58,7 +58,7 @@ test('tdesktop bridge json keys match what the launcher writes', () => {
     apiBase: 'http://127.0.0.1:8080',
     deviceId: 'dev',
     cookies: { pix_session: 's', pix_csrf: 't' },
-    prefs: { engine: 'youdao', lang: 'zh', transRecv: true, transSend: true, transGroup: true }
+    prefs: { engine: 'deepseek', lang: 'zh', transRecv: true, transSend: true, transGroup: true }
   })
   const jsKeys = new Set(Object.keys(written))
 

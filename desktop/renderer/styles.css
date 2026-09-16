@@ -121,19 +121,41 @@
   /* 页脚与弹窗的底色渐变。它们是"深色专属"的写死渐变，浅色下必须换掉，
      否则会出现深底 + 深字的不可读组合（实测页脚 1.35:1、弹窗同类）。 */
   --bg-footer: linear-gradient(90deg, rgba(12, 38, 65, 0.98), rgba(19, 58, 91, 0.98) 50%, rgba(12, 38, 65, 0.98));
-  --bg-tabs: var(--bg-tabs);
-  --bg-menu: var(--bg-menu);
-  --bg-menu-2: var(--bg-menu-2);
-  --bg-login-card: var(--bg-login-card);
-  --bg-update-card: var(--bg-update-card);
-  --bg-add-card: var(--bg-add-card);
-  --bg-add-head: var(--bg-add-head);
-  --bg-add-sec: var(--bg-add-sec);
-  --bg-login-vignette: var(--bg-login-vignette);
+  /* 面板类底色：深色主题下的真值。
+     注意不能写成 var(--同名) —— 那是循环引用，变量在计算期失效，
+     使用处又没有 fallback，整条 background 会被丢掉（面板变全透明）。
+     浅色主题在下面的 [data-theme="light"] 块里覆盖这些同名变量。 */
+  --bg-tabs: linear-gradient(180deg, rgba(12, 22, 38, 0.94), rgba(8, 14, 26, 0.96));
+  --bg-menu: linear-gradient(145deg, rgba(16, 28, 47, 0.98), rgba(9, 17, 31, 0.99));
+  --bg-menu-2: linear-gradient(145deg, rgba(15, 26, 44, 0.98), rgba(8, 16, 29, 0.99));
+  --bg-login-card: linear-gradient(180deg, rgba(10, 18, 32, 0.88), rgba(6, 10, 20, 0.94));
+  --bg-update-card: linear-gradient(155deg, rgba(12, 26, 44, 0.97), rgba(7, 14, 26, 0.98));
+  --bg-add-card: linear-gradient(145deg, rgba(15, 27, 45, 0.97), rgba(8, 15, 28, 0.98));
+  --bg-add-head: linear-gradient(90deg, rgba(23, 52, 82, 0.76), rgba(11, 27, 48, 0.42));
+  --bg-add-sec: rgba(11, 27, 47, 0.38);
+  --bg-login-vignette: radial-gradient(circle at 50% 46%, rgba(8, 16, 30, 0.1) 0%, rgba(3, 8, 18, 0.55) 100%);
   --bg-footer-home: linear-gradient(90deg, rgba(8, 28, 49, 0.84), rgba(17, 54, 84, 0.78) 50%, rgba(8, 28, 49, 0.84));
   --bg-modal: linear-gradient(180deg, rgba(10, 18, 32, 0.96), rgba(6, 10, 20, 0.98));
   --c-ctl-border: rgb(var(--c-white-rgb) / 0.12);
   --c-ctl-bg: rgba(7, 16, 30, 0.55);
+  /* 控件各状态的底色。必须分主题：写死深色会让日间模式的输入框变成黑框，
+     而文字/占位符用的是日间深色 token，叠起来完全看不清。 */
+  --c-ctl-bg-focus: rgba(4, 12, 24, 0.92);
+  --c-ctl-bg-sunken: rgba(3, 12, 25, 0.6);
+  --c-ctl-bg-disabled: rgba(15, 31, 51, 0.55);
+  --c-ctl-text-disabled: #7f98ae;
+  /* 幽灵按钮（次要按钮）与「添加应用」弹窗页脚的底色 */
+  --c-ghost-bg: rgb(255 255 255 / 0.04);
+  --c-ghost-bg-hover: rgb(255 255 255 / 0.09);
+  --c-add-foot: rgba(6, 17, 32, 0.96);
+  /* 「添加应用」弹窗内的面板与强调文字。原来这些都写死深色，
+     日间主题下会变成深底深字（实测 proxy-copy 1.32:1，等于隐形）。 */
+  --c-add-sec-hover: rgba(13, 32, 54, 0.48);
+  --c-add-sec-h4: linear-gradient(90deg, rgba(26, 61, 91, 0.55), rgba(16, 38, 62, 0.22));
+  --c-add-sec-h4-text: #dceaf6;
+  --c-add-detect: rgba(3, 12, 25, 0.42);
+  --c-add-accent-text: #8be9f7;
+  --c-add-hover-text: #e5f7fb;
 }
 /* ===== 浅色（日间）主题 =====
    只覆盖变量，不改任何规则 —— 所有组件自动跟随。
@@ -183,8 +205,8 @@
   --c-accent: #0e7490;
   --c-accent-deep: #155e75;
   --c-accent-deepest: #0e7490;
-  --c-accent-soft: #0891b2;
-  --c-accent-2: #0284c7;
+  --c-accent-soft: #0e7490;
+  --c-accent-2: #0369a1;
   --c-accent-3: #0e7490;
   --c-accent-4: #0369a1;
   --c-accent-text: #155e75;
@@ -237,6 +259,20 @@
      压暗），不是"白色"。引用它会让输入框变成深底配深字 —— 实测日间模式下
      翻译条的下拉框几乎完全看不见。 */
   --c-ctl-bg: #ffffff;
+  /* 控件各状态：日间一律走浅色，否则深底配深字（见上面注释）。 */
+  --c-ctl-bg-focus: #ffffff;
+  --c-ctl-bg-sunken: #f7f9fc;
+  --c-ctl-bg-disabled: #eef1f6;
+  --c-ctl-text-disabled: #6b7280;
+  --c-ghost-bg: rgba(15, 23, 42, 0.05);
+  --c-ghost-bg-hover: rgba(15, 23, 42, 0.1);
+  --c-add-foot: rgba(244, 248, 253, 0.97);
+  --c-add-sec-hover: rgba(232, 241, 251, 0.9);
+  --c-add-sec-h4: linear-gradient(90deg, rgba(226, 238, 250, 0.85), rgba(244, 249, 255, 0.5));
+  --c-add-sec-h4-text: #1f2937;
+  --c-add-detect: rgba(240, 246, 253, 0.75);
+  --c-add-accent-text: #075985;
+  --c-add-hover-text: #111111;
 }
 
 
@@ -325,7 +361,7 @@ button, input, select, textarea {
 .login-card {
   width: 400px;
   padding: 36px 32px 28px;
-  background: linear-gradient(180deg, rgba(10, 18, 32, 0.88), rgba(6, 10, 20, 0.94));
+  background: var(--bg-login-card);
   border: 1px solid rgb(var(--c-accent-rgb) / 0.22);
   border-radius: 18px;
   position: relative;
@@ -436,7 +472,9 @@ button, input, select, textarea {
   width: 100%;
   height: 42px;
   border: 1px solid rgb(var(--c-accent-rgb) / 0.2);
-  background: rgba(3, 8, 18, 0.72);
+  /* 必须走主题变量：写死深色会让日间模式的输入框变成深底，
+     而文字/占位符用的是日间深色 token，两者叠起来几乎看不见。 */
+  background: var(--c-ctl-bg);
   color: var(--c-text-1);
   border-radius: 10px;
   padding: 0 14px;
@@ -454,7 +492,7 @@ button, input, select, textarea {
 .line-dd.open .line-trigger {
   border-color: var(--c-accent);
   box-shadow: 0 0 0 3px rgb(var(--c-accent-rgb) / 0.16), 0 0 18px rgb(var(--c-accent-rgb) / 0.12);
-  background: rgba(4, 12, 24, 0.92);
+  background: var(--c-ctl-bg-focus);
 }
 .field input:-webkit-autofill,
 .field input:-webkit-autofill:hover,
@@ -545,8 +583,12 @@ button {
   font-weight: 600;
   letter-spacing: 0.12em;
   background: linear-gradient(90deg, var(--c-accent-deep), var(--c-accent-6) 55%, var(--c-accent));
+  /* 底色是深色渐变（两套主题相同），文字必须写死白色：
+     继承基础 button 的 --c-text-strong 在日间是近黑，黑压深蓝只有 2.9~3.1:1，读不清。
+     白字实测 6.7~7.3:1。text-shadow 同理不能用 --c-white-rgb（日间被翻成深色）。 */
+  color: #ffffff;
   box-shadow: 0 0 0 1px rgba(103, 232, 249, 0.25), 0 10px 28px rgb(var(--c-accent-rgb) / 0.22);
-  text-shadow: 0 0 12px rgb(var(--c-white-rgb) / 0.25);
+  text-shadow: 0 0 12px rgba(255, 255, 255, 0.25);
 }
 #loginBtn:hover { filter: brightness(1.08); }
 #loginBtn:active { transform: translateY(1px); }
@@ -584,8 +626,10 @@ button {
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  background: var(--c-text-strong);
-  box-shadow: 0 2px 6px rgb(var(--c-black-rgb) / 0.25);
+  /* 圆钮是"控件表面"，不能借用文字色 token：
+     --c-text-strong 在日间是纯黑，会在浅色轨道上变成一个突兀的黑点。 */
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgb(var(--c-black-rgb) / 0.35);
   transition: left 0.18s ease;
 }
 .opt input:checked + .toggle { background: linear-gradient(180deg, var(--c-accent), var(--c-accent-8)); }
@@ -603,11 +647,15 @@ button {
 }
 .login-foot p { margin: 0; }
 .link-btn {
+  /* 点击热区必须 >=20px（HIG 桌面最小值）：
+     原来是 height:auto + padding:0，实测热区只有 53×17 —— 文字本身就是热区，
+     手指/指针都容易点不中。加纵向内边距把热区撑到 24px，视觉位置不变。 */
   height: auto;
+  min-height: 24px;
   margin-top: 8px;
   background: transparent;
   color: var(--c-accent-soft);
-  padding: 0;
+  padding: 3px 0;
   font-size: 12px;
   box-shadow: none;
   letter-spacing: 0.08em;
@@ -750,7 +798,7 @@ button {
   padding: 0 3px;
   border: 1px solid rgb(var(--c-accent-rgb) / 0.65);
   border-radius: 4px;
-  background: rgba(4, 15, 29, 0.95);
+  background: var(--c-ctl-bg-sunken);
   color: var(--c-text-5);
   font-size: var(--fs-meta);
   text-align: center;
@@ -767,7 +815,7 @@ button {
   display: none;
   align-items: center;
   justify-content: center;
-  background: rgba(4, 15, 29, 0.72);
+  background: var(--c-ctl-bg-sunken);
   color: var(--c-text-faint);
   opacity: 0.85;
   font-size: 12px;
@@ -1316,7 +1364,9 @@ button {
   text-overflow: ellipsis;
   transition: color 0.18s ease, background 0.18s ease, border-color 0.18s ease;
 }
-.footer-group button span { color: var(--c-accent-soft); font-size: 9px; }
+/* 10px 而非 9px：HIG 规定 macOS 最小字号 10pt（typography.md › Ensuring legibility）。
+   9px 在 Retina 上勉强能看，但在非 Retina 外接显示器上会糊。 */
+.footer-group button span { color: var(--c-accent-soft); font-size: 10px; }
 .footer-group button:hover {
   color: #f0f9ff;
   background: rgba(56, 189, 248, 0.1);
@@ -1536,7 +1586,7 @@ button {
   border-radius: 3px;
   background: var(--c-danger);
   color: var(--c-text-strong);
-  font-size: 9px;
+  font-size: 10px;
   font-style: normal;
   line-height: 14px;
   white-space: nowrap;
@@ -1633,7 +1683,9 @@ button {
 }
 .lock-card {
   width: 320px;
-  background: var(--c-text-strong);
+  /* 这张卡在两套主题下都是"白卡"：里面 h3/p/input 的文字色是写死的深色。
+     不能拿 --c-text-strong 当白底用 —— 它在日间是近黑，整张卡会变成黑底黑字。 */
+  background: #ffffff;
   border-radius: 12px;
   padding: 22px;
   color: #202124;
@@ -1648,7 +1700,7 @@ button {
   padding: 0 10px;
   margin-bottom: 10px;
   color: #202124;
-  background: var(--c-text-strong);
+  background: #ffffff;
 }
 .lock-card button {
   width: 100%;
@@ -1978,7 +2030,7 @@ button {
   position: relative;
   background:
     var(--bg-add-card);
-  color: #e8f1fa;
+  color: var(--c-text-1);
   border: 1px solid rgba(71, 203, 236, 0.24);
   border-radius: 18px;
   box-shadow:
@@ -2006,7 +2058,7 @@ button {
 #addApp .add-head {
   position: relative;
   padding: 15px 18px;
-  background: linear-gradient(90deg, rgba(23, 52, 82, 0.76), rgba(11, 27, 48, 0.42));
+  background: var(--bg-add-head);
   border-bottom: 1px solid rgba(125, 211, 252, 0.1);
 }
 #addApp .add-head::before {
@@ -2020,7 +2072,7 @@ button {
 }
 #addApp .add-head h3 {
   flex: 1;
-  color: #f2f8fd;
+  color: var(--c-text-1);
   font-size: 16px;
   letter-spacing: 0.02em;
 }
@@ -2053,8 +2105,8 @@ button {
 #addApp .proxy-geo input {
   border-color: rgb(var(--c-slate-rgb) / 0.2);
   border-radius: 8px;
-  background: rgba(3, 12, 25, 0.6);
-  color: #e6f0f9;
+  background: var(--c-ctl-bg-sunken);
+  color: var(--c-text-1);
   outline: none;
   transition:
     border-color 0.2s ease,
@@ -2068,13 +2120,13 @@ button {
 #addApp .add-grid input[type="password"]:focus,
 #addApp .proxy-geo input:focus {
   border-color: rgb(var(--c-accent-rgb) / 0.58);
-  background: rgba(5, 18, 35, 0.82);
+  background: var(--c-ctl-bg-focus);
   box-shadow: 0 0 0 3px rgb(var(--c-accent-rgb) / 0.09), 0 0 16px rgb(var(--c-accent-rgb) / 0.06);
 }
 #addApp .add-grid input[type="text"]:disabled,
 #addApp .add-grid input[type="text"]:read-only {
-  background: rgba(15, 31, 51, 0.55);
-  color: #7f98ae;
+  background: var(--c-ctl-bg-disabled);
+  color: var(--c-ctl-text-disabled);
 }
 #addApp .add-update,
 #addApp #addProxyDetectBtn,
@@ -2097,7 +2149,7 @@ button {
   background: rgba(14, 116, 144, 0.12);
   border-color: rgb(var(--c-accent-rgb) / 0.25);
   border-radius: 9px;
-  color: #8be9f7;
+  color: var(--c-add-accent-text);
 }
 #addApp .add-sec {
   position: relative;
@@ -2105,7 +2157,7 @@ button {
   overflow: hidden;
   border: 1px solid rgba(139, 184, 218, 0.11);
   border-radius: 13px;
-  background: rgba(11, 27, 47, 0.38);
+  background: var(--bg-add-sec);
   transition:
     border-color 0.25s ease,
     background 0.25s ease,
@@ -2114,14 +2166,14 @@ button {
 }
 #addApp .add-sec:hover {
   border-color: rgb(var(--c-accent-rgb) / 0.2);
-  background: rgba(13, 32, 54, 0.48);
+  background: var(--c-add-sec-hover);
   box-shadow: 0 8px 28px rgb(var(--c-black-rgb) / 0.1), 0 0 20px rgb(var(--c-accent-rgb) / 0.025);
 }
 #addApp .add-sec h4 {
   position: relative;
   padding: 10px 13px 10px 27px;
-  color: #dceaf6;
-  background: linear-gradient(90deg, rgba(26, 61, 91, 0.55), rgba(16, 38, 62, 0.22));
+  color: var(--c-add-sec-h4-text);
+  background: var(--c-add-sec-h4);
   border-bottom: 1px solid rgba(139, 184, 218, 0.08);
   letter-spacing: 0.02em;
 }
@@ -2151,7 +2203,7 @@ button {
 }
 #addApp .add-checks label:hover,
 #addApp .proxy-udp:hover {
-  color: #e5f7fb;
+  color: var(--c-add-hover-text);
   border-color: rgb(var(--c-accent-rgb) / 0.3);
   background: rgb(var(--c-accent-rgb) / 0.07);
   transform: translateY(-1px);
@@ -2163,7 +2215,7 @@ button {
 #addApp .add-grid input[type="color"] {
   border-color: rgb(var(--c-slate-rgb) / 0.2);
   border-radius: 8px;
-  background: rgba(3, 12, 25, 0.6);
+  background: var(--c-ctl-bg-sunken);
 }
 #addApp .add-proxy-tip,
 #addApp .proxy-detect-msg { color: #7890a7; }
@@ -2171,30 +2223,30 @@ button {
 #addApp .proxy-detect {
   border-color: rgba(139, 184, 218, 0.13);
   border-radius: 11px;
-  background: rgba(3, 12, 25, 0.42);
+  background: var(--c-add-detect);
 }
 #addApp .proxy-copy,
 #addApp .add-cancel {
   border-color: rgb(var(--c-slate-rgb) / 0.2);
   border-radius: 9px;
-  background: rgb(var(--c-white-rgb) / 0.04);
+  background: var(--c-ghost-bg);
   color: var(--c-text-14);
   transition: background 0.2s ease, color 0.2s ease, transform 0.2s ease;
 }
 #addApp .proxy-copy:hover,
 #addApp .add-cancel:hover {
-  background: rgb(var(--c-white-rgb) / 0.09);
+  background: var(--c-ghost-bg-hover);
   color: var(--c-text-strong);
   transform: translateY(-1px);
 }
 #addApp .proxy-geo label,
 #addApp .proxy-geo input,
-#addApp .proxy-quality { color: #75dff1; }
+#addApp .proxy-quality { color: var(--c-accent-2); }
 #addApp .proxy-history { color: var(--c-warn-4); }
 #addApp .add-foot {
   padding: 12px 18px;
   border-top-color: rgba(125, 211, 252, 0.1);
-  background: rgba(6, 17, 32, 0.96);
+  background: var(--c-add-foot);
 }
 #addApp .add-cancel,
 #addApp .add-ok { height: 36px; padding: 0 20px; }
@@ -2288,7 +2340,7 @@ button {
   display: block;
   margin-top: 16px;
   color: #5fcee0;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.18em;
 }

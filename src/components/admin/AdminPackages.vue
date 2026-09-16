@@ -3,7 +3,10 @@
     <el-table :data="rows" border stripe>
       <el-table-column prop="id" label="ID" width="60"></el-table-column>
       <el-table-column prop="title" label="套餐" width="160"></el-table-column>
-      <el-table-column prop="price" label="价格(元)" width="90"></el-table-column>
+      <!-- 货币单位跟随后台「系统设置 → 价格货币」，不再写死"元" -->
+      <el-table-column :label="'价格(' + currencyName + ')'" width="120">
+        <template slot-scope="scope">{{ currencySymbol }} {{ scope.row.price }}</template>
+      </el-table-column>
       <el-table-column label="字符" width="100">
         <template slot-scope="scope">{{ (scope.row.chars || 0) / 10000 }} 万</template>
       </el-table-column>
@@ -29,7 +32,10 @@
       <el-form :model="form" label-width="90px">
         <el-form-item label="名称"><el-input v-model="form.title"></el-input></el-form-item>
         <el-form-item label="说明"><el-input v-model="form.subtitle"></el-input></el-form-item>
-        <el-form-item label="价格"><el-input-number v-model="form.price" :min="0"></el-input-number></el-form-item>
+        <el-form-item label="价格">
+          <el-input-number v-model="form.price" :min="0" :precision="2" :step="10"></el-input-number>
+          <span class="unit-tip">{{ currencyName }}（{{ currencySymbol }}）· 币种在「系统设置 → 价格货币」切换</span>
+        </el-form-item>
         <el-form-item label="字符数"><el-input-number v-model="form.chars" :min="0" :step="150000"></el-input-number></el-form-item>
         <el-form-item label="客户端">
           <el-checkbox :value="!!(form.clients && form.clients.standalone)" @change="val => setClient('standalone', val)">独立应用版</el-checkbox>
@@ -131,4 +137,5 @@ export default {
 </script>
 <style scoped>
 .admin-page { text-align: left; }
+.unit-tip { margin-left: 10px; color: var(--w-text-faint); font-size: 12px; }
 </style>

@@ -9,6 +9,8 @@ const { redisRateLimit } = require('../redis-security')
 const captcha = require('../lib/captcha')
 const { encryptSecret, credentialsKeyReady, KEY_ENV } = require('../lib/credentials')
 const { providers, channelStatus } = require('../services/translation-provider')
+const { AdminTotpService } = require('../services/admin-totp-service')
+const { validTronAddress, normalizeTronAddress } = require('../lib/tron-address')
 
 function publicUser(session) {
   return {
@@ -45,6 +47,15 @@ function productionRouter(context) {
   const translateIpLimit = limit('translate-ip', 180, 60_000)
   const translateAccountLimit = limit('translate-account', 120, 60_000, req =>
     req.pixUser ? `${req.pixUser.kind}:${req.pixUser.account.id}` : 'missing'
+  )
+
+  // 超管两步验证
+  const adminTotp = new AdminTotpService(repo, core.redis)
+  // 第二步的限流按来源 IP：票据本身还有尝试次数上限，两层叠加
+  const adminTotpLimit = limit('admin-totp-ip', 20, 15 * 60_000)
+  // 动态码/密钥相关操作只可能在已登录会话里发生，给个宽松上限防脚本刷
+  const adminTotpOpLimit = limit('admin-totp-op', 60, 15 * 60_000, req =>
+    req.pixAdmin ? `admin:${req.pixAdmin.id}` : 'missing'
   )
 
   router.use(auth.middleware())
@@ -123,6 +134,91 @@ function productionRouter(context) {
     res.json(page(result.rows, result.total, paging))
   }))
   router.get('/user/quote', asyncRoute(async (req, res) => res.json(await core.quote(input(req)))))
+
+  /**
+   * 创建充值订单（待支付）。
+   *
+   * 收款用 TRC20 USDT，靠人工/链上核对确认，所以这里做了一个关键设计：
+   * **给每单加 0.01~0.99 的唯一"匹配尾数"**。多家商户都转到同一个收款地址时，
+   * 金额本身就是身份标识 —— 看到 200.37 到账就能精确对上哪一单，
+   * 否则只能靠"谁在群里说了一声"，早晚对错账。
+   *
+   * 尾数会同时写进 original_amount 和 paid_amount，这样表上的
+   * CHECK (original_amount - discount_amount = paid_amount) 依然成立。
+   */
+  /**
+   * 创建充值订单（待支付）。
+   *
+   * 收款用 TRC20 USDT，靠链上核对人工确认，所以这里做了一个关键设计：
+   * **给每单加 0.01~0.99 的唯一"匹配尾数"**。多家商户都转到同一个收款地址时，
+   * 金额本身就是身份标识 —— 看到 200.37 到账就能精确对上哪一单，
+   * 否则只能靠"谁在群里说了一声"，早晚对错账。
+   *
+   * 尾数会同时写进 original_amount 和 paid_amount，这样表上的
+   * CHECK (original_amount - discount_amount = paid_amount) 依然成立。
+   */
+  router.post('/userRecharge/create', asyncRoute(async (req, res) => {
+    // 充值涉及资金，只允许主账号操作；子账号需让主账号来充
+    if (req.pixUser.kind !== 'main') {
+      throw new ApiError(403, '仅主账号可发起充值', 'MAIN_ACCOUNT_REQUIRED')
+    }
+    const data = input(req)
+    const quote = await core.quote({ baseid: data.baseid || data.id, month: data.month || data.qty })
+    const pack = await repo.package(data.baseid || data.id)
+    if (!pack) throw new ApiError(404, '套餐不存在', 'PACKAGE_NOT_FOUND')
+
+    // 收款渠道未启用/未填地址时拒绝下单，避免商户拿到空地址
+    const channels = (await readSettings()).paymentChannels.filter(item => item.enabled && item.address)
+    if (!channels.length) {
+      throw new ApiError(503, '收款方式尚未配置，请联系客服', 'PAYMENT_NOT_CONFIGURED')
+    }
+    const channel = channels.find(item => item.id === String(data.channelId || '')) || channels[0]
+
+    const order = await repo.transaction(async client => {
+      // 挑一个当前待支付订单没在用的尾数
+      const pending = await repo.query(
+        "SELECT paid_amount FROM recharges WHERE status=0 AND created_at > now() - interval '7 days'",
+        [], client
+      )
+      const used = new Set(pending.rows.map(row => Number(row.paidAmount).toFixed(2)))
+      let suffix = 0
+      for (let i = 0; i < 200; i++) {
+        const candidate = crypto.randomInt(1, 100) / 100
+        if (!used.has((quote.paidAmount + candidate).toFixed(2))) { suffix = candidate; break }
+      }
+      const round2 = value => Math.round(value * 100) / 100
+      const paidAmount = round2(quote.paidAmount + suffix)
+      const originalAmount = round2(quote.originalPrice + suffix)
+      const orderNumber = `HP${Date.now()}${crypto.randomInt(100, 999)}`
+
+      const created = await repo.query(
+        `INSERT INTO recharges(user_id,package_id,order_number,kind,payment_type,quantity,chars,
+         original_amount,discount_amount,paid_amount,status,idempotency_key)
+         VALUES($1,$2,$3,'package',$4,$5,$6,$7,$8,$9,0,$10) RETURNING *`,
+        [req.pixUser.parent.id, pack.id, orderNumber, `USDT-${channel.network}`,
+          quote.qty, quote.chars, originalAmount, quote.discountAmount, paidAmount,
+          `recharge:${orderNumber}`], client
+      )
+      // 这里**不写** repo.audit：audit_logs 是「超管操作记录」，
+      // 其 admin_id 有指向 admins 表的外键，商户下单写进去会外键冲突。
+      // 下单本身在 recharges 表里已有完整记录（时间/金额/状态），足够追溯。
+      return mapRow(created.rows[0])
+    })
+
+    res.json({
+      orderNum: order.orderNumber,
+      packageTitle: pack.title,
+      quantity: order.quantity,
+      chars: Number(order.chars),
+      originalAmount: Number(order.originalAmount),
+      discountAmount: Number(order.discountAmount),
+      payAmount: Number(order.paidAmount),
+      // 明确告诉前端尾数是多少，好向商户解释"为什么不是整数"
+      matchSuffix: Math.round((Number(order.paidAmount) - quote.paidAmount) * 100) / 100,
+      channel: { id: channel.id, name: channel.name, network: channel.network, address: channel.address, note: channel.note },
+      expiresHint: '请按此金额准确转账，金额即订单标识'
+    })
+  }))
 
   router.get('/team/info', asyncRoute(async (req, res) => res.json(await core.teamInfo(req.pixUser))))
   router.get('/team/subs', asyncRoute(async (req, res) => {
@@ -264,7 +360,7 @@ function productionRouter(context) {
   }))
   router.post('/order/checkSharePwd', shareIpLimit, shareOrderLimit,
     asyncRoute(async (req, res) => res.json(await core.sharePassword(input(req)))))
-  router.post('/orderDetails/shareOrder', asyncRoute(async (req, res) => {
+  router.post('/orderDetails/shareOrder', shareIpLimit, shareOrderLimit, asyncRoute(async (req, res) => {
     const data = input(req)
     await core.assertShare(data.shareToken, data.orderNum)
     const paging = pagination(req)
@@ -298,9 +394,9 @@ function productionRouter(context) {
     )
     res.json(page(mapRows(result.rows), count.rows[0].total, paging))
   })
-  router.post('/orderDetails/getOrderFans', sharedFans)
-  router.get('/orderDetails/getOrderFans', sharedFans)
-  router.post('/orderDetails/getTodayFansCount', asyncRoute(async (req, res) => {
+  router.post('/orderDetails/getOrderFans', shareIpLimit, shareOrderLimit, sharedFans)
+  router.get('/orderDetails/getOrderFans', shareIpLimit, shareOrderLimit, sharedFans)
+  router.post('/orderDetails/getTodayFansCount', shareIpLimit, shareOrderLimit, asyncRoute(async (req, res) => {
     const data = input(req)
     const serial = data.serialNumber || data.orderNum
     await core.assertShare(data.shareToken, serial)
@@ -332,15 +428,109 @@ function productionRouter(context) {
   router.post('/translate', translateIpLimit, translateAccountLimit, translate)
 
   router.get('/site/info', asyncRoute(async (_req, res) => res.json(await core.siteInfo())))
+
+  // 官网（未登录可见）用的公开内容。
+  // 只暴露营销信息：套餐标题/价格/额度/卖点，不含任何商户或凭据数据。
+  router.get('/site/packages', asyncRoute(async (_req, res) => {
+    const result = await repo.query(
+      // 不要写驼峰别名：Postgres 会把未加引号的别名折叠成小写
+      // （portUnlimited → portunlimited），mapRow 的下划线转换就接不上了。
+      // 直接用原列名，交给 mapRow 统一转成 portLimit / portUnlimited / includedChars。
+      `SELECT code,title,subtitle,price,port_limit,port_unlimited,included_chars,highlights,clients,features
+       FROM packages WHERE active=true ORDER BY sort_order,id`
+    )
+    res.json({ success: true, rows: mapRows(result.rows) })
+  }))
+  router.get('/site/faqs', asyncRoute(async (_req, res) => {
+    const result = await repo.query(
+      'SELECT id,question,answer FROM faqs WHERE enabled=true ORDER BY sort_order,id'
+    )
+    res.json({ success: true, rows: mapRows(result.rows) })
+  }))
+  router.get('/site/platforms', (_req, res) => res.json({ success: true, rows: core.platforms() }))
+
   router.get('/client/lines', asyncRoute(async (_req, res) => {
     const result = await repo.query('SELECT id,name,url,region,enabled FROM client_lines WHERE enabled=true ORDER BY sort_order,id')
     res.json({ success: true, rows: mapRows(result.rows) })
   }))
 
   router.post('/admin/login', loginIpLimit, loginAccountLimit, asyncRoute(async (req, res) => {
-    const admin = await auth.loginAdmin(req, res, input(req))
-    res.json({ success: true, msg: '登录成功', obj: { username: admin.username, nickname: admin.nickname, role: admin.role || 'superadmin' } })
+    const data = input(req)
+    // 图形验证码：超管是全站最高价值目标，前置阻力不能比商户端还弱
+    const captchaError = await captcha.consume(core.redis, data.imageId, data.imageCode)
+    if (captchaError) throw new ApiError(400, captchaError, 'BAD_CAPTCHA')
+
+    const admin = await auth.verifyAdminCredentials(req, data)
+
+    if (admin.totpEnabled) {
+      // 已开两步验证：这一步只发一次性票据，**不给会话**
+      const { ticket, expiresInMs } = await adminTotp.issueLoginTicket(admin)
+      return res.json({
+        success: true,
+        needTotp: true,
+        ticket,
+        expiresInMs,
+        msg: '请输入验证器上的 6 位动态码'
+      })
+    }
+
+    await auth.startAdminSession(req, res, admin)
+    res.json({
+      success: true,
+      obj: {
+        username: admin.username,
+        nickname: admin.nickname,
+        role: admin.role || 'superadmin',
+        totpEnabled: false
+      }
+    })
   }))
+
+  router.post('/admin/login/totp', adminTotpLimit, asyncRoute(async (req, res) => {
+    const data = input(req)
+    const { admin, usedRecovery } = await adminTotp.completeLogin(data.ticket, data.code, req.ip)
+    await auth.startAdminSession(
+      req, res, admin, usedRecovery ? '使用恢复码登录超管后台' : '登录超管后台（两步验证）'
+    )
+    res.json({
+      success: true,
+      usedRecovery: !!usedRecovery,
+      obj: {
+        username: admin.username,
+        nickname: admin.nickname,
+        role: admin.role || 'superadmin',
+        totpEnabled: true
+      }
+    })
+  }))
+
+  router.get('/admin/totp', adminTotpOpLimit, asyncRoute(async (req, res) => {
+    res.json(Object.assign({ success: true }, await adminTotp.status(req.pixAdmin)))
+  }))
+
+  router.post('/admin/totp/setup', adminTotpOpLimit, asyncRoute(async (req, res) => {
+    res.json(Object.assign({ success: true }, await adminTotp.beginSetup(req.pixAdmin)))
+  }))
+
+  router.post('/admin/totp/enable', adminTotpOpLimit, asyncRoute(async (req, res) => {
+    const { recoveryCodes } = await adminTotp.enable(req.pixAdmin, input(req).code, req.ip)
+    // 恢复码只在此刻返回一次，之后库里只有哈希，谁也取不回明文
+    res.json({ success: true, recoveryCodes, msg: '两步验证已开启' })
+  }))
+
+  router.post('/admin/totp/disable', adminTotpOpLimit, asyncRoute(async (req, res) => {
+    await adminTotp.disable(req.pixAdmin, input(req).code, req.ip)
+    // 与同组其它端点保持一致用 success:true。
+    // 项目里的 ok() 辅助返回的是 success:'success'（字符串），两种风格并存，
+    // 前端靠真值判断都能用，但同一组接口混着来迟早会坑到调用方。
+    res.json({ success: true, msg: '两步验证已关闭' })
+  }))
+
+  router.post('/admin/totp/recovery', adminTotpOpLimit, asyncRoute(async (req, res) => {
+    const { recoveryCodes } = await adminTotp.regenerateRecovery(req.pixAdmin, input(req).code, req.ip)
+    res.json({ success: true, recoveryCodes, msg: '恢复码已重新生成' })
+  }))
+
   router.post('/admin/logout', asyncRoute(async (req, res) => {
     await security.destroySession(req, res, 'admin')
     ok(res, '已退出')
@@ -461,8 +651,59 @@ function productionRouter(context) {
     await repo.query('UPDATE orders SET status=$2,updated_at=NOW() WHERE id=$1', [data.id, number(data.status)])
     ok(res, '工单状态已更新')
   }))
-  router.post('/admin/recharges/status',
-    stub('admin.recharges.status', '支付结算与回调验签尚未迁移'))
+  /**
+   * 确认收款（超管手动把订单标记为已支付）。
+   *
+   * 这是全站唯一"点一下就给商户加字符"的地方，所以三重防重复：
+   *   1. 事务里 SELECT ... FOR UPDATE 锁住订单行，并发点击会被串行化
+   *   2. 已经是已支付状态直接返回，不重复加字符（幂等）
+   *   3. 填了链上交易号时，走表上 (payment_type, provider_transaction_id)
+   *      唯一索引 —— 同一笔链上交易不可能给两单充值
+   */
+  router.post('/admin/recharges/status', asyncRoute(async (req, res) => {
+    const data = input(req)
+    const id = number(data.id)
+    if (!id) throw new ApiError(400, '缺少订单 ID', 'ORDER_ID_REQUIRED')
+    const txId = String(data.providerTransactionId || data.txId || '').trim().slice(0, 160)
+
+    const result = await repo.transaction(async client => {
+      const found = await repo.query('SELECT * FROM recharges WHERE id=$1 FOR UPDATE', [id], client)
+      const order = mapRow(found.rows[0])
+      if (!order) throw new ApiError(404, '订单不存在', 'RECHARGE_NOT_FOUND')
+
+      if (Number(order.status) === 1) {
+        // 已经确认过了：不重复加字符，也不报错（运维可能重复点了或刷新后重提）
+        return { order, alreadyPaid: true }
+      }
+
+      // 链上交易号重复 = 同一笔钱想充两次，交给唯一索引拦下并给出明确文案
+      if (txId) {
+        const dup = await repo.query(
+          'SELECT order_number FROM recharges WHERE payment_type=$1 AND provider_transaction_id=$2 AND id<>$3',
+          [order.paymentType, txId, id], client
+        )
+        if (dup.rows[0]) {
+          throw new ApiError(409, `该交易号已用于订单 ${dup.rows[0].orderNumber}，不能重复充值`, 'TX_ALREADY_USED')
+        }
+      }
+
+      await repo.adjustChars(client, 'main', order.userId, Number(order.chars))
+      await repo.query(
+        `UPDATE recharges SET status=1,paid_at=NOW(),provider_transaction_id=COALESCE(NULLIF($2,''),provider_transaction_id),
+         updated_at=NOW() WHERE id=$1`,
+        [id, txId], client
+      )
+      await repo.audit(client, req.pixAdmin, '确认收款',
+        `${order.orderNumber} +${order.chars} 字符${txId ? ' tx:' + txId : ''}`, req.ip,
+        { type: 'user', id: order.userId })
+      return { order, alreadyPaid: false }
+    })
+
+    ok(res, result.alreadyPaid
+      ? `订单 ${result.order.orderNumber} 此前已确认，未重复加字符`
+      : `已确认收款，${result.order.chars} 字符已到账`)
+  }))
+
   router.post('/admin/translate/grant', asyncRoute(async (req, res) => {
     const data = input(req)
     const chars = Math.trunc(number(data.chars))
@@ -535,6 +776,13 @@ function productionRouter(context) {
     const gift = data.charBalance === undefined || data.charBalance === ''
       ? number(settings['registration.trial_chars'])
       : number(data.charBalance)
+      // 新商户的默认翻译通道：后台设置的默认值 → 套餐内第一个「已接通且启用」的 → 空。
+      // 原先写死 'youdao'，一旦该通道没接通，该商户从第一天起翻译就必然失败。
+      let defaultEngine = String(settings['translation.active_engine'] || '').trim()
+      if (!defaultEngine) {
+        const usable = await repo.packageEngines(pack.id)
+        defaultEngine = (usable.find(row => row.enabled && row.wired) || {}).id || ''
+      }
     await repo.transaction(async client => {
       const created = await repo.query(
         `INSERT INTO users(username,password_hash,nickname,status,package_id,port_limit,expires_at,
@@ -544,7 +792,7 @@ function productionRouter(context) {
         [String(data.username).trim(), await auth.hash(data.password), data.nickname || data.username,
           pack.id, number(data.port, number(pack.portLimit)), data.expireTime || null, gift,
           Boolean(number(data.autoReply)), data.phone || null, data.remarks || '',
-          String(settings['translation.active_engine'] || 'youdao'), Boolean(number(data.enterprise)),
+          defaultEngine || null, Boolean(number(data.enterprise)),
           data.email ? String(data.email).toLowerCase() : null, number(data.subQuota)], client
       )
       if (gift) {
@@ -873,13 +1121,37 @@ function productionRouter(context) {
     supportNote: 'support.note',
     supportBtnText: 'support.button_text',
     supportShow: 'support.visible',
-    notices: 'site.notices'
+    notices: 'site.notices',
+    // 货币单位：官网价格显示要用，做成设置项而不是页面写死。
+    // 刻意**没有**计费周期项 —— 本站按字符计费，没有按月/按年这回事，
+    // 加一个周期设置等于凭空造出一个不存在的商业条款。
+    currency: 'billing.currency',
+    // 收款渠道。当前用 TRC20 USDT（跨境、无拒付、手续费低）。
+    // 地址必须过 base58check 校验：填错 = 资金永久丢失、无法追回。
+    paymentChannels: 'payment.channels'
   }
+
+  const CURRENCIES = {
+    USD: { symbol: '$', label: '美元 USD' },
+    CNY: { symbol: '¥', label: '人民币 CNY' },
+    HKD: { symbol: 'HK$', label: '港币 HKD' },
+    JPY: { symbol: '¥', label: '日元 JPY' },
+    EUR: { symbol: '€', label: '欧元 EUR' }
+  }
+  const DEFAULT_CURRENCY = 'USD'
+
+  // 收款渠道默认值。只支持 TRC20 USDT：
+  // 跨境客户用不了微信/支付宝，TRC20 手续费低（约 $1-3）、无拒付。
+  const PAYMENT_NETWORKS = { TRC20: 'TRC20（波场）' }
+  const PAYMENT_DEFAULTS = [
+    { id: 'usdt-trc20', name: 'USDT', network: 'TRC20', address: '', note: '', enabled: 0 }
+  ]
 
   async function readSettings() {
     const rows = (await repo.query('SELECT key,value FROM app_settings')).rows
     const byKey = rows.reduce((out, row) => { out[row.key] = row.value; return out }, {})
     const discounts = byKey['billing.discounts'] || {}
+    const savedChannels = Array.isArray(byKey['payment.channels']) ? byKey['payment.channels'] : []
     return {
       siteName: byKey['site.name'] || '',
       announcement: byKey['site.announcement'] || '',
@@ -896,7 +1168,21 @@ function productionRouter(context) {
       supportBtnText: byKey['support.button_text'] || '联系客服',
       supportShow: byKey['support.visible'] === false ? 0 : 1,
       notices: Array.isArray(byKey['site.notices']) ? byKey['site.notices'] : [],
-      lines: Array.isArray(byKey['service.lines']) ? byKey['service.lines'] : []
+      lines: Array.isArray(byKey['service.lines']) ? byKey['service.lines'] : [],
+      currency: CURRENCIES[byKey['billing.currency']] ? byKey['billing.currency'] : DEFAULT_CURRENCY,
+      currencyOptions: Object.keys(CURRENCIES).map(code => ({ code, label: CURRENCIES[code].label })),
+      // 收款渠道：把默认值和已保存的合并，保证新增字段能补上
+      paymentChannels: PAYMENT_DEFAULTS.map(item => {
+        const saved = savedChannels.find(row => row && row.id === item.id) || {}
+        return Object.assign({}, item, {
+          name: String(saved.name || item.name),
+          network: 'TRC20',
+          address: normalizeTronAddress(saved.address),
+          note: String(saved.note || ''),
+          enabled: Number(saved.enabled) ? 1 : 0
+        })
+      }),
+      paymentNetworks: Object.keys(PAYMENT_NETWORKS).map(code => ({ code, label: PAYMENT_NETWORKS[code] }))
     }
   }
 
@@ -919,6 +1205,13 @@ function productionRouter(context) {
       let value = data[field]
       if (field === 'trialChars') value = Math.max(0, Math.floor(Number(value) || 0))
       if (field === 'supportShow') value = Number(value) ? true : false
+      if (field === 'currency') {
+        const text = String(value || '').trim().toUpperCase()
+        if (!CURRENCIES[text]) {
+          throw new ApiError(400, `不支持的货币单位：${text}`, 'BAD_CURRENCY')
+        }
+        value = text
+      }
       if (field === 'notices') {
         const parsed = typeof value === 'string' ? safeParse(value) : value
         if (!Array.isArray(parsed)) throw new ApiError(400, '公告必须是数组', 'BAD_NOTICES')
@@ -951,6 +1244,33 @@ function productionRouter(context) {
             enabled: Number(line.enabled) ? 1 : 0
           }
         })
+      }
+      if (field === 'paymentChannels') {
+        const parsed = typeof value === 'string' ? safeParse(value) : value
+        if (!Array.isArray(parsed)) throw new ApiError(400, '收款渠道必须是数组', 'BAD_PAYMENT_CHANNELS')
+        value = parsed.map((item, index) => {
+          const id = String((item && item.id) || `ch${index + 1}`)
+          const address = normalizeTronAddress(item && item.address)
+          const enabled = Number(item && item.enabled) ? 1 : 0
+          // 地址一旦填了就必须能过校验和 —— 这是资金安全底线，不做"先存后改"
+          if (address && !validTronAddress(address)) {
+            throw new ApiError(400,
+              `第 ${index + 1} 个收款地址不是合法的 TRC20 地址（校验和不匹配，请核对是否复制错字符）`,
+              'BAD_PAYMENT_ADDRESS')
+          }
+          // 启用但没填地址 = 商户看到空地址，属于必然出事故的配置，直接拦下
+          if (enabled && !address) {
+            throw new ApiError(400, `第 ${index + 1} 个渠道已启用但没填收款地址`, 'PAYMENT_ADDRESS_REQUIRED')
+          }
+          return {
+            id,
+            name: String((item && item.name) || 'USDT').trim().slice(0, 40) || 'USDT',
+            network: 'TRC20',
+            address,
+            note: String((item && item.note) || '').slice(0, 500),
+            enabled
+          }
+        }).slice(0, 10)
       }
       if (['clientDownloadUrl', 'officialUrl', 'guideUrl', 'telegramUrl'].includes(field)) {
         const text = String(value || '').trim()

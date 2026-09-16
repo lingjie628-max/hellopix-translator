@@ -37,7 +37,7 @@
         </el-form-item>
         <el-form-item v-if="form.id === 'email'" label="演示带出验证码">
           <el-switch v-model="form.revealDemo" :active-value="1" :inactive-value="0"></el-switch>
-          <span style="margin-left:8px;color:#909399;font-size:12px">仅本地演示有效</span>
+          <span style="margin-left:8px;color:var(--w-text-faint);font-size:12px">仅本地演示有效</span>
         </el-form-item>
         <el-form-item v-if="form.id === 'email'" label="重发间隔">
           <el-input-number v-model="form.resendSeconds" :min="10" :max="300"></el-input-number>

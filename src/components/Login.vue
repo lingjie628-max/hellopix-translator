@@ -4,7 +4,7 @@
       <div class="pix-login-topbar"><theme-toggle></theme-toggle></div>
       <div class="pix-login-brand">Hello Pix</div>
       <el-form :rules="rules" :model="loginForm" ref="loginFormTable" class="login-container" label-position="left"
-               label-width="0px" v-loading="loading">
+               label-width="0px" v-loading="loading" @submit.native.prevent>
         <h3 class="login_title">用户登录</h3>
         <el-form-item prop="username">
           <el-input type="text" v-model="loginForm.username" placeholder="请输入账号" @keyup.enter.native="submitClick('loginFormTable')"></el-input>
@@ -21,6 +21,8 @@
         <div class="auth-links">
           <router-link to="/register">注册用户</router-link>
           <router-link to="/forgot">忘记密码?</router-link>
+          <!-- 回官网：登录页是深层页，没有回去的入口用户会被困住 -->
+          <router-link to="/">返回官网</router-link>
         </div>
         <el-form-item style="width: 100%">
           <el-button type="primary" @click="submitClick('loginFormTable')" style="width: 100%">进入 Hello Pix</el-button>
@@ -66,10 +68,13 @@ export default {
       })
     },
     submitClick(formName) {
+      // 防重入：回车同时命中输入框的 keyup 与表单原生 submit，双击也会发两次。
+      // 图形验证码是一次性的，第二次必然报"已过期"，而这条报错会盖在正常流程上。
+      if (this.loading) return
+      this.loading = true
       this.$refs[formName].validate((valid) => {
         if (valid) {
           var _this = this;
-          this.loading = true;
           this.postRequest("/login", {
             username: this.loginForm.username,
             password: this.loginForm.password,
@@ -96,6 +101,8 @@ export default {
             _this.getImageCode();
           });
         } else {
+          // 校验没过必须放开占位，否则按钮会永久卡在加载态
+          this.loading = false;
           return false;
         }
       });
@@ -159,7 +166,7 @@ export default {
 }
 
 .auth-links a {
-  color: #409EFF;
+  color: var(--w-accent);
   font-size: 13px;
   text-decoration: none;
 }

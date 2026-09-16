@@ -14,11 +14,10 @@ function notWired(name) {
 }
 
 const providers = {
-  youdao: { name: '有道翻译', translate: notWired('有道翻译') },
+  deepseek: { name: 'DeepSeek 翻译', translate: notWired('DeepSeek') },
   baidu: { name: '百度翻译', translate: notWired('百度翻译') },
   niutrans: { name: '小牛翻译', translate: notWired('小牛翻译') },
   google: { name: '谷歌翻译', translate: notWired('谷歌翻译') },
-  tencent: { name: '腾讯翻译', translate: notWired('腾讯翻译') },
   deepl: { name: 'DeepL 翻译', translate: notWired('DeepL') },
   aws: { name: '亚马逊 AWS 翻译', translate: notWired('AWS Translate') },
   gpt: { name: 'GPT 翻译', translate: notWired('GPT') },

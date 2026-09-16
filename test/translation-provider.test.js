@@ -11,7 +11,10 @@ const path = require('node:path')
 const test = require('node:test')
 const provider = require('../server/services/translation-provider')
 
-const CREDENTIAL_KEYS = ['PIX_YOUDAO_APP_KEY', 'PIX_YOUDAO_APP_SECRET', 'PIX_DEEPSEEK_API_KEY']
+const CREDENTIAL_KEYS = [
+  'PIX_YOUDAO_APP_KEY', 'PIX_YOUDAO_APP_SECRET',
+  'PIX_DEEPSEEK_API_KEY', 'PIX_GOOGLE_API_KEY', 'PIX_GEMINI_API_KEY'
+]
 
 async function withCredentials(values, run) {
   const saved = {}
@@ -44,6 +47,16 @@ function withDeepseekKey(value, run) {
   return withCredentials({ PIX_DEEPSEEK_API_KEY: value === null ? undefined : value }, run)
 }
 
+/** 谷歌官方 API 的 Key 隔离。 */
+function withGoogleKey(value, run) {
+  return withCredentials({ PIX_GOOGLE_API_KEY: value === null ? undefined : value }, run)
+}
+
+/** Gemini 的 Key 隔离。 */
+function withGeminiKey(value, run) {
+  return withCredentials({ PIX_GEMINI_API_KEY: value === null ? undefined : value }, run)
+}
+
 function captureFetch(response) {
   const calls = []
   const impl = async (url, options) => {
@@ -54,107 +67,9 @@ function captureFetch(response) {
   return { calls, impl }
 }
 
-const youdao = { id: 'youdao', name: '有道翻译', enabled: true, wired: true }
+// 唯一仍带真实适配实现的通道（有道已下架），通用契约用例都打它
+  const deepseek = { id: 'deepseek', name: 'DeepSeek 翻译', enabled: true, wired: true, model: 'deepseek-flash' }
 const payload = { text: 'hello', from: 'auto', to: 'zh', detected: 'en' }
-
-test('missing credentials fail closed without touching the network', async () => {
-  await withCredentials(null, async () => {
-    const { calls, impl } = captureFetch(jsonResponse({ errorCode: '0', translation: ['你好'] }))
-    const result = await provider.translate(youdao, payload, { fetch: impl })
-    assert.equal(result.ok, false)
-    assert.match(result.msg, /凭据未配置/)
-    assert.equal(calls.length, 0, '凭据缺失时不允许发出任何请求')
-  })
-})
-
-test('youdao success returns the vendor translation', async () => {
-  await withCredentials({ PIX_YOUDAO_APP_KEY: 'k', PIX_YOUDAO_APP_SECRET: 's' }, async () => {
-    const { impl } = captureFetch(jsonResponse({ errorCode: '0', translation: ['你好', '世界'] }))
-    const result = await provider.translate(youdao, payload, { fetch: impl })
-    assert.equal(result.ok, true)
-    assert.equal(result.text, '你好世界')
-  })
-})
-
-test('youdao request carries a v3 signature over the documented string', async () => {
-  await withCredentials({ PIX_YOUDAO_APP_KEY: 'app-key', PIX_YOUDAO_APP_SECRET: 'app-secret' }, async () => {
-    const { calls, impl } = captureFetch(jsonResponse({ errorCode: '0', translation: ['译文'] }))
-    await provider.translate(youdao, payload, { fetch: impl })
-    assert.equal(calls.length, 1)
-    assert.equal(calls[0].url, 'https://openapi.youdao.com/api')
-    assert.equal(calls[0].options.method, 'POST')
-
-    const form = new URLSearchParams(calls[0].options.body)
-    assert.equal(form.get('q'), 'hello')
-    assert.equal(form.get('appKey'), 'app-key')
-    assert.equal(form.get('signType'), 'v3')
-    assert.equal(form.get('from'), 'auto')
-    assert.equal(form.get('to'), 'zh-CHS', 'zh 必须映射成有道自己的 zh-CHS')
-
-    // 独立复算签名，验证 truncate 规则与拼接顺序
-    const expected = crypto
-      .createHash('sha256')
-      .update('app-key' + 'hello' + form.get('salt') + form.get('curtime') + 'app-secret')
-      .digest('hex')
-    assert.equal(form.get('sign'), expected)
-  })
-})
-
-test('youdao long text签名用 前10+长度+后10 截断', async () => {
-  await withCredentials({ PIX_YOUDAO_APP_KEY: 'k', PIX_YOUDAO_APP_SECRET: 's' }, async () => {
-    const long = 'a'.repeat(15) + 'MIDDLE' + 'b'.repeat(15) // 长度 36 > 20
-    const { calls, impl } = captureFetch(jsonResponse({ errorCode: '0', translation: ['x'] }))
-    await provider.translate(youdao, Object.assign({}, payload, { text: long }), { fetch: impl })
-
-    const form = new URLSearchParams(calls[0].options.body)
-    const truncated = long.slice(0, 10) + String(long.length) + long.slice(-10)
-    const expected = crypto
-      .createHash('sha256')
-      .update('k' + truncated + form.get('salt') + form.get('curtime') + 's')
-      .digest('hex')
-    assert.equal(form.get('sign'), expected)
-  })
-})
-
-test('youdao error codes become actionable messages', async () => {
-  await withCredentials({ PIX_YOUDAO_APP_KEY: 'k', PIX_YOUDAO_APP_SECRET: 's' }, async () => {
-    const { impl } = captureFetch(jsonResponse({ errorCode: '202' }))
-    const result = await provider.translate(youdao, payload, { fetch: impl })
-    assert.equal(result.ok, false)
-    assert.match(result.msg, /签名校验失败/)
-
-    const unknown = captureFetch(jsonResponse({ errorCode: '999' }))
-    const other = await provider.translate(youdao, payload, { fetch: unknown.impl })
-    assert.equal(other.ok, false)
-    assert.match(other.msg, /999/)
-  })
-})
-
-test('transport failures never surface as a translation', async () => {
-  await withCredentials({ PIX_YOUDAO_APP_KEY: 'k', PIX_YOUDAO_APP_SECRET: 's' }, async () => {
-    const http500 = captureFetch(jsonResponse({}, 500))
-    const failed = await provider.translate(youdao, payload, { fetch: http500.impl })
-    assert.equal(failed.ok, false)
-    assert.match(failed.msg, /HTTP 500/)
-
-    const broken = captureFetch({ ok: true, status: 200, json: async () => { throw new Error('bad json') } })
-    const parsed = await provider.translate(youdao, payload, { fetch: broken.impl })
-    assert.equal(parsed.ok, false)
-    assert.match(parsed.msg, /无法解析/)
-
-    const timeout = new Error('The operation was aborted due to timeout')
-    timeout.name = 'TimeoutError'
-    const aborted = captureFetch(timeout)
-    const timedOut = await provider.translate(youdao, payload, { fetch: aborted.impl })
-    assert.equal(timedOut.ok, false)
-    assert.match(timedOut.msg, /超时/)
-
-    const empty = captureFetch(jsonResponse({ errorCode: '0', translation: [] }))
-    const nothing = await provider.translate(youdao, payload, { fetch: empty.impl })
-    assert.equal(nothing.ok, false)
-    assert.match(nothing.msg, /未返回译文/)
-  })
-})
 
 test('unknown and disabled channels are rejected', async () => {
   const missing = await provider.translate({ id: 'nope', enabled: true }, payload, {})
@@ -162,7 +77,7 @@ test('unknown and disabled channels are rejected', async () => {
   assert.match(missing.msg, /通道不存在/)
 
   const disabled = await provider.translate(
-    { id: 'youdao', name: '有道翻译', enabled: false },
+    { id: 'deepseek', name: 'DeepSeek 翻译', enabled: false },
     payload,
     {}
   )
@@ -195,96 +110,6 @@ test('every engine seeded in migrations has an adapter entry', () => {
   assert.deepEqual(missing, [], `这些通道在数据库里有、适配层没有: ${missing.join(', ')}`)
 })
 
-test('channelStatus reports credential readiness per channel', async () => {
-  await withCredentials({ PIX_YOUDAO_APP_KEY: 'k', PIX_YOUDAO_APP_SECRET: 's' }, () => {
-    const rows = provider.channelStatus()
-    const youdaoRow = rows.find(row => row.id === 'youdao')
-    assert.equal(youdaoRow.credentialReady, true)
-    const others = rows.filter(row => row.id !== 'youdao')
-    assert.ok(others.every(row => row.credentialReady === false))
-  })
-  await withCredentials(null, () => {
-    assert.equal(provider.channelStatus().find(row => row.id === 'youdao').credentialReady, false)
-  })
-})
-
-// --- 谷歌极速：公共端点必须显式放行 ------------------------------------------
-
-const googleFast = { id: 'google-fast', name: '谷歌极速', enabled: true, wired: true }
-
-async function withPublicNetwork(value, run) {
-  const saved = process.env.PIX_ALLOW_PUBLIC_TRANSLATION
-  if (value === undefined) delete process.env.PIX_ALLOW_PUBLIC_TRANSLATION
-  else process.env.PIX_ALLOW_PUBLIC_TRANSLATION = value
-  try {
-    return await run()
-  } finally {
-    if (saved === undefined) delete process.env.PIX_ALLOW_PUBLIC_TRANSLATION
-    else process.env.PIX_ALLOW_PUBLIC_TRANSLATION = saved
-  }
-}
-
-test('google-fast stays offline unless the public network switch is on', async () => {
-  await withPublicNetwork(undefined, async () => {
-    const { calls, impl } = captureFetch(jsonResponse([['你好', 'hello']]))
-    const result = await provider.translate(googleFast, payload, {
-      allowPublicNetwork: false,
-      fetch: impl
-    })
-    assert.equal(result.ok, false)
-    assert.match(result.msg, /未启用/)
-    assert.equal(calls.length, 0, '开关关闭时不允许发出任何请求')
-  })
-})
-
-test('google-fast parses the nested gtx response when allowed', async () => {
-  await withPublicNetwork(undefined, async () => {
-    const body = [[['你好', 'hello', null, null, 10], ['世界', 'world', null, null, 3]], null, 'en']
-    const { calls, impl } = captureFetch(jsonResponse(body))
-    const result = await provider.translate(googleFast, payload, {
-      allowPublicNetwork: true,
-      fetch: impl
-    })
-    assert.equal(result.ok, true)
-    assert.equal(result.text, '你好世界')
-
-    const url = new URL(calls[0].url)
-    assert.equal(url.origin + url.pathname, 'https://translate.googleapis.com/translate_a/single')
-    assert.equal(url.searchParams.get('client'), 'gtx')
-    assert.equal(url.searchParams.get('tl'), 'zh-CN', 'zh 必须映射成 gtx 的 zh-CN')
-    assert.equal(url.searchParams.get('q'), 'hello')
-  })
-})
-
-test('google-fast rejects malformed or empty payloads', async () => {
-  await withPublicNetwork(undefined, async () => {
-    const malformed = captureFetch(jsonResponse({ error: 'nope' }))
-    const bad = await provider.translate(googleFast, payload, {
-      allowPublicNetwork: true,
-      fetch: malformed.impl
-    })
-    assert.equal(bad.ok, false)
-    assert.match(bad.msg, /结构异常/)
-
-    const empty = captureFetch(jsonResponse([[['', 'hello', null, null, 0]]]))
-    const nothing = await provider.translate(googleFast, payload, {
-      allowPublicNetwork: true,
-      fetch: empty.impl
-    })
-    assert.equal(nothing.ok, false)
-    assert.match(nothing.msg, /未返回译文/)
-  })
-})
-
-test('google-fast readiness follows the public network switch', async () => {
-  await withPublicNetwork('1', () => {
-    assert.equal(provider.channelStatus().find(row => row.id === 'google-fast').credentialReady, true)
-  })
-  await withPublicNetwork('0', () => {
-    assert.equal(provider.channelStatus().find(row => row.id === 'google-fast').credentialReady, false)
-  })
-})
-
 test('detectLang and countBillableChars keep their billing semantics', () => {
   assert.equal(provider.detectLang('你好'), 'zh')
   assert.equal(provider.detectLang('こんにちは'), 'ja')
@@ -296,46 +121,37 @@ test('detectLang and countBillableChars keep their billing semantics', () => {
 })
 
 test('admin-configured credentials take precedence over environment', async () => {
+  const okBody = jsonResponse({ choices: [{ message: { content: '来自后台' } }] })
+
   // 只有管理后台配置的密钥
-  await withCredentials(null, async () => {
-    const { calls, impl } = captureFetch(jsonResponse({ errorCode: '0', translation: ['来自后台'] }))
-    const result = await provider.translate(youdao, payload, {
+  await withDeepseekKey(null, async () => {
+    const { calls, impl } = captureFetch(okBody)
+    const result = await provider.translate(deepseek, payload, {
       fetch: impl,
-      credentials: { apiKey: 'db-key', secret: 'db-secret' }
+      credentials: { apiKey: 'db-key' }
     })
     assert.equal(result.ok, true)
-    const form = new URLSearchParams(calls[0].options.body)
-    assert.equal(form.get('appKey'), 'db-key')
+    assert.equal(calls[0].options.headers.Authorization, 'Bearer db-key')
   })
 
   // 后台与 env 都有 -> 后台优先
-  await withCredentials({ PIX_YOUDAO_APP_KEY: 'env-key', PIX_YOUDAO_APP_SECRET: 'env-secret' }, async () => {
-    const { calls, impl } = captureFetch(jsonResponse({ errorCode: '0', translation: ['x'] }))
-    await provider.translate(youdao, payload, { fetch: impl, credentials: { apiKey: 'db-key', secret: 'db-secret' } })
-    assert.equal(new URLSearchParams(calls[0].options.body).get('appKey'), 'db-key')
+  await withDeepseekKey('env-key', async () => {
+    const { calls, impl } = captureFetch(okBody)
+    await provider.translate(deepseek, payload, { fetch: impl, credentials: { apiKey: 'db-key' } })
+    assert.equal(calls[0].options.headers.Authorization, 'Bearer db-key')
   })
 
   // 后台为空时回落到 env
-  await withCredentials({ PIX_YOUDAO_APP_KEY: 'env-key', PIX_YOUDAO_APP_SECRET: 'env-secret' }, async () => {
-    const { calls, impl } = captureFetch(jsonResponse({ errorCode: '0', translation: ['x'] }))
-    await provider.translate(youdao, payload, { fetch: impl, credentials: { apiKey: '', secret: '' } })
-    assert.equal(new URLSearchParams(calls[0].options.body).get('appKey'), 'env-key')
-  })
-})
-
-test('channelStatus reflects admin-configured credentials', async () => {
-  await withCredentials(null, () => {
-    const rows = provider.channelStatus({ youdao: { apiKey: 'k', secret: 's' } })
-    assert.equal(rows.find(row => row.id === 'youdao').credentialReady, true)
-    assert.equal(provider.channelStatus({}).find(row => row.id === 'youdao').credentialReady, false)
+  await withDeepseekKey('env-key', async () => {
+    const { calls, impl } = captureFetch(okBody)
+    await provider.translate(deepseek, payload, { fetch: impl, credentials: { apiKey: '' } })
+    assert.equal(calls[0].options.headers.Authorization, 'Bearer env-key')
   })
 })
 
 // --- DeepSeek（对话式翻译，与有道那类专用翻译 API 的约定不同）------------------
 // 契约差异：返回体是对话补全结构（choices[0].message.content），
 // 语言控制靠 system 提示词，且必须同时有 apiKey 与 model。
-
-const deepseek = { id: 'deepseek', name: 'DeepSeek 翻译', enabled: true, wired: true, model: 'deepseek-flash' }
 
 test('deepseek：凭据缺失时 fail-closed，不发任何请求', async () => {
   await withDeepseekKey(null, async () => {
@@ -460,5 +276,207 @@ test('deepseek：登进注册表、凭据状态可查', async () => {
     assert.equal(provider.providers.deepseek.configured({ apiKey: 'k' }), true)
     const rows = provider.channelStatus({ deepseek: { apiKey: 'k' } })
     assert.equal(rows.find(row => row.id === 'deepseek').credentialReady, true)
+  })
+})
+
+// --- 谷歌翻译：官方 Cloud Translation API --------------------------------------
+// 与公共端点版本的关键差别：要凭据、且**必须显式传 format:'text'** ——
+// 该参数默认是 html，不传的话译文里的引号会变成 &quot; 直接显示给商户。
+
+const google = { id: 'google', name: '谷歌翻译', enabled: true, wired: true }
+
+test('谷歌：凭据缺失时 fail-closed，不发任何请求', async () => {
+  await withGoogleKey(null, async () => {
+    const { calls, impl } = captureFetch(jsonResponse({ data: { translations: [{ translatedText: '你好' }] } }))
+    const result = await provider.translate(google, payload, { fetch: impl })
+    assert.equal(result.ok, false)
+    assert.match(result.msg, /凭据未配置/)
+    assert.equal(calls.length, 0, '凭据缺失时不允许发出任何请求')
+  })
+})
+
+test('谷歌：请求打到官方端点，带 key 与 format=text', async () => {
+  await withGoogleKey('gk-test', async () => {
+    const { calls, impl } = captureFetch(jsonResponse({
+      data: { translations: [{ translatedText: '  你好世界  ', detectedSourceLanguage: 'en' }] }
+    }))
+    const result = await provider.translate(google, Object.assign({}, payload, { text: 'hello world' }),
+      { fetch: impl })
+
+    assert.equal(result.ok, true)
+    assert.equal(result.text, '你好世界', '译文应去掉首尾空白')
+
+    assert.match(calls[0].url, /^https:\/\/translation\.googleapis\.com\/language\/translate\/v2\?key=gk-test$/)
+    assert.equal(calls[0].options.method, 'POST')
+    const body = JSON.parse(calls[0].options.body)
+    assert.deepEqual(body.q, ['hello world'])
+    // 中文必须映射成 zh-CN；直接送 'zh' 谷歌会报不支持
+    assert.equal(body.target, 'zh-CN', 'zh 应映射为 zh-CN')
+    // 这个参数漏了就会把 &quot; 之类的实体直接显示给商户
+    assert.equal(body.format, 'text', '必须显式要求纯文本，否则译文会被 HTML 转义')
+    // from=auto 不能作为 source 送出去
+    assert.equal(body.source, undefined, 'auto 不应作为 source 参数')
+  })
+})
+
+test('谷歌：指定源语言时带上 source，且映射为目标语言码', async () => {
+  await withGoogleKey('gk-test', async () => {
+    const { calls, impl } = captureFetch(jsonResponse({ data: { translations: [{ translatedText: 'Hello' }] } }))
+    await provider.translate(google, { text: '你好', from: 'zh', to: 'en' }, { fetch: impl })
+    const body = JSON.parse(calls[0].options.body)
+    assert.equal(body.source, 'zh-CN')
+    assert.equal(body.target, 'en')
+  })
+})
+
+test('谷歌：厂商错误原因透出，且不产生译文', async () => {
+  await withGoogleKey('bad-key', async () => {
+    const denied = captureFetch(jsonResponse(
+      { error: { code: 403, message: 'API key not valid. Please pass a valid API key.', status: 'PERMISSION_DENIED' } }, 403))
+    const result = await provider.translate(google, payload, { fetch: denied.impl })
+    assert.equal(result.ok, false)
+    assert.match(result.msg, /HTTP 403/)
+    assert.match(result.msg, /API key not valid/, '应带出厂商的可读原因')
+    assert.equal(result.text, undefined, '失败时绝不能带译文')
+  })
+})
+
+test('谷歌：空译文、坏 JSON、超时都转成 ok:false', async () => {
+  await withGoogleKey('gk-test', async () => {
+    const empty = captureFetch(jsonResponse({ data: { translations: [] } }))
+    assert.equal((await provider.translate(google, payload, { fetch: empty.impl })).ok, false)
+
+    const broken = captureFetch({ ok: true, status: 200, json: async () => { throw new Error('bad json') } })
+    const parsed = await provider.translate(google, payload, { fetch: broken.impl })
+    assert.equal(parsed.ok, false)
+    assert.match(parsed.msg, /无法解析/)
+
+    const timeout = Object.assign(new Error('timed out'), { name: 'TimeoutError' })
+    const timedOut = await provider.translate(google, payload, { fetch: captureFetch(timeout).impl })
+    assert.equal(timedOut.ok, false)
+    assert.match(timedOut.msg, /超时/)
+  })
+})
+
+// --- Gemini 翻译 ---------------------------------------------------------------
+// 最容易出错的两点：2.5 系列默认开思考（必须关掉），
+// 以及开思考时 parts 里会混入 thought:true 的推理片段（必须过滤）。
+
+const gemini = { id: 'gemini', name: 'Gemini 翻译', enabled: true, wired: true, model: 'gemini-2.5-flash' }
+
+test('Gemini：凭据缺失时 fail-closed，不发任何请求', async () => {
+  await withGeminiKey(null, async () => {
+    const { calls, impl } = captureFetch(jsonResponse({
+      candidates: [{ content: { parts: [{ text: '你好' }] } }]
+    }))
+    const result = await provider.translate(gemini, payload, { fetch: impl })
+    assert.equal(result.ok, false)
+    assert.match(result.msg, /凭据未配置/)
+    assert.equal(calls.length, 0)
+  })
+})
+
+test('Gemini：请求结构正确，且显式关闭思考模式', async () => {
+  await withGeminiKey('gm-test', async () => {
+    const { calls, impl } = captureFetch(jsonResponse({
+      candidates: [{ content: { parts: [{ text: '  你好世界  ' }], role: 'model' }, finishReason: 'STOP' }]
+    }))
+    const result = await provider.translate(gemini, Object.assign({}, payload, { text: 'hello world' }),
+      { fetch: impl })
+
+    assert.equal(result.ok, true)
+    assert.equal(result.text, '你好世界')
+
+    assert.match(calls[0].url,
+      /^https:\/\/generativelanguage\.googleapis\.com\/v1beta\/models\/gemini-2\.5-flash:generateContent\?key=gm-test$/)
+    const body = JSON.parse(calls[0].options.body)
+    // Gemini 用 contents/parts，不是 messages/content
+    assert.equal(body.contents.length, 1)
+    assert.equal(body.contents[0].role, 'user')
+    assert.equal(body.contents[0].parts[0].text, 'hello world')
+    // system 指令是顶层字段，不占 contents
+    assert.ok(body.systemInstruction, 'system 指令必须走顶层 systemInstruction')
+    assert.match(body.systemInstruction.parts[0].text, /中文/, '目标语言应出现在指令里')
+    assert.equal(body.generationConfig.temperature, 0, '翻译要稳定，温度必须为 0')
+    // 开着思考会变慢、token 翻倍，且让 temperature 失效
+    assert.equal(body.generationConfig.thinkingConfig.thinkingBudget, 0, '必须显式关闭思考模式')
+  })
+})
+
+test('Gemini：过滤掉 thought 推理片段，只返回正文', async () => {
+  await withGeminiKey('gm-test', async () => {
+    // 真实场景：开思考时 parts 里会先出现 thought:true 的推理，再出现正文
+    const { impl } = captureFetch(jsonResponse({
+      candidates: [{
+        content: {
+          role: 'model',
+          parts: [
+            { thought: true, text: '让我想想这句话怎么翻……' },
+            { text: '你好世界' }
+          ]
+        },
+        finishReason: 'STOP'
+      }]
+    }))
+    const result = await provider.translate(gemini, payload, { fetch: impl })
+    assert.equal(result.ok, true)
+    assert.equal(result.text, '你好世界', '推理过程绝不能当译文返回给商户')
+    assert.doesNotMatch(result.text, /让我想想/)
+  })
+})
+
+test('Gemini：内容被安全策略拦下时给出可读原因', async () => {
+  await withGeminiKey('gm-test', async () => {
+    const { impl } = captureFetch(jsonResponse({
+      promptFeedback: { blockReason: 'SAFETY' }
+    }))
+    const result = await provider.translate(gemini, payload, { fetch: impl })
+    assert.equal(result.ok, false)
+    assert.match(result.msg, /SAFETY/)
+  })
+})
+
+test('Gemini：厂商错误、空译文、超时都转成 ok:false', async () => {
+  await withGeminiKey('gm-test', async () => {
+    const denied = captureFetch(jsonResponse(
+      { error: { code: 400, message: 'API key not valid', status: 'INVALID_ARGUMENT' } }, 400))
+    const failed = await provider.translate(gemini, payload, { fetch: denied.impl })
+    assert.equal(failed.ok, false)
+    assert.match(failed.msg, /API key not valid/)
+
+    const empty = captureFetch(jsonResponse({ candidates: [{ content: { parts: [{ text: '   ' }] } }] }))
+    assert.equal((await provider.translate(gemini, payload, { fetch: empty.impl })).ok, false)
+
+    const timeout = Object.assign(new Error('timed out'), { name: 'TimeoutError' })
+    const timedOut = await provider.translate(gemini, payload, { fetch: captureFetch(timeout).impl })
+    assert.equal(timedOut.ok, false)
+    assert.match(timedOut.msg, /超时/)
+  })
+})
+
+test('谷歌与 Gemini：模型/端点可在后台覆盖', async () => {
+  await withGeminiKey('gm-test', async () => {
+    const { calls, impl } = captureFetch(jsonResponse({
+      candidates: [{ content: { parts: [{ text: '好' }] } }]
+    }))
+    // 后台只填到域名时，应自动补出完整路径（与 deepseek 同样的坑）
+    await provider.translate(
+      { id: 'gemini', name: 'Gemini 翻译', enabled: true, wired: true, model: 'gemini-2.5-pro', endpoint: 'https://generativelanguage.googleapis.com' },
+      payload, { fetch: impl })
+    assert.match(calls[0].url, /\/v1beta\/models\/gemini-2\.5-pro:generateContent/)
+  })
+})
+
+test('谷歌与 Gemini：登进注册表、凭据状态可查', async () => {
+  assert.equal(provider.providers.google.name, '谷歌翻译')
+  assert.equal(provider.providers.gemini.name, 'Gemini 翻译')
+
+  await withGoogleKey(null, () => {
+    assert.equal(provider.providers.google.configured({}), false)
+    assert.equal(provider.providers.google.configured({ apiKey: 'k' }), true)
+  })
+  await withGeminiKey(null, () => {
+    assert.equal(provider.providers.gemini.configured({}), false)
+    assert.equal(provider.providers.gemini.configured({ apiKey: 'k' }), true)
   })
 })

@@ -140,6 +140,41 @@ const geoZip = document.getElementById('geoZip')
 const geoQuality = document.getElementById('geoQuality')
 const geoHistory = document.getElementById('geoHistory')
 const addCard = document.querySelector('#addApp .add-card')
+
+/**
+ * 把异常转成能直接给用户看的一句话。
+ *
+ * 为什么需要：ipcRenderer.invoke 抛出的错误会被 Electron 包一层，
+ * 原样显示出来是
+ *   Error invoking remote method 'auth:login': Error: API 线路不符合安全策略
+ * 既泄漏内部实现（方法名、错误分层），又不是用户能处理的措辞。
+ * 这里剥掉包装，并把几个已知原因换成可执行的提示。
+ */
+function friendlyError(err, fallback) {
+  // 取消息：优先 err.message；字符串直接用。
+  // 注意 new Error('') 的 toString 是 "Error"，别把它当成有效消息。
+  let msg = ''
+  if (err && typeof err.message === 'string') msg = err.message
+  else if (typeof err === 'string') msg = err
+  else if (err) msg = String(err)
+  // 包装可能套多层，循环剥干净
+  for (let i = 0; i < 4; i++) {
+    const next = msg.replace(/^\s*Error invoking remote method '[^']*':\s*/i, '').replace(/^\s*Error:\s*/i, '')
+    if (next === msg) break
+    msg = next
+  }
+  msg = msg.trim()
+  if (!msg || /^error$/i.test(msg)) return fallback
+  const known = [
+    [/不符合安全策略/, '当前线路不可用，请检查网络后重试'],
+    [/ENOTFOUND|EAI_AGAIN|getaddrinfo/i, '无法解析服务器地址，请检查网络'],
+    [/ECONNREFUSED|ECONNRESET|ETIMEDOUT|timeout|超时/i, '连接服务器超时，请稍后重试'],
+    [/fetch failed|NetworkError|network/i, '网络连接失败，请检查网络']
+  ]
+  for (const [re, text] of known) if (re.test(msg)) return text
+  return msg
+}
+
 let proxyPresetRows = []
 let proxyDetectTimer = 0
 let geoManual = false
@@ -503,7 +538,7 @@ async function checkUpdate() {
       showUpdateNotice(resp)
     } else if (hint) hint.textContent = '当前已是最新版本'
   } catch (e) {
-    if (hint) hint.textContent = e.message || '暂时无法检查更新'
+    if (hint) hint.textContent = friendlyError(e, '暂时无法检查更新')
   } finally {
     if (btn) btn.disabled = false
   }
@@ -574,7 +609,7 @@ function defaultAppSettings() {
     recvFrom: 'auto',
     recvTo: 'zh',
     server: selectedId === 'auto' ? (fastest && fastest.id) || '' : selectedId,
-    engine: (current && current.activeEngine) || 'youdao',
+    engine: (current && current.activeEngine) || (engineRows[0] && engineRows[0].id) || '',
     groupMode: 'manual',
     includeZh: false,
     fontSize: 15,
@@ -928,7 +963,10 @@ async function openAddApp(item) {
     const preset = await window.pix.preset(item.id)
     if (preset && preset.data) fillAddForm(item, preset.data)
   } catch (e) {}
-  addEngine.innerHTML = '<option value="youdao">有道翻译</option>'
+  // 兜底取当前可用通道的第一项，不写死通道名
+  addEngine.innerHTML = engineRows.length
+    ? '<option value="' + esc(engineRows[0].id) + '">' + esc(engineRows[0].name) + '</option>'
+    : '<option value="">无可用通道</option>'
   try {
     const resp = await window.pix.translateEngines()
     const rows = ((resp && resp.rows) || []).filter(e => e.allowed !== false)
@@ -1120,6 +1158,8 @@ let transBarInited = false
 let transBarSilent = false
 let transBarTabId = ''
 let engineRows = []
+// 套餐是否允许商户自己换通道（基础版为 false）。服务端另有强制，这里只负责不误导用户
+let canSwitchEngine = true
 
 function barLangOptions() {
   return langOptionHtml()
@@ -1147,8 +1187,12 @@ function ensureTransBarOptions() {
   barServer.innerHTML = (lineRows.length ? lineRows : [{ id: 'cn', name: '默认线路' }]).map(l => {
     return '<option value="' + esc(l.id) + '">' + esc(l.name) + '</option>'
   }).join('')
-  const engines = engineRows.length ? engineRows : [{ id: 'youdao', name: '有道翻译' }]
+  // 没有可用通道就给空选项，不假装有个默认通道
+  const engines = engineRows.length ? engineRows : [{ id: '', name: '无可用通道' }]
   barEngine.innerHTML = engines.map(e => '<option value="' + esc(e.id) + '">' + esc(e.name) + '</option>').join('')
+    // 套餐固定通道时禁用下拉：能点却点了没效果，比直接禁用更让人困惑
+    barEngine.disabled = !canSwitchEngine
+    barEngine.title = canSwitchEngine ? '' : '当前套餐的翻译通道由系统指定'
 }
 
 let transBarPainted = false
@@ -1445,6 +1489,7 @@ async function enterShell(data) {
   try {
     const resp = await window.pix.translateEngines()
     engineRows = ((resp && resp.rows) || []).filter(e => e.allowed !== false)
+    canSwitchEngine = !(resp && resp.canSwitch === false)
   } catch (e) {
     engineRows = []
   }
@@ -1474,7 +1519,7 @@ async function doLogin() {
     await persistAuth()
     await enterShell(resp.obj)
   } catch (err) {
-    loginError.textContent = err.message || '无法连接后台'
+    loginError.textContent = friendlyError(err, '无法连接后台')
   } finally {
     loginBtn.disabled = false
   }
@@ -1706,7 +1751,7 @@ document.addEventListener('keydown', (event) => {
 
 // 全球语言列表（ISO 639-1 全量 + 各翻译引擎额外支持的小语种）。
 // 说明：世界语言有 7000+ 种，但只有翻译引擎真正支持的才有意义 —— 列进来
-// 选不到的语种必然报错。当前覆盖 Google/DeepL/有道等主流引擎支持的全部语种。
+// 选不到的语种必然报错。当前覆盖 Google/DeepL/DeepSeek 等主流引擎支持的全部语种。
 // 通道不支持的语种会在翻译时返回厂商错误码（不扣费），不会静默产出错误译文。
 // 国家/地区官方语言列表（只收有国家或地区官方地位的语言，不收方言）。
 // 已剔除：汉语各方言（粤语/闽南语/吴语/客家话/湘语/赣语/晋语/徽语/平话/闽北语）、
@@ -1778,10 +1823,12 @@ async function openTransPanel() {
     const rows = (resp && resp.rows) || []
     transEngine.innerHTML = rows.filter(e => e.allowed !== false).map(e => {
       return '<option value="' + esc(e.id) + '">' + esc(e.name) + (e.wired ? '' : '') + '</option>'
-    }).join('') || '<option value="youdao">有道翻译</option>'
+    }).join('') || '<option value="">无可用通道</option>'
+      transEngine.disabled = !canSwitchEngine
+      transEngine.title = canSwitchEngine ? '' : '当前套餐的翻译通道由系统指定'
     applyTransPrefs(current)
   } catch (e) {
-    transEngine.innerHTML = '<option value="youdao">有道翻译</option>'
+    transEngine.innerHTML = '<option value="">通道加载失败</option>'
   }
   showOverlay(transPanel, true)
 }
@@ -1809,7 +1856,7 @@ async function saveTransPrefs() {
     const resp = await window.pix.saveTranslatePrefs(payload)
     transMsg.textContent = (resp && resp.msg) || '已保存'
   } catch (e) {
-    transMsg.textContent = e.message || '保存失败'
+    transMsg.textContent = friendlyError(e, '保存失败')
   }
 }
 

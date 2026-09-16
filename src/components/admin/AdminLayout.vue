@@ -25,9 +25,11 @@
         <el-menu-item index="/admin/clients">客户端版本</el-menu-item>
         <el-menu-item index="/admin/support">帮助与客服</el-menu-item>
         <el-menu-item index="/admin/verify">验证码接口</el-menu-item>
+        <el-menu-item index="/admin/payments">收款方式</el-menu-item>
         <el-menu-item index="/admin/settings">系统设置</el-menu-item>
         <el-menu-item index="/admin/logs">登录与审计</el-menu-item>
         <el-menu-item index="/admin/staff">超管账号</el-menu-item>
+        <el-menu-item index="/admin/security">账号安全</el-menu-item>
       </el-submenu>
     </el-menu>
     <el-container>
@@ -35,6 +37,10 @@
         <span>{{ $route.name }}</span>
         <span class="admin-header-right">
           <theme-toggle></theme-toggle>
+          <!-- 未开启两步验证时常驻提醒：这是全站最高权限账号，值得反复提示 -->
+          <router-link v-if="admin.totpEnabled === false" to="/admin/security" class="totp-warn">
+            <i class="el-icon-warning"></i> 未开启两步验证
+          </router-link>
           {{ admin.nickname || admin.username }}
           <el-button type="text" @click="logout">退出</el-button>
         </span>
@@ -118,4 +124,17 @@ export default {
   align-items: center;
   gap: 12px;
 }
+.totp-warn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  text-decoration: none;
+  color: var(--w-warning);      /* #b45309 在深色下只有 2.2:1，改用主题 token */
+  background: var(--w-warning-soft);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+.totp-warn:hover { background: rgba(245, 158, 11, 0.22); }
 </style>

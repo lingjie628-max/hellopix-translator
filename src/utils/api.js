@@ -61,14 +61,25 @@ axios.interceptors.response.use(
     } else if (status === 403) {
       Message.error({ message: serverMsg || '权限不足，请联系管理员' })
     } else if (status === 401) {
+      // 401 有两种完全不同的含义，不能一视同仁：
+      //   1) 登录接口返回 401 = 账号或密码错误（后端文案就是"超管账号或密码错误"）；
+      //   2) 其它接口返回 401 = 会话已过期。
+      // 之前不区分，用户在登录页输错密码时看到的是"超管尚未登录"，
+      // 还被"跳转"到当前所在的登录页（原地打转），真正有用的提示被吞掉。
+      const url = String((error.config && error.config.url) || '')
+      const isLoginAttempt = /\/(?:admin\/)?login(\/totp)?$/.test(url)
+      if (isLoginAttempt) {
+        Message.error({ message: serverMsg || '账号或密码错误' })
+        return Promise.reject(error)
+      }
       const onAdmin = router.currentRoute.path.indexOf('/admin') === 0
-      Message.error({ message: onAdmin ? '超管尚未登录' : '尚未登录，请登录' })
+      Message.error({ message: serverMsg || '登录已过期，请重新登录' })
       if (onAdmin) {
         store.commit('adminLogout')
         router.replace('/admin/login')
       } else {
         store.commit('logout')
-        router.replace('/')
+        router.replace('/login')
       }
     } else if (error.response && error.response.data && error.response.data.msg) {
       Message.error({ message: error.response.data.msg })

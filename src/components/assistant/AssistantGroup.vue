@@ -19,7 +19,7 @@
 			</div>
 		</div>
         <el-menu default-active="1-0">
-		  <el-menu-item v-for="(item,index) in assistantGroupValue"  @click="loadAssistantGroupDetails(item.id)" :default-active="'1-' + index" :index="'1-'+ index" :key="index">
+		  <el-menu-item v-for="(item,index) in assistantGroupValue"  @click="loadAssistantGroupDetails(item.id)" :default-active="'1-' + index" :index="'1-'+ index" :key="item.id">
 			<span style="float:left">
 				<i class="el-icon-folder-opened"></i>
 				<span>{{item.title}}</span>

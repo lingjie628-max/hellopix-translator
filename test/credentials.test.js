@@ -25,10 +25,10 @@ function withKey(value, run) {
 
 test('secret round-trips with a configured key', () => {
   withKey(KEY.toString('hex'), () => {
-    const cipher = credentials.encryptSecret('youdao-app-secret')
+    const cipher = credentials.encryptSecret('deepseek-app-secret')
     assert.ok(Buffer.isBuffer(cipher))
-    assert.ok(!cipher.includes(Buffer.from('youdao-app-secret')), '密文里不得出现明文')
-    assert.equal(credentials.decryptSecret(cipher), 'youdao-app-secret')
+    assert.ok(!cipher.includes(Buffer.from('deepseek-app-secret')), '密文里不得出现明文')
+    assert.equal(credentials.decryptSecret(cipher), 'deepseek-app-secret')
     // 同样的明文两次加密应得到不同密文（随机 IV）
     assert.notEqual(credentials.encryptSecret('x').toString('hex'), credentials.encryptSecret('x').toString('hex'))
   })

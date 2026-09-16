@@ -51,7 +51,7 @@ test('bridge defaults stay on for receive, send and group', () => {
   const data = buildBridge({ apiBase: 'http://127.0.0.1:8080' })
   // 引擎默认是空串，不是某个具体通道名：
   // 空串会被原样写进 bridge 文件，服务端按 falsy 回退到账号当前通道。
-  // 硬编码 'youdao' 在未接通该通道时会 503 静默失败（气泡永远不出译文）。
+  // 硬编码 'deepseek' 在未接通该通道时会 503 静默失败（气泡永远不出译文）。
   assert.equal(data.engine, '')
   assert.equal(data.lang, 'zh')
   assert.equal(data.transRecv, true)
@@ -65,7 +65,7 @@ test('writeBridge puts hello-pix-bridge.json in the telegram workdir', () => {
     apiBase: 'http://127.0.0.1:8080',
     deviceId: 'x',
     cookies: { pix_session: 's' },
-    prefs: { engine: 'youdao', lang: 'zh' }
+    prefs: { engine: 'deepseek', lang: 'zh' }
   })
   assert.equal(path.basename(file), BRIDGE_NAME)
   const saved = JSON.parse(fs.readFileSync(file, 'utf8'))

@@ -51,7 +51,7 @@ test('PostgreSQL and Redis preserve billing under concurrency', {
     const user = await pool.query(
       `INSERT INTO users(username,password_hash,nickname,package_id,active_engine_id,
        char_balance,status,sub_quota)
-       SELECT $1,$2,'Integration User',id,'youdao',1000,1,2
+       SELECT $1,$2,'Integration User',id,'deepseek',1000,1,2
        FROM packages WHERE code='basic' RETURNING id`,
       [username, hashPassword('Integration-Pass9!')]
     )
@@ -67,11 +67,11 @@ test('PostgreSQL and Redis preserve billing under concurrency', {
     const sub = await pool.query(
       `INSERT INTO sub_accounts(parent_id,username,password_hash,nickname,status,
        active_engine_id,char_balance)
-       VALUES($1,$2,$3,'Integration Sub',1,'youdao',0) RETURNING id`,
+       VALUES($1,$2,$3,'Integration Sub',1,'deepseek',0) RETURNING id`,
       [userId, subUsername, hashPassword('Integration-Sub9!')]
     )
     const subId = sub.rows[0].id
-    await pool.query("UPDATE engines SET wired=true WHERE id='youdao'")
+    await pool.query("UPDATE engines SET wired=true WHERE id='deepseek'")
 
     const sessionStore = new RedisSessionStore(redis, { ttlMs: 30_000 })
     await sessionStore.set(`session_${suffix}`, {
@@ -200,10 +200,10 @@ test('PostgreSQL and Redis preserve billing under concurrency', {
     })
     const translations = await Promise.allSettled([
       core.translate(session, {
-        text: 'hello', from: 'en', to: 'zh', engine: 'youdao'
+        text: 'hello', from: 'en', to: 'zh', engine: 'deepseek'
       }, `translate_${suffix}`),
       core.translate(session, {
-        text: 'hello', from: 'en', to: 'zh', engine: 'youdao'
+        text: 'hello', from: 'en', to: 'zh', engine: 'deepseek'
       }, `translate_${suffix}`)
     ])
     assert.equal(translations.filter(item => item.status === 'fulfilled').length, 1)
@@ -211,7 +211,7 @@ test('PostgreSQL and Redis preserve billing under concurrency', {
       item.status === 'rejected' && item.reason.code === 'REQUEST_IN_PROGRESS'
     ).length, 1)
     const cached = await core.translate(session, {
-      text: 'hello', from: 'en', to: 'zh', engine: 'youdao'
+      text: 'hello', from: 'en', to: 'zh', engine: 'deepseek'
     }, `translate_cached_${suffix}`)
     assert.equal(cached.cached, true)
     assert.equal(cached.chars, 5)
@@ -224,7 +224,7 @@ test('PostgreSQL and Redis preserve billing under concurrency', {
     })
     await assert.rejects(
       failing.translate(session, {
-        text: 'fail', from: 'en', to: 'zh', engine: 'youdao'
+        text: 'fail', from: 'en', to: 'zh', engine: 'deepseek'
       }, `failure_${suffix}`),
       error => error.code === 'TRANSLATE_FAILED'
     )
@@ -256,7 +256,7 @@ test('PostgreSQL and Redis preserve billing under concurrency', {
         `INSERT INTO translation_reservations(user_id,engine_id,idempotency_key,status,
          reserved_chars,expires_at,created_at,source_language,target_language,
          source_hash,request_hash)
-         VALUES($1,'youdao',$2,'reserved',10,NOW()-interval '1 minute',
+         VALUES($1,'deepseek',$2,'reserved',10,NOW()-interval '1 minute',
          NOW()-interval '2 minutes','en','zh',$3,$3)`,
         [userId, `expired_${suffix}`, 'a'.repeat(64)],
         client
@@ -269,7 +269,7 @@ test('PostgreSQL and Redis preserve billing under concurrency', {
         apiServer.close(error => error ? reject(error) : resolve()))
     }
     if (apiServices) await apiServices.stop()
-    await pool.query("UPDATE engines SET wired=false WHERE id='youdao'")
+    await pool.query("UPDATE engines SET wired=false WHERE id='deepseek'")
     if (userId) {
       await pool.query('DELETE FROM translate_logs WHERE user_id=$1', [userId])
       await pool.query('DELETE FROM translation_reservations WHERE user_id=$1', [userId])

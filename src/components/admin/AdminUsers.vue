@@ -202,6 +202,6 @@ export default {
 </script>
 <style scoped>
 .admin-page { text-align: left; }
-.trial-tip { color: #909399; font-size: 12px; line-height: 1.4; }
+.trial-tip { color: var(--w-text-faint); font-size: 12px; line-height: 1.4; }
 .admin-bar { margin-bottom: 12px; }
 </style>

@@ -113,7 +113,7 @@ export default {
       }).then(() => {
         this.postRequest('/logout')
         this.$store.commit('logout')
-        this.$router.replace({ path: '/' })
+        this.$router.replace({ path: '/login' })
       }).catch(() => {})
     },
     handleCommand(cmd) {
@@ -147,20 +147,20 @@ export default {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: #fff;
+  background: var(--w-surface);
   box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
 }
 .cms-fold {
   font-size: 22px;
   cursor: pointer;
-  color: #606266;
+  color: var(--w-text-muted);
 }
 .cms-main {
-  background: #f5f7fa;
+  background: var(--w-surface-2);
   padding: 16px 20px;
 }
 .el-dropdown-link {
   cursor: pointer;
-  color: #303133;
+  color: var(--w-text);
 }
 </style>

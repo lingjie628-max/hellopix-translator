@@ -1,7 +1,7 @@
 <template>
   <div class="admin-page">
     <el-alert
-      :title="'全站通道 ' + rows.length + ' 个。成本由超管填写，不调取厂商计费。商户按套餐整包买：' + (meta.packageBill || '基础 ¥200/150万 · 高级 ¥350/150万 · 专业 ¥850/150万') + '。接口板块已就位。当前默认：' + activeName"
+      :title="'全站通道 ' + rows.length + ' 个。成本由超管填写，不调取厂商计费。商户按套餐整包买：' + (meta.packageBill || '套餐价格见「套餐管理」页') + '。接口板块已就位。当前默认：' + activeName"
       type="info" show-icon :closable="false" style="margin-bottom:12px">
     </el-alert>
     <el-table :data="rows" border stripe>
@@ -57,7 +57,7 @@
           <el-input v-model="form.apiKey" placeholder="不填则保持原值" show-password></el-input>
         </el-form-item>
         <el-form-item label="Secret">
-          <el-input v-model="form.secret" placeholder="百度 / 腾讯 / AWS 等需要" show-password></el-input>
+          <el-input v-model="form.secret" placeholder="百度 / AWS 等需要" show-password></el-input>
         </el-form-item>
         <el-form-item label="备注">
           <el-input type="textarea" v-model="form.note"></el-input>

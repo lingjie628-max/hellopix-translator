@@ -19,8 +19,8 @@
       <el-table-column prop="engine" label="通道" width="100"></el-table-column>
       <el-table-column prop="direction" label="方向" width="90"></el-table-column>
       <el-table-column prop="chars" label="字符" width="80"></el-table-column>
-      <el-table-column prop="cost" label="成本(元)" width="90"></el-table-column>
-      <el-table-column prop="sell" label="售价(元)" width="90"></el-table-column>
+      <el-table-column prop="cost" :label="'成本(' + currencyName + ')'" width="120"></el-table-column>
+      <el-table-column prop="sell" :label="'售价(' + currencyName + ')'" width="120"></el-table-column>
       <el-table-column prop="snippet" label="摘要" min-width="180" show-overflow-tooltip></el-table-column>
     </el-table>
     <el-pagination style="margin-top:12px" :current-page="page" :page-size="size" :total="total"
@@ -38,6 +38,7 @@
         </el-form-item>
         <el-form-item label="金额">
           <el-input-number v-model="form.price" :min="0" :precision="2" style="width:100%"></el-input-number>
+          <span class="unit-tip">{{ currencyName }}（{{ currencySymbol }}）</span>
         </el-form-item>
         <el-form-item label="方式">
           <el-select v-model="form.type" style="width:100%">
@@ -69,8 +70,8 @@ export default {
       return [
         { label: '全站字符余额', value: s.charBalance || 0 },
         { label: '已用字符', value: s.charUsed || 0 },
-        { label: '翻译售出', value: '¥' + (s.translateSell || 0) },
-        { label: '通道成本', value: '¥' + (s.translateCost || 0) }
+        { label: '翻译售出', value: this.currencySymbol + (s.translateSell || 0) },
+        { label: '通道成本', value: this.currencySymbol + (s.translateCost || 0) }
       ]
     }
   },
@@ -110,6 +111,7 @@ export default {
 <style scoped>
 .admin-page { text-align: left; }
 .admin-bar { margin-bottom: 12px; }
-.stat-label { color: #909399; font-size: 13px; }
+.stat-label { color: var(--w-text-faint); font-size: 13px; }
 .stat-value { font-size: 22px; font-weight: 700; margin-top: 6px; }
+.unit-tip { margin-left: 10px; color: var(--w-text-faint); font-size: 12px; }
 </style>

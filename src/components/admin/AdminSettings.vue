@@ -12,6 +12,14 @@
         <el-form-item label="商户公告">
           <el-button type="text" @click="$router.push('/admin/notices')">去公告管理编辑</el-button>
         </el-form-item>
+        <el-form-item label="价格货币">
+          <el-select v-model="form.currency" style="width:220px">
+            <el-option
+              v-for="c in form.currencyOptions" :key="c.code"
+              :label="c.label" :value="c.code"></el-option>
+          </el-select>
+          <span class="field-tip">本站按字符计费，套餐金额在「套餐管理」里改</span>
+        </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="save">保存设置</el-button>
         </el-form-item>
@@ -58,7 +66,7 @@
       <el-table :data="packages" border stripe>
         <el-table-column prop="title" label="套餐" min-width="160"></el-table-column>
         <el-table-column label="售价" width="110">
-          <template slot-scope="scope">¥ {{ scope.row.price }}</template>
+          <template slot-scope="scope">{{ currencySymbol }} {{ scope.row.price }}</template>
         </el-table-column>
         <el-table-column label="字符" width="110">
           <template slot-scope="scope">{{ (scope.row.chars || 0) / 10000 }} 万</template>
@@ -106,6 +114,8 @@ export default {
         discount1: 0.9,
         discount10: 0.8,
         discount50: 0.75,
+        currency: 'USD',
+        currencyOptions: [],
         lines: []
       }
     }
@@ -125,6 +135,8 @@ export default {
           discount1: Number(resp.data.discount1 || 0.9),
           discount10: Number(resp.data.discount10 || 0.8),
           discount50: Number(resp.data.discount50 || 0.75),
+          currency: resp.data.currency || 'USD',
+          currencyOptions: Array.isArray(resp.data.currencyOptions) ? resp.data.currencyOptions : [],
           lines: Array.isArray(resp.data.lines) ? resp.data.lines.map(l => Object.assign({ enabled: 1 }, l)) : []
         }
       })
@@ -144,5 +156,6 @@ export default {
 </script>
 <style scoped>
 .admin-page { text-align: left; }
-.line-tip { color: #909399; font-size: 13px; margin: 0 0 12px; }
+.line-tip { color: var(--w-text-faint); font-size: 13px; margin: 0 0 12px; }
+.field-tip { color: var(--w-text-faint); font-size: 12px; margin-left: 10px; }
 </style>

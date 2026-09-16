@@ -6,7 +6,7 @@
  * 这段逻辑写错的后果是**静默的**：桥接文件里写进一个没接通的通道，
  * 服务端一律 503，而魔改电报的 Provider 按设计"失败就不写译文、不弹错、不崩电报"，
  * 所以现象就是气泡永远不出 [译文] —— 和"编译没成功"完全一样。
- * 真实库里 demo 账号正是这种状态：active_engine_id='youdao'，而 youdao 没有接通。
+ * 真实库里 demo 账号正是这种状态：active_engine_id='deepseek'，而 deepseek 没有接通。
  *
  * 这里用的 engines 报文形状取自 core-service.js 的 engines()：
  *   { wired, activeEngine, rows: [{ id, name, wired, enabled, allowed, active }] }
@@ -16,17 +16,17 @@ const assert = require('node:assert/strict')
 const test = require('node:test')
 const { usableEngines, resolveEngine, engineState } = require('../standalone/telegram-win/lib/engines')
 
-// 真实库的样子：12 个通道只有 deepseek 接通，账号 activeEngine 却指向没接通的 youdao。
+// 真实库的样子：12 个通道只有 deepseek 接通，账号 activeEngine 却指向没接通的 deepseek。
 function realWorldEngines() {
   return {
     wired: true,
-    activeEngine: 'youdao',
+    activeEngine: 'deepseek',
     packageTitle: '专业版',
     rows: [
       { id: 'baidu', name: '百度翻译', wired: false, enabled: true, allowed: true, active: false },
       { id: 'deepseek', name: 'DeepSeek 翻译', wired: true, enabled: true, allowed: true, active: false },
       { id: 'deepl', name: 'DeepL 翻译', wired: false, enabled: true, allowed: true, active: false },
-      { id: 'youdao', name: '有道翻译', wired: false, enabled: true, allowed: true, active: true }
+      { id: 'deepseek', name: '有道翻译', wired: false, enabled: true, allowed: true, active: true }
     ]
   }
 }
@@ -48,20 +48,20 @@ test('usableEngines 过滤掉 enabled=false，即使已接通', () => {
 })
 
 test('账号 activeEngine 指向死通道时，绕开它挑已接通的', () => {
-  // 这是真实库 demo 账号的状态：activeEngine=youdao（未接通）。
+  // 这是真实库 demo 账号的状态：activeEngine=deepseek（未接通）。
   // 如果实现直接采信 activeEngine，气泡就永远不出译文。
   assert.equal(resolveEngine(realWorldEngines(), ''), 'deepseek')
-  assert.equal(resolveEngine(realWorldEngines(), 'youdao'), 'deepseek')
+  assert.equal(resolveEngine(realWorldEngines(), 'deepseek'), 'deepseek')
   assert.equal(resolveEngine(realWorldEngines(), 'deepl'), 'deepseek')
 })
 
 test('用户存的通道已接通时保持不变（不擅自改用户的选择）', () => {
   const engines = {
-    activeEngine: 'youdao',
+    activeEngine: 'deepseek',
     rows: [
       { id: 'deepseek', wired: true, enabled: true },
       { id: 'gpt', wired: true, enabled: true },
-      { id: 'youdao', wired: false, enabled: true }
+      { id: 'deepseek', wired: false, enabled: true }
     ]
   }
   assert.equal(resolveEngine(engines, 'gpt'), 'gpt')
@@ -84,14 +84,14 @@ test('没有已接通通道时返回空串，交给服务端按 falsy 回退', (
   // 回退到 activeEngineId。比硬编码一个死通道安全。
   const basic = {
     wired: false,
-    activeEngine: 'youdao',
+    activeEngine: 'deepseek',
     rows: [
       { id: 'baidu', wired: false, enabled: true },
-      { id: 'youdao', wired: false, enabled: true }
+      { id: 'deepseek', wired: false, enabled: true }
     ]
   }
   assert.equal(resolveEngine(basic, ''), '')
-  assert.equal(resolveEngine(basic, 'youdao'), '')
+  assert.equal(resolveEngine(basic, 'deepseek'), '')
   assert.equal(resolveEngine(basic, 'deepl'), '')
 })
 
@@ -116,7 +116,7 @@ test('engineState 只把已接通的通道暴露给侧栏', () => {
 
 test('engineState 在没有可用通道时明确区分"问过了"和"没问到"', () => {
   // 侧栏据此给不同提示：前者让用户去后台接通通道，后者提示连不上后台。
-  const known = engineState({ wired: false, rows: [{ id: 'youdao', wired: false, enabled: true }] })
+  const known = engineState({ wired: false, rows: [{ id: 'deepseek', wired: false, enabled: true }] })
   assert.equal(known.known, true)
   assert.equal(known.wired, false)
   assert.deepEqual(known.rows, [])

@@ -43,7 +43,7 @@ class CoreService {
     this.shareGrants = options && options.shareGrants ||
       new RedisShareGrantStore(redis)
     this.reservationTtlMs = Math.max(30_000, Number(options && options.reservationTtlMs) || 120_000)
-    // 公共翻译网络（如"谷歌极速"的免费端点）默认关闭，只有显式配置才放行。
+    // 公共翻译网络（如"谷歌翻译"的免费端点）默认关闭，只有显式配置才放行。
     // 关闭时相关通道直接 ok:false，不产生任何译文或计费。
     this.allowPublicNetwork = Boolean(options && options.allowPublicNetwork)
     this.reconciliationTimer = null
@@ -81,7 +81,9 @@ class CoreService {
       parentCharBalance: number(parent.charBalance),
       enterprise: parent.enterprise ? 1 : 0,
       bound: account.boundDevice ? 1 : 0,
-      activeEngine: account.activeEngineId || parent.activeEngineId || 'youdao',
+      // 同步方法查不了库，这里只回退成空串；具体用哪个通道由客户端
+      // 从 /translate/engines 已经拿到的列表里选，不再写死通道名
+      activeEngine: account.activeEngineId || parent.activeEngineId || '',
       expireTime: parent.expiresAt,
       port: number(parent.portLimit),
       userPorts: number(parent.portsInUse),
@@ -291,6 +293,37 @@ class CoreService {
     }
   }
 
+  /**
+   * 解析实际使用的翻译通道 id。
+   *
+   * 顺序：显式指定 → 账号设置 → 主账号设置 → 套餐内第一个"已接通且启用"的 → 空串
+   *
+   * 刻意**不硬编码兜底某个通道名**。历史上这里写死 'youdao'，
+   * 一旦 youdao 没接通，翻译就以 403/503 静默失败，用户只看到"没有译文"
+   * 却不知道原因（telegram-engines 测试里保留了这个案例）。
+   * 返回空串表示没有可用通道，由调用方给出明确报错。
+   */
+  /**
+   * 该套餐是否允许商户自己指定通道。
+   * 基础版刻意关闭：客户不必做他们判断不了的选择，成本也锁死在便宜通道上。
+   * 字段缺失时按"允许"处理，避免存量数据被误伤。
+   */
+  canSwitchEngine(session) {
+    return session.parent.packageAllowEngineSwitch !== false
+  }
+
+  async resolveEngineId(session, explicit) {
+    // 不允许切换时**忽略**客户端传来的 engine。
+    // 必须是服务端强制：只把前端下拉藏起来的话，直接调接口就能绕过。
+    const chosen = this.canSwitchEngine(session)
+      ? String(explicit || session.account.activeEngineId || session.parent.activeEngineId || '').trim()
+      : ''
+    if (chosen) return chosen
+    const rows = await this.repo.packageEngines(session.parent.packageId)
+    const usable = rows.filter(row => row.enabled && row.wired)
+    return (usable[0] || {}).id || ''
+  }
+
   async engines(session) {
     const rows = await this.repo.packageEngines(session.parent.packageId)
     // 默认通道优先取"已接通且启用"的：套餐里按 id 排在前面的通道很可能还没配
@@ -298,9 +331,15 @@ class CoreService {
     // 下拉里翻出可用通道。没有已接通的才退回原行为（首个通道）。
     const usable = rows.filter(row => row.wired && row.enabled)
     const fallbackId = (usable[0] || rows[0] || {}).id
-    const active = session.account.activeEngineId || session.parent.activeEngineId || fallbackId
+    const canSwitch = this.canSwitchEngine(session)
+    // 不允许切换时不能把账号里存的旧选择当成"当前通道"——
+    // 那会与实际使用的通道不一致，界面等于在骗人。判定口径与 resolveEngineId 保持一致。
+    const preferred = canSwitch ? (session.account.activeEngineId || session.parent.activeEngineId) : ''
+    const active = preferred || fallbackId
     return {
       wired: rows.some(row => row.wired),
+      // 前端据此隐藏/禁用下拉；服务端另有强制，两边都不能少
+      canSwitch,
       packageTitle: session.parent.packageTitle || '',
       charBalance: number(session.account.charBalance),
       activeEngine: active,
@@ -319,7 +358,7 @@ class CoreService {
     if (!/^(?:auto|[a-z]{2,3}(?:-[a-z0-9]{2,8})?)$/i.test(from) || !/^[a-z]{2,3}(?:-[a-z0-9]{2,8})?$/i.test(to)) {
       throw new ApiError(400, '语言参数无效', 'BAD_LANGUAGE')
     }
-    const engineId = String(data.engine || session.account.activeEngineId || session.parent.activeEngineId || 'youdao')
+    const engineId = await this.resolveEngineId(session, data.engine)
     const allowed = await this.repo.packageEngines(session.parent.packageId)
     const engine = allowed.find(row => row.id === engineId && row.enabled)
     if (!engine) throw new ApiError(403, '当前套餐未包含此通道', 'ENGINE_NOT_ALLOWED')
@@ -556,6 +595,30 @@ class CoreService {
         standalone: standaloneApps[0] ? standaloneApps[0].url : '',
         standaloneApps
       },
+      // 完整发布列表：官网要区分"主推版本"与"其他版本"（如 Apple 芯片 / Intel、
+      // 安装版 / 免安装版）。只给 clientDownloads 的话每类只能拿到第一条，
+      // 用户找不到自己架构的包。
+      downloads: listed,
+      // 官网"用户使用反馈"。刻意不做内置假数据：编造用户评价既是欺骗访客，
+      // 也可能给你招来合规风险。后台配了才展示，没配官网就不出现这一节。
+      testimonials: setting(settings, 'site.testimonials', []),
+      // 货币单位：官网价格展示要用，由后台设置决定，页面不写死。
+      // 本站**按字符计费**，没有计费周期，所以这里只有货币，没有 period。
+      billing: {
+        currency: setting(settings, 'billing.currency', 'USD')
+      },
+      // 收款渠道：只下发"已启用且填了地址"的，避免商户看到空地址去转账。
+      // 收款地址本身不是秘密（就是要给人转账用的），放公开接口没有风险。
+      paymentChannels: (Array.isArray(setting(settings, 'payment.channels', []))
+        ? setting(settings, 'payment.channels', []) : [])
+        .filter(item => item && Number(item.enabled) && String(item.address || '').trim())
+        .map(item => ({
+          id: String(item.id || ''),
+          name: String(item.name || 'USDT'),
+          network: String(item.network || 'TRC20'),
+          address: String(item.address || '').trim(),
+          note: String(item.note || '')
+        })),
       officialUrl: setting(settings, 'links.official_url', ''),
       guideUrl: setting(settings, 'links.guide_url', ''),
       telegram: setting(settings, 'support.telegram', ''),

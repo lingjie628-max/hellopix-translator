@@ -84,7 +84,7 @@ class ProductionRepository {
     const parentId = kind === 'sub' ? account.parentId : account.id
     const parent = await this.query(
       `SELECT u.*,p.title AS package_title,p.code AS package_code,p.included_chars,p.port_unlimited,
-       p.clients AS package_clients
+       p.clients AS package_clients,p.allow_engine_switch AS package_allow_engine_switch
        FROM users u LEFT JOIN packages p ON p.id=u.package_id WHERE u.id=$1`,
       [parentId], client
     )
@@ -101,6 +101,114 @@ class ProductionRepository {
 
   async adminById(id) {
     return mapRow((await this.query('SELECT * FROM admins WHERE id=$1 AND status=1', [id])).rows[0])
+  }
+
+  /* ---------------------------------------------------------------- 超管两步验证 */
+
+  /** 暂存待确认的密钥（此时 totp_enabled 仍为 false，未确认前不生效） */
+  async setAdminTotpSecret(adminId, secret) {
+    await this.query(
+      'UPDATE admins SET totp_secret=$2,updated_at=NOW() WHERE id=$1',
+      [adminId, secret]
+    )
+  }
+
+  /**
+   * 开启两步验证并写入恢复码，整体一个事务。
+   * 必须同时成功：只写密钥不写恢复码会让管理员一旦丢手机就永久进不去。
+   */
+  async enableAdminTotp(adminId, secret, codeHashes) {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query(
+        `UPDATE admins SET totp_secret=$2,totp_enabled=true,totp_confirmed_at=NOW(),updated_at=NOW()
+         WHERE id=$1`,
+        [adminId, secret]
+      )
+      await client.query('DELETE FROM admin_recovery_codes WHERE admin_id=$1', [adminId])
+      for (const hash of codeHashes) {
+        await client.query(
+          'INSERT INTO admin_recovery_codes(admin_id,code_hash) VALUES($1,$2)',
+          [adminId, hash]
+        )
+      }
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
+  async regenerateAdminRecoveryCodes(adminId, codeHashes) {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query('DELETE FROM admin_recovery_codes WHERE admin_id=$1', [adminId])
+      for (const hash of codeHashes) {
+        await client.query(
+          'INSERT INTO admin_recovery_codes(admin_id,code_hash) VALUES($1,$2)',
+          [adminId, hash]
+        )
+      }
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
+  async disableAdminTotp(adminId) {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query(
+        `UPDATE admins SET totp_enabled=false,totp_secret=NULL,totp_confirmed_at=NULL,updated_at=NOW()
+         WHERE id=$1`,
+        [adminId]
+      )
+      await client.query('DELETE FROM admin_recovery_codes WHERE admin_id=$1', [adminId])
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
+  async countAdminRecoveryCodes(adminId) {
+    const result = await this.query(
+      'SELECT count(*)::int AS n FROM admin_recovery_codes WHERE admin_id=$1 AND used_at IS NULL',
+      [adminId]
+    )
+    return Number(result.rows[0] && result.rows[0].n) || 0
+  }
+
+  /**
+   * 消费一个恢复码。用 UPDATE ... WHERE used_at IS NULL 做原子占位：
+   * 并发的两次请求里只有一次能拿到行，杜绝同一个码被用两次。
+   */
+  async consumeAdminRecoveryCode(adminId, codeHash, ip) {
+    const result = await this.query(
+      `UPDATE admin_recovery_codes SET used_at=NOW(),used_ip=NULLIF($3,'')::inet
+       WHERE admin_id=$1 AND code_hash=$2 AND used_at IS NULL
+       RETURNING id`,
+      [adminId, codeHash, ip || '']
+    )
+    return result.rowCount > 0
+  }
+
+  async recordAdminTotpEvent(adminId, event, detail, ip) {
+    await this.query(
+      `INSERT INTO admin_totp_events(admin_id,event,detail,ip)
+       VALUES($1,$2,$3,NULLIF($4,'')::inet)`,
+      [adminId, event, detail || null, ip || '']
+    )
   }
 
   async package(id) {

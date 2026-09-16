@@ -116,7 +116,7 @@ test('desktop session requires bound device and CSRF for writes', async t => {
       'X-Pix-Device': 'desktop-test',
       'Content-Type': 'application/x-www-form-urlencoded'
     },
-    body: new URLSearchParams({ text: 'hello', from: 'auto', to: 'zh', engine: 'youdao' })
+    body: new URLSearchParams({ text: 'hello', from: 'auto', to: 'zh', engine: 'deepseek' })
   })
   assert.equal(response.status, 403)
 
@@ -128,7 +128,7 @@ test('desktop session requires bound device and CSRF for writes', async t => {
       'X-CSRF-Token': decodeURIComponent(jar.pix_csrf),
       'Content-Type': 'application/x-www-form-urlencoded'
     },
-    body: new URLSearchParams({ text: 'hello', from: 'auto', to: 'zh', engine: 'youdao' })
+    body: new URLSearchParams({ text: 'hello', from: 'auto', to: 'zh', engine: 'deepseek' })
   })
   assert.equal(response.status, 200)
 })
@@ -298,7 +298,7 @@ test('translation cache is tenant scoped and cached work remains billable', asyn
   const translate = login => request(api.base, '/apis/translate/run', {
     method: 'POST',
     headers: authHeaders(login),
-    body: new URLSearchParams({ text: 'hello', from: 'en', to: 'zh', engine: 'youdao' })
+    body: new URLSearchParams({ text: 'hello', from: 'en', to: 'zh', engine: 'deepseek' })
   }).then(response => response.json())
 
   const first = await translate(pix)
@@ -335,7 +335,7 @@ test('translation balance is reserved before concurrent provider work', async t 
   const makeRequest = () => request(api.base, '/apis/translate/run', {
     method: 'POST',
     headers: authHeaders(demo),
-    body: new URLSearchParams({ text: 'hello', from: 'en', to: 'zh', engine: 'youdao' })
+    body: new URLSearchParams({ text: 'hello', from: 'en', to: 'zh', engine: 'deepseek' })
   }).then(value => value.json())
   const results = await Promise.all([makeRequest(), makeRequest()])
   assert.equal(results.filter(result => result.success).length, 1)
@@ -447,7 +447,7 @@ test('same-language or unchanged translations do not consume balance', async t =
   response = await request(api.base, '/apis/translate/run', {
     method: 'POST',
     headers: authHeaders(login),
-    body: new URLSearchParams({ text: '你好', from: 'auto', to: 'zh', engine: 'youdao' })
+    body: new URLSearchParams({ text: '你好', from: 'auto', to: 'zh', engine: 'deepseek' })
   })
   const result = await response.json()
   assert.equal(result.success, true)

@@ -3,11 +3,9 @@ exports.up = pgm => {
     INSERT INTO engines
       (id, name, provider, tier, enabled, wired, cost_per_million, model, note)
     VALUES
-      ('youdao', '有道翻译', '有道', 'basic', true, false, 48, NULL, '凭据未配置，默认不接通厂商'),
       ('baidu', '百度翻译', '百度', 'basic', true, false, 49, NULL, '凭据未配置，默认不接通厂商'),
       ('niutrans', '小牛翻译', '小牛', 'basic', true, false, 50, NULL, '凭据未配置，默认不接通厂商'),
       ('google', '谷歌翻译', 'Google', 'advanced', true, false, 134, NULL, '凭据未配置，默认不接通厂商'),
-      ('tencent', '腾讯翻译', '腾讯云', 'advanced', true, false, 58, NULL, '凭据未配置，默认不接通厂商'),
       ('deepl', 'DeepL 翻译', 'DeepL', 'pro', true, false, 168, NULL, '凭据未配置，默认不接通厂商'),
       ('aws', '亚马逊 AWS 翻译', 'Amazon', 'pro', true, false, 100, NULL, '凭据未配置，默认不接通厂商'),
       ('gpt', 'GPT 翻译', 'OpenAI', 'pro', true, false, 5, 'gpt-4o-mini', '凭据未配置，默认不接通厂商'),
@@ -20,14 +18,14 @@ exports.up = pgm => {
       (
         'basic', 'Hello Pix 基础版', '基本功能，适合小型企业', 0, true, 1500000, 200,
         '{"standalone":true,"mobile":true,"counter":false}'::jsonb,
-        '["150万字符","有道翻译","百度翻译","小牛翻译","独立应用版","手机版"]'::jsonb,
+        '["150万字符","百度翻译","小牛翻译","独立应用版","手机版"]'::jsonb,
         '{"autoFill":true,"export":true,"moveMaster":true,"fanStats":true,"autoReply":true,"assistant":true,"repeatFan":true,"rotate":true,"keepChat":false,"counterRepeat":true,"ssl":true,"aws":false,"support":false,"feedback":true}'::jsonb,
         10
       ),
       (
         'advanced', 'Hello Pix 高级版', '高级功能，适合中大型企业', 0, true, 1500000, 350,
         '{"standalone":true,"mobile":true,"counter":false}'::jsonb,
-        '["150万字符","谷歌翻译","腾讯翻译","+基础版各翻译通道","独立应用版","手机版"]'::jsonb,
+        '["150万字符","谷歌翻译","+基础版各翻译通道","独立应用版","手机版"]'::jsonb,
         '{"autoFill":true,"export":true,"moveMaster":true,"fanStats":true,"autoReply":true,"assistant":true,"repeatFan":true,"rotate":true,"keepChat":true,"counterRepeat":true,"ssl":true,"aws":false,"support":true,"feedback":true}'::jsonb,
         20
       ),
@@ -43,11 +41,11 @@ exports.up = pgm => {
     SELECT p.id, mapping.engine_id
     FROM (
       VALUES
-        ('basic', 'youdao'), ('basic', 'baidu'), ('basic', 'niutrans'),
-        ('advanced', 'youdao'), ('advanced', 'baidu'), ('advanced', 'niutrans'),
-        ('advanced', 'google'), ('advanced', 'tencent'),
-        ('pro', 'youdao'), ('pro', 'baidu'), ('pro', 'niutrans'),
-        ('pro', 'google'), ('pro', 'tencent'), ('pro', 'deepl'), ('pro', 'aws')
+        ('basic', 'baidu'), ('basic', 'niutrans'),
+        ('advanced', 'baidu'), ('advanced', 'niutrans'),
+        ('advanced', 'google'),
+        ('pro', 'baidu'), ('pro', 'niutrans'),
+        ('pro', 'google'), ('pro', 'deepl'), ('pro', 'aws')
     ) AS mapping(package_code, engine_id)
     JOIN packages p ON p.code = mapping.package_code;
 
@@ -58,7 +56,7 @@ exports.up = pgm => {
       ('downloads.client_url', '""'::jsonb, '客户端 HTTPS 下载地址'),
       ('links.official_url', '""'::jsonb, '官网 HTTPS 地址'),
       ('links.guide_url', '""'::jsonb, '使用指南 HTTPS 地址'),
-      ('translation.active_engine', '"youdao"'::jsonb, '默认翻译引擎'),
+        ('translation.active_engine', '""'::jsonb, '默认翻译引擎（留空则用套餐内第一个已接通的通道）'),
       ('registration.trial_chars', '0'::jsonb, '新注册账户试用字符，默认关闭'),
       ('billing.enterprise_min_packs', '2'::jsonb, '企业用户最低套餐组数'),
       ('billing.discounts', '{"1":0.9,"10":0.8,"50":0.75}'::jsonb, '套餐数量折扣'),
@@ -85,6 +83,6 @@ exports.down = pgm => {
     WHERE package_id IN (SELECT id FROM packages WHERE code IN ('basic', 'advanced', 'pro'));
     DELETE FROM packages WHERE code IN ('basic', 'advanced', 'pro');
     DELETE FROM engines
-    WHERE id IN ('youdao', 'baidu', 'niutrans', 'google', 'tencent', 'deepl', 'aws', 'gpt', 'grok');
+    WHERE id IN ('baidu', 'niutrans', 'google', 'deepl', 'aws', 'gpt', 'grok');
   `)
 }

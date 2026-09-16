@@ -74,8 +74,8 @@
         </div>
         <div style="margin-top: 10px;">
           <span
-            style="font-size: 14px;color:#209cdf">聊天号不限登录<span
-            style="color:#6c757d;margin-left:20px">子账号里 Telegram / WhatsApp 等可无限登录。同一账号同时只能一台电脑在线，新电脑登录会踢下旧电脑。</span></span>
+            style="font-size: 14px;color:var(--w-accent)">聊天号不限登录<span
+            style="color:var(--w-text-faint);margin-left:20px">子账号里 Telegram / WhatsApp 等可无限登录。同一账号同时只能一台电脑在线，新电脑登录会踢下旧电脑。</span></span>
         </div>
       </el-header>
 

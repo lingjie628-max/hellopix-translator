@@ -2,6 +2,7 @@ import Vue from 'vue'
 import VueRouter from 'vue-router'
 import store from '../store'
 import Login from '../components/Login.vue'
+import Landing from '../components/Landing.vue'
 import Home from '../components/Home.vue'
 import HomeIndex from '../components/HomeIndex.vue'
 import OrderInfo from '../components/order/OrderInfo.vue'
@@ -27,6 +28,7 @@ import AdminUsers from '../components/admin/AdminUsers.vue'
 import AdminOrders from '../components/admin/AdminOrders.vue'
 import AdminPackages from '../components/admin/AdminPackages.vue'
 import AdminRecharges from '../components/admin/AdminRecharges.vue'
+import AdminPayments from '../components/admin/AdminPayments.vue'
 import AdminAccounts from '../components/admin/AdminAccounts.vue'
 import AdminFans from '../components/admin/AdminFans.vue'
 import AdminLinks from '../components/admin/AdminLinks.vue'
@@ -36,6 +38,7 @@ import AdminEngines from '../components/admin/AdminEngines.vue'
 import AdminLogs from '../components/admin/AdminLogs.vue'
 import AdminSettings from '../components/admin/AdminSettings.vue'
 import AdminStaff from '../components/admin/AdminStaff.vue'
+import AdminSecurity from '../components/admin/AdminSecurity.vue'
 import AdminClients from '../components/admin/AdminClients.vue'
 import AdminSupport from '../components/admin/AdminSupport.vue'
 import AdminNotices from '../components/admin/AdminNotices.vue'
@@ -46,10 +49,13 @@ import RegSuccess from '../components/RegSuccess.vue'
 
 Vue.use(VueRouter)
 
-const publicPages = ['/', '/register', '/forgot', '/regSuccess', '/order/shareDetails', '/order/shareFans', '/empty', '/paySuccess', '/payError']
+// '/' 是官网落地页（未登录可看），商户登录移到 '/login'。
+// 之前根路径直接渲染登录页 —— 访客打开域名只看到一个登录框，看不到任何产品介绍。
+const publicPages = ['/', '/login', '/register', '/forgot', '/regSuccess', '/order/shareDetails', '/order/shareFans', '/empty', '/paySuccess', '/payError']
 
 const routes = [
-  { path: '/', name: '登录', component: Login },
+  { path: '/', name: '官网', component: Landing },
+  { path: '/login', name: '登录', component: Login },
   { path: '/register', name: '用户注册', component: Register },
   { path: '/forgot', name: '忘记密码', component: Forgot },
   { path: '/regSuccess', name: '注册成功', component: RegSuccess },
@@ -74,6 +80,7 @@ const routes = [
       { path: '/admin/scripts', name: '话术回复', component: AdminScripts },
       { path: '/admin/packages', name: '套餐管理', component: AdminPackages },
       { path: '/admin/recharges', name: '充值流水', component: AdminRecharges },
+      { path: '/admin/payments', name: '收款方式', component: AdminPayments },
       { path: '/admin/translate', name: '翻译计费', component: AdminTranslate },
       { path: '/admin/engines', name: '翻译通道', component: AdminEngines },
       { path: '/admin/clients', name: '客户端版本', component: AdminClients },
@@ -82,7 +89,8 @@ const routes = [
       { path: '/admin/verify', name: '验证码接口', component: AdminVerify },
       { path: '/admin/settings', name: '系统设置', component: AdminSettings },
       { path: '/admin/logs', name: '登录与审计', component: AdminLogs },
-      { path: '/admin/staff', name: '超管账号', component: AdminStaff }
+      { path: '/admin/staff', name: '超管账号', component: AdminStaff },
+      { path: '/admin/security', name: '账号安全', component: AdminSecurity }
     ]
   },
   {
@@ -112,7 +120,33 @@ const router = new VueRouter({
   routes
 })
 
+/**
+ * 超管后台专用域名。
+ *
+ * 为什么要按域名判断：前端路由是 hash 模式，服务器拿不到 "#" 之后的内容，
+ * 所以没法在 nginx 里把 lindufyht.com 的根路径跳到 /#/admin/login
+ * —— 那样浏览器会反复请求 "/" 形成无限重定向（hash 不会回传服务器）。
+ * 只能在页面加载后由前端判断域名再跳。
+ *
+ * 顺带解决了"路径形式访问"的问题：直接打开 lindufyht.com/admin/login 时，
+ * SPA 认为 URL 里没有 hash、落到默认路由，同样会走到下面这个跳转。
+ */
+const ADMIN_HOSTS = ['lindufyht.com', 'www.lindufyht.com']
+
+function isAdminHost() {
+  try {
+    return ADMIN_HOSTS.includes(String(window.location.hostname || '').toLowerCase())
+  } catch (e) {
+    return false
+  }
+}
+
 router.beforeEach((to, from, next) => {
+  // 超管域名下不展示官网首页，根路径直接进后台
+  if (isAdminHost() && (to.path === '/' || to.path === '')) {
+    next('/admin/login')
+    return
+  }
   if (to.path === '/admin/login') {
     next()
     return
@@ -136,7 +170,7 @@ router.beforeEach((to, from, next) => {
     }
     next()
   } else {
-    next({ path: '/', query: { redirect: to.fullPath } })
+    next({ path: '/login', query: { redirect: to.fullPath } })
   }
 })
 

@@ -109,7 +109,7 @@ async function createRuntime(options) {
 
   let services
   try {
-    // 公共翻译网络（"谷歌极速"这类免费公共端点）默认关闭，需显式开启；
+    // 公共翻译网络（"谷歌翻译"这类免费公共端点）默认关闭，需显式开启；
     // 显式传入的 productionApiOptions 优先级最高，便于测试与定制部署。
     const productionApiOptions = Object.assign({
       allowPublicNetwork: envFlag(process.env.PIX_ALLOW_PUBLIC_TRANSLATION)
@@ -123,7 +123,45 @@ async function createRuntime(options) {
   app.get('/health', (_req, res) => {
     res.json({ ok: true, service: 'hello-pix', backend: persistent ? 'persistent' : 'mock', time: new Date().toISOString() })
   })
-  app.use(express.static(dist, { index: false, maxAge: production ? '1h' : 0 }))
+  // 静态资源缓存策略：
+  //   - 带内容哈希的产物（app.47bedb2c.js）内容一变文件名就变，可以永久缓存；
+  //     原先统一 1 小时，回头客每次超时都要重下约 400KB（压缩后）。
+  //   - index.html / favicon 这类**没有哈希**的文件必须不缓存，
+  //     否则发版后用户拿到的还是旧页面，甚至因引用了已删除的 chunk 而白屏。
+  // 按文件名判定，而不是给整个目录一刀切设长缓存。
+  const HASHED_ASSET = /\.[0-9a-f]{8}\.(?:js|css)$/
+  app.use(express.static(dist, {
+    index: false,
+    maxAge: production ? '1h' : 0,
+    setHeaders(res, filePath) {
+      if (!production) return
+      if (HASHED_ASSET.test(filePath)) {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+      } else {
+        // 无哈希文件（theme.js / landing-boot.js / favicon.ico）必须**立刻**生效：
+        // 它们没有内容哈希，改了名字也不变。
+        // 这里用 no-store 而不是 no-cache，是因为实测发现 Cloudflare 会把源站的
+        // `no-cache` 替换成它自己的 Browser Cache TTL 默认值（4 小时）——
+        // 于是 landing-boot.js 这种控制路由分流的脚本会被浏览器缓存 4 小时，
+        // 改动传不出去。no-store 明确禁止落盘，CF 不再插手。
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate')
+      }
+    }
+  }))
+  // 超管域名只服务后台，根路径**不能**出官网 ——
+  // 否则 lindufyht.com 打开会是官网页，后台入口就没了
+  // （前端路由守卫只在拿到主应用后才有机会跳转，见 src/router/index.js 的 ADMIN_HOSTS）。
+  const ADMIN_HOSTS = new Set(['lindufyht.com', 'www.lindufyht.com'])
+  // 根路径出**官网**入口（landing.html）而非主应用：
+  // 官网与主应用已拆成两个 HTML 入口，landing 只带 3 个 Element 组件，约 254KB；
+  // 主应用是 1.5MB。访客第一眼看到的是官网，不该为此下载整个后台。
+  // 带 hash 的访问（/#/login）由 public/landing-boot.js 转交主应用 ——
+  // hash 不会发给服务器，只能在前端分流。
+  app.get('/', (req, res) => {
+    const host = String(req.headers.host || '').split(':')[0].toLowerCase()
+    const file = ADMIN_HOSTS.has(host) ? 'index.html' : 'landing.html'
+    res.sendFile(path.join(dist, file))
+  })
   app.use((req, res, next) => {
     if (!['GET', 'HEAD'].includes(req.method)) return next()
     res.sendFile(path.join(dist, 'index.html'))

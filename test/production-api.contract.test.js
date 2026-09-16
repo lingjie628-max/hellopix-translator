@@ -201,8 +201,8 @@ test('share password issues and validates Redis grants', async () => {
 })
 
 test('translation request digest is deterministic and payload-sensitive', () => {
-  const first = requestDigest({ engine: 'youdao', text: 'hello' })
-  assert.equal(first, requestDigest({ engine: 'youdao', text: 'hello' }))
+  const first = requestDigest({ engine: 'deepseek', text: 'hello' })
+  assert.equal(first, requestDigest({ engine: 'deepseek', text: 'hello' }))
   assert.notEqual(first, requestDigest({ engine: 'baidu', text: 'hello' }))
 })
 
@@ -210,7 +210,7 @@ test('unwired translation providers fail before reserving balance', async () => 
   let transactions = 0
   const repository = {
     async packageEngines() {
-      return [{ id: 'youdao', enabled: true, wired: false }]
+      return [{ id: 'deepseek', enabled: true, wired: false }]
     },
     async transaction() {
       transactions += 1
@@ -221,12 +221,12 @@ test('unwired translation providers fail before reserving balance', async () => 
   const core = new CoreService(repository, redis, {})
   const session = {
     kind: 'main',
-    account: { id: 1, charBalance: 100, activeEngineId: 'youdao' },
-    parent: { id: 1, packageId: 1, activeEngineId: 'youdao' }
+    account: { id: 1, charBalance: 100, activeEngineId: 'deepseek' },
+    parent: { id: 1, packageId: 1, activeEngineId: 'deepseek' }
   }
   await assert.rejects(
     core.translate(session, {
-      text: 'hello', from: 'en', to: 'zh', engine: 'youdao'
+      text: 'hello', from: 'en', to: 'zh', engine: 'deepseek'
     }, 'unwired-provider'),
     error => error.code === 'ENGINE_NOT_CONFIGURED'
   )
@@ -276,4 +276,84 @@ test('wired is derived from adapter readiness, not typed in by hand', () => {
   const body = source.slice(source.indexOf("router.post('/admin/engines/save'"), source.indexOf("router.post('/admin/engines/active'"))
   assert.match(body, /const wired = enabled && ready/, 'wired 必须由 enabled + 适配器就绪推导')
   assert.doesNotMatch(body, /wired\s*=\s*(?:Boolean\()?Number\(data\.wired/, '不允许前端直接指定 wired')
+})
+
+// --- 套餐级"是否允许切换翻译通道" ----------------------------------------------
+// 基础版刻意关闭切换（客户不必做他们判断不了的选择，成本也锁死在便宜通道上）。
+// 关键点：**必须是服务端强制**。只把前端下拉藏起来的话，
+// 直接调 POST /translate/run 带上 engine 就能绕过 —— 所以这里测的是服务端行为。
+
+function coreWithEngines(engines) {
+  const repository = {
+    async packageEngines() { return engines },
+    async settings() { return {} }
+  }
+  return new CoreService(repository, { get() {}, set() {} }, {})
+}
+
+const ENGINE_ROWS = [
+  { id: 'baidu', name: '百度翻译', enabled: true, wired: true },
+  { id: 'niutrans', name: '小牛翻译', enabled: true, wired: true }
+]
+
+test('套餐不允许切换时，忽略客户端传来的 engine', async () => {
+  const core = coreWithEngines(ENGINE_ROWS)
+  const session = {
+    account: { activeEngineId: null },
+    parent: { packageId: 1, packageAllowEngineSwitch: false }
+  }
+  // 显式传一个"套餐里没有"的通道，也必须被忽略而非采纳
+  assert.equal(await core.resolveEngineId(session, 'deepl'), 'baidu',
+    '不允许切换时必须回落到套餐内第一个已接通的通道')
+})
+
+test('套餐不允许切换时，账号里存的旧选择也不能生效', async () => {
+  const core = coreWithEngines(ENGINE_ROWS)
+  const session = {
+    // 模拟"用户升级前选过 google，之后降级到不含 google 的套餐"
+    account: { activeEngineId: 'google' },
+    parent: { packageId: 1, packageAllowEngineSwitch: false }
+  }
+  assert.equal(await core.resolveEngineId(session, ''), 'baidu',
+    '存量账号的旧选择不能绕过套餐限制')
+})
+
+test('套餐允许切换时，显式指定的通道正常生效', async () => {
+  const core = coreWithEngines(ENGINE_ROWS)
+  const session = {
+    account: { activeEngineId: null },
+    parent: { packageId: 2, packageAllowEngineSwitch: true }
+  }
+  assert.equal(await core.resolveEngineId(session, 'niutrans'), 'niutrans')
+  // 没显式指定时用账号设置
+  const withAccount = {
+    account: { activeEngineId: 'niutrans' },
+    parent: { packageId: 2, packageAllowEngineSwitch: true }
+  }
+  assert.equal(await core.resolveEngineId(withAccount, ''), 'niutrans')
+})
+
+test('界面显示的当前通道必须与实际使用的一致', async () => {
+  const core = coreWithEngines(ENGINE_ROWS)
+  // 不允许切换：即使账号里存着 google，界面也不能把 google 显示成"当前使用"
+  const locked = await core.engines({
+    account: { activeEngineId: 'google', charBalance: 0 },
+    parent: { packageId: 1, packageAllowEngineSwitch: false, packageTitle: '基础版' }
+  })
+  assert.equal(locked.canSwitch, false)
+  assert.equal(locked.activeEngine, 'baidu', '显示的通道必须与 resolveEngineId 的结果一致')
+
+  // 允许切换：账号设置照常生效
+  const free = await core.engines({
+    account: { activeEngineId: 'niutrans', charBalance: 0 },
+    parent: { packageId: 2, packageAllowEngineSwitch: true, packageTitle: '高级版' }
+  })
+  assert.equal(free.canSwitch, true)
+  assert.equal(free.activeEngine, 'niutrans')
+})
+
+test('字段缺失时按"允许切换"处理，不误伤存量数据', async () => {
+  const core = coreWithEngines(ENGINE_ROWS)
+  const session = { account: { activeEngineId: 'niutrans' }, parent: { packageId: 1 } }
+  assert.equal(await core.resolveEngineId(session, ''), 'niutrans')
 })

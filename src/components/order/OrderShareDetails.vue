@@ -38,7 +38,7 @@
           </el-link>
         </div>
         <div style="margin-top: 10px;">
-			<span style="font-size: 14px;color:#209cdf">
+			<span style="font-size: 14px;color:var(--w-accent)">
             <span>工单重置后进粉总数（已去重）：{{ totalFansCount }}</span>
             <span style="margin-left: 20px">当日总进粉（已去重）：{{ todayFansCount }}</span>
             <span style="margin-left: 20px">当日总重粉：{{ todayRepFansCount }}</span>

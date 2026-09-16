@@ -49,9 +49,9 @@ export default {
         { label: '工单', value: s.orderCount || 0, sub: '进行中 ' + (s.openOrders || 0) },
         { label: '企业账号', value: s.enterpriseUsers || 0, sub: '子账号 ' + (s.subCount || 0) + ' · 聊天号不限' },
         { label: '进粉', value: s.fanCount || 0, sub: '短链点击 ' + (s.shortLinkHits || 0) },
-        { label: '充值金额', value: '¥' + (s.rechargeSum || 0), sub: (s.rechargeCount || 0) + ' 笔' },
+        { label: '充值金额', value: this.currencySymbol + (s.rechargeSum || 0), sub: (s.rechargeCount || 0) + ' 笔' },
         { label: '字符余额', value: s.charBalance || 0, sub: '已用 ' + (s.charUsed || 0) },
-        { label: '翻译售出', value: '¥' + (s.translateSell || 0), sub: '通道成本 ¥' + (s.translateCost || 0) },
+        { label: '翻译售出', value: this.currencySymbol + (s.translateSell || 0), sub: '通道成本 ' + this.currencySymbol + (s.translateCost || 0) },
         { label: '当前通道', value: s.activeEngine || '-', sub: s.packageBill || '按套餐整包售卖' }
       ]
     }
@@ -64,9 +64,18 @@ export default {
 }
 </script>
 <style scoped>
+/* 全部走主题变量：之前 .stat-value 写死 #111827，
+   在夜间模式的深色卡片上等于隐形 —— 数字看不见，整张卡就显得空荡。 */
 .stat-card { margin-bottom: 16px; text-align: left; }
-.stat-label { color: #909399; font-size: 13px; }
-.stat-value { font-size: 24px; font-weight: 700; margin-top: 8px; color: #111827; }
-.stat-sub { color: #c0c4cc; font-size: 12px; margin-top: 6px; }
+.stat-label { color: var(--w-text-muted); font-size: 13px; }
+.stat-value {
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.25;
+  margin-top: 10px;
+  color: var(--w-text-strong);
+  word-break: break-all;
+}
+.stat-sub { color: var(--w-text-faint); font-size: 12px; margin-top: 8px; }
 .el-card { margin-bottom: 16px; text-align: left; }
 </style>

@@ -146,8 +146,8 @@ export default {
 }
 </script>
 <style scoped>
-.team-page { text-align: left; background: #fff; padding: 16px; }
+.team-page { text-align: left; background: var(--w-surface); padding: 16px; }
 .team-bar { margin-bottom: 8px; }
-.quota { color: #909399; font-size: 13px; margin: 0 0 12px; }
-.char-hint { color: #909399; font-size: 13px; margin: 0 0 12px; }
+.quota { color: var(--w-text-faint); font-size: 13px; margin: 0 0 12px; }
+.char-hint { color: var(--w-text-faint); font-size: 13px; margin: 0 0 12px; }
 </style>

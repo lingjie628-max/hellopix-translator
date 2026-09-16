@@ -147,7 +147,7 @@ test('share grants are scoped and revocable', async () => {
 
 test('translation cache is tenant scoped', async () => {
   const store = new RedisTranslationCache(new FakeRedis())
-  const request = { engine: 'youdao', from: 'en', to: 'zh', text: 'hello' }
+  const request = { engine: 'deepseek', from: 'en', to: 'zh', text: 'hello' }
   await store.set('tenant-a', request, '你好')
   assert.equal(await store.get('tenant-a', request), '你好')
   assert.equal(await store.get('tenant-b', request), null)

@@ -1,8 +1,14 @@
 <template>
   <div class="engine-page">
     <el-alert
-      title="翻译接口板块已就位，厂商请求尚未接入。成本由超管填写，不调取厂商计费。"
-      type="warning" show-icon :closable="false" style="margin-bottom:16px">
+      v-if="!canSwitch"
+      title="当前套餐已为你选好翻译通道，如需自行切换请升级套餐"
+      type="info" show-icon :closable="false" style="margin-bottom:16px">
+    </el-alert>
+    <el-alert
+      v-else
+      title="只有已接通的通道可以选用；切换后立即对新的翻译生效。"
+      type="info" show-icon :closable="false" style="margin-bottom:16px">
     </el-alert>
     <div class="engine-meta">
       当前套餐 <b>{{ meta.packageTitle }}</b>
@@ -24,9 +30,10 @@
             type="primary"
             size="small"
             style="width:100%;margin-top:12px"
-            :disabled="!item.allowed || item.active"
+              :disabled="!canSwitch || !item.allowed || item.active"
             @click="choose(item)">
-            {{ item.allowed ? (item.active ? '已选择' : '设为当前通道') : '升级套餐后可用' }}
+              {{ !canSwitch ? (item.active ? '当前使用中' : '套餐固定')
+                 : (item.allowed ? (item.active ? '已选择' : '设为当前通道') : '升级套餐后可用') }}
           </el-button>
         </el-card>
       </el-col>
@@ -36,7 +43,7 @@
 <script>
 export default {
   data() {
-    return { rows: [], meta: {} }
+    return { rows: [], meta: {}, canSwitch: true }
   },
   computed: {
     activeName() {
@@ -53,7 +60,8 @@ export default {
       this.getRequest('/translate/engines').then(resp => {
         if (!resp) return
         this.rows = resp.data.rows || []
-        this.meta = resp.data
+          this.meta = resp.data
+          this.canSwitch = resp.data.canSwitch !== false
       })
     },
     choose(item) {
@@ -67,11 +75,11 @@ export default {
 </script>
 <style scoped>
 .engine-page { text-align: left; }
-.engine-meta { margin-bottom: 16px; color: #606266; }
+.engine-meta { margin-bottom: 16px; color: var(--w-text-muted); }
 .el-card { margin-bottom: 16px; }
-.engine-name { font-size: 18px; font-weight: 700; color: #111827; }
-.engine-provider { color: #909399; font-size: 12px; margin: 6px 0 10px; }
-.engine-note { color: #606266; font-size: 13px; min-height: 44px; }
+.engine-name { font-size: 18px; font-weight: 700; color: var(--w-text-strong); }
+.engine-provider { color: var(--w-text-faint); font-size: 12px; margin: 6px 0 10px; }
+.engine-note { color: var(--w-text-muted); font-size: 13px; min-height: 44px; }
 .engine-foot { margin-top: 10px; }
 .locked { opacity: 0.72; }
 .current { border-color: #fca5a5; }
