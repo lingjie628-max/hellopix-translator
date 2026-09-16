@@ -26,7 +26,7 @@ function publicUser(session) {
 }
 
 function productionRouter(context) {
-  const { repository: repo, auth, core, security } = context
+  const { repository: repo, auth, core, customers, security } = context
   const router = express.Router()
   const limit = (namespace, max, windowMs, key) => redisRateLimit({
     redis: core.redis,
@@ -426,6 +426,32 @@ function productionRouter(context) {
   })
   router.post('/translate/run', translateIpLimit, translateAccountLimit, translate)
   router.post('/translate', translateIpLimit, translateAccountLimit, translate)
+
+  // ---------------------------------------------------------------------
+  // 统一客户身份：线索接入与撞单提醒
+  //
+  // 两个接口都从会话取 user_id，**不接受客户端传入的商户号** ——
+  // 否则任何人都能伪造线索塞进别人的客户库。
+  // ---------------------------------------------------------------------
+
+  router.post('/customer/ingest', asyncRoute(async (req, res) => {
+    const session = req.pixUser
+    if (!session || !session.parent) throw new ApiError(401, '请先登录', 'AUTH_REQUIRED')
+    const data = input(req)
+    // 操作员工只在子账号时落库：customer_owners.employee_id 外键指向 sub_accounts，
+    // 主账号自己的 id 在 users 表里，直接塞进去会违反外键。
+    const operatorId = session.kind === 'sub' ? session.account.id : null
+    const result = await customers.ingest(session.parent.id, Object.assign({}, data, { operatorId }))
+    res.json(result)
+  }))
+
+  router.get('/customer/reminders', asyncRoute(async (req, res) => {
+    const session = req.pixUser
+    if (!session || !session.parent) throw new ApiError(401, '请先登录', 'AUTH_REQUIRED')
+    // 默认只看最近 10 分钟，客户端每 8 秒轮询一次，窗口足够且不会重复轰炸
+    const since = new Date(Date.now() - 10 * 60 * 1000)
+    res.json({ items: await customers.pendingReminders(session.parent.id, since) })
+  }))
 
   router.get('/site/info', asyncRoute(async (_req, res) => res.json(await core.siteInfo())))
 
