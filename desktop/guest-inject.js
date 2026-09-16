@@ -13,6 +13,11 @@ const pixBridge = {
   onPrefs: callback => {
     ipcRenderer.removeAllListeners('translate:prefs')
     ipcRenderer.on('translate:prefs', (_event, data) => callback(data))
+  },
+  // 客户身份与消息上报。失败**不抛错**：采集是尽力而为，
+  // 不能因为它出错就影响用户正常聊天（翻译才是主线功能）。
+  reportCustomer: payload => {
+    try { return ipcRenderer.invoke('customer:ingest', payload).catch(() => null) } catch (e) { return Promise.resolve(null) }
   }
 }
 
@@ -161,6 +166,75 @@ const pixBridge = {
       node.closest('div.copyable-text') ||
       node.closest('[data-testid="msg-container"]') ||
       node
+  }
+
+  // ---------------------------------------------------------------------
+  // 客户身份采集
+  //
+  // 目标：让服务端知道「哪个员工、通过哪个账号、正在跟哪个客户」，
+  // 从而做跨账号/跨平台的客户识别与撞单检测。
+  //
+  // 采集是**尽力而为**：拿不到就跳过，绝不影响翻译主流程。
+  // 身份标识来源只有 URL hash 一个可信渠道；拿不到就**不上报**，
+  // 宁可漏采集，也不要制造一个错误的客户身份。
+  // ---------------------------------------------------------------------
+
+  var lastPeerKey = ''
+
+  function currentPeer() {
+    var hash = String(location.hash || '').replace(/^#\/?/, '').trim()
+    // Telegram Web A：纯数字是 peer id（群组带前导 -），@ 开头是用户名
+    if (/^-?\d{5,}$/.test(hash)) {
+      return { peerKey: hash.replace(/^-/, ''), platformUid: hash, kind: 'peer_id' }
+    }
+    if (/^@?[A-Za-z0-9_]{4,64}$/.test(hash)) {
+      return { peerKey: '@' + hash.replace(/^@/, ''), platformUid: hash, kind: 'username' }
+    }
+    return null
+  }
+
+  function chatDisplayName() {
+    var el = document.querySelector('.ChatInfo .title, .ChatInfo h3, .peer-title, header .title')
+    var text = el ? String(el.innerText || '').trim().split('\n')[0] : ''
+    return text.slice(0, 80)
+  }
+
+  /**
+   * 上报一条线索。body 为空表示"只是打开了会话"——
+   * 服务端据此建立跟进关系，这正是撞单检测的触发点。
+   */
+  function reportClue(body, direction) {
+    var pix = api()
+    if (!pix || !pix.reportCustomer) return
+    var peer = currentPeer()
+    if (!peer) return
+    if (document.hidden) return
+
+    try {
+      pix.reportCustomer({
+        // platform 与 accountKey **刻意不在这里填**：
+        // 主进程会按 webContents 反查到可信的 tab 再补上。
+        // 渲染进程在网页上下文里，理论上可被页面脚本影响，
+        // 让它自报"我是哪个账号"等于把归属权交给不可信的一侧。
+        peerKey: peer.peerKey,
+        platformUid: peer.platformUid,
+        displayName: chatDisplayName(),
+        body: body ? String(body).slice(0, 4000) : '',
+        direction: direction || 'in',
+        sourceConvId: peer.peerKey,
+        sourceMsgId: '',
+        sentAt: new Date().toISOString()
+      })
+    } catch (e) {}
+    lastPeerKey = peer.peerKey
+  }
+
+  /** 会话切换时上报一次 —— 打开新客户就是撞单检测的触发时机 */
+  function reportIfPeerChanged() {
+    var peer = currentPeer()
+    if (!peer) return
+    if (peer.peerKey === lastPeerKey) return
+    reportClue('', 'in')
   }
 
   function detectLang(text) {
@@ -500,6 +574,10 @@ const pixBridge = {
   }
 
   async function scan() {
+    // 每次扫描顺带看一眼是不是换了客户 —— 打开新会话就是撞单检测的触发点。
+    // 挂在 scan 上而不是另起定时器：scan 已由 MutationObserver 调度，
+    // 复用既省资源，也保证"页面一变就能发现"。
+    try { reportIfPeerChanged() } catch (e) {}
     const nodes = messageNodes()
     const group = isGroupChat()
     const auto = !group || prefs.transGroup

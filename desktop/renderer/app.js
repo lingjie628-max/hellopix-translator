@@ -493,6 +493,49 @@ function cmpVer(a, b) {
 
 let pendingUpdateUrl = ''
 
+// ---------------------------------------------------------------------------
+// 撞单提醒
+//
+// 按产品要求先做 warn（只提醒、不阻止操作）—— 误报时不会挡住正常工作，
+// 等真实数据出来再决定哪些场景需要升级为 block。
+//
+// 跨商户撞单是**匿名**的：服务端只给一句提示，客户端不要试图渲染姓名或账号
+// （返回体里根本没有，也刻意不查）。
+// ---------------------------------------------------------------------------
+const seenCollisions = new Set()
+
+function showCollisionBanner(items) {
+  const box = document.getElementById('pixCollision')
+  if (!box) return
+  const fresh = items.filter(it => !seenCollisions.has(String(it.id)))
+  if (!fresh.length) { if (!items.length) box.classList.remove('on'); return }
+  fresh.forEach(it => seenCollisions.add(String(it.id)))
+
+  const it = fresh[0]
+  const who = it.kind === 'cross_merchant'
+    ? ''
+    : (it.colleagueEmployeeId ? '（同事 ID ' + it.colleagueEmployeeId + '）' : '')
+  box.innerHTML = ''
+  const title = document.createElement('b')
+  title.textContent = '⚠ ' + (it.title || '检测到客户撞单')
+  const body = document.createElement('span')
+  body.textContent = '客户 ' + it.customerId + ' — ' + it.message + who
+  const close = document.createElement('button')
+  close.type = 'button'
+  close.textContent = '知道了'
+  close.onclick = () => { box.classList.remove('on'); box.innerHTML = '' }
+  box.appendChild(title); box.appendChild(body); box.appendChild(close)
+  box.classList.add('on')
+}
+
+async function checkCollisions() {
+  if (!window.pix || !window.pix.customerReminders) return
+  try {
+    const items = await window.pix.customerReminders()
+    if (Array.isArray(items) && items.length) showCollisionBanner(items)
+  } catch (e) {}
+}
+
 function showUpdateNotice(resp) {
   const local = String((resp && resp.local) || appVersion || '-')
   const remote = String((resp && resp.remote) || '-')
@@ -1499,6 +1542,8 @@ async function enterShell(data) {
     const resp = await window.pix.session()
     if (resp && resp.kicked) return
     if (resp && resp.obj) setProfile(resp.obj)
+    // 撞单提醒搭这趟车，不另开定时器
+    checkCollisions()
   }, 8000)
 }
 

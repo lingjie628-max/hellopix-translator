@@ -2538,3 +2538,43 @@ button {
 [data-theme="light"] .app-card .name {
   text-shadow: none;
 }
+
+/* ---------------------------------------------------------------------------
+   撞单提醒横幅
+   按产品要求先做 warn：只提示、不遮挡内容、不阻止任何操作。
+   固定在最上方且不占布局高度（position: fixed），避免挤压聊天区。
+   --------------------------------------------------------------------------- */
+.pix-collision {
+  display: none;
+  position: fixed;
+  left: 50%;
+  top: 12px;
+  transform: translateX(-50%);
+  z-index: 900;
+  max-width: min(720px, calc(100vw - 48px));
+  padding: 10px 14px;
+  border-radius: var(--w-radius-sm, 8px);
+  background: var(--c-surface, #1b2333);
+  border: 1px solid var(--c-warning, #b45309);
+  box-shadow: 0 10px 30px rgb(var(--c-black-rgb, 0 0 0) / 0.35);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--w-text, #e6edf6);
+  align-items: center;
+  gap: 10px;
+}
+.pix-collision.on { display: flex; }
+.pix-collision b { color: var(--c-warning, #fbbf24); flex: none; }
+.pix-collision span { flex: 1; min-width: 0; }
+.pix-collision button {
+  flex: none;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid var(--c-border, rgba(255, 255, 255, 0.18));
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.pix-collision button:hover { background: rgb(var(--c-white-rgb, 255 255 255) / 0.08); }

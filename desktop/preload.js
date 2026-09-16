@@ -43,6 +43,7 @@ contextBridge.exposeInMainWorld('pix', {
   version: () => ipcRenderer.invoke('app:version'),
   checkUpdate: () => ipcRenderer.invoke('app:checkUpdate'),
   translateEngines: () => ipcRenderer.invoke('translate:engines'),
+  customerReminders: () => ipcRenderer.invoke('customer:reminders'),
   saveTranslatePrefs: (payload) => ipcRenderer.invoke('translate:savePrefs', payload),
   setOverlay: (on) => ipcRenderer.invoke('app:overlay', on),
   onTranslateOpen: (cb) => {

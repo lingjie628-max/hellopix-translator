@@ -214,7 +214,8 @@ function restoreOneApp(row) {
   if (item.id === 'whatsapp-pro' && settings.antiRevoke === undefined) settings.antiRevoke = true
   const homeUrl = safePlatformHomeUrl(item, settings)
   if (!homeUrl) return
-  const view = createWebView(partition, settings, item, homeUrl)
+  const view = createWebView(partition, settings, item, homeUrl,
+    { platform: item.id, account: accountSlug(), id: row.id || '' })
   const tab = {
     id: row.id || (item.id + '-' + nextTab++),
     platform: item.id,
@@ -1353,7 +1354,7 @@ function startTabLoad(tab) {
   })
 }
 
-function createWebView(partition, settings, item, homeUrl) {
+function createWebView(partition, settings, item, homeUrl, tabInfo) {
   const ses = session.fromPartition(partition)
   ses.setUserAgent(CHROME_UA)
   ses.setPermissionRequestHandler((wc, permission, callback) => {
@@ -1398,7 +1399,8 @@ function openPlatform(payload) {
   const homeUrl = safePlatformHomeUrl(item, settings)
   if (!homeUrl) return { success: false, msg: '应用地址不符合安全策略' }
   const displayName = String(payload.name || item.name).trim() || item.name
-  const view = createWebView(partition, settings, item, homeUrl)
+  const view = createWebView(partition, settings, item, homeUrl,
+    { platform: item.id, account: accountSlug(), id: '' })
   const tab = {
     id: id,
     platform: item.id,
@@ -1848,6 +1850,38 @@ ipcMain.handle('app:checkUpdate', async () => {
     return { success: false, local: local, msg: e.message || '无法检查更新' }
   }
 })
+// 客户身份线索上报。
+//
+// platform 与 accountKey **由主进程填入，不接受渲染进程传值** ——
+// 渲染进程在网页上下文里，理论上可被页面脚本影响；由主进程按
+// webContents 反查到可信的 tab 再补上，才能保证"这条线索确实来自那个账号"。
+ipcMain.handle('customer:ingest', async (event, payload) => {
+  const tab = trustedTabSender(event.sender)
+  if (!tab) return { success: false, msg: '标签页未授权' }
+  const data = Object.assign({}, payload || {}, {
+    platform: tab.platform,
+    accountKey: accountSlug()
+  })
+  try {
+    return await api('/customer/ingest', { method: 'POST', form: data })
+  } catch (e) {
+    // 采集失败不影响聊天，静默即可 —— 但不能吞掉到连排查线索都没有
+    return { success: false, msg: String((e && e.message) || '上报失败') }
+  }
+})
+
+// 撞单提醒查询。客户端每 8 秒的 session 轮询顺带拉一次，
+// 不另开定时器、也不上 WebSocket —— 撞单不是高频交易，
+// "8 秒内知道"和"立刻知道"对结果没有区别。
+ipcMain.handle('customer:reminders', async () => {
+  try {
+    const data = await api('/customer/reminders')
+    return data && data.items ? data.items : []
+  } catch (e) {
+    return []
+  }
+})
+
 ipcMain.handle('translate:engines', async () => {
   try {
     return await api('/translate/engines')
