@@ -453,6 +453,56 @@ function productionRouter(context) {
     res.json({ items: await customers.pendingReminders(session.parent.id, since) })
   }))
 
+  // ---------------------------------------------------------------------
+  // 统一客户身份：超管后台
+  //
+  // 全部挂在 /admin/ 下 —— 仓储层有一组不带商户隔离的方法（customerDetail
+  // 等），静态测试强制它们**只能**被 /admin/ 路由调用。商户端接口在下面
+  // 单独分组，两者不能混。
+  // ---------------------------------------------------------------------
+
+  router.get('/admin/customers', asyncRoute(async (req, res) => {
+    const { keyword } = req.query
+    // listCustomers 自己就返回 { rows, total } ——
+    // 不要再调 countCustomers：那是仓储层的方法，服务层没有透出，
+    // 而且它跑的是同一条 count 查询，重复一次没有意义。
+    const { limit, offset } = pagination(req, 50)
+    res.json(await customers.listCustomers({ keyword, limit, offset }))
+  }))
+
+  router.get('/admin/customers/:id', asyncRoute(async (req, res) => {
+    const id = Number(req.params.id)
+    if (!Number.isInteger(id) || id <= 0) throw new ApiError(400, '客户编号不正确', 'BAD_ID')
+    const detail = await customers.customerDetail(id)
+    if (!detail) throw new ApiError(404, '客户不存在', 'NOT_FOUND')
+    res.json(detail)
+  }))
+
+  router.get('/admin/merge-candidates', asyncRoute(async (req, res) => {
+    res.json({ rows: await customers.listMergeCandidates(req.query.status || 'pending') })
+  }))
+
+  router.post('/admin/merge-candidates/:id/resolve', asyncRoute(async (req, res) => {
+    const id = Number(req.params.id)
+    const action = String((req.body && req.body.action) || '')
+    if (!['merge', 'reject'].includes(action)) {
+      throw new ApiError(400, 'action 只能是 merge 或 reject', 'BAD_ACTION')
+    }
+    res.json(await customers.resolveMergeCandidate(id, action, req.pixAdmin && req.pixAdmin.id))
+  }))
+
+  router.get('/admin/collisions', asyncRoute(async (_req, res) => {
+    res.json({ rows: await customers.collisionHistory(100) })
+  }))
+
+  router.get('/admin/collision-settings', asyncRoute(async (_req, res) => {
+    res.json(await customers.collisionConfig())
+  }))
+
+  router.put('/admin/collision-settings', asyncRoute(async (req, res) => {
+    res.json(await customers.saveCollisionConfig(input(req), req.pixAdmin && req.pixAdmin.id))
+  }))
+
   router.get('/site/info', asyncRoute(async (_req, res) => res.json(await core.siteInfo())))
 
   // 官网（未登录可见）用的公开内容。

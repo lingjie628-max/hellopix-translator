@@ -270,6 +270,79 @@ class CustomerIdentityService {
   // 三、撞单检测（业务规则层）
   // =========================================================================
 
+  // =========================================================================
+  // 管理端（超管视角）
+  //
+  // 这里的查询**不做商户隔离** —— 超管按设计看全局。
+  // 仓储层有静态测试强制：这些方法只能被 /admin/ 路由调用。
+  // =========================================================================
+
+  async listCustomers(opts) {
+    const [rows, total] = await Promise.all([
+      this.repo.listCustomers(opts),
+      this.repo.countCustomers(opts.keyword)
+    ])
+    return { rows, total }
+  }
+
+  async customerDetail(customerId) {
+    const detail = await this.repo.customerDetail(customerId)
+    if (!detail) return null
+    // 指纹是 bytea，转成十六进制串再出接口 —— 直接返回 Buffer 会被 JSON
+    // 序列化成 {"type":"Buffer","data":[...]}，前端没法用也没法读。
+    detail.identities = detail.identities.map(x => Object.assign({}, x, {
+      fingerprint: Buffer.from(x.fingerprint).toString('hex').slice(0, 16)
+    }))
+    return detail
+  }
+
+  async listMergeCandidates(status) {
+    const rows = await this.repo.listMergeCandidates(status, 100)
+    return rows.map(r => Object.assign({}, r, {
+      // 疑似重复只给"哪两条可能是同一人"，不自动合并 ——
+      // 名字相同太常见，误合并是不可逆的数据污染
+      a_public: r.a_public,
+      b_public: r.b_public
+    }))
+  }
+
+  /**
+   * 处理疑似重复：合并或驳回。
+   *
+   * 合并走 `mergeCustomers`，它**只改归属不改溯源** —— messages 的
+   * source_* 四列一个字都不动，合并本身也可通过 merged_into 回滚。
+   */
+  async resolveMergeCandidate(id, action, adminId) {
+    return this.repo.transaction(async client => {
+      const row = await this.repo.resolveMergeCandidate(id, action === 'merge' ? 'merged' : 'rejected', adminId, client)
+      if (!row) throw new ApiError(404, '该疑似重复记录不存在或已处理', 'NOT_FOUND')
+      if (action !== 'merge') return { ok: true, action: 'rejected' }
+      // 把较新的客户并入较旧的 —— 让 public_id 更小、更早的那个作为主客户，
+      // 与"谁先出现谁是主"的直觉一致，也让历史链接继续有效。
+      const [fromId, intoId] = row.customer_a < row.customer_b
+        ? [row.customer_b, row.customer_a]
+        : [row.customer_a, row.customer_b]
+      await this.repo.mergeCustomers(fromId, intoId, client)
+      return { ok: true, action: 'merged', fromId, intoId }
+    })
+  }
+
+  async collisionHistory(limit) {
+    return this.repo.collisionHistory(limit)
+  }
+
+  /** 保存撞单规则。**跨商户开关单独校验**：打开它需要显式确认。 */
+  async saveCollisionConfig(data, adminId) {
+    const cfg = Object.assign({}, COLLISION_DEFAULTS, {
+      sameMerchant: data.sameMerchant !== false,
+      crossMerchant: data.crossMerchant === true,
+      notifyMode: ['warn', 'block', 'takeover'].includes(data.notifyMode) ? data.notifyMode : COLLISION_DEFAULTS.notifyMode,
+      ownerIdleReleaseDays: Math.min(365, Math.max(1, Number(data.ownerIdleReleaseDays) || COLLISION_DEFAULTS.ownerIdleReleaseDays))
+    })
+    await this.repo.collisionSettingsSave(cfg)
+    return cfg
+  }
+
   async collisionConfig(client) {
     const saved = await this.repo.collisionSettings(client)
     return Object.assign({}, COLLISION_DEFAULTS, saved || {})

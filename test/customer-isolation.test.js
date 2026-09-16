@@ -43,17 +43,47 @@ function methodBodies(source) {
         if (depth === 0) break
       }
     }
-    out.push({ name: m[1], body: source.slice(bodyStart, i + 1) })
+    out.push({ name: m[1], body: source.slice(bodyStart, i + 1), start })
   }
   return out
 }
 
+/**
+ * 管理端查询的豁免清单。
+ *
+ * 超管按设计需要跨商户视角（客户详情、合并、撞单历史），所以这几个方法
+ * 查询内容表时**不带 user_id**，这是需求而不是疏漏。
+ *
+ * 但豁免必须满足两个条件，缺一不可：
+ *   1. 明确列在这里 —— 不能靠命名巧合蒙混过关
+ *   2. 只被 /admin/ 路由调用 —— 由下一个测试强制校验
+ *
+ * 换句话说：允许超管看全局，但绝不允许这些方法被商户端路由捞走。
+ */
+const ADMIN_EXEMPT = new Set([
+  'countCustomers', 'customerDetail', 'mergeCustomers', 'collisionHistory', 'listCustomers',
+  'listMergeCandidates', 'resolveMergeCandidate'
+])
+
+/** 管理端区块的起始标记，用于确认豁免方法确实写在标注过的区域里 */
+const ADMIN_SECTION_MARK = '管理端查询（超管视角）'
+
 test('内容层的读改删必须带 user_id —— 漏一条就失败', () => {
   const source = fs.readFileSync(REPO_PATH, 'utf8')
   const offenders = []
+  const adminSectionStart = source.indexOf(ADMIN_SECTION_MARK)
 
-  for (const { name, body } of methodBodies(source)) {
+  for (const { name, body, start } of methodBodies(source)) {
     if (!/this\.query\(/.test(body)) continue
+    // 豁免方法必须**物理位于标注过的管理端区块内**，
+    // 否则"豁免"就只是白名单上的一个名字，谁都能加。
+    if (ADMIN_EXEMPT.has(name)) {
+      assert.ok(
+        adminSectionStart >= 0 && start > adminSectionStart,
+        `${name} 在豁免清单里，但不在「${ADMIN_SECTION_MARK}」区块内 —— 豁免必须写在标注过的地方`
+      )
+      continue
+    }
 
     // 只针对**读取/修改/删除**：这三类如果没有 user_id 条件，
     // 就会把别的商户的数据捞出来。INSERT 由下一个测试单独把关
@@ -91,7 +121,30 @@ test('内容层的 INSERT ... ON CONFLICT 必须把 user_id 纳入冲突目标',
   assert.deepEqual(offenders, [], `以下 upsert 的冲突目标缺少 user_id：${offenders.join(', ')}`)
 })
 
-test('内容表的写入必须落 user_id（不只是查询）', () => {
+test('管理端豁免方法只能出现在 /admin/ 路由里 —— 防止被商户端捞走', () => {
+  const routes = fs.readFileSync(
+    path.join(__dirname, '..', 'server', 'routes', 'production.js'), 'utf8')
+
+  for (const name of ADMIN_EXEMPT) {
+    // 找出所有 customers.<name>( 的调用，回溯它所在的路由声明
+    const re = new RegExp('customers\\.' + name + '\\(', 'g')
+    let m
+    while ((m = re.exec(routes))) {
+      // 往前找最近的一条 router.xxx('路径'
+      const before = routes.slice(0, m.index)
+      const decls = [...before.matchAll(/router\.(get|post|put|delete)\(\s*'([^']+)'/g)]
+      const last = decls[decls.length - 1]
+      assert.ok(last, `${name} 的调用找不到所属路由`)
+      assert.ok(
+        last[2].startsWith('/admin/'),
+        `${name} 被非管理端路由 ${last[1].toUpperCase()} ${last[2]} 调用了 —— ` +
+        '这个方法没有商户隔离，只能挂在 /admin/ 下'
+      )
+    }
+  }
+})
+
+test('内容表的写入必须落 user_id（不只是写入）', () => {
   const source = fs.readFileSync(REPO_PATH, 'utf8')
   const offenders = []
 

@@ -181,7 +181,7 @@ const pixBridge = {
 
   var lastPeerKey = ''
 
-  function currentPeer() {
+  function telegramPeer() {
     var hash = String(location.hash || '').replace(/^#\/?/, '').trim()
     // Telegram Web A：纯数字是 peer id（群组带前导 -），@ 开头是用户名
     if (/^-?\d{5,}$/.test(hash)) {
@@ -191,6 +191,48 @@ const pixBridge = {
       return { peerKey: '@' + hash.replace(/^@/, ''), platformUid: hash, kind: 'username' }
     }
     return null
+  }
+
+  /**
+   * WhatsApp Web 没有可用的 URL 标识，但消息元素的 data-id 里有更好的东西：
+   *
+   *   data-id="false_8613800138000@c.us_3EB0ABC123"
+   *            ↑      ↑                  ↑
+   *          是否本人  chatId            消息 ID
+   *
+   * chatId 就是**手机号**（个人）或群标识 —— 手机号是跨平台识别最强的线索，
+   * 比 Telegram 的 peer id 还有用：同一个人的 WhatsApp 与 Telegram
+   * 只要有手机号就能合并成同一个客户。
+   *
+   * 群聊（@g.us）**不作为客户身份**：群里没有单一"客户"，
+   * 把它当客户会把整个群的人混成一个人。
+   */
+  function whatsappPeer() {
+    var nodes = document.querySelectorAll('[data-id]')
+    for (var i = 0; i < nodes.length && i < 400; i++) {
+      var raw = String(nodes[i].getAttribute('data-id') || '')
+      if (raw.indexOf('@c.us') < 0 && raw.indexOf('@g.us') < 0) continue
+      var parts = raw.split('_')
+      if (parts.length < 3) continue
+      var chatId = parts[1] || ''
+      if (chatId.indexOf('@g.us') >= 0) return null   // 群聊不算客户
+      var digits = chatId.split('@')[0]
+      if (!/^\d{7,15}$/.test(digits)) return null
+      return {
+        peerKey: chatId,
+        platformUid: chatId,
+        // 手机号以 + 开头交给服务端按 E.164 归一 —— WhatsApp 的 chatId
+        // 一定含国家码，所以不存在"猜国家码"的歧义
+        phone: '+' + digits,
+        sourceMsgId: parts.slice(2).join('_'),
+        kind: 'phone'
+      }
+    }
+    return null
+  }
+
+  function currentPeer() {
+    return telegramPeer() || whatsappPeer()
   }
 
   function chatDisplayName() {
@@ -222,7 +264,11 @@ const pixBridge = {
         body: body ? String(body).slice(0, 4000) : '',
         direction: direction || 'in',
         sourceConvId: peer.peerKey,
-        sourceMsgId: '',
+        // WhatsApp 能从 data-id 里拿到平台原始消息 ID；Telegram 拿不到，
+        // 此时靠服务端按「同会话+同时间+同内容」去重兜底
+        sourceMsgId: peer.sourceMsgId || '',
+        // 手机号是跨平台合并的关键线索，能拿到就一定要带上
+        phone: peer.phone || '',
         sentAt: new Date().toISOString()
       })
     } catch (e) {}

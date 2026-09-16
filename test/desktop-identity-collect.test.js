@@ -19,15 +19,25 @@ const vm = require('node:vm')
 
 const SRC = fs.readFileSync(path.join(__dirname, '..', 'desktop', 'guest-inject.js'), 'utf8')
 
-/** 从源码里抠出 currentPeer 函数体并求值 */
-function loadCurrentPeer() {
-  const m = SRC.match(/function currentPeer\(\)\s*\{[\s\S]*?\n  \}/)
-  assert.ok(m, '在 guest-inject.js 里找不到 currentPeer —— 函数被改名或删掉了？')
-  const sandbox = { location: { hash: '' } }
+/**
+ * 把身份解析相关的函数源码抠出来求值。
+ *
+ * 取两个函数而不是一个：`currentPeer` 现在按平台分发
+ * （telegramPeer → whatsappPeer），只加载它会因为 telegramPeer 未定义而抛错。
+ */
+function loadPeerFns() {
+  const srcs = ['telegramPeer', 'whatsappPeer', 'currentPeer'].map(name => {
+    const m = SRC.match(new RegExp('function ' + name + '\\(\\)\\s*\\{[\\s\\S]*?\\n  \\}'))
+    assert.ok(m, `在 guest-inject.js 里找不到 ${name} —— 函数被改名或删掉了？`)
+    return m[0]
+  })
+  const sandbox = { location: { hash: '' }, document: { querySelectorAll: () => [] } }
   vm.createContext(sandbox)
-  vm.runInContext(m[0] + '\nthis.__f = currentPeer', sandbox)
-  return hash => { sandbox.location.hash = hash; return sandbox.__f() }
+  vm.runInContext(srcs.join('\n') + '\nthis.__f = currentPeer', sandbox)
+  return hash => { sandbox.location.hash = hash; sandbox.document = { querySelectorAll: () => [] }; return sandbox.__f() }
 }
+
+function loadCurrentPeer() { return loadPeerFns() }
 
 test('Telegram peer id 能正确解析', () => {
   const peer = loadCurrentPeer()
@@ -79,4 +89,41 @@ test('撞单横幅先做 warn（不阻止操作）且跨商户不渲染同事信
   assert.doesNotMatch(body, /preventDefault|disabled\s*=|block/i, 'warn 阶段不得阻止操作')
   // 跨商户必须走匿名分支
   assert.match(body, /cross_merchant/, '必须区分跨商户与同商户')
+})
+
+test('WhatsApp 的 chatId 能解析出手机号，且**群聊必须排除**', () => {
+  const m = SRC.match(/function whatsappPeer\(\)\s*\{[\s\S]*?\n  \}/)
+  assert.ok(m, '找不到 whatsappPeer')
+  const sandbox = { document: { querySelectorAll: () => [] } }
+  vm.createContext(sandbox)
+  vm.runInContext(m[0] + '\nthis.__f = whatsappPeer', sandbox)
+  const parse = raw => {
+    sandbox.document = { querySelectorAll: () => (raw === null ? [] : [{ getAttribute: () => raw }]) }
+    return sandbox.__f()
+  }
+
+  // 个人聊天：chatId 就是手机号，带国家码，不存在"猜国家码"的歧义
+  const p1 = parse('false_8613800138000@c.us_3EB0ABC123')
+  assert.equal(p1.peerKey, '8613800138000@c.us')
+  assert.equal(p1.phone, '+8613800138000')
+  assert.equal(p1.sourceMsgId, '3EB0ABC123', 'WhatsApp 能拿到平台原始消息 ID，必须带上')
+
+  // 本人发出的消息同样能拿到对方 chatId
+  assert.equal(parse('true_447911123456@c.us_ABCDEF').phone, '+447911123456')
+
+  // 群聊：群里没有单一"客户"，当成客户会把整个群的人混成一个人
+  assert.equal(parse('false_120363012345678901@g.us_XYZ'), null, '群聊必须排除')
+
+  // 脏数据不能让整条链路出错
+  assert.equal(parse('false_abc@c.us_XYZ'), null, '非数字 chatId 应跳过')
+  assert.equal(parse('garbage'), null)
+  assert.equal(parse(null), null)
+})
+
+test('拿不到 peer 时不生成 body 之外的任何身份猜测', () => {
+  const m = SRC.match(/function reportClue\([\s\S]*?\n  \}/)
+  assert.ok(m)
+  // phone 必须来自 peer.phone（真实解析结果），不能从昵称之类的地方猜
+  assert.match(m[0], /phone:\s*peer\.phone/, 'phone 必须取自解析结果')
+  assert.doesNotMatch(m[0], /phone:\s*['"]/, 'phone 不得写死或从别处编造')
 })

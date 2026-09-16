@@ -319,6 +319,192 @@ class CustomerRepository {
     return r.rows
   }
 
+  // =========================================================================
+  // 管理端查询（超管视角）
+  //
+  // 这些方法刻意不做商户隔离 —— 调用方是超管后台，按设计可以看到全局。
+  // 但它们**绝不暴露给商户端路由**，路由层按 /admin/ 前缀做了角色校验。
+  // =========================================================================
+
+  async listCustomers({ keyword, limit, offset }, client) {
+    const kw = String(keyword || '').trim()
+    const params = []
+    let where = ''
+    if (kw) {
+      params.push('%' + kw + '%')
+      // 按对外编号或昵称搜。**不按指纹搜** —— 指纹是 HMAC，搜不了也没意义。
+      where = `WHERE c.public_id ILIKE $1 OR EXISTS (
+        SELECT 1 FROM conversations cv
+        WHERE cv.customer_id = c.id AND cv.display_name ILIKE $1)`
+    }
+    params.push(limit, offset)
+    const r = await this.query(
+      `SELECT c.id, c.public_id, c.created_at, c.merged_into,
+              (SELECT count(*)::int FROM customer_merchant_links l WHERE l.customer_id = c.id) AS merchant_count,
+              (SELECT count(*)::int FROM conversations cv WHERE cv.customer_id = c.id) AS conversation_count,
+              (SELECT count(*)::int FROM customer_identities ci WHERE ci.customer_id = c.id) AS identity_count,
+              (SELECT max(cv.display_name) FROM conversations cv
+               WHERE cv.customer_id = c.id AND cv.display_name <> '') AS display_name
+       FROM customers c
+       ${where}
+       ORDER BY c.id DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params, client
+    )
+    return r.rows
+  }
+
+  async countCustomers(keyword, client) {
+    const kw = String(keyword || '').trim()
+    if (!kw) {
+      const r = await this.query('SELECT count(*)::int AS n FROM customers', [], client)
+      return r.rows[0].n
+    }
+    const r = await this.query(
+      `SELECT count(*)::int AS n FROM customers c
+       WHERE c.public_id ILIKE $1 OR EXISTS (
+         SELECT 1 FROM conversations cv WHERE cv.customer_id = c.id AND cv.display_name ILIKE $1)`,
+      ['%' + kw + '%'], client
+    )
+    return r.rows[0].n
+  }
+
+  async customerDetail(customerId, client) {
+    const head = await this.query(
+      `SELECT id, public_id, created_at, merged_into, merged_at FROM customers WHERE id = $1`,
+      [customerId], client
+    )
+    if (!head.rows[0]) return null
+    // 已合并的客户要顺着 merged_into 走到最终客户，否则详情页会指向一个空壳
+    const finalId = head.rows[0].merged_into || head.rows[0].id
+
+    const [identities, conversations, owners, collisions, matches, merchants] = await Promise.all([
+      this.query(
+        `SELECT ci.fingerprint, ci.confidence, ci.linked_at, pi.identity_type,
+                pi.first_seen_at, pi.merchant_count, pi.touch_count
+         FROM customer_identities ci
+         JOIN platform_identities pi ON pi.fingerprint = ci.fingerprint
+         WHERE ci.customer_id = $1 ORDER BY ci.linked_at`, [finalId], client),
+      this.query(
+        `SELECT id, user_id, platform, account_key, peer_key, display_name, last_message_at
+         FROM conversations WHERE customer_id = $1 ORDER BY last_message_at DESC NULLS LAST`,
+        [finalId], client),
+      this.query(
+        `SELECT o.id, o.user_id, o.employee_id, o.account_key, o.status,
+                o.assigned_at, o.last_activity_at, s.nickname AS employee_name
+         FROM customer_owners o
+         LEFT JOIN sub_accounts s ON s.id = o.employee_id
+         WHERE o.customer_id = $1 ORDER BY o.assigned_at DESC`, [finalId], client),
+      this.query(
+        `SELECT id, kind, existing_user_id, new_user_id, existing_employee_id, new_employee_id,
+                existing_account_key, new_account_key, detected_at, resolution
+         FROM collision_events WHERE customer_id = $1 ORDER BY detected_at DESC LIMIT 50`,
+        [finalId], client),
+      this.query(
+        `SELECT e.id, e.matched_by, e.confidence, e.outcome, e.evidence, e.created_at,
+                e.source_user_id, e.source_platform, e.source_account
+         FROM identity_match_events e WHERE e.customer_id = $1
+         ORDER BY e.created_at DESC LIMIT 100`, [finalId], client),
+      this.query(
+        `SELECT l.user_id, u.username, l.first_seen_at, l.last_seen_at
+         FROM customer_merchant_links l JOIN users u ON u.id = l.user_id
+         WHERE l.customer_id = $1 ORDER BY l.first_seen_at`, [finalId], client)
+    ])
+
+    return {
+      customer: Object.assign({}, head.rows[0], { id: finalId }),
+      identities: identities.rows,
+      conversations: conversations.rows,
+      owners: owners.rows,
+      collisions: collisions.rows,
+      matches: matches.rows,
+      merchants: merchants.rows
+    }
+  }
+
+  async listMergeCandidates(status, limit, client) {
+    const r = await this.query(
+      `SELECT m.id, m.customer_a, m.customer_b, m.reason, m.confidence, m.evidence,
+              m.status, m.created_at,
+              a.public_id AS a_public, b.public_id AS b_public
+       FROM customer_merge_candidates m
+       JOIN customers a ON a.id = m.customer_a
+       JOIN customers b ON b.id = m.customer_b
+       WHERE m.status = $1
+       ORDER BY m.confidence DESC, m.created_at DESC
+       LIMIT $2`,
+      [status || 'pending', limit || 100], client
+    )
+    return r.rows
+  }
+
+  async resolveMergeCandidate(id, status, adminId, client) {
+    const r = await this.query(
+      `UPDATE customer_merge_candidates
+       SET status = $2, reviewed_by = $3, reviewed_at = now()
+       WHERE id = $1 AND status = 'pending'
+       RETURNING id, customer_a, customer_b`,
+      [id, status, adminId], client
+    )
+    return r.rows[0] || null
+  }
+
+  /**
+   * 合并两个客户。
+   *
+   * **只改归属，不改溯源**：messages 的 source_* 四列一个字都不动，
+   * conversations / customer_owners 的 customer_id 指向合并后的客户。
+   * `merged_into` 保留指向，所以合并可回滚。
+   */
+  async mergeCustomers(fromId, intoId, client) {
+    await this.query(
+      `UPDATE customer_identities SET customer_id = $2 WHERE customer_id = $1`, [fromId, intoId], client)
+    await this.query(
+      `UPDATE conversations SET customer_id = $2 WHERE customer_id = $1`, [fromId, intoId], client)
+    await this.query(
+      `UPDATE messages SET customer_id = $2 WHERE customer_id = $1`, [fromId, intoId], client)
+    // customer_owners 有 (user_id, customer_id) 的 FOLLOWING 唯一索引，
+    // 两边同属一个商户时会撞索引 —— 冲突的那条直接释放，保留目标方的跟进关系。
+    await this.query(
+      `UPDATE customer_owners o SET status = 'LOST', released_at = now()
+       WHERE o.customer_id = $1 AND o.status = 'FOLLOWING' AND EXISTS (
+         SELECT 1 FROM customer_owners t
+         WHERE t.customer_id = $2 AND t.user_id = o.user_id AND t.status = 'FOLLOWING')`,
+      [fromId, intoId], client)
+    await this.query(
+      `UPDATE customer_owners SET customer_id = $2 WHERE customer_id = $1`, [fromId, intoId], client)
+    await this.query(
+      `UPDATE collision_events SET customer_id = $2 WHERE customer_id = $1`, [fromId, intoId], client)
+    await this.query(
+      `UPDATE customer_merchant_links l SET customer_id = $2
+       WHERE l.customer_id = $1
+         AND NOT EXISTS (SELECT 1 FROM customer_merchant_links t
+                         WHERE t.customer_id = $2 AND t.user_id = l.user_id)`,
+      [fromId, intoId], client)
+    await this.query(`DELETE FROM customer_merchant_links WHERE customer_id = $1`, [fromId], client)
+    await this.query(
+      `UPDATE customers SET merged_into = $2, merged_at = now() WHERE id = $1`, [fromId, intoId], client)
+  }
+
+  async collisionSettingsSave(value, client) {
+    await this.query(
+      `INSERT INTO app_settings (key, value) VALUES ('customer.collision', $1::jsonb)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+      [JSON.stringify(value)], client
+    )
+  }
+
+  async collisionHistory(limit, client) {
+    const r = await this.query(
+      `SELECT ce.id, ce.kind, ce.detected_at, ce.resolution, c.public_id,
+              ce.existing_user_id, ce.new_user_id
+       FROM collision_events ce JOIN customers c ON c.id = ce.customer_id
+       ORDER BY ce.detected_at DESC LIMIT $1`,
+      [limit || 100], client
+    )
+    return r.rows
+  }
+
   async collisionSettings(client) {
     const r = await this.query(
       `SELECT value FROM app_settings WHERE key = 'customer.collision'`,
