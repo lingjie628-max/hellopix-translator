@@ -28,6 +28,7 @@
         <el-menu-item index="/admin/payments">收款方式</el-menu-item>
         <el-menu-item index="/admin/customers">统一客户</el-menu-item>
         <el-menu-item index="/admin/collision">撞单规则</el-menu-item>
+        <el-menu-item index="/admin/mail">邮件服务</el-menu-item>
         <el-menu-item index="/admin/settings">系统设置</el-menu-item>
         <el-menu-item index="/admin/logs">登录与审计</el-menu-item>
         <el-menu-item index="/admin/staff">超管账号</el-menu-item>

@@ -31,6 +31,7 @@ import AdminRecharges from '../components/admin/AdminRecharges.vue'
 import AdminPayments from '../components/admin/AdminPayments.vue'
 import AdminCustomers from '@/components/admin/AdminCustomers'
 import AdminCollision from '@/components/admin/AdminCollision'
+import AdminMail from '@/components/admin/AdminMail'
 import AdminAccounts from '../components/admin/AdminAccounts.vue'
 import AdminFans from '../components/admin/AdminFans.vue'
 import AdminLinks from '../components/admin/AdminLinks.vue'
@@ -85,6 +86,7 @@ const routes = [
       { path: '/admin/payments', name: '收款方式', component: AdminPayments },
     { path: '/admin/customers', name: '统一客户', component: AdminCustomers },
     { path: '/admin/collision', name: '撞单规则', component: AdminCollision },
+    { path: '/admin/mail', name: '邮件服务', component: AdminMail },
       { path: '/admin/translate', name: '翻译计费', component: AdminTranslate },
       { path: '/admin/engines', name: '翻译通道', component: AdminEngines },
       { path: '/admin/clients', name: '客户端版本', component: AdminClients },

@@ -278,6 +278,58 @@ class ProductionRepository {
     }
   }
 
+  /** 单个设置项。settings() 返回全量，这里只要一项时不必把整表捞出来。 */
+  async setting(key, client) {
+    const r = await this.query('SELECT value FROM app_settings WHERE key = $1', [key], client)
+    return r.rows[0] ? r.rows[0].value : null
+  }
+
+  async userByEmail(email, client) {
+    const r = await this.query(
+      'SELECT * FROM users WHERE lower(email) = lower($1) LIMIT 1', [email], client)
+    return r.rows[0] ? mapRow(r.rows[0]) : null
+  }
+
+  /**
+   * 创建商户主账号。
+   *
+   * **必须同时写 merchant_identities** —— 登录是靠那张表按用户名查的
+   * （见 accountByUsername）。只写 users 的话账号建出来了却登不进去，
+   * 而且报错是"用户不存在"，极难排查。
+   *
+   * 两张表放同一个事务里：身份表写失败而 users 写成功，
+   * 就会留下一个永远无法登录、又占着用户名/邮箱的僵尸账号。
+   */
+  async createUser(payload, client) {
+    return this.transaction(async tx => {
+      const c = client || tx
+      const hash = await require('../lib/password').hashPassword(payload.password)
+      const r = await this.query(
+        `INSERT INTO users (username, password_hash, nickname, email, email_verified,
+                            status, char_balance, char_used)
+         VALUES ($1, $2, $3, $4, true, 1, $5, 0)
+         RETURNING id, username, email`,
+        [payload.username, hash, payload.nickname || payload.username,
+         payload.email, Math.max(0, Math.floor(Number(payload.charBalance) || 0))], c
+      )
+      const user = r.rows[0]
+      await this.query(
+        `INSERT INTO merchant_identities (account_type, account_id, username, email)
+         VALUES ('main', $1, $2, $3)`,
+        [user.id, payload.username, payload.email], c
+      )
+      return user
+    })
+  }
+
+  async updateUserPassword(userId, password, client) {
+    const hash = await require('../lib/password').hashPassword(password)
+    await this.query(
+      `UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1`,
+      [userId, hash], client
+    )
+  }
+
   async settings() {
     const result = await this.query('SELECT key,value FROM app_settings WHERE is_secret=false')
     return result.rows.reduce((out, row) => {

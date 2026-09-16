@@ -1,0 +1,116 @@
+<template>
+  <div class="admin-page">
+    <el-alert v-if="!configured" type="error" :closable="false" show-icon style="margin-bottom:16px">
+      <template slot="title">邮件服务未配置 —— 商户无法注册、无法找回密码</template>
+      <div class="tip-body">
+        缺：{{ missing.join('、') || '未知' }}。<br>
+        推荐用现成的邮件推送服务（阿里云邮件推送 / 腾讯云 SES / SendGrid），
+        它们都提供 SMTP 入口，比自建 SMTP 可靠得多 —— <b>自建发件很容易进垃圾箱</b>，
+        而验证邮件进垃圾箱等于注册功能不可用。
+      </div>
+    </el-alert>
+    <el-alert v-else type="success" :closable="false" show-icon style="margin-bottom:16px">
+      <template slot="title">邮件服务已就绪</template>
+      <div class="tip-body">注册与找回密码可用。建议填一个收件地址点「发送测试邮件」实测一次。</div>
+    </el-alert>
+
+    <el-card>
+      <div slot="header">SMTP 配置</div>
+      <el-form :model="form" label-width="140px" style="max-width:680px">
+        <el-form-item label="SMTP 服务器">
+          <el-input v-model="form.host" placeholder="smtpdm.aliyun.com"></el-input>
+        </el-form-item>
+        <el-form-item label="端口">
+          <el-input-number v-model="form.port" :min="1" :max="65535"></el-input-number>
+          <el-checkbox v-model="form.secure" style="margin-left:12px">SSL/TLS</el-checkbox>
+          <div class="hint">465 用 SSL，587 用 STARTTLS（此时取消勾选）</div>
+        </el-form-item>
+        <el-form-item label="账号">
+          <el-input v-model="form.user" placeholder="通常是发件邮箱全称"></el-input>
+        </el-form-item>
+        <el-form-item label="密码 / 授权码">
+          <el-input v-model="form.pass" type="password" show-password
+                    placeholder="多数服务商要求用「授权码」而不是登录密码"></el-input>
+          <div class="hint">保存后读取会打码显示，不会回传明文</div>
+        </el-form-item>
+        <el-form-item label="发件地址">
+          <el-input v-model="form.from" placeholder="noreply@yourdomain.com"></el-input>
+          <div class="hint">
+            必须在该服务商后台完成<b>域名验证（SPF / DKIM）</b>，
+            否则邮件会进垃圾箱甚至被拒收
+          </div>
+        </el-form-item>
+        <el-form-item label="发件人名称">
+          <el-input v-model="form.fromName" placeholder="Hello Pix" style="width:240px"></el-input>
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" :loading="saving" @click="save">保存</el-button>
+        </el-form-item>
+      </el-form>
+    </el-card>
+
+    <el-card style="margin-top:16px">
+      <div slot="header">测试发信</div>
+      <div class="test-row">
+        <el-input v-model="testTo" placeholder="收件邮箱" style="width:280px"></el-input>
+        <el-button :loading="testing" @click="test">发送测试邮件</el-button>
+        <span class="hint">
+          「只验证连接」不够 —— 最常见的故障是连接正常但邮件进垃圾箱，
+          所以这里直接真发一封
+        </span>
+      </div>
+    </el-card>
+  </div>
+</template>
+
+<script>
+export default {
+  name: 'AdminMail',
+  data() {
+    return {
+      form: { host: '', port: 465, secure: true, user: '', pass: '', from: '', fromName: 'Hello Pix' },
+      configured: false,
+      missing: [],
+      saving: false,
+      testing: false,
+      testTo: ''
+    }
+  },
+  mounted() { this.load() },
+  methods: {
+    load() {
+      this.getRequest('/admin/mail').then(resp => {
+        if (!resp) return
+        Object.assign(this.form, resp.data)
+        this.configured = !!resp.data.configured
+        this.missing = resp.data.missing || []
+      })
+    },
+    save() {
+      this.saving = true
+      this.postRequest('/admin/mail', this.form).then(resp => {
+        if (!resp) return
+        this.configured = !!resp.data.configured
+        this.$message({ type: 'success', message: '已保存' })
+        this.load()
+      }).finally(() => { this.saving = false })
+    },
+    test() {
+      if (!this.testTo) return this.$message({ type: 'warning', message: '请先填收件邮箱' })
+      this.testing = true
+      this.postRequest('/admin/mail/test', { to: this.testTo }).then(resp => {
+        if (!resp) return
+        const d = resp.data || {}
+        this.$message({ type: d.ok ? 'success' : 'error', message: d.msg || (d.ok ? '成功' : '失败') })
+      }).finally(() => { this.testing = false })
+    }
+  }
+}
+</script>
+
+<style scoped>
+.admin-page { text-align: left; }
+.tip-body { font-size: 12px; line-height: 1.7; }
+.hint { margin-left: 10px; color: var(--w-text-faint); font-size: 12px; }
+.test-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+</style>

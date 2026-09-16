@@ -26,7 +26,7 @@ function publicUser(session) {
 }
 
 function productionRouter(context) {
-  const { repository: repo, auth, core, customers, security } = context
+  const { repository: repo, auth, core, customers, accounts, security } = context
   const router = express.Router()
   const limit = (namespace, max, windowMs, key) => redisRateLimit({
     redis: core.redis,
@@ -40,6 +40,12 @@ function productionRouter(context) {
     String(input(req).username || '').trim().toLowerCase() || 'missing'
   )
   const captchaLimit = limit('captcha-ip', 60, 10 * 60_000)
+  // 发验证码：每 IP 每 10 分钟 10 次。比图形验证码更严 ——
+  // 它背后是真金白银的发信配额，滥用还会拖累发件域名信誉。
+  const emailCodeLimit = limit('emailcode-ip', 10, 10 * 60_000)
+  // 注册与找回密码：每 IP 每 10 分钟 20 次。
+  // 验证码本身有 5 次尝试上限，这里只挡批量刷接口。
+  const registerLimit = limit('register-ip', 20, 10 * 60_000)
   const shareIpLimit = limit('share-ip', 30, 10 * 60_000)
   const shareOrderLimit = limit('share-order', 15, 10 * 60_000, req =>
     String(input(req).serialNumber || input(req).orderNum || 'missing')
@@ -460,6 +466,73 @@ function productionRouter(context) {
   // 等），静态测试强制它们**只能**被 /admin/ 路由调用。商户端接口在下面
   // 单独分组，两者不能混。
   // ---------------------------------------------------------------------
+
+  // ---------------------------------------------------------------------
+  // 邮件服务配置（超管）
+  //
+  // 读取时 **pass 字段一律打码**：SMTP 授权码等同于发件域名的使用权，
+  // 泄露出去可以伪造该域名的任何邮件。页面不需要看到原值，
+  // 保存时若提交的是掩码则保持原值不变（见 saveMailConfig）。
+  // ---------------------------------------------------------------------
+
+  router.get('/admin/mail', asyncRoute(async (_req, res) => {
+    const settings = await repo.settings()
+    const smtp = (settings.mail && settings.mail.smtp) || {}
+    const ready = await accounts.mailer.configured()
+    res.json({
+      host: smtp.host || '',
+      port: smtp.port || 465,
+      secure: smtp.secure !== false,
+      user: smtp.user || '',
+      pass: smtp.pass ? '********' : '',
+      from: smtp.from || '',
+      fromName: smtp.fromName || 'Hello Pix',
+      configured: ready,
+      missing: (await accounts.mailer.config()).missing
+    })
+  }))
+
+  router.post('/admin/mail', asyncRoute(async (req, res) => {
+    const data = input(req)
+    const settings = await repo.settings()
+    const current = (settings.mail && settings.mail.smtp) || {}
+    const smtp = {
+      host: String(data.host || '').trim(),
+      port: Number(data.port) || 465,
+      secure: data.secure !== false && data.secure !== 'false',
+      user: String(data.user || '').trim(),
+      // 提交的是掩码说明管理员没改密码 —— 保持原值，别把真密码覆盖成星号
+      pass: data.pass === '********' ? (current.pass || '') : String(data.pass || ''),
+      from: String(data.from || '').trim(),
+      fromName: String(data.fromName || 'Hello Pix').trim()
+    }
+    // 与 /admin/settings/save 用同一套写法：事务 + 审计。
+    // 仓储层没有 upsertSetting 这个方法（我先写了才发现），
+    // 实际都是 inline 的 ON CONFLICT —— 抽出来反而会让两处行为分叉。
+    await repo.transaction(async client => {
+      await repo.query(
+        `INSERT INTO app_settings(key,value,description) VALUES($1,$2::jsonb,$3)
+         ON CONFLICT (key) DO UPDATE SET value=$2::jsonb`,
+        ['mail.smtp', JSON.stringify(smtp), 'SMTP 服务器配置'], client
+      )
+      await repo.audit(client, req.pixAdmin, '修改邮件服务配置',
+        smtp.host + ' / ' + smtp.from, req.ip, { type: 'settings' })
+    })
+    res.json({ ok: true, configured: await accounts.mailer.configured() })
+  }))
+
+  router.post('/admin/mail/test', asyncRoute(async (req, res) => {
+    const result = await accounts.mailer.verify()
+    const to = String((req.body && req.body.to) || '').trim()
+    if (result.ok && to) {
+      // 真发一封测试信 —— verify() 只验证连接，不验证"能不能投递"，
+      // 而实际最常出问题的是发件地址与域名的 SPF/DKIM 配置
+      const mail = accounts.mailer.verificationMail('123456', 'register', '测试')
+      await accounts.mailer.send(to, '【测试】' + mail.subject, mail.html)
+      return res.json({ ok: true, msg: '测试邮件已发送至 ' + to })
+    }
+    res.json(result)
+  }))
 
   router.get('/admin/customers', asyncRoute(async (req, res) => {
     const { keyword } = req.query
@@ -1443,9 +1516,25 @@ function productionRouter(context) {
     ok(res, '已保存（真实发信通道未接入，暂不生效）')
   }))
 
-  router.post('/user/register', stub('user.register', '注册依赖验证码及邮件服务迁移'))
-  router.post('/user/forgot', stub('user.forgot', '找回密码依赖验证码及邮件服务迁移'))
-  router.post('/user/emailCode', stub('user.emailCode', '邮件发送服务尚未迁移'))
+  // ---------------------------------------------------------------------
+  // 注册 / 找回密码 / 邮箱验证码
+  //
+  // 这三条此前是 stub，新商户一个都注册不了。现在按真实链路实现。
+  // 三条都是公开接口，所以都挂了 IP 限流 —— 尤其是发验证码那条，
+  // 不限流的话会被当成免费发信机，轻则烧钱、重则发件域名被拉黑。
+  // ---------------------------------------------------------------------
+
+  router.post('/user/emailCode', emailCodeLimit, asyncRoute(async (req, res) => {
+    res.json(await accounts.sendEmailCode(input(req), { ip: req.ip }))
+  }))
+
+  router.post('/user/register', registerLimit, asyncRoute(async (req, res) => {
+    res.json(await accounts.register(input(req)))
+  }))
+
+  router.post('/user/forgot', registerLimit, asyncRoute(async (req, res) => {
+    res.json(await accounts.forgot(input(req)))
+  }))
 
   const unmigrated = [
     '/order/setDistributionMode', '/order/cancelAccount', '/order/resetOrder',
