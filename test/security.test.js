@@ -454,3 +454,79 @@ test('same-language or unchanged translations do not consume balance', async t =
   assert.equal(result.chars, 0)
   assert.equal(result.remain, before)
 })
+
+// ---------------------------------------------------------------------------
+// 数据库传输安全守卫
+//
+// 数据库迁到独立主机却忘了开 TLS，是个**完全没有症状**的问题：
+// 服务照常运行，口令哈希与通道密钥却在网络上明文传输。
+// 所以做成启动守卫 —— 宁可拒绝启动，也不裸奔。
+// ---------------------------------------------------------------------------
+
+const { spawnSync } = require('node:child_process')
+const path = require('node:path')
+
+function tryBoot(env) {
+  const r = spawnSync(process.execPath, ['-e', 'require("./server/config")'], {
+    cwd: path.join(__dirname, '..'),
+    env: Object.assign({}, process.env, env),
+    encoding: 'utf8'
+  })
+  return { ok: r.status === 0, err: (r.stderr || '') + (r.stdout || '') }
+}
+
+const BASE = {
+  NODE_ENV: 'production',
+  REDIS_URL: 'redis://:somepassword@127.0.0.1:6380',
+  DATABASE_SSL_MODE: 'disable'
+}
+
+test('数据库在远程主机但 SSL 关闭 → 拒绝启动', () => {
+  const r = tryBoot(Object.assign({}, BASE, {
+    DATABASE_URL: 'postgres://u:p@db.example.com:5432/x'
+  }))
+  assert.equal(r.ok, false, '跨网络的明文数据库连接必须被拦下')
+  assert.match(r.err, /DATABASE_SSL_MODE/)
+})
+
+test('远程数据库必须是 verify-full —— require 都不够', () => {
+  // 不是"开了 TLS 就行"：require 只加密不验证证书，中间人可以用自签证书
+  // 冒充数据库。verify-full 会校验主机名与证书链，才是真正的端到端。
+  const weak = tryBoot(Object.assign({}, BASE, {
+    DATABASE_URL: 'postgres://u:p@db.example.com:5432/x',
+    DATABASE_SSL_MODE: 'require'
+  }))
+  assert.equal(weak.ok, false, 'require 不足以保护远程连接')
+  assert.match(weak.err, /verify-full/)
+
+  // verify-full 还要求提供 CA 证书（否则拿什么校验服务器身份）
+  const missingCa = tryBoot(Object.assign({}, BASE, {
+    DATABASE_URL: 'postgres://u:p@db.example.com:5432/x',
+    DATABASE_SSL_MODE: 'verify-full'
+  }))
+  assert.equal(missingCa.ok, false, 'verify-full 缺 CA 必须拒绝启动')
+  assert.match(missingCa.err, /DATABASE_SSL_CA_FILE/)
+
+  // 给了 CA 才放行
+  const caPath = path.join(require('node:os').tmpdir(), 'pix-test-ca.pem')
+  require('node:fs').writeFileSync(caPath, '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n')
+  try {
+    const ok = tryBoot(Object.assign({}, BASE, {
+      DATABASE_URL: 'postgres://u:p@db.example.com:5432/x',
+      DATABASE_SSL_MODE: 'verify-full',
+      DATABASE_SSL_CA_FILE: caPath
+    }))
+    assert.equal(ok.ok, true, ok.err.slice(0, 200))
+  } finally {
+    require('node:fs').unlinkSync(caPath)
+  }
+})
+
+test('数据库在本机 → 不因 SSL 关闭被拦（回环上 TLS 无实际收益）', () => {
+  for (const host of ['127.0.0.1', 'localhost']) {
+    const r = tryBoot(Object.assign({}, BASE, {
+      DATABASE_URL: `postgres://u:p@${host}:5432/x`
+    }))
+    assert.equal(r.ok, true, `${host} 不该被拦: ${r.err.slice(0, 200)}`)
+  }
+})
