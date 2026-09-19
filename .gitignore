@@ -36,3 +36,4 @@ desktop/dists/
 # 独立客户端构建（tdesktop 源码树与产物，体积过大）
 standalone/build/
 standalone/telegram-win/tdesktop-fork/out/
+docs/报告图片/
