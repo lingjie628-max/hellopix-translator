@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2200" height="1372" viewBox="0 0 1100 686" font-family="PingFang SC, Hiragino Sans GB, Helvetica, Arial, sans-serif">
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#94A3B8"/></marker></defs>
+<rect width="1100" height="686" fill="#F7F9FC"/>
+<text x="40" y="52" font-size="26" fill="#0F172A" font-weight="700">数据模型概览</text>
+<text x="40" y="78" font-size="14" fill="#667085">40 张表，按职责分成六组</text>
+<rect x="40" y="108" width="324" height="214" rx="10" fill="#EAF2FF" stroke="#C7D6EE" stroke-width="1"/>
+<text x="58" y="138" font-size="14" fill="#1E3A8A" font-weight="700">账号与权限</text>
+<path d="M58 150 L346 150" stroke="#C7D6EE" stroke-width="1" fill="none"/>
+<text x="58" y="176" font-size="11.5" fill="#2B3748">· users</text>
+<text x="58" y="195" font-size="11.5" fill="#2B3748">· sub_accounts</text>
+<text x="58" y="214" font-size="11.5" fill="#2B3748">· merchant_identities</text>
+<text x="58" y="233" font-size="11.5" fill="#2B3748">· platform_identities</text>
+<text x="58" y="252" font-size="11.5" fill="#2B3748">· admins</text>
+<text x="58" y="271" font-size="11.5" fill="#2B3748">· admin_recovery_codes</text>
+<text x="58" y="290" font-size="11.5" fill="#2B3748">· admin_totp_events</text>
+<text x="58" y="309" font-size="11.5" fill="#2B3748">· login_logs</text>
+<rect x="388" y="108" width="324" height="214" rx="10" fill="#DCFCE7" stroke="#86EFAC" stroke-width="1"/>
+<text x="406" y="138" font-size="14" fill="#065F46" font-weight="700">商品与订单</text>
+<path d="M406 150 L694 150" stroke="#86EFAC" stroke-width="1" fill="none"/>
+<text x="406" y="176" font-size="11.5" fill="#2B3748">· packages</text>
+<text x="406" y="195" font-size="11.5" fill="#2B3748">· package_engines</text>
+<text x="406" y="214" font-size="11.5" fill="#2B3748">· orders</text>
+<text x="406" y="233" font-size="11.5" fill="#2B3748">· order_details</text>
+<text x="406" y="252" font-size="11.5" fill="#2B3748">· order_fans</text>
+<text x="406" y="271" font-size="11.5" fill="#2B3748">· recharges</text>
+<text x="406" y="290" font-size="11.5" fill="#2B3748">· character_transfers</text>
+<rect x="736" y="108" width="324" height="214" rx="10" fill="#FFF7E8" stroke="#FDE68A" stroke-width="1"/>
+<text x="754" y="138" font-size="14" fill="#92400E" font-weight="700">翻译与计费</text>
+<path d="M754 150 L1042 150" stroke="#FDE68A" stroke-width="1" fill="none"/>
+<text x="754" y="176" font-size="11.5" fill="#2B3748">· engines</text>
+<text x="754" y="195" font-size="11.5" fill="#2B3748">· translate_logs</text>
+<text x="754" y="214" font-size="11.5" fill="#2B3748">· translation_reservations</text>
+<text x="754" y="233" font-size="11.5" fill="#2B3748">· character_transfers</text>
+<text x="754" y="252" font-size="11.5" fill="#2B3748">· audit_logs</text>
+<rect x="40" y="344" width="324" height="214" rx="10" fill="#F5F3FF" stroke="#DDD6FE" stroke-width="1"/>
+<text x="58" y="374" font-size="14" fill="#5B21B6" font-weight="700">客户身份</text>
+<path d="M58 386 L346 386" stroke="#DDD6FE" stroke-width="1" fill="none"/>
+<text x="58" y="412" font-size="11.5" fill="#2B3748">· customers</text>
+<text x="58" y="431" font-size="11.5" fill="#2B3748">· customer_identities</text>
+<text x="58" y="450" font-size="11.5" fill="#2B3748">· customer_owners</text>
+<text x="58" y="469" font-size="11.5" fill="#2B3748">· customer_merchant_links</text>
+<text x="58" y="488" font-size="11.5" fill="#2B3748">· customer_merge_candidates</text>
+<text x="58" y="507" font-size="11.5" fill="#2B3748">· identity_match_events</text>
+<text x="58" y="526" font-size="11.5" fill="#2B3748">· collision_events</text>
+<rect x="388" y="344" width="324" height="214" rx="10" fill="#F1F5F9" stroke="#CBD5E1" stroke-width="1"/>
+<text x="406" y="374" font-size="14" fill="#334155" font-weight="700">会话与消息</text>
+<path d="M406 386 L694 386" stroke="#CBD5E1" stroke-width="1" fill="none"/>
+<text x="406" y="412" font-size="11.5" fill="#2B3748">· conversations</text>
+<text x="406" y="431" font-size="11.5" fill="#2B3748">· messages</text>
+<text x="406" y="450" font-size="11.5" fill="#2B3748">· messages_2026_09（分区）</text>
+<text x="406" y="469" font-size="11.5" fill="#2B3748">· messages_2026_10（分区）</text>
+<text x="406" y="488" font-size="11.5" fill="#2B3748">· client_lines</text>
+<rect x="736" y="344" width="324" height="214" rx="10" fill="#FEF2F2" stroke="#FECACA" stroke-width="1"/>
+<text x="754" y="374" font-size="14" fill="#B91C1C" font-weight="700">站点与分发</text>
+<path d="M754 386 L1042 386" stroke="#FECACA" stroke-width="1" fill="none"/>
+<text x="754" y="412" font-size="11.5" fill="#2B3748">· faqs</text>
+<text x="754" y="431" font-size="11.5" fill="#2B3748">· scripts</text>
+<text x="754" y="450" font-size="11.5" fill="#2B3748">· short_links</text>
+<text x="754" y="469" font-size="11.5" fill="#2B3748">· client_releases</text>
+<text x="754" y="488" font-size="11.5" fill="#2B3748">· app_settings</text>
+<rect x="40" y="592" width="1020" height="74" rx="10" fill="#F1F5F9" stroke="#CBD5E1" stroke-width="1"/>
+<text x="60" y="618" font-size="12.5" fill="#334155" font-weight="700">两条设计约定</text>
+<text x="60" y="642" font-size="12" fill="#2B3748">· messages 按月分区，保留期与分区清理由 cron 执行；聊天内容不参与任何计费与统计。</text>
+<text x="560" y="642" font-size="12" fill="#2B3748">· app_settings 是 jsonb 键值表，键名只允许小写，用于价格、折扣、收款地址等可运营项。</text>
+</svg>

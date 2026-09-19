@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2200" height="1260" viewBox="0 0 1100 630" font-family="PingFang SC, Hiragino Sans GB, Helvetica, Arial, sans-serif">
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#94A3B8"/></marker></defs>
+<rect width="1100" height="630" fill="#F7F9FC"/>
+<text x="40" y="52" font-size="26" fill="#0F172A" font-weight="700">多开隔离模型</text>
+<text x="40" y="78" font-size="14" fill="#667085">一条线路 = 一个独立分区，登录态互不可见</text>
+<rect x="40" y="108" width="1020" height="74" rx="10" fill="#FFFFFF" stroke="#DBE3EE" stroke-width="1"/>
+<text x="60" y="136" font-size="14" fill="#172033" font-weight="700">同一个客户端进程</text>
+<text x="60" y="160" font-size="12" fill="#667085">Electron 主进程 · 窗口管理 / 代理调度 / 翻译桥接 / 崩溃上报</text>
+<path d="M550 182 L550 212" stroke="#94A3B8" stroke-width="1.6" fill="none" marker-end="url(#ah)"/>
+<rect x="40" y="212" width="324" height="176" rx="10" fill="#FFFFFF" stroke="#DBE3EE" stroke-width="1"/>
+<rect x="40" y="212" width="324" height="40" rx="10" fill="#0B1F3A"/>
+<rect x="40" y="232" width="324" height="20" fill="#0B1F3A"/>
+<text x="56" y="238" font-size="13.5" fill="#FFFFFF" font-weight="700">线路 1 · WhatsApp</text>
+<text x="56" y="276" font-size="11" fill="#667085">会话分区</text>
+<text x="56" y="296" font-size="10.5" fill="#2563EB" font-weight="700">persist:pix-&lt;账号&gt;-whatsapp-green-0</text>
+<text x="56" y="322" font-size="11" fill="#667085">出网通道</text>
+<text x="56" y="342" font-size="12" fill="#2B3748">代理 A · 美国住宅</text>
+<text x="56" y="368" font-size="10.5" fill="#94A3B8">Cookie / localStorage / IndexedDB</text>
+<rect x="388" y="212" width="324" height="176" rx="10" fill="#FFFFFF" stroke="#DBE3EE" stroke-width="1"/>
+<rect x="388" y="212" width="324" height="40" rx="10" fill="#0B1F3A"/>
+<rect x="388" y="232" width="324" height="20" fill="#0B1F3A"/>
+<text x="404" y="238" font-size="13.5" fill="#FFFFFF" font-weight="700">线路 2 · Telegram</text>
+<text x="404" y="276" font-size="11" fill="#667085">会话分区</text>
+<text x="404" y="296" font-size="10.5" fill="#2563EB" font-weight="700">persist:pix-&lt;账号&gt;-telegram-z-1</text>
+<text x="404" y="322" font-size="11" fill="#667085">出网通道</text>
+<text x="404" y="342" font-size="12" fill="#2B3748">代理 B · 德国机房</text>
+<text x="404" y="368" font-size="10.5" fill="#94A3B8">Cookie / localStorage / IndexedDB</text>
+<rect x="736" y="212" width="324" height="176" rx="10" fill="#FFFFFF" stroke="#DBE3EE" stroke-width="1"/>
+<rect x="736" y="212" width="324" height="40" rx="10" fill="#0B1F3A"/>
+<rect x="736" y="232" width="324" height="20" fill="#0B1F3A"/>
+<text x="752" y="238" font-size="13.5" fill="#FFFFFF" font-weight="700">线路 3 · Line</text>
+<text x="752" y="276" font-size="11" fill="#667085">会话分区</text>
+<text x="752" y="296" font-size="10.5" fill="#2563EB" font-weight="700">persist:pix-&lt;账号&gt;-line-2</text>
+<text x="752" y="322" font-size="11" fill="#667085">出网通道</text>
+<text x="752" y="342" font-size="12" fill="#2B3748">直连 · 本地出口</text>
+<text x="752" y="368" font-size="10.5" fill="#94A3B8">Cookie / localStorage / IndexedDB</text>
+<rect x="40" y="408" width="1020" height="128" rx="10" fill="#DCFCE7" stroke="#86EFAC" stroke-width="1"/>
+<text x="60" y="436" font-size="13" fill="#065F46" font-weight="700">隔离保证</text>
+<text x="60" y="462" font-size="12" fill="#065F46">· 分区名由账号 ID + 平台 ID + 序号三段拼成，换账号或换平台一定换分区，不存在复用。</text>
+<text x="60" y="482" font-size="12" fill="#065F46">· 统一登出会按前缀遍历销毁该平台全部分区；重登不会继承上一次的登录态。</text>
+<text x="60" y="502" font-size="12" fill="#065F46">· 代理按线路单独绑定，一条线路的出口 IP 变化不影响其他线路。</text>
+<text x="60" y="522" font-size="12" fill="#065F46">· 翻译浮层只挂在本线路的 webContents 上，且校验发送方是否属于可信标签页。</text>
+<rect x="40" y="552" width="1020" height="60" rx="10" fill="#FFF7E8" stroke="#FDE68A" stroke-width="1"/>
+<text x="60" y="578" font-size="12.5" fill="#92400E" font-weight="700">边界</text>
+<text x="96" y="578" font-size="12" fill="#78350F">分区解决的是“平台 A 看不到平台 B 的登录态”，不等于“同一台电脑上的线路互相不可见”。</text>
+<text x="60" y="600" font-size="12" fill="#78350F">若一台电脑要跑多个互不信任的商户，仍需操作系统级隔离（独立系统用户或虚拟机）。</text>
+</svg>

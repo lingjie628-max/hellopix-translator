@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2200" height="1184" viewBox="0 0 1100 592" font-family="PingFang SC, Hiragino Sans GB, Helvetica, Arial, sans-serif">
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#94A3B8"/></marker></defs>
+<rect width="1100" height="592" fill="#F7F9FC"/>
+<text x="40" y="52" font-size="26" fill="#0F172A" font-weight="700">权限与数据边界</text>
+<text x="40" y="78" font-size="14" fill="#667085">三层账号 × 三条隔离线</text>
+<rect x="40" y="108" width="324" height="190" rx="10" fill="#FFFFFF" stroke="#DBE3EE" stroke-width="1"/>
+<rect x="40" y="108" width="324" height="54" rx="10" fill="#0B1F3A"/>
+<rect x="40" y="142" width="324" height="20" fill="#0B1F3A"/>
+<text x="58" y="132" font-size="14.5" fill="#FFFFFF" font-weight="700">超管 Superadmin</text>
+<text x="58" y="152" font-size="11" fill="#FFFFFF">lindufyht.com</text>
+<text x="58" y="192" font-size="11.5" fill="#2B3748">· 全部商户 / 订单 / 充值 / 通道</text>
+<text x="66" y="208" font-size="11.5" fill="#2B3748"> / 密钥</text>
+<text x="58" y="226" font-size="11.5" fill="#2B3748">· TOTP 双因子 + 10 个一次性恢</text>
+<text x="66" y="242" font-size="11.5" fill="#2B3748">复码</text>
+<text x="58" y="260" font-size="11.5" fill="#2B3748">· 改价、开关通道、看审计日志</text>
+<rect x="388" y="108" width="324" height="190" rx="10" fill="#FFFFFF" stroke="#DBE3EE" stroke-width="1"/>
+<rect x="388" y="108" width="324" height="54" rx="10" fill="#2563EB"/>
+<rect x="388" y="142" width="324" height="20" fill="#2563EB"/>
+<text x="406" y="132" font-size="14.5" fill="#FFFFFF" font-weight="700">商户 Merchant</text>
+<text x="406" y="152" font-size="11" fill="#FFFFFF">pixfanyi.com 商户端</text>
+<text x="406" y="192" font-size="11.5" fill="#2B3748">· 自己的子账号、套餐、订单、字符余额</text>
+<text x="406" y="226" font-size="11.5" fill="#2B3748">· 给子账号分配字符（主账号扣减）</text>
+<text x="406" y="260" font-size="11.5" fill="#2B3748">· 自己的客户身份与碰撞提醒</text>
+<rect x="736" y="108" width="324" height="190" rx="10" fill="#FFFFFF" stroke="#DBE3EE" stroke-width="1"/>
+<rect x="736" y="108" width="324" height="54" rx="10" fill="#475569"/>
+<rect x="736" y="142" width="324" height="20" fill="#475569"/>
+<text x="754" y="132" font-size="14.5" fill="#FFFFFF" font-weight="700">子账号 Sub-account</text>
+<text x="754" y="152" font-size="11" fill="#FFFFFF">客户端登录</text>
+<text x="754" y="192" font-size="11.5" fill="#2B3748">· 只能用被分配的字符额度</text>
+<text x="754" y="226" font-size="11.5" fill="#2B3748">· 只能看自己的翻译记录</text>
+<text x="754" y="260" font-size="11.5" fill="#2B3748">· 不能改价、不能看其他子账号</text>
+<rect x="40" y="318" width="1020" height="132" rx="10" fill="#EAF2FF" stroke="#C7D6EE" stroke-width="1"/>
+<text x="60" y="346" font-size="13" fill="#2563EB" font-weight="700">三条隔离线（后端强制，前端隐藏按钮不算数）</text>
+<text x="60" y="372" font-size="12" fill="#2B3748">① 账号隔离：主账号与子账号各有一份字符余额，子账号的扣减不影响其他子账号。</text>
+<text x="60" y="396" font-size="12" fill="#2B3748">② 商户隔离：任何查询都必须带 workspace / merchant 条件，跨商户读取在 SQL 层就被拒绝。</text>
+<text x="60" y="420" font-size="12" fill="#2B3748">③ 后台隔离：/admin/* 路由全部走独立超管会话，与商户会话不共用 Cookie 与 CSRF。</text>
+<rect x="40" y="466" width="1020" height="108" rx="10" fill="#FFF7E8" stroke="#FDE68A" stroke-width="1"/>
+<text x="60" y="494" font-size="13" fill="#92400E" font-weight="700">已知的软肋（写在明处）</text>
+<text x="60" y="520" font-size="12" fill="#78350F">· translate_logs.snippet 目前会存原文前 300 字符，用于排查“翻错了”。这是设计取舍，不是漏洞。</text>
+<text x="60" y="542" font-size="12" fill="#78350F">· 服务器磁盘未加密：拿到磁盘就等于拿到通道密钥与数据库。需要在一次停机窗口内做。</text>
+<text x="60" y="564" font-size="12" fill="#78350F">· 客户身份指纹目前存在平台库里；工单池本地化完成后，这部分应当整体迁到商户内网。</text>
+</svg>

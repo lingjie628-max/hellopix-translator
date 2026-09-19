@@ -37,3 +37,8 @@ desktop/dists/
 standalone/build/
 standalone/telegram-win/tdesktop-fork/out/
 docs/报告图片/
+
+# 完整框架报告的二进制产物：截图 4.8MB、docx 7MB，都能用一条命令重新生成
+# （见 docs/完整框架报告/目录说明.md），只把源码与矢量图入库
+docs/完整框架报告/图/截图/
+docs/完整框架报告/*.docx

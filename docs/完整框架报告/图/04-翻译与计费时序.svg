@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2200" height="1412" viewBox="0 0 1100 706" font-family="PingFang SC, Hiragino Sans GB, Helvetica, Arial, sans-serif">
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#94A3B8"/></marker></defs>
+<rect width="1100" height="706" fill="#F7F9FC"/>
+<text x="40" y="52" font-size="26" fill="#0F172A" font-weight="700">翻译链路与按字符计费</text>
+<text x="40" y="78" font-size="14" fill="#667085">预留 → 调用通道 → 提交或回滚，失败一定退字符</text>
+<rect x="8" y="112" width="164" height="40" rx="8" fill="#0B1F3A"/>
+<text x="90" y="138" font-size="13" fill="#FFFFFF" font-weight="700" text-anchor="middle">客户端</text>
+<path d="M90 152 L90 596" stroke="#E2E8F0" stroke-width="1" fill="none" stroke-dasharray="4 4"/>
+<rect x="238" y="112" width="164" height="40" rx="8" fill="#0B1F3A"/>
+<text x="320" y="138" font-size="13" fill="#FFFFFF" font-weight="700" text-anchor="middle">平台 API</text>
+<path d="M320 152 L320 596" stroke="#E2E8F0" stroke-width="1" fill="none" stroke-dasharray="4 4"/>
+<rect x="468" y="112" width="164" height="40" rx="8" fill="#0B1F3A"/>
+<text x="550" y="138" font-size="13" fill="#FFFFFF" font-weight="700" text-anchor="middle">Redis</text>
+<path d="M550 152 L550 596" stroke="#E2E8F0" stroke-width="1" fill="none" stroke-dasharray="4 4"/>
+<rect x="698" y="112" width="164" height="40" rx="8" fill="#0B1F3A"/>
+<text x="780" y="138" font-size="13" fill="#FFFFFF" font-weight="700" text-anchor="middle">PostgreSQL</text>
+<path d="M780 152 L780 596" stroke="#E2E8F0" stroke-width="1" fill="none" stroke-dasharray="4 4"/>
+<rect x="928" y="112" width="164" height="40" rx="8" fill="#0B1F3A"/>
+<text x="1010" y="138" font-size="13" fill="#FFFFFF" font-weight="700" text-anchor="middle">翻译通道</text>
+<path d="M1010 152 L1010 596" stroke="#E2E8F0" stroke-width="1" fill="none" stroke-dasharray="4 4"/>
+<path d="M90 196 L316 196" stroke="#2563EB" stroke-width="1.6" fill="none" marker-end="url(#ah)"/>
+<text x="98" y="188" font-size="11.5" fill="#2B3748">① POST /translate/run（带 Idempotency-Key）</text>
+<path d="M320 232 L546 232" stroke="#2563EB" stroke-width="1.6" fill="none" marker-end="url(#ah)"/>
+<text x="328" y="224" font-size="11.5" fill="#2B3748">② 校验会话与字符余额</text>
+<path d="M550 268 L776 268" stroke="#2563EB" stroke-width="1.6" fill="none" marker-end="url(#ah)"/>
+<text x="558" y="260" font-size="11.5" fill="#2B3748">③ 写 translation_reservations（status=reserved）</text>
+<path d="M780 304 L324 304" stroke="#94A3B8" stroke-width="1.4" fill="none" marker-end="url(#ah)" stroke-dasharray="5 4"/>
+<text x="328" y="296" font-size="11.5" fill="#667085">④ 预留成功</text>
+<path d="M320 340 L1006 340" stroke="#2563EB" stroke-width="1.6" fill="none" marker-end="url(#ah)"/>
+<text x="328" y="332" font-size="11.5" fill="#2B3748">⑤ 调用通道适配器（from / to）</text>
+<path d="M1010 376 L324 376" stroke="#94A3B8" stroke-width="1.4" fill="none" marker-end="url(#ah)" stroke-dasharray="5 4"/>
+<text x="328" y="368" font-size="11.5" fill="#667085">⑥ 返回译文</text>
+<path d="M320 412 L776 412" stroke="#94A3B8" stroke-width="1.6" fill="none" marker-end="url(#ah)"/>
+<text x="328" y="404" font-size="11.5" fill="#2B3748">⑦ 扣字符 + 写 translate_logs（commit）</text>
+<path d="M780 448 L324 448" stroke="#94A3B8" stroke-width="1.4" fill="none" marker-end="url(#ah)" stroke-dasharray="5 4"/>
+<text x="328" y="440" font-size="11.5" fill="#667085">⑧ 提交完成</text>
+<path d="M320 484 L94 484" stroke="#94A3B8" stroke-width="1.4" fill="none" marker-end="url(#ah)" stroke-dasharray="5 4"/>
+<text x="98" y="476" font-size="11.5" fill="#667085">⑨ 译文 + 剩余字符</text>
+<rect x="320" y="512" width="700" height="76" rx="10" fill="#FEF2F2" stroke="#FECACA" stroke-width="1"/>
+<text x="340" y="538" font-size="12.5" fill="#B91C1C" font-weight="700">失败分支</text>
+<text x="404" y="538" font-size="12" fill="#7F1D1D">通道报错 / 超时 → 回滚预留，字符原路退回，translate_logs 记 released。</text>
+<text x="340" y="562" font-size="12" fill="#7F1D1D">预留有 TTL；到点未提交的任务由清理任务自动回滚，不会出现“扣了字符没译文”。</text>
+<rect x="40" y="606" width="1020" height="84" rx="10" fill="#EAF2FF" stroke="#C7D6EE" stroke-width="1"/>
+<text x="60" y="632" font-size="13" fill="#2563EB" font-weight="700">计费口径</text>
+<text x="60" y="658" font-size="12" fill="#2B3748">计费字符 = 原文长度，中日韩统一表意文字（U+4E00–U+9FFF）每字按 2 计，其余每字符按 1 计；emoji 直接跳过不计费。</text>
+<text x="60" y="680" font-size="12" fill="#2B3748">成本 = 通道 cost_per_million × 计费字符 ÷ 1,000,000；售价与折扣在超管后台维护，币种 USD。</text>
+</svg>

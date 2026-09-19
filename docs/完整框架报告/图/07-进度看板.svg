@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2200" height="1344" viewBox="0 0 1100 672" font-family="PingFang SC, Hiragino Sans GB, Helvetica, Arial, sans-serif">
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#94A3B8"/></marker></defs>
+<rect width="1100" height="672" fill="#F7F9FC"/>
+<text x="40" y="52" font-size="26" fill="#0F172A" font-weight="700">当前进度看板</text>
+<text x="40" y="78" font-size="14" fill="#667085">截至 2026-09-18，按模块统计完成度</text>
+<text x="40" y="134" font-size="12.5" fill="#172033" font-weight="700">平台服务端</text>
+<rect x="190" y="120" width="380" height="18" rx="9" fill="#E9EEF5"/>
+<rect x="190" y="120" width="380" height="18" rx="9" fill="#16A34A"/>
+<text x="582" y="134" font-size="12" fill="#16A34A" font-weight="700">100%</text>
+<text x="626" y="134" font-size="11.5" fill="#667085">9 个服务 / 103 个 API / 254 项测试</text>
+<text x="40" y="180" font-size="12.5" fill="#172033" font-weight="700">桌面客户端</text>
+<rect x="190" y="166" width="380" height="18" rx="9" fill="#E9EEF5"/>
+<rect x="190" y="166" width="364" height="18" rx="9" fill="#16A34A"/>
+<text x="582" y="180" font-size="12" fill="#16A34A" font-weight="700">96%</text>
+<text x="626" y="180" font-size="11.5" fill="#667085">多开、代理、翻译浮层、自动更新均已可用</text>
+<text x="40" y="226" font-size="12.5" fill="#172033" font-weight="700">翻译通道</text>
+<rect x="190" y="212" width="380" height="18" rx="9" fill="#E9EEF5"/>
+<rect x="190" y="212" width="83" height="18" rx="9" fill="#DC2626"/>
+<text x="582" y="226" font-size="12" fill="#DC2626" font-weight="700">22%</text>
+<text x="626" y="226" font-size="11.5" fill="#667085">9 条适配器写完，2 条已接通计费</text>
+<text x="40" y="272" font-size="12.5" fill="#172033" font-weight="700">商户端与官网</text>
+<rect x="190" y="258" width="380" height="18" rx="9" fill="#E9EEF5"/>
+<rect x="190" y="258" width="380" height="18" rx="9" fill="#16A34A"/>
+<text x="582" y="272" font-size="12" fill="#16A34A" font-weight="700">100%</text>
+<text x="626" y="272" font-size="11.5" fill="#667085">套餐、充值、订单、工单、团队管理已上线</text>
+<text x="40" y="318" font-size="12.5" fill="#172033" font-weight="700">超管后台</text>
+<rect x="190" y="304" width="380" height="18" rx="9" fill="#E9EEF5"/>
+<rect x="190" y="304" width="380" height="18" rx="9" fill="#16A34A"/>
+<text x="582" y="318" font-size="12" fill="#16A34A" font-weight="700">100%</text>
+<text x="626" y="318" font-size="11.5" fill="#667085">25 个页面，含客户身份与合并、邮件、通道</text>
+<text x="40" y="364" font-size="12.5" fill="#172033" font-weight="700">计费与充值</text>
+<rect x="190" y="350" width="380" height="18" rx="9" fill="#E9EEF5"/>
+<rect x="190" y="350" width="342" height="18" rx="9" fill="#16A34A"/>
+<text x="582" y="364" font-size="12" fill="#16A34A" font-weight="700">90%</text>
+<text x="626" y="364" font-size="11.5" fill="#667085">字符计费闭环已验证；TRC20 地址待填</text>
+<text x="40" y="410" font-size="12.5" fill="#172033" font-weight="700">邮件服务</text>
+<rect x="190" y="396" width="380" height="18" rx="9" fill="#E9EEF5"/>
+<rect x="190" y="396" width="76" height="18" rx="9" fill="#DC2626"/>
+<text x="582" y="410" font-size="12" fill="#DC2626" font-weight="700">20%</text>
+<text x="626" y="410" font-size="11.5" fill="#667085">代码与后台就绪，等阿里云发信配置</text>
+<text x="40" y="456" font-size="12.5" fill="#172033" font-weight="700">客户端分发</text>
+<rect x="190" y="442" width="380" height="18" rx="9" fill="#E9EEF5"/>
+<rect x="190" y="442" width="380" height="18" rx="9" fill="#16A34A"/>
+<text x="582" y="456" font-size="12" fill="#16A34A" font-weight="700">100%</text>
+<text x="626" y="456" font-size="11.5" fill="#667085">0.1.3 已构建并上传，SHA-256 校验一致</text>
+<text x="40" y="502" font-size="12.5" fill="#172033" font-weight="700">安全与加密</text>
+<rect x="190" y="488" width="380" height="18" rx="9" fill="#E9EEF5"/>
+<rect x="190" y="488" width="285" height="18" rx="9" fill="#F59E0B"/>
+<text x="582" y="502" font-size="12" fill="#F59E0B" font-weight="700">75%</text>
+<text x="626" y="502" font-size="11.5" fill="#667085">通道密钥 / 密码 / TOTP 已加密；磁盘未加密</text>
+<text x="40" y="548" font-size="12.5" fill="#172033" font-weight="700">工单池本地化</text>
+<rect x="190" y="534" width="380" height="18" rx="9" fill="#E9EEF5"/>
+<rect x="190" y="534" width="38" height="18" rx="9" fill="#DC2626"/>
+<text x="582" y="548" font-size="12" fill="#DC2626" font-weight="700">10%</text>
+<text x="626" y="548" font-size="11.5" fill="#667085">设计方案已完成，等确认后开发</text>
+<rect x="40" y="584" width="1020" height="78" rx="10" fill="#EAF2FF" stroke="#C7D6EE" stroke-width="1"/>
+<text x="60" y="612" font-size="13" fill="#2563EB" font-weight="700">整体判断</text>
+<text x="60" y="638" font-size="12" fill="#2B3748">代码侧已基本完工：40 张表、254 项测试全绿、真实翻译与充值链路都已跑通。</text>
+<text x="560" y="638" font-size="12" fill="#B91C1C" font-weight="700">剩下的 20% 不是写代码，是配置与实机验证。</text>
+</svg>
