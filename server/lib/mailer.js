@@ -27,9 +27,32 @@ function esc(value) {
     .replace(/'/g, '&#39;')
 }
 
+/**
+ * app_settings 的键是**扁平点号键**（`'mail.smtp'`），不是嵌套对象。
+ *
+ * repo.settings() 的返回值长这样：`{ 'mail.smtp': {...}, 'site.name': '...' }`。
+ * 这里曾经写成 `settings.mail.smtp`（嵌套读法），结果永远是 undefined ——
+ * 配置存进去了也读不出来，`configured` 恒为 false，注册接口恒返回 503。
+ * 全库统一的读法是 core-service 的 `setting(settings, 'a.b', fallback)`，此处保持一致。
+ */
+function setting(settings, key, fallback) {
+  const value = settings ? settings[key] : undefined
+  return value === undefined || value === null ? fallback : value
+}
+
+/** 同上，但保证拿到的是对象（jsonb 偶发以字符串形态返回时兜一下）。 */
+function objectSetting(settings, key, fallback) {
+  const value = setting(settings, key, fallback)
+  if (value && typeof value === 'object') return value
+  if (typeof value === 'string') {
+    try { return JSON.parse(value) } catch (_error) { return fallback }
+  }
+  return fallback
+}
+
 /** 从后台设置里读出 SMTP 配置。缺任何必填项就视为未配置。 */
 function readConfig(settings) {
-  const raw = (settings && settings.mail && settings.mail.smtp) || {}
+  const raw = objectSetting(settings, 'mail.smtp', {})
   const host = String(raw.host || '').trim()
   const user = String(raw.user || '').trim()
   const pass = String(raw.pass || '').trim()
@@ -50,6 +73,52 @@ function readConfig(settings) {
       !from && '发件地址'
     ].filter(Boolean)
   }
+}
+
+/** 运维告警收件地址。它和 SMTP 分开存：SMTP 还没配好时也要能收告警。 */
+function readAlertTo(settings) {
+  return String(setting(settings, 'mail.alertTo', '') || '').trim()
+}
+
+/**
+ * SMTP 错误码 → 人话。
+ *
+ * nodemailer 把底层错误原样抛出来，`err.message` 里可能带着服务器应答，
+ * 甚至带认证信息。所以这里做两件事：**给出可执行的判断**、**把敏感信息洗掉**。
+ */
+const SMTP_ERROR_REASONS = {
+  EAUTH: '认证被拒绝：账号或 API Key 不正确，或该账号没有发信权限',
+  ECONNECTION: '连不上 SMTP 服务器：主机名或端口不对，或被网络/防火墙拦截',
+  ESOCKET: '连接被中断：端口与加密方式不匹配（465 要开 SSL，587 要关 SSL 走 STARTTLS）',
+  ETIMEDOUT: '连接超时：主机不可达或端口被拦',
+  EDNS: 'SMTP 主机名解析失败：域名拼错了',
+  EENVELOPE: '信封被拒绝：发件地址或收件地址不被服务器接受（发件域名通常需要先完成 SPF/DKIM 验证）',
+  EMESSAGE: '邮件内容被服务器拒绝',
+  ENOEMAIL: 'SMTP 没有返回有效响应',
+  MAIL_NOT_CONFIGURED: '邮件服务尚未配置'
+}
+
+/**
+ * 把异常翻译成 `{ code, reason, detail }`。
+ * `secrets` 传入本次用到的口令，命中就替换成 ***。
+ */
+function describeSmtpError(err, secrets) {
+  const code = String((err && err.code) || 'SMTP_ERROR')
+  const reason = SMTP_ERROR_REASONS[code] || 'SMTP 发送失败'
+  let detail = String((err && err.message) || err || '')
+  ;(secrets || []).forEach(secret => {
+    const value = String(secret || '')
+    // 太短的串不做替换，否则会把正常文本打满星号
+    if (value.length >= 4) detail = detail.split(value).join('***')
+  })
+  detail = detail.replace(/\s+/g, ' ').trim().slice(0, 300)
+  return { code, reason, detail }
+}
+
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+function validEmail(value) {
+  return EMAIL_PATTERN.test(String(value || '').trim())
 }
 
 class Mailer {
@@ -96,15 +165,69 @@ class Mailer {
     return { messageId: info && info.messageId, accepted: (info && info.accepted) || [] }
   }
 
-  /** 后台"测试发信"用：直接把结果返回给管理员，不吞异常。 */
-  async verify() {
+  /** 后台"测试发信"用。任何失败都不抛异常，一律返回结构化结果。 */
+  /**
+   * 把「连接」「认证」「投递」三步分开报。
+   *
+   * 只回一句"失败"等于没说 —— 排障时最需要知道的恰恰是卡在哪一步。
+   * 早期版本这里是 `verify()` + 一个吞掉异常的 try/catch，
+   * 结果后台只能看到一句原始报错，既分不清成因，也可能带出服务器应答里的敏感信息。
+   */
+  async sendTest(to) {
     const cfg = await this.config()
-    if (!cfg.configured) return { ok: false, msg: '尚未配置：' + cfg.missing.join('、') }
+    if (!cfg.configured) {
+      return {
+        ok: false, stage: 'config', code: 'MAIL_NOT_CONFIGURED',
+        msg: '邮件服务尚未配置，缺少：' + cfg.missing.join('、'),
+        missing: cfg.missing
+      }
+    }
+    if (!validEmail(to)) {
+      return { ok: false, stage: 'input', code: 'BAD_EMAIL', msg: '收件邮箱格式不正确' }
+    }
+
+    const transporter = this.transport(cfg)
+
     try {
-      await this.transport(cfg).verify()
-      return { ok: true, msg: 'SMTP 连接正常' }
+      await transporter.verify()
     } catch (e) {
-      return { ok: false, msg: String((e && e.message) || e) }
+      const d = describeSmtpError(e, [cfg.pass])
+      return {
+        ok: false, stage: 'connect', code: d.code,
+        msg: `连接或认证失败（${d.code}）：${d.reason}`, detail: d.detail
+      }
+    }
+
+    try {
+      const mail = this.verificationMail('000000', 'register', '测试')
+      const info = await transporter.sendMail({
+        from: cfg.fromName ? `"${cfg.fromName}" <${cfg.from}>` : cfg.from,
+        to,
+        subject: mail.subject,
+        text: mail.html.replace(/<[^>]+>/g, ''),
+        html: mail.html
+      })
+      const accepted = (info && info.accepted) || []
+      if (!accepted.length) {
+        // 连接与认证都过了、但收件人没被接受 —— 多半是发件域名没验证
+        return {
+          ok: false, stage: 'deliver', code: 'SMTP_NOT_ACCEPTED',
+          msg: 'SMTP 接受了连接，但拒绝投递该收件人',
+          detail: String((info && info.response) || '').slice(0, 300)
+        }
+      }
+      return {
+        ok: true, stage: 'done', code: 'OK',
+        msg: `测试邮件已投递至 ${to}`,
+        messageId: (info && info.messageId) || '',
+        accepted
+      }
+    } catch (e) {
+      const d = describeSmtpError(e, [cfg.pass])
+      return {
+        ok: false, stage: 'deliver', code: d.code,
+        msg: `投递失败（${d.code}）：${d.reason}`, detail: d.detail
+      }
     }
   }
 
@@ -131,4 +254,8 @@ class Mailer {
   }
 }
 
-module.exports = { Mailer, readConfig, esc }
+module.exports = {
+  Mailer, readConfig, readAlertTo, esc,
+  describeSmtpError, validEmail, setting, objectSetting,
+  SMTP_ERROR_REASONS
+}

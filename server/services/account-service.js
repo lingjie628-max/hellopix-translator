@@ -24,7 +24,7 @@
 
 const { ApiError } = require('../lib/http')
 const { VerificationService } = require('./verification-service')
-const { Mailer } = require('../lib/mailer')
+const { Mailer, setting: settingOf } = require('../lib/mailer')
 
 // 复用 lib/password 的 validPassword，而不是在这里另写一套 ——
 // 两套规则一旦分叉，就会出现"注册时说密码合法、登录时被拒"的怪事。
@@ -86,7 +86,8 @@ class AccountService {
 
     const code = VerificationService.generate()
     const settings = await this.repo.settings()
-    const siteName = (settings.site && settings.site.name) || 'Hello Pix'
+    // 键是扁平的 'site.name' —— 写成 settings.site.name 会永远取不到，静默退回默认值
+    const siteName = String(settingOf(settings, 'site.name', '') || '').trim() || 'Hello Pix'
     const mail = this.mailer.verificationMail(code, scene, siteName)
 
     // 先发信成功、再落验证码：反过来的话 SMTP 挂掉会留下"已发送"的假象，

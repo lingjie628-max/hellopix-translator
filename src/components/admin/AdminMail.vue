@@ -66,6 +66,24 @@
           所以这里直接真发一封
         </span>
       </div>
+
+      <!-- 结果常驻显示：toast 一闪而过，排障时看不到细节 -->
+      <el-alert v-if="testResult" style="margin-top:12px" :closable="false" show-icon
+                :type="testResult.ok ? 'success' : 'error'"
+                :title="testResult.msg">
+        <div class="tip-body">
+          <div v-if="testResult.code && !testResult.ok">
+            错误码：<b>{{ testResult.code }}</b>
+            <span v-if="testResult.stage">（卡在 {{ stageText(testResult.stage) }} 这一步）</span>
+          </div>
+          <div v-if="testResult.detail" style="margin-top:4px;word-break:break-all">
+            服务端应答：{{ testResult.detail }}
+          </div>
+          <div v-if="testResult.messageId" style="margin-top:4px;word-break:break-all">
+            messageId：{{ testResult.messageId }}
+          </div>
+        </div>
+      </el-alert>
     </el-card>
   </div>
 </template>
@@ -80,7 +98,8 @@ export default {
       missing: [],
       saving: false,
       testing: false,
-      testTo: ''
+      testTo: '',
+      testResult: null
     }
   },
   mounted() { this.load() },
@@ -105,11 +124,21 @@ export default {
     test() {
       if (!this.testTo) return this.$message({ type: 'warning', message: '请先填收件邮箱' })
       this.testing = true
+      this.testResult = null
+      // 失败时后端返回非 2xx + 结构化错误体，axios 会 reject；
+      // 这里两个分支都要接住，否则真实的错误码就丢了。
       this.postRequest('/admin/mail/test', { to: this.testTo }).then(resp => {
         if (!resp) return
-        const d = resp.data || {}
-        this.$message({ type: d.ok ? 'success' : 'error', message: d.msg || (d.ok ? '成功' : '失败') })
+        this.testResult = resp.data || { ok: false, msg: '服务端没有返回结果' }
+      }).catch(err => {
+        const body = (err && err.response && err.response.data) || {}
+        this.testResult = body.msg
+          ? body
+          : { ok: false, code: 'REQUEST_FAILED', msg: (err && err.message) || '请求失败' }
       }).finally(() => { this.testing = false })
+    },
+    stageText(stage) {
+      return { config: '读取配置', input: '校验收件人', connect: '连接/认证', deliver: '投递', done: '完成' }[stage] || stage
     }
   }
 }

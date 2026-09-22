@@ -11,6 +11,7 @@ const { encryptSecret, credentialsKeyReady, KEY_ENV } = require('../lib/credenti
 const { providers, channelStatus } = require('../services/translation-provider')
 const { AdminTotpService } = require('../services/admin-totp-service')
 const { validTronAddress, normalizeTronAddress } = require('../lib/tron-address')
+const { objectSetting, readAlertTo, setting: settingOf } = require('../lib/mailer')
 
 function publicUser(session) {
   return {
@@ -477,8 +478,9 @@ function productionRouter(context) {
 
   router.get('/admin/mail', asyncRoute(async (_req, res) => {
     const settings = await repo.settings()
-    const smtp = (settings.mail && settings.mail.smtp) || {}
-    const ready = await accounts.mailer.configured()
+    // 键是扁平的 'mail.smtp'，不是 settings.mail.smtp —— 读错位置会永远显示"未配置"
+    const smtp = objectSetting(settings, 'mail.smtp', {})
+    const cfg = await accounts.mailer.config()
     res.json({
       host: smtp.host || '',
       port: smtp.port || 465,
@@ -487,16 +489,16 @@ function productionRouter(context) {
       pass: smtp.pass ? '********' : '',
       from: smtp.from || '',
       fromName: smtp.fromName || 'Hello Pix',
-      alertTo: (settings.mail && settings.mail.alertTo) || '',
-      configured: ready,
-      missing: (await accounts.mailer.config()).missing
+      alertTo: readAlertTo(settings),
+      configured: cfg.configured,
+      missing: cfg.missing
     })
   }))
 
   router.post('/admin/mail', asyncRoute(async (req, res) => {
     const data = input(req)
     const settings = await repo.settings()
-    const current = (settings.mail && settings.mail.smtp) || {}
+    const current = objectSetting(settings, 'mail.smtp', {})
     const smtp = {
       host: String(data.host || '').trim(),
       port: Number(data.port) || 465,
@@ -526,20 +528,18 @@ function productionRouter(context) {
       await repo.audit(client, req.pixAdmin, '修改邮件服务配置',
         smtp.host + ' / ' + smtp.from, req.ip, { type: 'settings' })
     })
-    res.json({ ok: true, configured: await accounts.mailer.configured() })
+    res.json({ ok: true, configured: await accounts.mailer.configured(), missing: (await accounts.mailer.config()).missing })
   }))
 
+  // 真实发信测试：连接 → 认证 → 投递，三步分开报。
+  // 失败用真实 HTTP 状态码（配置缺失 503 / SMTP 侧失败 502），绝不返回 200 假装成功。
   router.post('/admin/mail/test', asyncRoute(async (req, res) => {
-    const result = await accounts.mailer.verify()
     const to = String((req.body && req.body.to) || '').trim()
-    if (result.ok && to) {
-      // 真发一封测试信 —— verify() 只验证连接，不验证"能不能投递"，
-      // 而实际最常出问题的是发件地址与域名的 SPF/DKIM 配置
-      const mail = accounts.mailer.verificationMail('123456', 'register', '测试')
-      await accounts.mailer.send(to, '【测试】' + mail.subject, mail.html)
-      return res.json({ ok: true, msg: '测试邮件已发送至 ' + to })
-    }
-    res.json(result)
+    const result = await accounts.mailer.sendTest(to)
+    if (result.ok) return res.json(result)
+    const status = result.code === 'MAIL_NOT_CONFIGURED' ? 503
+      : (result.code === 'BAD_EMAIL' ? 400 : 502)
+    res.status(status).json(result)
   }))
 
   router.get('/admin/customers', asyncRoute(async (req, res) => {
@@ -1469,12 +1469,20 @@ function productionRouter(context) {
   }))
 
 
-  // ---- 验证码接口配置（后台「验证配置」页）------------------------------------
-  // 真实发信/发短信尚未迁移，因此这里只保存配置，wired 恒为 false ——
-  // 页面如实显示"未接通"，绝不假装可用。
+  // ---- 验证码接口配置（后台「验证码接口」页）----------------------------------
+  // 这一页管两件事：通道参数（重发间隔/有效期/位数），以及邮箱通道的 SMTP 凭据。
+  //
+  // 两个曾经真实存在的缺陷，都在这里修掉：
+  //   1) 页面上的 SMTP 输入框（smtpHost/smtpPort/smtpSecure/smtpUser/smtpPass/smtpFrom）
+  //      在保存时被整体丢弃 —— 只存了 id/provider/revealDemo/resendSeconds/expireMin/digits。
+  //      管理员填完以为存上了，实际 mail.smtp 一直是空的。
+  //   2) 读取时把状态写死成 wired=false / '未接通' / hasKey=false，
+  //      无论真实配置如何都显示"未接入"，把真正的故障点藏了起来。
+  // 现在：SMTP 字段真正落到 mail.smtp（与「邮件服务」页同一个键，单一事实来源），
+  //      状态由 mailer 的真实配置推导，读不出来的原因（缺哪一项）直接回给页面。
   const VERIFY_DEFAULTS = [
-    { id: 'email', name: '邮箱验证码', kind: '邮箱', provider: 'local', revealDemo: 0,
-      resendSeconds: 60, expireMin: 10, digits: 6, note: 'SMTP 未接入，仅本地演示；生产环境注册/找回仍返回 503' },
+    { id: 'email', name: '邮箱验证码', kind: '邮箱', provider: 'smtp', revealDemo: 0,
+      resendSeconds: 60, expireMin: 10, digits: 6, note: '注册与找回密码的发信通道' },
     { id: 'sms', name: '短信验证码', kind: '短信', provider: 'local', revealDemo: 0,
       resendSeconds: 60, expireMin: 5, digits: 6, note: '短信通道未接入，保留配置位' }
   ]
@@ -1483,17 +1491,43 @@ function productionRouter(context) {
     const row = (await repo.query("SELECT value FROM app_settings WHERE key='verify.channels'")).rows[0]
     const saved = row && Array.isArray(row.value) ? row.value : []
     const byId = saved.reduce((out, item) => { if (item && item.id) out[item.id] = item; return out }, {})
+    const settings = await repo.settings()
+    const smtp = objectSetting(settings, 'mail.smtp', {})
+    const cfg = await accounts.mailer.config()
+    const ready = cfg.configured
+
     const rows = VERIFY_DEFAULTS.map(item => {
       const merged = Object.assign({}, item, byId[item.id] || {})
+      if (item.id !== 'email') {
+        return Object.assign(merged, {
+          providerName: '本地 SVG（不发短信）', wired: false, wiredText: '未接通', hasKey: false
+        })
+      }
       return Object.assign(merged, {
-        providerName: merged.provider === 'smtp' ? 'SMTP（未接入）' : '本地演示（不发信）',
-        // 没有任何一条真实发信通道，接口状态如实为"未接通"
-        wired: false,
-        wiredText: '未接通',
-        hasKey: false
+        providerName: ready ? 'SMTP（已接通）' : 'SMTP（未接通）',
+        wired: ready,
+        wiredText: ready ? '已接通' : '未接通',
+        // 密钥是否已填：看的是真实配置，不是写死的 false
+        hasKey: Boolean(smtp.pass && smtp.user),
+        smtpHost: smtp.host || '',
+        smtpPort: Number(smtp.port) || 465,
+        smtpSecure: smtp.secure === false ? 0 : 1,
+        smtpUser: smtp.user || '',
+        smtpFrom: smtp.from || '',
+        // 口令永不回传明文，只回"已配置"
+        smtpPass: smtp.pass ? '********' : '',
+        missing: ready ? [] : cfg.missing
       })
     })
-    res.json({ rows, smtpReady: false, note: '邮件/短信服务尚未迁移，注册与找回密码接口保持 503' })
+
+    res.json({
+      rows,
+      smtpReady: ready,
+      note: ready
+        ? 'SMTP 已接通，注册与找回密码可正常发信'
+        : 'SMTP 未接通，缺少：' + (cfg.missing.join('、') || '未知') +
+          '。补齐后注册与找回密码立即生效。'
+    })
   }))
 
   router.post('/admin/verify/save', asyncRoute(async (req, res) => {
@@ -1510,7 +1544,8 @@ function productionRouter(context) {
       revealDemo: Number(data.revealDemo) ? 1 : 0,
       resendSeconds: Math.min(300, Math.max(10, Math.floor(Number(data.resendSeconds) || 60))),
       expireMin: Math.min(60, Math.max(1, Math.floor(Number(data.expireMin) || 10))),
-      digits: Math.min(8, Math.max(4, Math.floor(Number(data.digits) || 6)))
+      // 前端字段名叫 length，接口此前只认 digits —— 位数设置也被静默丢了。两个都收。
+      digits: Math.min(8, Math.max(4, Math.floor(Number(data.digits || data.length) || 6)))
     }
     const index = saved.findIndex(item => item && item.id === id)
     if (index >= 0) saved[index] = entry
@@ -1520,8 +1555,49 @@ function productionRouter(context) {
        ON CONFLICT (key) DO UPDATE SET value=$1::jsonb`,
       [JSON.stringify(saved)]
     )
-    await repo.audit(null, req.pixAdmin, '配置验证码通道', JSON.stringify(entry), req.ip, { type: 'verify', id })
-    ok(res, '已保存（真实发信通道未接入，暂不生效）')
+
+    // 邮箱通道选 SMTP 时，把页面上那几个 SMTP 字段真正写进 mail.smtp。
+    // 留空的字段沿用原值 —— 否则管理员只改端口会把主机和口令一起清掉。
+    let smtpSaved = false
+    if (id === 'email' && entry.provider === 'smtp') {
+      const settings = await repo.settings()
+      const current = objectSetting(settings, 'mail.smtp', {})
+      const secureRaw = data.smtpSecure
+      const keep = secureRaw === undefined || secureRaw === ''
+      const nextPass = String(data.smtpPass || '').trim()
+      const smtp = {
+        host: String(data.smtpHost || '').trim() || current.host || '',
+        port: Number(data.smtpPort) || current.port || 465,
+        secure: keep ? current.secure !== false
+          : !(secureRaw === 0 || secureRaw === '0' || secureRaw === false || secureRaw === 'false'),
+        user: String(data.smtpUser || '').trim() || current.user || '',
+        // 掩码或留空都表示"不改口令"
+        pass: (!nextPass || nextPass === '********') ? (current.pass || '') : nextPass,
+        from: String(data.smtpFrom || '').trim() || current.from || '',
+        fromName: String(current.fromName || 'Hello Pix').trim()
+      }
+      await repo.transaction(async client => {
+        await repo.query(
+          `INSERT INTO app_settings(key,value,description) VALUES($1,$2::jsonb,$3)
+           ON CONFLICT (key) DO UPDATE SET value=$2::jsonb`,
+          ['mail.smtp', JSON.stringify(smtp), 'SMTP 服务器配置'], client
+        )
+        await repo.query(
+          `INSERT INTO app_settings(key,value,description) VALUES('mail.enabled','true'::jsonb,'邮件服务总开关')
+           ON CONFLICT (key) DO UPDATE SET value='true'::jsonb`, [], client
+        )
+        await repo.audit(client, req.pixAdmin, '配置验证码通道（含 SMTP）',
+          `${id} / ${entry.provider} / ${smtp.host || '(空主机)'}`, req.ip, { type: 'verify', id })
+      })
+      smtpSaved = true
+    } else {
+      await repo.audit(null, req.pixAdmin, '配置验证码通道', JSON.stringify(entry), req.ip, { type: 'verify', id })
+    }
+
+    const cfg = await accounts.mailer.config()
+    ok(res, smtpSaved
+      ? (cfg.configured ? '已保存，SMTP 已接通' : '已保存，但 SMTP 仍未就绪：缺少 ' + cfg.missing.join('、'))
+      : '已保存')
   }))
 
   // ---------------------------------------------------------------------
