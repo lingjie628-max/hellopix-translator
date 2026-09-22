@@ -252,6 +252,16 @@ test('sendTest 永不抛异常 —— 后台必须能拿到结构化结果', asy
   assert.equal(r.ok, false)
 })
 
+test('测试邮件不含验证码，一眼能看出是测试信', () => {
+  // 早期测试信直接复用验证码模板（正文里是 000000），
+  // 收件人会把它当成真实验证码去输。测试信就该是测试信。
+  const mail = new Mailer({ async settings() { return {} } }).testMail()
+  assert.match(mail.subject, /测试/)
+  assert.match(mail.subject, /无需操作/)
+  assert.doesNotMatch(mail.html, /\d{6}/, '测试邮件里不该出现任何 6 位数字')
+  assert.match(mail.html, /不需要做任何操作/)
+})
+
 // ----------------------------------------------------------------- 源码守卫
 
 const routeSource = fs.readFileSync(path.join(root, 'server/routes/production.js'), 'utf8')

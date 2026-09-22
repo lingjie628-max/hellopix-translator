@@ -199,7 +199,7 @@ class Mailer {
     }
 
     try {
-      const mail = this.verificationMail('000000', 'register', '测试')
+      const mail = this.testMail()
       const info = await transporter.sendMail({
         from: cfg.fromName ? `"${cfg.fromName}" <${cfg.from}>` : cfg.from,
         to,
@@ -234,6 +234,27 @@ class Mailer {
   // -------------------------------------------------------------------------
   // 邮件模板。所有插值都走 esc()。
   // -------------------------------------------------------------------------
+
+  /**
+   * 后台「发送测试邮件」用的模板。
+   *
+   * 刻意**不含任何验证码**：早期版本直接复用了验证码模板（正文里是 000000），
+   * 结果测试信长得和真实验证信一模一样 —— 收件人容易把 000000 当成真码去输，
+   * 也分不清这封到底是在测什么。测试信就该一眼看出是测试信。
+   */
+  testMail() {
+    return {
+      subject: '【Hello Pix】邮件服务测试（无需操作）',
+      html: `<div style="font-family:-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#1f2328">
+  <h2 style="margin:0 0 16px;font-size:18px">Hello Pix</h2>
+  <p style="margin:0 0 12px;line-height:1.7">这是一封<strong>测试邮件</strong>，用来确认邮件服务已经配好。</p>
+  <p style="margin:0 0 8px;line-height:1.7;color:#5b6675">你看到它，就说明 SMTP 连接、认证、投递三步都通了，注册与找回密码的发信通道可用。</p>
+  <p style="margin:0 0 16px;line-height:1.7;color:#5b6675"><strong>本邮件不包含验证码，不需要做任何操作。</strong></p>
+  <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0">
+  <p style="margin:0;font-size:12px;color:#8a94a3">本邮件由系统自动发送，请勿直接回复。</p>
+</div>`
+    }
+  }
 
   verificationMail(code, scene, siteName) {
     const name = esc(siteName || 'Hello Pix')
