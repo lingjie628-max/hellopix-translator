@@ -1,0 +1,26 @@
+# ChainWatcher 日志轮转。
+#
+# 为什么必须配：watcher 每分钟跑一轮，每轮至少写 2 行（开始 + 统计），
+# 一天就是近 3000 行；JSONL 统计文件还会更长。不管的话几个月就能把磁盘写满，
+# 而磁盘满会让整个服务以各种奇怪的方式失败 —— 比日志丢了严重得多。
+#
+# copytruncate 而不是 create：脚本用 appendFileSync 每次开闭文件，
+# 理论上 create 也行，但 copytruncate 对"正在写入"更宽容，代价只是极小概率
+# 丢掉轮转瞬间的那一行。
+#
+# maxsize 与 daily 并用：正常一天远到不了 20MB，但万一上游异常导致
+# 疯狂重试、日志暴涨，maxsize 会在当天就触发轮转，不必等到明天。
+
+/var/log/hello-pix/recharge-watcher.log
+/var/log/hello-pix/recharge-watcher-stats.jsonl
+{
+    daily
+    maxsize 20M
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su root root
+}

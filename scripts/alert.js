@@ -23,6 +23,7 @@ const path = require('path')
 const http = require('http')
 const { Pool } = require('pg')
 const config = require('../server/config')
+const { sendOpsAlert } = require('../server/lib/ops-alert')
 
 const DRY = process.argv.includes('--dry')
 const BACKUP_DIR = '/var/backups/hello-pix'
@@ -113,33 +114,22 @@ async function checkPartitions(pool) {
 
 // ---------------------------------------------------------------------------
 
+/**
+ * 发告警。实现在 server/lib/ops-alert.js —— 抽出去是因为 ChainWatcher
+ * 也要用同一套（凭据失效必须立刻告警），各写一份迟早分叉。
+ *
+ * 抽取时顺带修掉一个真 bug：这里原本读 `settings.mail.alertTo`（嵌套），
+ * 而 repo.settings() 返回扁平键 `'mail.alertTo'` —— 收件人永远取不到，
+ * 告警从来没发出去过。
+ */
 async function sendAlert(subject, lines) {
-  const { Mailer } = require('../server/lib/mailer')
-  const { ProductionRepository } = require('../server/repositories/production-repository')
-  const repo = new ProductionRepository(new Pool({
-    connectionString: config.database.connectionString,
-    ssl: config.database.ssl,
-    max: 1
-  }))
-  const mailer = new Mailer(repo)
-  const settings = await repo.settings()
-  // 收件人优先用专门的告警地址，没配就退回发件地址。
-  // 都没有就只打日志 —— 但不能静默丢弃，否则等于没有告警。
-  const adminMail = (settings.mail && settings.mail.alertTo) ||
-    (settings.mail && settings.mail.smtp && settings.mail.smtp.from)
-  if (!adminMail) {
-    console.error('告警无法送达：后台未配置收件地址（mail.alertTo）')
-    return
-  }
-  await mailer.send(
-    adminMail,
+  // 不传 pool：调用点那个 pool 在告警之前就已经 end() 了。
+  // 让共享模块自己建一个短连接，顺便避免"用到已关闭连接"这类隐蔽问题。
+  return sendOpsAlert({
     subject,
-    `<div style="font-family:-apple-system,'PingFang SC',sans-serif;line-height:1.8">
-      <h3 style="margin:0 0 12px">${subject}</h3>
-      <ul>${lines.map(l => `<li>${l}</li>`).join('')}</ul>
-      <p style="color:#8a94a3;font-size:12px">来自 ${require('os').hostname()} 的自动巡检</p>
-    </div>`
-  )
+    lines,
+    source: require('os').hostname() + ' 的自动巡检'
+  })
 }
 
 // ---------------------------------------------------------------------------

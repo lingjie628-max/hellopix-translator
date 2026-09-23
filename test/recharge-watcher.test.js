@@ -14,6 +14,8 @@
  */
 
 const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const path = require('node:path')
 const test = require('node:test')
 
 const databaseUrl = process.env.PIX_TEST_DATABASE_URL
@@ -400,4 +402,58 @@ test('ChainWatcher：重复扫描、重启恢复、上游故障、未确认交�
     assert.equal(r.processed, 0)
     assert.equal(r.fetched, 0)
   })
+})
+
+// --------------------------------------------------- 每轮统计（Shadow 报告的数据源）
+
+test('instrumentProvider 统计调用次数与耗时，失败也计入', async () => {
+  const { instrumentProvider } = require('../scripts/recharge-watcher')
+  const provider = {
+    async latestSolidBlock() {
+      await new Promise(r => setTimeout(r, 5))
+      return { blockNumber: 1, blockTimestamp: Date.now() }
+    },
+    async listIncomingTransfers() { throw Object.assign(new Error('boom'), { code: 'UPSTREAM_ERROR' }) }
+  }
+  const stats = instrumentProvider(provider)
+  await provider.latestSolidBlock()
+  await assert.rejects(() => provider.listIncomingTransfers())
+  assert.equal(stats.apiCalls, 2)
+  assert.equal(stats.apiFailures, 1, '失败也要计入调用与耗时，否则统计会漏掉故障轮次')
+  assert.ok(stats.apiLatencyMs >= 0)
+})
+
+test('统计文件路径可由环境变量覆盖，默认在 /var/log/hello-pix 下', () => {
+  const { STATS_FILE } = require('../scripts/recharge-watcher')
+  assert.ok(STATS_FILE.endsWith('recharge-watcher-stats.jsonl'))
+  assert.match(STATS_FILE, /hello-pix/)
+})
+
+test('cron 包装脚本具备用户要求的四项保护', () => {
+  const script = fs.readFileSync(
+    path.join(__dirname, '..', 'deploy', 'recharge-watcher-cron.sh'), 'utf8')
+  assert.match(script, /flock -n/, '必须有单实例锁')
+  assert.match(script, /timeout --signal=TERM --kill-after=\d+/, '必须有单轮超时')
+  assert.match(script, /\/etc\/hello-pix\/hello-pix\.env/, '必须显式加载环境变量（cron 环境极简）')
+  assert.match(script, /recharge-watcher\.log/, '必须有独立日志文件')
+  // 超时被杀不能影响正确性 —— 注释里必须写清楚为什么
+  assert.match(script, /游标未推进/, '要写明超时不会丢单的原因')
+})
+
+test('logrotate 配置存在且不会让日志无限增长', () => {
+  const conf = fs.readFileSync(
+    path.join(__dirname, '..', 'deploy', 'logrotate-hello-pix-recharge-watcher'), 'utf8')
+  assert.match(conf, /rotate \d+/, '必须限制保留份数')
+  assert.match(conf, /maxsize \d+M/, '必须有体积上限，防止异常刷屏写满磁盘')
+  assert.match(conf, /recharge-watcher\.log/)
+  assert.match(conf, /recharge-watcher-stats\.jsonl/)
+})
+
+test('告警收件人用扁平键读取 —— 嵌套读法会让告警永远发不出去', () => {
+  const { resolveRecipient } = require('../server/lib/ops-alert')
+  assert.equal(resolveRecipient({ 'mail.alertTo': 'ops@x.test' }), 'ops@x.test')
+  assert.equal(resolveRecipient({ 'mail.smtp': { from: 'noreply@x.test' } }), 'noreply@x.test')
+  assert.equal(resolveRecipient({}), '')
+  // 旧写法（嵌套）读不出来 —— 这正是修复前的行为
+  assert.equal(resolveRecipient({ mail: { alertTo: 'ops@x.test' } }), '')
 })

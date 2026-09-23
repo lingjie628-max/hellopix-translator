@@ -1,0 +1,17 @@
+[Unit]
+Description=Hello Pix · 链上收款扫描（每 1 分钟，Shadow 模式）
+
+[Timer]
+# 开机后 2 分钟先跑一轮，之后每 1 分钟一轮。
+# 间隔内若上一轮尚未结束，systemd 会**跳过**本次启动（oneshot 不并发），
+# 脚本内部的 flock 是第二道保险。
+OnBootSec=2min
+OnUnitActiveSec=1min
+
+# 允许 ±10 秒的抖动，避免与其它整点任务挤在同一秒
+AccuracySec=10s
+
+Unit=hello-pix-recharge-watcher.service
+
+[Install]
+WantedBy=timers.target

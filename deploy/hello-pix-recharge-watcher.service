@@ -1,0 +1,35 @@
+[Unit]
+Description=Hello Pix · 链上收款扫描（Shadow 模式：只记录，不动任何余额）
+Documentation=file:/opt/hello-pix/deploy/recharge-watcher-cron.sh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/hello-pix
+
+# 走包装脚本而不是直接调 node：
+#   单实例锁（flock）+ 单轮超时（timeout）+ 独立日志 + 日志体积自愈
+# 三者都在脚本里，cron 与 systemd 共用同一个入口，不会分叉。
+ExecStart=/opt/hello-pix/deploy/recharge-watcher-cron.sh
+
+# 单轮最长 120 秒。脚本内部还有 50 秒的 timeout ——
+# 这里是第二道保险，防止包装脚本本身卡住（比如 flock 等待）。
+TimeoutStartSec=120
+
+# 扫描是后台任务，不该和 Web 服务抢 CPU
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hello-pix-recharge-watcher
+
+# 加固：扫描只需要读代码、连数据库、发出网请求，不需要别的权限。
+# 注意不要加 ProtectSystem=strict —— 脚本要往 /var/log 写日志。
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
