@@ -370,3 +370,171 @@ test('getTransactionBlock 拿不到时返回 null，不让整轮扫描失败', a
   const { provider: good } = makeProvider()
   assert.equal(await good.getTransactionBlock('a'.repeat(64)), 60000000)
 })
+
+// ═══════════════════════════════════════════════ 分页游标与事件位置
+
+test('nextCursor 是不透明的 meta.fingerprint，不是时间戳', async () => {
+  const FP = 'TmGrm87rBdhJFGjasxCJbkDTbLVzQmXHq5zckQDZnT7Rsxy'
+  const { provider } = makeProvider({
+    list: () => ({
+      success: true,
+      data: [trongridRow()],
+      meta: { fingerprint: FP, at: Date.now(), page_size: 1 }
+    })
+  }, { pageLimit: 1, maxPagesPerScan: 1 })
+  const r = await provider.listIncomingTransfers({ toAddress: TO, fromTimestamp: 0, toTimestamp: SOLID_TS })
+  assert.equal(r.nextCursor, FP, 'nextCursor 应当原样透传上游游标')
+  // 不能是时间戳 —— 一个时间点可能有多笔交易，用时间翻页会重复或漏
+  assert.notEqual(r.nextCursor, String(SOLID_TS))
+  assert.equal(typeof r.nextCursor, 'string')
+})
+
+test('没有下一页时 nextCursor 为 null', async () => {
+  const { provider } = makeProvider({
+    list: () => ({ success: true, data: [trongridRow()], meta: {} })
+  })
+  const r = await provider.listIncomingTransfers({ toAddress: TO, fromTimestamp: 0, toTimestamp: SOLID_TS })
+  assert.equal(r.nextCursor, null)
+  assert.equal(r.hasMore, false)
+})
+
+test('cursor 原样回传给上游，不做任何解析', async () => {
+  const FP = 'opaque-cursor-value-带中文也要能透传'
+  const seen = []
+  const { provider } = makeProvider({
+    list: (url, fp) => {
+      seen.push(fp)
+      return { success: true, data: [trongridRow()], meta: {} }
+    }
+  })
+  await provider.listIncomingTransfers({
+    toAddress: TO, fromTimestamp: 0, toTimestamp: SOLID_TS, cursor: FP
+  })
+  assert.deepEqual(seen, [FP], '第一次请求就应带上传入的 cursor')
+})
+
+test('分页跨 fingerprint：第二页带上第一页给的游标', async () => {
+  const FP1 = 'page-one-fingerprint'
+  const seen = []
+  const { provider } = makeProvider({
+    list: (url, fp) => {
+      seen.push(fp)
+      if (!fp) {
+        return { success: true, data: [trongridRow({ transaction_id: '1'.repeat(64) })], meta: { fingerprint: FP1 } }
+      }
+      return { success: true, data: [trongridRow({ transaction_id: '2'.repeat(64) })], meta: {} }
+    }
+  }, { pageLimit: 1 })
+  const r = await provider.listIncomingTransfers({ toAddress: TO, fromTimestamp: 0, toTimestamp: SOLID_TS })
+  assert.deepEqual(seen, ['', FP1], '第二次请求必须带第一页的 fingerprint')
+  assert.equal(r.transfers.length, 2)
+})
+
+test('同一时间戳的记录超过一页时不会丢 —— 靠 fingerprint 而不是时间戳', async () => {
+  // 10 笔交易共用同一个 block_timestamp，分 3 页返回
+  const sameTs = SOLID_TS - 5000
+  const pages = [
+    { ids: ['1', '2', '3', '4'], fp: 'fp-a' },
+    { ids: ['5', '6', '7', '8'], fp: 'fp-b' },
+    { ids: ['9', 'a'], fp: '' }
+  ]
+  let call = 0
+  const { provider } = makeProvider({
+    list: () => {
+      const page = pages[call++] || { ids: [], fp: '' }
+      return {
+        success: true,
+        data: page.ids.map(c => trongridRow({ transaction_id: c.repeat(64), block_timestamp: sameTs })),
+        meta: page.fp ? { fingerprint: page.fp } : {}
+      }
+    }
+  }, { pageLimit: 4, maxPagesPerScan: 10 })
+  const r = await provider.listIncomingTransfers({ toAddress: TO, fromTimestamp: 0, toTimestamp: SOLID_TS })
+  assert.equal(r.transfers.length, 10, '同一时间戳的 10 笔必须全部拿到')
+  const ids = new Set(r.transfers.map(t => t.txId))
+  assert.equal(ids.size, 10, '不能有重复')
+})
+
+// ---------------------------------------------------------- 事件位置解析
+
+test('事件位置从交易回执的 log[] 下标补出，不是伪造的序号', async () => {
+  const usdtHex = 'a614f803b6fd780986a42c78ec9c7f77e6ded13c'
+  const toHex = '33707b5f44db4a0477c1f10cc6314a559acaaaad'
+  const pad = h => '0'.repeat(64 - h.length) + h
+  const { provider } = makeProvider({
+    list: () => ({
+      success: true,
+      data: [trongridRow({ transaction_id: 'e'.repeat(64) })],
+      meta: {}
+    }),
+    txInfo: () => ({
+      blockNumber: 60000000,
+      log: [
+        // [0] 别的事件
+        { address: usdtHex, topics: ['00'.repeat(32), pad('11'.repeat(20)), pad(toHex)] },
+        // [1] 转给我们的 Transfer —— 真实位置是 1
+        { address: usdtHex, topics: [
+          'ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef',
+          pad('22'.repeat(20)), pad(toHex)], data: '0x1' }
+      ]
+    })
+  })
+  const r = await provider.listIncomingTransfers({ toAddress: TO, fromTimestamp: 0, toTimestamp: SOLID_TS })
+  assert.equal(r.transfers.length, 1)
+  assert.equal(r.transfers[0].eventIndex, 1, '必须取回执里的真实下标，而不是默认 0')
+})
+
+test('取不到回执时 eventIndex 为 null —— 绝不编一个序号顶上', async () => {
+  const { provider } = makeProvider({
+    list: () => ({ success: true, data: [trongridRow()], meta: {} }),
+    txInfo: () => { throw new Error('回执接口挂了') }
+  })
+  const r = await provider.listIncomingTransfers({ toAddress: TO, fromTimestamp: 0, toTimestamp: SOLID_TS })
+  assert.equal(r.transfers.length, 1)
+  assert.equal(r.transfers[0].eventIndex, null,
+    '拿不到位置必须是 null，不能是 0 —— 否则真正的事件 0 会被它挡住')
+})
+
+test('同一笔交易在一页里出现多次 → 各自拿到不同的真实事件位置', async () => {
+  const usdtHex = 'a614f803b6fd780986a42c78ec9c7f77e6ded13c'
+  const toHex = '33707b5f44db4a0477c1f10cc6314a559acaaaad'
+  const pad = h => '0'.repeat(64 - h.length) + h
+  const sig = 'ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+  let receiptCalls = 0
+  const { provider } = makeProvider({
+    list: () => ({
+      success: true,
+      data: [
+        trongridRow({ transaction_id: 'f'.repeat(64), value: '1000000' }),
+        trongridRow({ transaction_id: 'f'.repeat(64), value: '2000000' })
+      ],
+      meta: {}
+    }),
+    txInfo: () => {
+      receiptCalls += 1
+      return {
+        blockNumber: 60000000,
+        log: [
+          { address: usdtHex, topics: [sig, pad('aa'.repeat(20)), pad(toHex)], data: '0x1' },
+          { address: usdtHex, topics: [sig, pad('bb'.repeat(20)), pad(toHex)], data: '0x2' }
+        ]
+      }
+    }
+  })
+  const r = await provider.listIncomingTransfers({ toAddress: TO, fromTimestamp: 0, toTimestamp: SOLID_TS })
+  assert.equal(r.transfers.length, 2, '同一 tx 的两个事件都要保留')
+  const idx = r.transfers.map(t => t.eventIndex).sort((a, b) => a - b)
+  assert.deepEqual(idx, [0, 1], '两个事件必须拿到不同的位置')
+  assert.equal(receiptCalls, 1, '同一笔交易的回执只该查一次（1 rps 限流下很关键）')
+})
+
+test('回执查询次数有上限，超出的交易 eventIndex 为 null 而不是无限打上游', async () => {
+  const ids = ['1', '2', '3', '4', '5'].map(c => c.repeat(64))
+  const { provider } = makeProvider({
+    list: () => ({ success: true, data: ids.map(id => trongridRow({ transaction_id: id })), meta: {} })
+  }, { maxReceiptLookups: 2 })
+  const r = await provider.listIncomingTransfers({ toAddress: TO, fromTimestamp: 0, toTimestamp: SOLID_TS })
+  const resolved = r.transfers.filter(t => t.eventIndex !== null).length
+  assert.ok(resolved <= 2, `最多只该解析 2 条，实际 ${resolved}`)
+  assert.ok(r.transfers.some(t => t.eventIndex === null), '超出上限的应当为 null 而不是 0')
+})

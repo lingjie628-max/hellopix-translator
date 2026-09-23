@@ -45,7 +45,25 @@ const { STATUS: RECHARGE_STATUS, statusText, assertTransition } = require('./rec
 const { checkTransferEligibility } = require('./tron/transfer')
 const { formatMilli } = require('../lib/money')
 
+/** 链标识。与 chain_transactions.network 对应 */
+const NETWORK = 'tron'
+
 /** 匹配结论，与 chain_transactions.match_kind 的 CHECK 一致 */
+/**
+ * 处理结论。
+ *
+ * `SKIPPED_UNRESOLVED` 是新增的：**事件位置未知**（回执没取到）时跳过，
+ * 且调用方**不得推进游标越过它** —— 否则这一笔就永久漏掉了。
+ * 下一轮重扫会重新尝试取回执。
+ */
+const OUTCOME = Object.freeze({
+  SETTLED: 'SETTLED',
+  SHADOW_MATCHED: 'SHADOW_MATCHED',
+  DUPLICATE: 'DUPLICATE',
+  EXCEPTION: 'EXCEPTION',
+  SKIPPED_UNRESOLVED: 'SKIPPED_UNRESOLVED'
+})
+
 const MATCH_KIND = Object.freeze({
   MATCHED: 'MATCHED',            // 精确匹配到一张待支付且未过期的订单
   LATE_PAYMENT: 'LATE_PAYMENT',  // 金额对得上，但订单已终态（过期/已付/取消）
@@ -88,7 +106,7 @@ class RechargeSettlementService {
    * 处理一条链上转账。**调用方必须已开启事务**，且必须在同一事务里推进游标。
    *
    * @returns {Promise<{
-   *   outcome: 'SETTLED'|'SHADOW_MATCHED'|'DUPLICATE'|'EXCEPTION',
+   *   outcome: OUTCOME.SETTLED|'SHADOW_MATCHED'|'DUPLICATE'|'EXCEPTION',
    *   matchKind: string,
    *   rechargeId: number|null,
    *   exceptionKind: string|null,
@@ -99,12 +117,28 @@ class RechargeSettlementService {
     const ctx = context || {}
     const mode = this.mode
 
-    // ---- ① 先落库占住 TXID。这一步就是幂等锚点 ----
+    // ---- ⓪ 事件位置未知就直接跳过 ----
+    //
+    // 一笔交易可以有多个 Transfer 事件，(txId + eventIndex) 才是完整身份。
+    // 位置拿不到时**绝不落库**：落成 eventIndex=0 会把"未知"伪装成"第一个事件"，
+    // 后续真正的事件 0 到来时就会撞上它被静默丢掉。
+    // 调用方看到这个结论必须跳过该条、且不推进游标越过它。
+    if (transfer.eventIndex === null || transfer.eventIndex === undefined) {
+      return {
+        outcome: OUTCOME.SKIPPED_UNRESOLVED,
+        matchKind: null,
+        rechargeId: null,
+        exceptionKind: null,
+        detail: { reason: '事件位置未知（交易回执未取到）', txId: transfer.txId }
+      }
+    }
+
+    // ---- ① 先落库占住事件身份。这一步就是幂等锚点 ----
     const recorded = await this.recordTransaction(client, transfer, { mode })
     if (!recorded.inserted) {
       // 这笔链上交易已经见过。**绝不产生任何余额变化**，也不报错。
       return {
-        outcome: 'DUPLICATE',
+        outcome: OUTCOME.DUPLICATE,
         matchKind: MATCH_KIND.DUPLICATE_TX,
         rechargeId: recorded.existingRechargeId,
         exceptionKind: null,
@@ -129,7 +163,7 @@ class RechargeSettlementService {
         shadowAction: { wouldSettle: false, action: 'exception', kind, reason: eligibility.reason }
       })
       return {
-        outcome: 'EXCEPTION', matchKind: MATCH_KIND.NOT_ELIGIBLE,
+        outcome: OUTCOME.EXCEPTION, matchKind: MATCH_KIND.NOT_ELIGIBLE,
         rechargeId: null, exceptionKind: kind, detail: { reason: eligibility.reason }
       }
     }
@@ -148,7 +182,7 @@ class RechargeSettlementService {
         shadowAction: { wouldSettle: false, action: 'exception', kind: EXCEPTION_KIND.NO_MATCH }
       })
       return {
-        outcome: 'EXCEPTION', matchKind: MATCH_KIND.NO_MATCH,
+        outcome: OUTCOME.EXCEPTION, matchKind: MATCH_KIND.NO_MATCH,
         rechargeId: null, exceptionKind: EXCEPTION_KIND.NO_MATCH, detail: {}
       }
     }
@@ -180,9 +214,44 @@ class RechargeSettlementService {
         }
       })
       return {
-        outcome: 'EXCEPTION', matchKind: MATCH_KIND.LATE_PAYMENT,
+        outcome: OUTCOME.EXCEPTION, matchKind: MATCH_KIND.LATE_PAYMENT,
         rechargeId: null, exceptionKind: EXCEPTION_KIND.EXPIRED_PAYMENT,
         detail: { belongedTo: match.order.orderNumber, reason: match.reason }
+      }
+    }
+
+    // ---- ③′ 同一 TXID 已结算过别的订单 → 进异常池，不自动发放 ----
+    //
+    // 一笔交易里可以有多个 Transfer 事件（合约中转、批量转账）。
+    // 若其中两个都指向平台地址且金额各自匹配上了订单，
+    // 钱其实只有一笔 —— 自动发放会把一次付款记成两次充值。
+    //
+    // 规则：**一个 TXID 最多结算一张订单**，其余全部进异常池等人工判断。
+    const sameTx = await this.settledBySameTx(client, transfer, recorded.id)
+    if (sameTx) {
+      await this.recordException(client, transfer, {
+        kind: EXCEPTION_KIND.DUPLICATE_TXID,
+        rechargeId: match.order ? match.order.id : null,
+        summary: `同一交易 ${transfer.txId.slice(0, 16)}… 的另一个事件已结算过订单，本事件不自动入账`,
+        detail: {
+          settledRechargeId: sameTx.recharge_id,
+          settledEventIndex: sameTx.event_index,
+          thisEventIndex: transfer.eventIndex,
+          amountMilli: transfer.amountMilli.toString()
+        }
+      })
+      await this.finalizeTransaction(client, recorded.id, {
+        status: 'exception', matchKind: MATCH_KIND.DUPLICATE_TX,
+        rechargeId: null,
+        shadowAction: {
+          wouldSettle: false, action: 'exception', kind: EXCEPTION_KIND.DUPLICATE_TXID,
+          settledRechargeId: sameTx.recharge_id
+        }
+      })
+      return {
+        outcome: OUTCOME.EXCEPTION, matchKind: MATCH_KIND.DUPLICATE_TX,
+        rechargeId: null, exceptionKind: EXCEPTION_KIND.DUPLICATE_TXID,
+        detail: { settledRechargeId: sameTx.recharge_id, thisEventIndex: transfer.eventIndex }
       }
     }
 
@@ -204,7 +273,7 @@ class RechargeSettlementService {
         rechargeId: match.order.id, shadowAction
       })
       return {
-        outcome: 'SHADOW_MATCHED', matchKind: MATCH_KIND.MATCHED,
+        outcome: OUTCOME.SHADOW_MATCHED, matchKind: MATCH_KIND.MATCHED,
         rechargeId: match.order.id, exceptionKind: null, detail: shadowAction
       }
     }
@@ -220,7 +289,7 @@ class RechargeSettlementService {
       shadowAction: { wouldSettle: true, action: 'credit', executed: true, alreadyPaid: settled.alreadyPaid }
     })
     return {
-      outcome: settled.alreadyPaid ? 'DUPLICATE' : 'SETTLED',
+      outcome: settled.alreadyPaid ? OUTCOME.DUPLICATE : OUTCOME.SETTLED,
       matchKind: MATCH_KIND.MATCHED,
       rechargeId: match.order.id, exceptionKind: null, detail: settled
     }
@@ -235,16 +304,20 @@ class RechargeSettlementService {
    * 撞上就短路，不报错也不入账。
    */
   async recordTransaction(client, transfer, info) {
+    // 身份是**事件级**的：(链, 代币合约, 交易哈希, 事件下标)。
+    // 只用 tx_id 会让"同一交易的第二个 Transfer 事件"被静默吞掉。
     const { rows } = await client.query(
       `INSERT INTO chain_transactions
-         (tx_id, log_index, token_contract, from_address, to_address, amount_milli,
+         (network, tx_id, event_index, token_contract, from_address, to_address, amount_milli,
           block_number, block_timestamp, confirmations, solidified, status, mode, raw)
-       VALUES ($1,$2,$3,$4,$5,$6::bigint,$7,$8,$9,$10,'seen',$11,$12::jsonb)
-       ON CONFLICT (tx_id) DO NOTHING
+       VALUES ($1,$2,$3,$4,$5,$6,$7::bigint,$8,$9,$10,$11,'seen',$12,$13::jsonb)
+       ON CONFLICT (network, token_contract, tx_id, event_index)
+         WHERE event_index IS NOT NULL DO NOTHING
        RETURNING id`,
       [
+        NETWORK,
         transfer.txId,
-        transfer.logIndex,
+        transfer.eventIndex,
         transfer.tokenContract,
         transfer.fromAddress,
         transfer.toAddress,
@@ -259,10 +332,11 @@ class RechargeSettlementService {
     )
     if (rows[0]) return { inserted: true, id: rows[0].id, existingRechargeId: null, existingMode: null }
 
-    // 已存在：取出原记录，供上层判断"这笔当初是以什么身份处理的"
+    // 已存在：取出原记录，供上层判断"这个事件当初是以什么身份处理的"
     const existing = await client.query(
-      'SELECT id, recharge_id, mode, status FROM chain_transactions WHERE tx_id=$1',
-      [transfer.txId]
+      `SELECT id, recharge_id, mode, status FROM chain_transactions
+        WHERE network=$1 AND token_contract=$2 AND tx_id=$3 AND event_index=$4`,
+      [NETWORK, transfer.tokenContract, transfer.txId, transfer.eventIndex]
     )
     const row = existing.rows[0] || {}
     return {
@@ -273,6 +347,28 @@ class RechargeSettlementService {
       existingStatus: row.status || null
     }
   }
+
+  /**
+   * 同一 TXID 是否已经结算过**另一张**订单。
+   *
+   * 规则：**一个 TXID 最多结算一张订单**。若同一交易里有多个都指向平台的
+   * Transfer 事件，第一个正常入账，其余的进异常池等人工判断 ——
+   * 自动发放的话，一笔钱可能被记成两次充值。
+   */
+  async settledBySameTx(client, transfer, selfId) {
+    const { rows } = await client.query(
+      `SELECT recharge_id, event_index
+         FROM chain_transactions
+        WHERE network=$1 AND tx_id=$2 AND recharge_id IS NOT NULL AND id <> $3
+        ORDER BY event_index NULLS LAST
+        LIMIT 1`,
+      [NETWORK, transfer.txId, String(selfId || 0)]
+    )
+    return rows[0] || null
+  }
+
+  /** 链标识。将来接别的链时改成从 transfer 上取 */
+  get network() { return NETWORK }
 
   async finalizeTransaction(client, id, patch) {
     if (!id) return
@@ -429,7 +525,7 @@ class RechargeSettlementService {
   async recordException(client, transfer, info) {
     const { rows } = await client.query(
       `INSERT INTO recharge_exceptions
-         (kind, tx_id, log_index, to_address, from_address, token_contract, amount_milli,
+         (kind, tx_id, event_index, to_address, from_address, token_contract, amount_milli,
           block_number, block_timestamp, confirmations, recharge_id, reservation_id,
           detail, summary)
        VALUES ($1,$2,$3,$4,$5,$6,$7::bigint,$8,$9,$10,$11,$12,$13::jsonb,$14)
@@ -438,7 +534,7 @@ class RechargeSettlementService {
       [
         info.kind,
         transfer.txId,
-        transfer.logIndex,
+        transfer.eventIndex,
         transfer.toAddress,
         transfer.fromAddress,
         transfer.tokenContract,
@@ -459,5 +555,7 @@ class RechargeSettlementService {
 module.exports = {
   RechargeSettlementService,
   MATCH_KIND,
-  EXCEPTION_KIND
+  EXCEPTION_KIND,
+  OUTCOME,
+  NETWORK
 }

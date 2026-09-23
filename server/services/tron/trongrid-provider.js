@@ -11,22 +11,34 @@
  * 下面所有第三方字段名（`token_info` / `value` / `block_timestamp` /
  * `fingerprint` / `meta.links.next`）**只允许出现在这里**。
  * 出了这个文件，业务层看到的一律是 `NormalizedTransfer`。
- * 换 Provider 时只改这一个文件，`SettlementService` 一行都不用动。
  *
- * ## 两个容易踩的点
+ * ## 实测过的三件事（都不是推测）
  *
- * 1. **金额是 6 位小数的字符串**，不是数字。`value: "35427000"` 表示
- *    35.427 USDT。用 Number 接会在超过 2^53 时丢精度 —— 所以一路 BigInt。
+ * 1. **TRC20 账户接口不返回事件序号。**
+ *    它只给 `transaction_id / token_info / block_timestamp / from / to /
+ *    type / value` 七个字段，没有任何 index / logIndex。
  *
- * 2. **TRC20 列表接口不返回区块高度**，只给 `block_timestamp`。
- *    所以扫描游标用时间戳而不是区块高度。判定 solidified 也是拿
- *    交易时间戳和「最终确认块的时间戳」比 —— TRON 的区块时间单调不减，
- *    所以 `tx.timestamp <= solidBlock.timestamp` 蕴含
- *    `tx.block <= solidBlock`，这个比较是严谨的，不是近似。
+ * 2. **分页游标是 `meta.fingerprint`**（一长串不透明 base64）。
+ *    实测翻页两页零重叠，fingerprint 随页推进。
+ *    它对外**原样透传**为 `nextCursor` —— 调用方不该解析它。
+ *
+ * 3. **事件位置可以从交易回执补出来。**
+ *    `POST /wallet/gettransactioninfobyid` 返回 `log[]`，数组下标就是稳定的事件位置
+ *    （同一笔交易的事件顺序在区块里固定，重放多少次都一样）。
+ *    这不是伪造序号，是链上数据本身。
+ *
+ * ## 限流
+ *
+ * TRC20 账户端点免费额度是 **1 请求/秒**，超了会被挂起 5 秒
+ * （实测报文：`allowed_rps(1), and the query server is suspended for 5 s`）。
+ * 所以：单次扫描最多翻 maxPages 页，且 `gettransactioninfobyid` 按交易去重后
+ * 才调用 —— 同一笔交易在一页里出现多次只查一次回执。
  */
 
 const { TronProvider, ProviderError, requestJson } = require('./tron-provider')
-const { USDT_TRC20_CONTRACT, makeTransfer } = require('./transfer')
+const {
+  USDT_TRC20_CONTRACT, makeTransfer, findTransferLogIndexes
+} = require('./transfer')
 
 const DEFAULT_BASE_URL = 'https://api.trongrid.io'
 /** 单页上限。TronGrid 最大 200，取满以减少翻页次数 */
@@ -34,11 +46,13 @@ const PAGE_LIMIT = 200
 /**
  * 单次扫描最多翻多少页。
  *
- * 存在的意义是防止「游标落后太多时一次扫描拉几万条」把 worker 拖死。
+ * 防的是"游标落后太多时一次拉几万条"把 worker 拖死，也顺手照顾了 1 rps 限流。
  * 拉满就返回 hasMore=true，下一轮继续 —— 游标会稳步追上去，
  * 而且因为幂等，重复覆盖一段也没关系。
  */
 const MAX_PAGES_PER_SCAN = 10
+/** 解事件序号时，单轮最多为多少笔交易查回执（1 rps 限流下要克制） */
+const MAX_RECEIPT_LOOKUPS = 50
 
 class TronGridProvider extends TronProvider {
   constructor(options) {
@@ -49,8 +63,11 @@ class TronGridProvider extends TronProvider {
     this.timeoutMs = Number(opts.timeoutMs) || 15000
     this.pageLimit = Math.min(PAGE_LIMIT, Math.max(1, Number(opts.pageLimit) || PAGE_LIMIT))
     this.maxPages = Math.max(1, Number(opts.maxPagesPerScan) || MAX_PAGES_PER_SCAN)
+    this.maxReceiptLookups = Math.max(0, Number(opts.maxReceiptLookups) || MAX_RECEIPT_LOOKUPS)
     // 便于测试注入自己的 fetch
     this.request = opts.request || requestJson
+    /** 回执缓存：同一笔交易在一页里出现多次只查一次 */
+    this.receiptCache = new Map()
   }
 
   get name() {
@@ -85,32 +102,48 @@ class TronGridProvider extends TronProvider {
     return { blockNumber, blockTimestamp }
   }
 
-  /**
-   * 某个 TRC20 交易的区块高度。
-   * 列表接口不给这个字段，只能额外问一次；拿不到就返回 null，不抛错。
-   */
-  async getTransactionBlock(txId) {
+  /** 交易回执（带 `log[]`）。结果缓存，同一轮内同一笔只查一次 */
+  async transactionInfo(txId) {
+    const key = String(txId).toLowerCase()
+    if (this.receiptCache.has(key)) return this.receiptCache.get(key)
+    if (this.receiptCache.size >= this.maxReceiptLookups) return null
+    let value = null
     try {
-      const body = await this.request(`${this.baseUrl}/wallet/gettransactioninfobyid`, {
+      value = await this.request(`${this.baseUrl}/wallet/gettransactioninfobyid`, {
         method: 'POST',
         headers: Object.assign({ 'Content-Type': 'application/json' }, this.headers()),
         body: JSON.stringify({ value: txId }),
         timeoutMs: this.timeoutMs
       })
-      const number = Number(body && body.blockNumber)
-      return Number.isFinite(number) ? number : null
     } catch (_error) {
-      // 区块高度只用于留档，查不到不该让整轮扫描失败
-      return null
+      // 单笔回执查不到不该让整轮扫描失败 —— 但它会导致该条 eventIndex 为 null，
+      // 调用方据此跳过并**不推进游标**，下一轮会重来
+      value = null
     }
+    this.receiptCache.set(key, value)
+    return value
+  }
+
+  /**
+   * 某个 TRC20 交易的区块高度（可选能力，拿不到返回 null）。
+   *
+   * 注意 `Number(null)` 是 **0** 而不是 NaN —— 只判 isFinite 会把
+   * "拿不到" 返回成 0，看起来像个合法块高。所以这里额外要求 > 0。
+   */
+  async getTransactionBlock(txId) {
+    const info = await this.transactionInfo(txId)
+    if (!info) return null
+    const number = Number(info.blockNumber)
+    return Number.isFinite(number) && number > 0 ? number : null
   }
 
   /**
    * 拉取转入。
    *
-   * 翻页用 `fingerprint`（TronGrid 的游标）。
-   * **注意不要用 `meta.links.next` 直接请求**：那个 URL 里带了 api key 之外的
-   * 全部参数，用它等于把请求构造权交给上游；自己拼更可控。
+   * 翻页用 `meta.fingerprint`（不透明游标）。
+   * **不要用 `meta.links.next` 直接请求**：那个 URL 把全部参数都带上了，
+   * 用它等于把请求构造权交给上游；自己拼更可控，也避免把 api key 之外的
+   * 东西一并带出去。
    */
   async listIncomingTransfers(params) {
     const p = params || {}
@@ -120,14 +153,15 @@ class TronGridProvider extends TronProvider {
     const limit = Math.min(this.pageLimit, Math.max(1, Number(p.limit) || this.pageLimit))
     const fromTimestamp = Number(p.fromTimestamp) || 0
     const toTimestamp = Number.isFinite(Number(p.toTimestamp)) ? Number(p.toTimestamp) : Date.now()
+    // 不透明游标：原样带回给上游，不做任何解析
+    let cursor = p.cursor ? String(p.cursor) : ''
 
-    // solidified 判定基准：最终确认块的时间戳
     const solid = await this.latestSolidBlock()
 
-    const collected = []
-    let fingerprint = ''
+    const rows = []
     let pages = 0
     let hasMore = false
+    this.receiptCache.clear()
 
     while (pages < this.maxPages) {
       const query = new URLSearchParams()
@@ -136,7 +170,7 @@ class TronGridProvider extends TronProvider {
       query.set('min_timestamp', String(fromTimestamp))
       query.set('max_timestamp', String(toTimestamp))
       query.set('contract_address', tokenContract)
-      if (fingerprint) query.set('fingerprint', fingerprint)
+      if (cursor) query.set('fingerprint', cursor)
 
       const body = await this.request(
         `${this.baseUrl}/v1/accounts/${encodeURIComponent(toAddress)}/transactions/trc20?${query.toString()}`,
@@ -146,33 +180,69 @@ class TronGridProvider extends TronProvider {
       if (!body || body.success === false) {
         throw new ProviderError('TronGrid 返回 success=false', { code: 'UPSTREAM_ERROR', retryable: true })
       }
-      const rows = Array.isArray(body.data) ? body.data : []
-      for (const row of rows) {
-        const transfer = this.normalize(row, { toAddress, tokenContract, solid })
-        // 上游可能返回不完整或不合规的记录 —— 单条坏数据不该让整轮扫描失败，
-        // 跳过并留给上层统计，比整体抛错更稳（抛错会让游标停住，越积越多）
-        if (transfer) collected.push(transfer)
-      }
+      const page = Array.isArray(body.data) ? body.data : []
+      rows.push(...page)
 
-      fingerprint = String((body.meta && body.meta.fingerprint) || '')
+      // 官方分页游标。拿不到就说明没有下一页。
+      cursor = String((body.meta && body.meta.fingerprint) || '')
       pages += 1
-      if (!fingerprint || rows.length < limit) break
+      if (!cursor || page.length < limit) break
       if (pages >= this.maxPages) hasMore = true
     }
 
-    // 上游不保证有序；游标推进依赖"处理到哪个时间点"，必须自己排好
-    collected.sort((a, b) => (a.blockTimestamp - b.blockTimestamp) || (a.txId < b.txId ? -1 : 1))
+    const transfers = await this.normalizeAll(rows, { toAddress, tokenContract, solid })
 
-    const maxTimestamp = collected.length
-      ? collected[collected.length - 1].blockTimestamp
-      : fromTimestamp
+    // 上游不保证有序；游标推进依赖"处理到哪个时间点"，必须自己排好
+    transfers.sort((a, b) => (a.blockTimestamp - b.blockTimestamp) || (a.txId < b.txId ? -1 : 1))
 
     return {
-      transfers: collected,
+      transfers,
       hasMore,
-      nextFromTimestamp: maxTimestamp,
+      // 不透明游标原样交给调用方；null 表示没有更多页
+      nextCursor: cursor || null,
       solidBlock: solid
     }
+  }
+
+  /**
+   * 把账户接口的一批记录转成 NormalizedTransfer，并**补上真实事件序号**。
+   *
+   * 事件序号来自交易回执的 `log[]` 下标。同一笔交易若在结果里出现多次
+   * （说明它有多个 Transfer 事件），按出现顺序依次分配回执里的命中下标 ——
+   * 这样每个事件都有自己独立的位置，不会被 `tx_id` 唯一约束吃掉。
+   */
+  async normalizeAll(rows, context) {
+    // 先按 txId 分组，避免同一笔交易查多次回执（1 rps 限流下很关键）
+    const byTx = new Map()
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') continue
+      if (row.type && row.type !== 'Transfer') continue
+      const txId = String(row.transaction_id || '').trim().toLowerCase()
+      if (!txId) continue
+      if (!byTx.has(txId)) byTx.set(txId, [])
+      byTx.get(txId).push(row)
+    }
+
+    const out = []
+    for (const [txId, group] of byTx) {
+      const info = await this.transactionInfo(txId)
+      const logs = (info && info.log) || null
+      // 命中回执里的哪些 log 才是"转给我们这笔代币"的
+      const indexes = logs
+        ? findTransferLogIndexes(logs, {
+          tokenContract: context.tokenContract,
+          toAddress: context.toAddress
+        })
+        : []
+
+      group.forEach((row, i) => {
+        // 事件位置：优先用回执里命中的下标；命中数不够时留 null 交给上层跳过
+        const eventIndex = i < indexes.length ? indexes[i] : null
+        const transfer = this.normalize(row, Object.assign({ eventIndex }, context))
+        if (transfer) out.push(transfer)
+      })
+    }
+    return out
   }
 
   /**
@@ -194,11 +264,11 @@ class TronGridProvider extends TronProvider {
     const blockTimestamp = Number(row.block_timestamp)
     if (!Number.isFinite(blockTimestamp) || blockTimestamp <= 0) return null
 
-    let transfer
     try {
-      transfer = makeTransfer({
+      return makeTransfer({
         txId: row.transaction_id,
-        logIndex: 0,
+        // null 表示"没能确定事件位置" —— 上层必须跳过，不得编造
+        eventIndex: context.eventIndex === undefined ? null : context.eventIndex,
         tokenContract: contract,
         fromAddress: String(row.from || '').trim(),
         toAddress: to,
@@ -212,8 +282,10 @@ class TronGridProvider extends TronProvider {
     } catch (_error) {
       return null
     }
-    return transfer
   }
 }
 
-module.exports = { TronGridProvider, DEFAULT_BASE_URL, PAGE_LIMIT, MAX_PAGES_PER_SCAN }
+module.exports = {
+  TronGridProvider, DEFAULT_BASE_URL, PAGE_LIMIT,
+  MAX_PAGES_PER_SCAN, MAX_RECEIPT_LOOKUPS
+}

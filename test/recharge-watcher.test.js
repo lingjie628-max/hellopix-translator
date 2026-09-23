@@ -125,6 +125,7 @@ test('ChainWatcher：重复扫描、重启恢复、上游故障、未确认交�
 
   const transferFor = (ctx, overrides) => makeTransfer(Object.assign({
     txId: require('crypto').randomBytes(32).toString('hex'),
+    eventIndex: 0,
     tokenContract: TOKEN,
     fromAddress: FROM,
     toAddress: address,
@@ -458,4 +459,340 @@ test('告警收件人用扁平键读取，且键名小写（DB 约束只允许�
   assert.equal(resolveRecipient({ mail: { alertTo: 'ops@x.test' } }), '')
   // 旧键名（含大写）在库里不可能存在，读了也只会是空
   assert.equal(resolveRecipient({ 'mail.alertTo': 'ops@x.test' }), '')
+})
+
+// ═══════════════════════════════════════════════ 分页与重扫（Phase 2 补充）
+
+test('分页跨多页全部处理，重扫同一批不重复入账', { skip: !databaseUrl }, async t => {
+  process.env.DATABASE_URL = databaseUrl
+  process.env.PIX_CREDENTIAL_KEY = process.env.PIX_CREDENTIAL_KEY || 'a'.repeat(64)
+
+  const { Pool } = require('pg')
+  const { ProductionRepository } = require('../server/repositories/production-repository')
+  const { RechargeAmountService } = require('../server/services/recharge-amount-service')
+  const { RechargeSettlementService } = require('../server/services/recharge-settlement-service')
+  const { ScanCursorService } = require('../server/services/tron/scan-cursor')
+  const { makeTransfer, milliToChainUnits } = require('../server/services/tron/transfer')
+  const { formatMilli } = require('../server/lib/money')
+  const { scanOneAddress } = require('../scripts/recharge-watcher')
+
+  const pool = new Pool({ connectionString: databaseUrl, max: 6 })
+  const repo = new ProductionRepository(pool)
+  const amount = new RechargeAmountService()
+  const cursor = new ScanCursorService({ rewindMs: 5 * 60 * 1000 })
+  const settlement = new RechargeSettlementService(repo, {
+    amountService: amount, autoSettlementEnabled: true, tokenContract: TOKEN
+  })
+
+  const addr = `${ADDRESS.slice(0, 18)}${String(7000 + (Date.now() % 999)).padStart(4, '0')}${ADDRESS.slice(22)}`
+  const createdU = []
+  const createdR = []
+  const madeTx = []
+
+  const withTx = async fn => {
+    const client = await pool.connect()
+    try { await client.query('BEGIN'); const o = await fn(client); await client.query('COMMIT'); return o }
+    catch (e) { await client.query('ROLLBACK'); throw e } finally { client.release() }
+  }
+
+  /** 造 3 张订单，返回它们的金额 */
+  const orders = []
+  for (let i = 0; i < 3; i++) {
+    const name = `rc02pg_${process.pid}_${Date.now()}_${i}`
+    const u = (await pool.query(
+      `INSERT INTO users(username,password_hash,nickname,email,email_verified,status,
+         char_balance,char_used,translate_count,sub_quota,auto_alloc_master,auto_reply,
+         enterprise,port_limit,ports_in_use,remarks)
+       VALUES($1,'scrypt$s$h',$1,$2,false,1,0,0,0,0,false,false,false,1,0,'') RETURNING id`,
+      [name, `${name}@example.test`])).rows[0]
+    createdU.push(u.id)
+    const o = await withTx(async client => {
+      const expiresAt = new Date(Date.now() + 30 * 60 * 1000)
+      const alloc = await amount.allocate(client, {
+        payAddress: addr, tokenContract: TOKEN, baseAmountMilli: 40000n + BigInt(i * 1000), expiresAt
+      })
+      const no = `PG${Date.now()}${i}${Math.floor(Math.random() * 1e5)}`
+      const r = (await client.query(
+        `INSERT INTO recharges(user_id, order_number, kind, payment_type, quantity, chars,
+           original_amount, discount_amount, surcharge_amount, paid_amount, status,
+           idempotency_key, expires_at, pay_address, pay_token_contract, amount_reservation_id)
+         VALUES($1,$2,'package','USDT-TRC20',1,1000,$3,0,$4,$5,0,$6,$7,$8,$9,$10) RETURNING id`,
+        [u.id, no, formatMilli(40000n + BigInt(i * 1000)), formatMilli(alloc.suffixMilli),
+          formatMilli(alloc.amountMilli), `pg:${no}`, expiresAt.toISOString(),
+          addr, TOKEN, String(alloc.reservationId)])).rows[0]
+      await amount.attachToRecharge(client, alloc.reservationId, r.id)
+      createdR.push(r.id)
+      return { orderId: r.id, userId: u.id, amountMilli: alloc.amountMilli }
+    })
+    orders.push(o)
+  }
+
+  // 同一条链上时间，3 笔交易 —— 逼出"同一时间戳跨多页"的情形
+  const sameTs = SOLID_TS - 120 * 1000
+  const transfers = orders.map(o => {
+    const tx = makeTransfer({
+      txId: require('crypto').randomBytes(32).toString('hex'),
+      eventIndex: 0, tokenContract: TOKEN, fromAddress: FROM, toAddress: addr,
+      chainUnits: milliToChainUnits(o.amountMilli).toString(),
+      blockTimestamp: sameTs, solidified: true, raw: { test: 'pagination' }
+    })
+    madeTx.push(tx.txId)
+    return tx
+  })
+
+  /**
+   * 假 Provider。
+   *
+   * **内部翻页是 Provider 的职责** —— 它自己用不透明 cursor 翻到底，
+   * 再把聚合结果交给 watcher。所以这里一次返回全部 3 笔
+   * （同一条链上时间，等价于"同一时间戳跨了多页"）。
+   */
+  let listCalls = 0
+  const provider = {
+    name: 'mock-paged',
+    async latestSolidBlock() { return { blockNumber: 60000000, blockTimestamp: SOLID_TS } },
+    async listIncomingTransfers() {
+      listCalls += 1
+      return { transfers, hasMore: false, nextCursor: null }
+    },
+    async getTransactionBlock() { return null },
+    async health() { return { ok: true } }
+  }
+
+  const scan = () => scanOneAddress({
+    pool, cursor, settlement, provider, address: addr, tokenContract: TOKEN
+  })
+
+  const balanceOf = async id =>
+    Number((await pool.query('SELECT char_balance FROM users WHERE id=$1', [id])).rows[0].char_balance)
+
+  t.after(async () => {
+    for (const tx of madeTx) {
+      await pool.query('DELETE FROM recharge_exceptions WHERE tx_id=$1', [tx]).catch(() => {})
+      await pool.query('DELETE FROM chain_transactions WHERE tx_id=$1', [tx]).catch(() => {})
+    }
+    if (createdR.length) {
+      await pool.query('UPDATE recharge_amount_reservations SET recharge_id=NULL WHERE recharge_id = ANY($1::bigint[])', [createdR]).catch(() => {})
+      await pool.query('DELETE FROM char_ledger WHERE reference_id = ANY($1::bigint[])', [createdR]).catch(() => {})
+      await pool.query('DELETE FROM recharges WHERE id = ANY($1::bigint[])', [createdR]).catch(() => {})
+    }
+    if (createdU.length) {
+      await pool.query('DELETE FROM recharges WHERE user_id = ANY($1::bigint[])', [createdU]).catch(() => {})
+      await pool.query('DELETE FROM users WHERE id = ANY($1::bigint[])', [createdU]).catch(() => {})
+    }
+    await pool.query('DELETE FROM chain_scan_cursor WHERE address=$1', [addr]).catch(() => {})
+    await pool.end()
+  })
+
+  // ---------- 第一轮：3 页全部处理完 ----------
+  const before = await Promise.all(orders.map(o => balanceOf(o.userId)))
+  const first = await scan()
+  assert.equal(listCalls, 1, 'Provider 内部翻页，watcher 只调一次')
+  assert.equal(first.fetched, 3, '同一时间戳的 3 笔都要拿到')
+  assert.equal(first.settled, 3, '三笔都该入账')
+  for (let i = 0; i < orders.length; i++) {
+    assert.equal(await balanceOf(orders[i].userId), before[i] + 1000, `第 ${i + 1} 单未到账`)
+  }
+
+  // ---------- 第二轮：回退窗口内重扫，不得重复入账 ----------
+  listCalls = 0
+  const second = await scan()
+  assert.equal(second.settled, 0, '重扫不得重复入账')
+  assert.ok(second.duplicates >= 1, `重扫应命中重复，实际 ${second.duplicates}`)
+  for (let i = 0; i < orders.length; i++) {
+    assert.equal(await balanceOf(orders[i].userId), before[i] + 1000, `第 ${i + 1} 单余额被重复加了`)
+  }
+  const ledgerRows = (await pool.query(
+    'SELECT count(*)::int AS n FROM char_ledger WHERE reference_id = ANY($1::bigint[])',
+    [createdR.map(String)])).rows[0].n
+  assert.equal(ledgerRows, 3, '字符流水应当正好 3 条')
+})
+
+test('分页中途上游失败：整轮回滚，重扫后补全', { skip: !databaseUrl }, async t => {
+  process.env.DATABASE_URL = databaseUrl
+  process.env.PIX_CREDENTIAL_KEY = process.env.PIX_CREDENTIAL_KEY || 'a'.repeat(64)
+
+  const { Pool } = require('pg')
+  const { ProductionRepository } = require('../server/repositories/production-repository')
+  const { RechargeAmountService } = require('../server/services/recharge-amount-service')
+  const { RechargeSettlementService } = require('../server/services/recharge-settlement-service')
+  const { ScanCursorService } = require('../server/services/tron/scan-cursor')
+  const { makeTransfer, milliToChainUnits } = require('../server/services/tron/transfer')
+  const { formatMilli } = require('../server/lib/money')
+  const { ProviderError } = require('../server/services/tron/tron-provider')
+  const { scanOneAddress } = require('../scripts/recharge-watcher')
+
+  const pool = new Pool({ connectionString: databaseUrl, max: 4 })
+  const repo = new ProductionRepository(pool)
+  const amount = new RechargeAmountService()
+  const cursor = new ScanCursorService({ rewindMs: 5 * 60 * 1000 })
+  const settlement = new RechargeSettlementService(repo, {
+    amountService: amount, autoSettlementEnabled: true, tokenContract: TOKEN
+  })
+
+  const addr = `${ADDRESS.slice(0, 18)}${String(8000 + (Date.now() % 999)).padStart(4, '0')}${ADDRESS.slice(22)}`
+  const name = `rc02pi_${process.pid}_${Date.now()}`
+  const u = (await pool.query(
+    `INSERT INTO users(username,password_hash,nickname,email,email_verified,status,
+       char_balance,char_used,translate_count,sub_quota,auto_alloc_master,auto_reply,
+       enterprise,port_limit,ports_in_use,remarks)
+     VALUES($1,'scrypt$s$h',$1,$2,false,1,0,0,0,0,false,false,false,1,0,'') RETURNING id`,
+    [name, `${name}@example.test`])).rows[0]
+
+  let orderId = null
+  let reservationId = null
+  let tx = null
+  try {
+    const withTx = async fn => {
+      const client = await pool.connect()
+      try { await client.query('BEGIN'); const o = await fn(client); await client.query('COMMIT'); return o }
+      catch (e) { await client.query('ROLLBACK'); throw e } finally { client.release() }
+    }
+    const o = await withTx(async client => {
+      const expiresAt = new Date(Date.now() + 30 * 60 * 1000)
+      const alloc = await amount.allocate(client, {
+        payAddress: addr, tokenContract: TOKEN, baseAmountMilli: 40000n, expiresAt
+      })
+      const no = `PI${Date.now()}`
+      const r = (await client.query(
+        `INSERT INTO recharges(user_id, order_number, kind, payment_type, quantity, chars,
+           original_amount, discount_amount, surcharge_amount, paid_amount, status,
+           idempotency_key, expires_at, pay_address, pay_token_contract, amount_reservation_id)
+         VALUES($1,$2,'package','USDT-TRC20',1,1000,$3,0,$4,$5,0,$6,$7,$8,$9,$10) RETURNING id`,
+        [u.id, no, formatMilli(40000n), formatMilli(alloc.suffixMilli), formatMilli(alloc.amountMilli),
+          `pi:${no}`, expiresAt.toISOString(), addr, TOKEN, String(alloc.reservationId)])).rows[0]
+      await amount.attachToRecharge(client, alloc.reservationId, r.id)
+      reservationId = alloc.reservationId
+      return { orderId: r.id, amountMilli: alloc.amountMilli }
+    })
+    orderId = o.orderId
+    tx = makeTransfer({
+      txId: require('crypto').randomBytes(32).toString('hex'),
+      eventIndex: 0, tokenContract: TOKEN, fromAddress: FROM, toAddress: addr,
+      chainUnits: milliToChainUnits(o.amountMilli).toString(),
+      blockTimestamp: SOLID_TS - 60 * 1000, solidified: true, raw: { test: 'page-interrupt' }
+    })
+
+    // 先正常扫一轮建立游标
+    const okProvider = {
+      name: 'mock-ok',
+      async latestSolidBlock() { return { blockNumber: 1, blockTimestamp: SOLID_TS } },
+      async listIncomingTransfers() { return { transfers: [], hasMore: false, nextCursor: null } },
+      async getTransactionBlock() { return null }
+    }
+    await scanOneAddress({ pool, cursor, settlement, provider: okProvider, address: addr, tokenContract: TOKEN })
+    const beforeCursor = (await pool.query(
+      'SELECT last_scanned_timestamp FROM chain_scan_cursor WHERE address=$1 AND token_contract=$2',
+      [addr, TOKEN])).rows[0].last_scanned_timestamp
+
+    // 模拟 Provider 内部翻页到第二页时上游挂掉：
+    // 它不会返回半截数据，而是把错误抛出来
+    const flaky = {
+      name: 'mock-flaky',
+      async latestSolidBlock() { return { blockNumber: 1, blockTimestamp: SOLID_TS } },
+      async listIncomingTransfers() {
+        throw new ProviderError('第二页 500', { code: 'UPSTREAM_ERROR', retryable: true, status: 500 })
+      },
+      async getTransactionBlock() { return null }
+    }
+    await assert.rejects(
+      () => scanOneAddress({ pool, cursor, settlement, provider: flaky, address: addr, tokenContract: TOKEN }),
+      err => err.code === 'UPSTREAM_ERROR')
+
+    const afterCursor = (await pool.query(
+      'SELECT last_scanned_timestamp FROM chain_scan_cursor WHERE address=$1 AND token_contract=$2',
+      [addr, TOKEN])).rows[0].last_scanned_timestamp
+    assert.equal(String(afterCursor), String(beforeCursor), '中断时游标不得推进')
+    const txRows = (await pool.query('SELECT count(*)::int AS n FROM chain_transactions WHERE tx_id=$1', [tx.txId])).rows[0].n
+    assert.equal(txRows, 0, '半截数据不该落库')
+    const bal0 = Number((await pool.query('SELECT char_balance FROM users WHERE id=$1', [u.id])).rows[0].char_balance)
+    assert.equal(bal0, 0, '中断时不该入账')
+
+    // 上游恢复 → 重扫补全
+    const recovered = {
+      name: 'mock-recovered',
+      async latestSolidBlock() { return { blockNumber: 1, blockTimestamp: SOLID_TS } },
+      async listIncomingTransfers() { return { transfers: [tx], hasMore: false, nextCursor: null } },
+      async getTransactionBlock() { return null }
+    }
+    const r = await scanOneAddress({ pool, cursor, settlement, provider: recovered, address: addr, tokenContract: TOKEN })
+    assert.equal(r.settled, 1, '恢复后应当补上这笔')
+    assert.equal(Number((await pool.query('SELECT char_balance FROM users WHERE id=$1', [u.id])).rows[0].char_balance), 1000)
+  } finally {
+    if (tx) {
+      await pool.query('DELETE FROM recharge_exceptions WHERE tx_id=$1', [tx.txId]).catch(() => {})
+      await pool.query('DELETE FROM chain_transactions WHERE tx_id=$1', [tx.txId]).catch(() => {})
+    }
+    if (orderId) {
+      await pool.query('UPDATE recharge_amount_reservations SET recharge_id=NULL WHERE recharge_id=$1', [String(orderId)]).catch(() => {})
+      await pool.query('DELETE FROM char_ledger WHERE reference_id=$1', [String(orderId)]).catch(() => {})
+      await pool.query('DELETE FROM recharges WHERE id=$1', [orderId]).catch(() => {})
+    }
+    if (reservationId) await pool.query('DELETE FROM recharge_amount_reservations WHERE id=$1', [String(reservationId)]).catch(() => {})
+    await pool.query('DELETE FROM users WHERE id=$1', [u.id]).catch(() => {})
+    await pool.query('DELETE FROM chain_scan_cursor WHERE address=$1', [addr]).catch(() => {})
+    await pool.end()
+  }
+})
+
+test('未拉完时抛 SCAN_INCOMPLETE 且不推进游标 —— 绝不静默丢单', { skip: !databaseUrl }, async t => {
+  process.env.DATABASE_URL = databaseUrl
+  process.env.PIX_CREDENTIAL_KEY = process.env.PIX_CREDENTIAL_KEY || 'a'.repeat(64)
+
+  const { Pool } = require('pg')
+  const { ProductionRepository } = require('../server/repositories/production-repository')
+  const { RechargeAmountService } = require('../server/services/recharge-amount-service')
+  const { RechargeSettlementService } = require('../server/services/recharge-settlement-service')
+  const { ScanCursorService } = require('../server/services/tron/scan-cursor')
+  const { scanOneAddress } = require('../scripts/recharge-watcher')
+
+  const pool = new Pool({ connectionString: databaseUrl, max: 2 })
+  const repo = new ProductionRepository(pool)
+  const cursor = new ScanCursorService({ rewindMs: 5 * 60 * 1000 })
+  const settlement = new RechargeSettlementService(repo, {
+    amountService: new RechargeAmountService(), autoSettlementEnabled: true, tokenContract: TOKEN
+  })
+  const addr = `${ADDRESS.slice(0, 18)}9500${ADDRESS.slice(22)}`
+
+  try {
+    // 先建立游标
+    await scanOneAddress({
+      pool, cursor, settlement, address: addr, tokenContract: TOKEN,
+      provider: {
+        async latestSolidBlock() { return { blockNumber: 1, blockTimestamp: SOLID_TS } },
+        async listIncomingTransfers() { return { transfers: [], hasMore: false, nextCursor: null } },
+        async getTransactionBlock() { return null }
+      }
+    })
+    const before = (await pool.query(
+      'SELECT last_scanned_timestamp FROM chain_scan_cursor WHERE address=$1 AND token_contract=$2',
+      [addr, TOKEN])).rows[0].last_scanned_timestamp
+
+    // Provider 表示"还有更多页没拉完"
+    await assert.rejects(
+      () => scanOneAddress({
+        pool, cursor, settlement, address: addr, tokenContract: TOKEN,
+        provider: {
+          async latestSolidBlock() { return { blockNumber: 1, blockTimestamp: SOLID_TS } },
+          async listIncomingTransfers() {
+            return { transfers: [], hasMore: true, nextCursor: 'more-pages-remain' }
+          },
+          async getTransactionBlock() { return null }
+        }
+      }),
+      err => {
+        assert.equal(err.code, 'SCAN_INCOMPLETE')
+        assert.equal(err.retryable, true, '下一轮应当重试')
+        return true
+      })
+
+    const after = (await pool.query(
+      'SELECT last_scanned_timestamp FROM chain_scan_cursor WHERE address=$1 AND token_contract=$2',
+      [addr, TOKEN])).rows[0].last_scanned_timestamp
+    assert.equal(String(after), String(before),
+      '还有未拉取的页时游标绝不能推进 —— 推进就等于把那部分交易永久丢掉')
+  } finally {
+    await pool.query('DELETE FROM chain_scan_cursor WHERE address=$1', [addr]).catch(() => {})
+    await pool.end()
+  }
 })

@@ -31,6 +31,7 @@ const TS = 1758600000000
 function base(overrides) {
   return Object.assign({
     txId: TX,
+    eventIndex: 0,
     tokenContract: USDT_TRC20_CONTRACT,
     fromAddress: FROM,
     toAddress: TO,
@@ -156,4 +157,72 @@ test('默认合约是 TRC20 USDT 官方地址', () => {
   assert.equal(USDT_TRC20_CONTRACT, 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t')
   const t = makeTransfer(base())
   assert.equal(checkTransferEligibility(t, {}).ok, true, '不传 toAddress 时只校验合约')
+})
+
+// ------------------------------------------------ 事件位置：地址转换与 log 解码
+
+const { addressToLogHex, topicToLogHex, findTransferLogIndexes } = require('../server/services/tron/transfer')
+
+const TRANSFER_SIG = 'ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+const padTo32 = hex => '0'.repeat(64 - hex.length) + hex
+
+test('base58 地址 → 事件日志里的 20 字节 hex（去掉 0x41 前缀与校验和）', () => {
+  // 实测值：TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t 的 log.address 就是这串
+  assert.equal(addressToLogHex('TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'),
+    'a614f803b6fd780986a42c78ec9c7f77e6ded13c')
+  assert.equal(addressToLogHex('TEfCDDuYwYdjCn2WDa7TNWCU9bkBk9EXPX'),
+    '33707b5f44db4a0477c1f10cc6314a559acaaaad')
+})
+
+test('非法地址返回 null，不抛错也不返回半截', () => {
+  assert.equal(addressToLogHex('not-an-address'), null)
+  assert.equal(addressToLogHex(''), null)
+  assert.equal(addressToLogHex(null), null)
+})
+
+test('topics 里地址是 32 字节左填充，取后 40 位', () => {
+  const hex = '33707b5f44db4a0477c1f10cc6314a559acaaaad'
+  assert.equal(topicToLogHex(padTo32(hex)), hex)
+  assert.equal(topicToLogHex('0x' + padTo32(hex)), hex)
+  assert.equal(topicToLogHex('tooshort'), null)
+})
+
+test('从回执 log[] 里定位事件下标 —— 一笔交易可命中多个', () => {
+  const usdt = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'
+  const me = 'TEfCDDuYwYdjCn2WDa7TNWCU9bkBk9EXPX'
+  const other = 'TJRabPrwbZy45sbavfcjinPJC18kjpRTv8'
+  const logs = [
+    // [0] 别的代币，不该命中
+    { address: addressToLogHex(other), topics: [TRANSFER_SIG, padTo32('11'.repeat(20)), padTo32(addressToLogHex(me))] },
+    // [1] 是转给我们的
+    { address: addressToLogHex(usdt), topics: [TRANSFER_SIG, padTo32('22'.repeat(20)), padTo32(addressToLogHex(me))], data: '0x1' },
+    // [2] 不是 Transfer 事件（签名不符）
+    { address: addressToLogHex(usdt), topics: ['00'.repeat(32), padTo32('33'.repeat(20)), padTo32(addressToLogHex(me))] },
+    // [3] 是转给别人
+    { address: addressToLogHex(usdt), topics: [TRANSFER_SIG, padTo32('44'.repeat(20)), padTo32(addressToLogHex(other))], data: '0x2' },
+    // [4] 又一个转给我们的
+    { address: addressToLogHex(usdt), topics: [TRANSFER_SIG, padTo32('55'.repeat(20)), padTo32(addressToLogHex(me))], data: '0x3' }
+  ]
+  const hit = findTransferLogIndexes(logs, { tokenContract: usdt, toAddress: me })
+  assert.deepEqual(hit, [1, 4], '只应命中真正转给我们的 Transfer 事件')
+})
+
+test('找不到匹配事件时返回空数组，而不是硬塞一个 0', () => {
+  const usdt = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'
+  const me = 'TEfCDDuYwYdjCn2WDa7TNWCU9bkBk9EXPX'
+  assert.deepEqual(findTransferLogIndexes([], { tokenContract: usdt, toAddress: me }), [])
+  assert.deepEqual(findTransferLogIndexes(null, { tokenContract: usdt, toAddress: me }), [])
+  assert.deepEqual(findTransferLogIndexes(
+    [{ address: 'deadbeef', topics: [TRANSFER_SIG] }],
+    { tokenContract: usdt, toAddress: me }), [])
+})
+
+test('事件位置 0 与「位置未知」是两回事', () => {
+  // 0 是合法的事件位置；null 表示没能确定，调用方必须跳过。
+  // 把未知当成 0 会让真正的事件 0 到来时撞上它被静默丢掉。
+  const withZero = makeTransfer(base({ eventIndex: 0 }))
+  const withNull = makeTransfer(base({ eventIndex: null }))
+  assert.equal(withZero.eventIndex, 0)
+  assert.equal(withNull.eventIndex, null)
+  assert.notEqual(withZero.eventIndex, withNull.eventIndex)
 })

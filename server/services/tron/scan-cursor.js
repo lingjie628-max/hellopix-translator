@@ -36,7 +36,14 @@
  */
 
 const DEFAULT_REWIND_MS = 10 * 60 * 1000        // 每次回退 10 分钟重扫
-const DEFAULT_INITIAL_LOOKBACK_MS = 24 * 3600 * 1000  // 首次扫描回看 24 小时
+/**
+ * 首次扫描回看时长。
+ *
+ * **故意取得小**：新部署时没有任何历史订单，回扫平台存在之前的转账毫无意义，
+ * 却可能一次拉出上千条把单轮翻页上限打满（那会导致整轮报 SCAN_INCOMPLETE）。
+ * 30 分钟足够覆盖"订单有效期 + 一点余量"。
+ */
+const DEFAULT_INITIAL_LOOKBACK_MS = 30 * 60 * 1000
 
 class ScanCursorService {
   constructor(options) {

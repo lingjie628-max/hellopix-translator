@@ -104,6 +104,9 @@ test('结算服务：Shadow / 幂等 / 异常池', { skip: !databaseUrl }, async
     const o = overrides || {}
     return makeTransfer({
       txId: o.txId || require('crypto').randomBytes(32).toString('hex'),
+      // 事件位置：真实 Provider 从交易回执的 log[] 下标取；
+      // 测试夹具直接给 0。**null 是"未知"**，会被结算层跳过。
+      eventIndex: o.eventIndex === undefined ? 0 : o.eventIndex,
       tokenContract: o.tokenContract || ctx.token,
       fromAddress: o.fromAddress || OTHER_ADDRESS,
       toAddress: o.toAddress || ctx.address,
@@ -402,4 +405,183 @@ test('结算服务：Shadow / 幂等 / 异常池', { skip: !databaseUrl }, async
     const row2 = (await pool.query('SELECT mode FROM chain_transactions WHERE tx_id=$1', [t2.txId])).rows[0]
     assert.equal(row2.mode, 'live')
   })
+})
+
+// ═══════════════════════════════════════ 事件级身份（同一 TXID 多个 Transfer 事件）
+
+test('同 TXID 不同 eventIndex：两个事件都落库，第二个进异常池', { skip: !databaseUrl }, async t => {
+  process.env.DATABASE_URL = databaseUrl
+  const { Pool } = require('pg')
+  const { ProductionRepository } = require('../server/repositories/production-repository')
+  const { RechargeAmountService } = require('../server/services/recharge-amount-service')
+  const {
+    RechargeSettlementService, EXCEPTION_KIND, OUTCOME
+  } = require('../server/services/recharge-settlement-service')
+  const { makeTransfer, milliToChainUnits } = require('../server/services/tron/transfer')
+  const { formatMilli } = require('../server/lib/money')
+
+  const pool = new Pool({ connectionString: databaseUrl, max: 4 })
+  const repo = new ProductionRepository(pool)
+  const amount = new RechargeAmountService()
+  const settlement = new RechargeSettlementService(repo, {
+    amountService: amount, autoSettlementEnabled: true, tokenContract: TOKEN
+  })
+
+  const withTx = async fn => {
+    const client = await pool.connect()
+    try { await client.query('BEGIN'); const o = await fn(client); await client.query('COMMIT'); return o }
+    catch (e) { await client.query('ROLLBACK'); throw e } finally { client.release() }
+  }
+
+  const createdU = []
+  const createdR = []
+  const createdRes = []
+  let addrSeq = 0
+  const addr = () => `${ADDRESS.slice(0, 18)}${String(9000 + (++addrSeq)).padStart(4, '0')}${ADDRESS.slice(22)}`
+  const madeTxIds = []
+
+  try {
+    // 造两张订单：同一收款地址、不同金额
+    const mk = async () => {
+      const a = addr()
+      const name = `rc02ev_${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+      const u = (await pool.query(
+        `INSERT INTO users(username,password_hash,nickname,email,email_verified,status,
+           char_balance,char_used,translate_count,sub_quota,auto_alloc_master,auto_reply,
+           enterprise,port_limit,ports_in_use,remarks)
+         VALUES($1,'scrypt$s$h',$1,$2,false,1,0,0,0,0,false,false,false,1,0,'') RETURNING id`,
+        [name, `${name}@example.test`])).rows[0]
+      createdU.push(u.id)
+      const out = await withTx(async client => {
+        const expiresAt = new Date(Date.now() + 30 * 60 * 1000)
+        const alloc = await amount.allocate(client, {
+          payAddress: a, tokenContract: TOKEN, baseAmountMilli: BASE_MILLI, expiresAt
+        })
+        const no = `EV${Date.now()}${Math.floor(Math.random() * 1e6)}`
+        const r = (await client.query(
+          `INSERT INTO recharges(user_id, order_number, kind, payment_type, quantity, chars,
+             original_amount, discount_amount, surcharge_amount, paid_amount, status,
+             idempotency_key, expires_at, pay_address, pay_token_contract, amount_reservation_id)
+           VALUES($1,$2,'package','USDT-TRC20',1,1000,$3,0,$4,$5,0,$6,$7,$8,$9,$10) RETURNING id`,
+          [u.id, no, formatMilli(BASE_MILLI), formatMilli(alloc.suffixMilli),
+            formatMilli(alloc.amountMilli), `ev:${no}`, expiresAt.toISOString(),
+            a, TOKEN, String(alloc.reservationId)])).rows[0]
+        await amount.attachToRecharge(client, alloc.reservationId, r.id)
+        createdR.push(r.id); createdRes.push(alloc.reservationId)
+        return { orderId: r.id, userId: u.id, address: a, amountMilli: alloc.amountMilli }
+      })
+      return out
+    }
+
+    const oA = await mk()
+    const oB = await mk()
+    const TXID = require('crypto').randomBytes(32).toString('hex')
+    madeTxIds.push(TXID)
+
+    const balanceOf = async id =>
+      Number((await pool.query('SELECT char_balance FROM users WHERE id=$1', [id])).rows[0].char_balance)
+
+    const mkTransfer = (ctx, eventIndex) => makeTransfer({
+      txId: TXID,
+      eventIndex,
+      tokenContract: TOKEN,
+      fromAddress: OTHER_ADDRESS,
+      toAddress: ctx.address,
+      chainUnits: milliToChainUnits(ctx.amountMilli).toString(),
+      blockTimestamp: Date.now(),
+      solidified: true,
+      raw: { test: 'event-identity' }
+    })
+
+    const beforeA = await balanceOf(oA.userId)
+    const beforeB = await balanceOf(oB.userId)
+
+    // 事件 0 → 正常入账 A
+    const r0 = await withTx(c => settlement.handleTransfer(c, mkTransfer(oA, 0), { toAddress: oA.address }))
+    assert.equal(r0.outcome, OUTCOME.SETTLED, JSON.stringify(r0.detail))
+    assert.equal(await balanceOf(oA.userId), beforeA + 1000)
+
+    // 事件 1 → **同一 TXID**，但金额匹配 B。规则：一个 TXID 最多结算一张订单
+    const r1 = await withTx(c => settlement.handleTransfer(c, mkTransfer(oB, 1), { toAddress: oB.address }))
+    assert.equal(r1.outcome, OUTCOME.EXCEPTION, '同一 TXID 的第二个事件不该自动发放')
+    assert.equal(r1.exceptionKind, EXCEPTION_KIND.DUPLICATE_TXID, r1.exceptionKind)
+    assert.equal(await balanceOf(oB.userId), beforeB, 'B 的余额不得变化')
+
+    // 两个事件各自落库（没有被 tx_id 唯一约束吞掉）
+    const rows = (await pool.query(
+      'SELECT event_index, match_kind, recharge_id FROM chain_transactions WHERE tx_id=$1 ORDER BY event_index',
+      [TXID])).rows
+    assert.equal(rows.length, 2, '同一 tx 的两个事件必须各占一行，不能被静默丢弃')
+    assert.deepEqual(rows.map(r => Number(r.event_index)), [0, 1])
+
+    // 异常池记录了第二个事件
+    const exc = (await pool.query(
+      'SELECT kind, event_index FROM recharge_exceptions WHERE tx_id=$1', [TXID])).rows[0]
+    assert.equal(exc.kind, EXCEPTION_KIND.DUPLICATE_TXID)
+    assert.equal(Number(exc.event_index), 1)
+
+    // 重放事件 1 → 幂等，不再新增异常
+    const again = await withTx(c => settlement.handleTransfer(c, mkTransfer(oB, 1), { toAddress: oB.address }))
+    assert.equal(again.outcome, OUTCOME.DUPLICATE)
+    const excCount = (await pool.query(
+      'SELECT count(*)::int AS n FROM recharge_exceptions WHERE tx_id=$1', [TXID])).rows[0].n
+    assert.equal(excCount, 1)
+  } finally {
+    for (const id of madeTxIds) {
+      await pool.query('DELETE FROM recharge_exceptions WHERE tx_id=$1', [id]).catch(() => {})
+      await pool.query('DELETE FROM chain_transactions WHERE tx_id=$1', [id]).catch(() => {})
+    }
+    if (createdR.length) {
+      await pool.query('UPDATE recharge_amount_reservations SET recharge_id=NULL WHERE recharge_id = ANY($1::bigint[])', [createdR]).catch(() => {})
+      await pool.query('DELETE FROM char_ledger WHERE reference_id = ANY($1::bigint[])', [createdR]).catch(() => {})
+      await pool.query('DELETE FROM recharges WHERE id = ANY($1::bigint[])', [createdR]).catch(() => {})
+    }
+    if (createdRes.length) {
+      await pool.query('DELETE FROM recharge_amount_reservations WHERE id = ANY($1::bigint[])', [createdRes]).catch(() => {})
+    }
+    if (createdU.length) {
+      await pool.query('DELETE FROM recharges WHERE user_id = ANY($1::bigint[])', [createdU]).catch(() => {})
+      await pool.query('DELETE FROM users WHERE id = ANY($1::bigint[])', [createdU]).catch(() => {})
+    }
+    await pool.end()
+  }
+})
+
+test('事件位置未知时跳过，不落库也不推进 —— 绝不把未知当成事件 0', { skip: !databaseUrl }, async t => {
+  process.env.DATABASE_URL = databaseUrl
+  const { Pool } = require('pg')
+  const { ProductionRepository } = require('../server/repositories/production-repository')
+  const { RechargeAmountService } = require('../server/services/recharge-amount-service')
+  const { RechargeSettlementService, OUTCOME } = require('../server/services/recharge-settlement-service')
+  const { makeTransfer, milliToChainUnits } = require('../server/services/tron/transfer')
+
+  const pool = new Pool({ connectionString: databaseUrl, max: 2 })
+  const repo = new ProductionRepository(pool)
+  const settlement = new RechargeSettlementService(repo, {
+    amountService: new RechargeAmountService(), autoSettlementEnabled: true, tokenContract: TOKEN
+  })
+  const TXID = require('crypto').randomBytes(32).toString('hex')
+  try {
+    const transfer = makeTransfer({
+      txId: TXID, eventIndex: null, tokenContract: TOKEN,
+      fromAddress: OTHER_ADDRESS, toAddress: ADDRESS,
+      chainUnits: milliToChainUnits(40000n).toString(),
+      blockTimestamp: Date.now(), solidified: true, raw: { test: 'unresolved' }
+    })
+    const client = await pool.connect()
+    let result
+    try {
+      await client.query('BEGIN')
+      result = await settlement.handleTransfer(client, transfer, { toAddress: ADDRESS })
+      await client.query('COMMIT')
+    } finally { client.release() }
+
+    assert.equal(result.outcome, OUTCOME.SKIPPED_UNRESOLVED)
+    const n = (await pool.query(
+      'SELECT count(*)::int AS n FROM chain_transactions WHERE tx_id=$1', [TXID])).rows[0].n
+    assert.equal(n, 0, '位置未知的事件绝不能落库 —— 落成 eventIndex=0 会把真正的事件 0 挡住')
+  } finally {
+    await pool.query('DELETE FROM chain_transactions WHERE tx_id=$1', [TXID]).catch(() => {})
+    await pool.end()
+  }
 })

@@ -136,18 +136,42 @@ class TronProvider {
   /**
    * 拉取某收款地址在时间窗内的 TRC20 转入。
    *
-   * 契约：
+   * ## 契约
+   *
    *   - 只返回 **转入**（to === toAddress）且 **代币合约匹配** 的记录
-   *   - `fromTimestamp` 含、`toTimestamp` 含
-   *   - 返回的 transfers 已通过 makeTransfer 标准化
-   *   - 结果按 blockTimestamp 升序；`hasMore` 为 true 时调用方用
-   *     `nextFromTimestamp` 继续翻页
+   *   - `fromTimestamp` / `toTimestamp` 是**扫描窗口**（闭区间），不是分页游标
+   *   - 每条 transfer 必须带 `eventIndex`（见下）
+   *   - 结果按 blockTimestamp 升序
    *
-   * **不在这里做订单匹配** —— Provider 只回答"链上发生了什么"。
+   * ## 分页：cursor 是**不透明**的
    *
-   * @returns {Promise<{transfers: object[], hasMore: boolean, nextFromTimestamp: number}>}
+   * `cursor` 与返回的 `nextCursor` 都是**不透明字符串** —— 调用方拿到什么就原样传回，
+   * 不要解析、不要拼装、不要假设它和时间有关。
+   *
+   * 为什么不能拿时间戳当分页游标：一个时间点上可能有多笔交易，
+   * 用"上次扫到的时间"翻页，同一时间戳的记录要么重复要么被跳过。
+   * TronGrid 给的是 `meta.fingerprint`（一个长 base64 串），
+   * 别的 Provider 可能给别的形式 —— 不透明化之后换数据源不用改调用方。
+   *
+   * **时间戳只承担三件事**：扫描窗口、solidified 上界、overlap replay。
+   * 翻页交给 cursor。
+   *
+   * ## eventIndex 为什么必须由 Provider 提供
+   *
+   * 一笔交易**可以包含多个 Transfer 事件**（合约中转、批量转账）。
+   * TronGrid 的账户接口不返回事件序号，所以 Provider 必须从交易回执的
+   * `log[]` 里把真实下标补出来。**返回 null 表示没能确定位置** ——
+   * 调用方必须跳过该条并且不推进游标，绝不能编一个序号顶上。
+   *
+   * @returns {Promise<{
+   *   transfers: object[],
+   *   hasMore: boolean,
+   *   nextCursor: string|null
+   * }>}
    */
-  async listIncomingTransfers(/* { tokenContract, toAddress, fromTimestamp, toTimestamp, limit } */) {
+  async listIncomingTransfers(/* {
+    tokenContract, toAddress, fromTimestamp, toTimestamp, cursor, limit
+  } */) {
     throw new Error('TronProvider.listIncomingTransfers 未实现')
   }
 

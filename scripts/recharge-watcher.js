@@ -44,6 +44,9 @@ const fs = require('fs')
 const os = require('os')
 const path = require('path')
 const config = require('../server/config')
+// ProviderError 在 scanOneAddress 里也要用，必须放模块作用域 ——
+// 放在 main() 里会让 scanOneAddress 抛 ReferenceError（踩过）
+const { ProviderError } = require('../server/services/tron/tron-provider')
 
 const DRY_RUN = process.argv.includes('--dry')
 const STATUS_ONLY = process.argv.includes('--status')
@@ -189,6 +192,12 @@ async function main() {
         if (result.skippedUnsolidified) {
           log(`  ⚠ 跳过 ${result.skippedUnsolidified} 条未最终确认的交易（游标未越过它们）`)
         }
+        if (result.unresolvedEvents) {
+          log(`  ⚠ ${result.unresolvedEvents} 条事件位置未知（回执未取到），已跳过且游标未越过 —— 下轮重试`)
+        }
+        if (result.hasMore) {
+          log('  · 上游还有更多页，本轮未拉完（游标会稳步追上）')
+        }
       } catch (error) {
         record.ok = false
         const code = (error && error.code) || 'UNKNOWN'
@@ -248,9 +257,9 @@ async function main() {
 async function scanOneAddress({ pool, cursor, settlement, provider, address, tokenContract }) {
   const client = await pool.connect()
   const stats = {
-    fetched: 0, processed: 0, inserted: 0, duplicates: 0,
+    fetched: 0, processed: 0, inserted: 0, duplicates: 0, hasMore: false,
     settled: 0, shadowMatched: 0, exceptions: 0,
-    skippedUnsolidified: 0,
+    skippedUnsolidified: 0, unresolvedEvents: 0,
     checkpointFrom: 0, checkpointTo: 0, solidBlock: null
   }
   try {
@@ -276,15 +285,35 @@ async function scanOneAddress({ pool, cursor, settlement, provider, address, tok
 
     const listed = await provider.listIncomingTransfers({
       tokenContract, toAddress: address,
+      // 时间戳只做扫描窗口；翻页交给 Provider 内部的不透明 cursor
       fromTimestamp: window.fromTimestamp, toTimestamp: effectiveTo
     })
+    // ⚠ Provider 内部翻页有上限。**没拉完就绝不能推进游标** ——
+    // 推进到窗口末尾会把尚未拉取的页永久丢掉（那些交易下一轮不会再被看到）。
+    //
+    // 这里选择**抛错而不是静默降级**：正常量级（每轮约 1 分钟的数据）永远碰不到上限；
+    // 真碰到了说明积压远超预期，需要人工把 TRON_MAX_PAGES_PER_SCAN 调大。
+    // 让游标停住 + 每轮报错，比"看起来在跑但实际在丢数据"安全得多。
+    if (listed.hasMore) {
+      throw new ProviderError(
+        `本轮未拉完（已达单轮翻页上限），游标保持不动以免丢单；` +
+        `请调大 TRON_MAX_PAGES_PER_SCAN 或等待下一轮`,
+        { code: 'SCAN_INCOMPLETE', retryable: true })
+    }
+
     const transfers = listed.transfers.slice(0, config.chain.maxTransfersPerScan)
     stats.fetched = transfers.length
+    stats.hasMore = Boolean(listed.hasMore)
 
     // 防御性再筛一次：即使 Provider 给了未确认交易，也不处理、不越过它
     const unsolidified = transfers.filter(t => !t.solidified)
     const processable = transfers.filter(t => t.solidified)
     stats.skippedUnsolidified = unsolidified.length
+
+    // 事件位置未知（交易回执没取到）的同样**不能越过** ——
+    // 越过就等于永久漏掉这一笔，因为下一轮不会再看到它。
+    // 应用层会返回 SKIPPED_UNRESOLVED，这里先记下来用于收窄游标。
+    const unresolved = new Set()
 
     for (const transfer of processable) {
       const result = await settlement.handleTransfer(client, transfer, { toAddress: address })
@@ -293,16 +322,20 @@ async function scanOneAddress({ pool, cursor, settlement, provider, address, tok
       else if (result.outcome === 'SHADOW_MATCHED') stats.shadowMatched += 1
       else if (result.outcome === 'EXCEPTION') stats.exceptions += 1
       else if (result.outcome === 'DUPLICATE') stats.duplicates += 1
+      else if (result.outcome === 'SKIPPED_UNRESOLVED') {
+        stats.unresolvedEvents += 1
+        unresolved.add(transfer.blockTimestamp)
+      }
     }
     // 新增 = 处理过 - 已存在（DUPLICATE 说明这笔之前就落过库）
     stats.inserted = stats.processed - stats.duplicates
 
-    // 游标推到哪：如果有被跳过的未确认交易，**绝不越过它**
-    // （越过就等于把它漏掉，且下一轮不会再看到）
+    // 游标推到哪：只要有**没处理成**的交易（未确认、或事件位置未知），
+    // 就绝不越过最早的它 —— 越过 = 永久漏单
     let advanceTo = effectiveTo
-    if (unsolidified.length) {
-      const earliestSkipped = Math.min(...unsolidified.map(t => t.blockTimestamp))
-      advanceTo = Math.min(advanceTo, earliestSkipped - 1)
+    const blockers = [...unsolidified.map(t => t.blockTimestamp), ...unresolved]
+    if (blockers.length) {
+      advanceTo = Math.min(advanceTo, Math.min(...blockers) - 1)
     }
 
     if (DRY_RUN) {
