@@ -186,7 +186,8 @@ function productionRouter(context) {
     }
     const channel = channels.find(item => item.id === String(data.channelId || '')) || channels[0]
 
-    const order = await repo.transaction(async client => {
+    const { order, originalText, discountText, surchargeText, paidText } =
+      await repo.transaction(async client => {
       const now = new Date()
       // 有效期 30 分钟。到期后金额仍被保护 24 小时（见 recharge-amount-service），
       // 保护期内到账的迟到款会被识别成"原订单的迟到款"而不是新订单的钱。
@@ -205,6 +206,17 @@ function productionRouter(context) {
         now
       })
 
+      // 先把三个金额格式化成文本，插入与响应都复用它们。
+      //
+      // 不要从 mapRow 之后的 order.paidAmount 反推 —— mapRow 会把 numeric
+      // 转成 JS Number（36.157），而 formatMilli 只接受整数毫，
+      // 直接喂进去会抛 `Cannot convert 36.157 to a BigInt`（踩过）。
+      // 精确值只有一份：这里的 milli。
+      const originalText = formatMilli(quote.originalMilli)   // 标准价，不含尾数
+      const discountText = formatMilli(quote.discountMilli)   // 折扣
+      const surchargeText = formatMilli(allocation.suffixMilli) // 尾数（0.001–0.999）
+      const paidText = formatMilli(allocation.amountMilli)    // 实付 = 标准价 − 折扣 + 尾数
+
       const orderNumber = `HP${Date.now()}${crypto.randomInt(100, 999)}`
       const created = await client.query(
         `INSERT INTO recharges(user_id,package_id,order_number,kind,payment_type,quantity,chars,
@@ -213,26 +225,24 @@ function productionRouter(context) {
          VALUES($1,$2,$3,'package',$4,$5,$6,$7,$8,$9,$10,0,$11,$12,$13,$14,$15) RETURNING *`,
         [req.pixUser.parent.id, pack.id, orderNumber, `USDT-${channel.network}`,
           quote.qty, quote.chars,
-          formatMilli(quote.originalMilli),      // 标准价，不含尾数
-          formatMilli(quote.discountMilli),      // 折扣
-          formatMilli(allocation.suffixMilli),   // 尾数（0.001–0.999）
-          formatMilli(allocation.amountMilli),   // 实付 = 标准价 − 折扣 + 尾数
+          originalText, discountText, surchargeText, paidText,
           `recharge:${orderNumber}`,
           expiresAt.toISOString(),
           channel.address,
           USDT_TRC20_CONTRACT,
-          String(allocation.reservationId)], client
-      )
+          String(allocation.reservationId)])
       // 预约先于订单插入（订单要引用它），这里回填归属
       await rechargeAmount.attachToRecharge(client, allocation.reservationId, created.rows[0].id)
 
       // 这里**不写** repo.audit：audit_logs 是「超管操作记录」，
       // 其 admin_id 有指向 admins 表的外键，商户下单写进去会外键冲突。
       // 下单本身在 recharges 表里已有完整记录（时间/金额/状态），足够追溯。
-      return Object.assign(mapRow(created.rows[0]), {
-        _suffixMilli: allocation.suffixMilli,
-        _baseMilli: baseMilli
-      })
+      // 金额文本必须从事务里带出来：它们在回调作用域内，
+      // 直接在外面用会 ReferenceError（踩过）
+      return {
+        order: mapRow(created.rows[0]),
+        originalText, discountText, surchargeText, paidText
+      }
     })
 
     res.json({
@@ -240,12 +250,14 @@ function productionRouter(context) {
       packageTitle: pack.title,
       quantity: order.quantity,
       chars: Number(order.chars),
-      originalAmount: Number(order.originalAmount),
-      discountAmount: Number(order.discountAmount),
-      surchargeAmount: Number(order.surchargeAmount),
-      payAmount: Number(order.paidAmount),
+      // 金额全部用插入时算好的精确文本，不从 mapRow 的 Number 反推
+      originalAmount: originalText,
+      discountAmount: discountText,
+      surchargeAmount: surchargeText,
+      payAmount: paidText,
       // 明确告诉前端尾数是多少，好向商户解释"为什么不是整数"
-      matchSuffix: Number(formatMilli(order._suffixMilli)),
+      matchSuffix: surchargeText,
+      // 从 mapRow 出来的订单行取，不用事务里的局部变量（那个在回调作用域内）
       expiresAt: order.expiresAt,
       expiresInMinutes: RECHARGE_TTL_MINUTES,
       channel: {
@@ -258,7 +270,7 @@ function productionRouter(context) {
       },
       // 金额就是订单标识：链上按"地址 + 合约 + 金额"三者匹配，
       // 所以必须一分不差地转账，多转少转都会进异常池等人工处理
-      expiresHint: `请按 ${formatMilli(order.paidAmount)} USDT 准确转账（金额即订单标识，多付少付都无法自动入账）`
+      expiresHint: `请按 ${paidText} USDT 准确转账（金额即订单标识，多付少付都无法自动入账）`
     })
   }))
 

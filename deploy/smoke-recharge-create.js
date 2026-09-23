@@ -61,6 +61,9 @@ function request(method, urlPath, { body, jar, headers } = {}) {
       let data = ''
       res.on('data', c => { data += c })
       res.on('end', () => {
+        // 必须把响应的 set-cookie 写回 jar —— 否则登录拿到的会话不会带到下一次请求，
+        // 表现为「登录成功但下一个接口 401」
+        if (jar) jar.set(res.headers['set-cookie'])
         let json = null
         try { json = JSON.parse(data) } catch (_e) { /* 保留原文 */ }
         resolve({ status: res.statusCode, json, text: data, headers: res.headers })
@@ -206,7 +209,8 @@ async function main() {
     check('预约状态为 held', resv && resv.state === 'held', resv && resv.state)
     check('预约尾数与订单一致', resv && Number(resv.suffix) === milli(o.matchSuffix),
       { resv: resv && resv.suffix, order: milli(o.matchSuffix) })
-    check('预约金额与订单实付一致', resv && milli(resv.amount_milli) === milli(o.payAmount),
+    // amount_milli 已经是「毫」，直接比，不要再乘 1000
+    check('预约金额与订单实付一致', resv && Number(resv.amount_milli) === milli(o.payAmount),
       { resv: resv && resv.amount_milli, order: o.payAmount })
     check('预约已回填订单归属', resv && String(resv.recharge_id) === String(rechargeId),
       { resv: resv && resv.recharge_id, order: rechargeId })
@@ -241,15 +245,20 @@ async function main() {
   } finally {
     console.log('\n=== 8. 清理（只删本次创建的测试数据）===')
     try {
-      if (rechargeId) {
-        await db.query('UPDATE recharge_amount_reservations SET recharge_id=NULL WHERE recharge_id=$1', [rechargeId])
-        await db.query('DELETE FROM recharges WHERE id=$1', [rechargeId])
-      }
-      if (reservationId) {
-        await db.query('DELETE FROM recharge_amount_reservations WHERE id=$1', [reservationId])
-      }
       if (userId) {
+        // 外键顺序：先解开预约对订单的引用 → 删订单 → 删预约 → 删用户。
+        // recharge_amount_reservations.recharge_id 指向 recharges 且是 RESTRICT，
+        // 顺序错了会报 foreign key constraint（踩过）。
+        await db.query(
+          `UPDATE recharge_amount_reservations SET recharge_id=NULL
+            WHERE recharge_id IN (SELECT id FROM recharges WHERE user_id=$1)`, [userId])
+        const resvIds = (await db.query(
+          `SELECT amount_reservation_id AS id FROM recharges
+            WHERE user_id=$1 AND amount_reservation_id IS NOT NULL`, [userId])).rows.map(r => r.id)
         await db.query('DELETE FROM recharges WHERE user_id=$1', [userId])
+        if (resvIds.length) {
+          await db.query('DELETE FROM recharge_amount_reservations WHERE id = ANY($1::bigint[])', [resvIds])
+        }
         await db.query('DELETE FROM users WHERE id=$1', [userId])
       }
       console.log('  已清理测试订单、预约与测试商户')

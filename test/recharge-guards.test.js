@@ -117,12 +117,15 @@ test('报价改成整数运算后，价格与旧公式逐例一致', async () =>
       const got = await core.quote({ baseid: 1, qty })
       const want = legacyQuote(price, qty)
 
-      assert.equal(got.originalPrice, want.originalPrice,
+      // 展示字段现在是固定 3 位小数的字符串，比价时转成数值再比
+      assert.equal(Number(got.originalPrice), want.originalPrice,
         `${price} × ${qty} 原价变了`)
-      assert.equal(got.paidAmount, want.paidAmount,
+      assert.equal(Number(got.paidAmount), want.paidAmount,
         `${price} × ${qty} 折后价变了（旧 ${want.paidAmount}，新 ${got.paidAmount}）`)
-      assert.equal(got.discountAmount, want.discountAmount,
+      assert.equal(Number(got.discountAmount), want.discountAmount,
         `${price} × ${qty} 折扣额变了`)
+      // 同时确认展示格式统一为 3 位小数
+      assert.match(got.paidAmount, /^\d+\.\d{3}$/, `${price} × ${qty} 展示格式不是 3 位小数`)
     }
   }
 })
@@ -268,4 +271,56 @@ test('折扣百分比展示不算金额运算 —— 守卫要能区分这两者
   assert.doesNotMatch(fold, MONEY_ROUNDING, '折扣展示不该被误判为金额运算')
   // 而真正的金额舍入必须被抓到
   assert.match('const paid = Math.round(originalPrice * rate * 100) / 100', MONEY_ROUNDING)
+})
+
+// ------------------------------- 迁移必须覆盖新代码引用的列（这次真的漏过）
+
+test('所有 recharges 新增列都有对应 migration', () => {
+  const migrationsDir = path.join(root, 'migrations')
+  const allSql = fs.readdirSync(migrationsDir)
+    .filter(f => f.endsWith('.js'))
+    .map(f => fs.readFileSync(path.join(migrationsDir, f), 'utf8'))
+    .join('\n')
+
+  // RC-02 引入、且下单代码会写入的列。
+  // 曾经漏掉 pay_address / pay_token_contract ——
+  // schema 检查才发现，否则部署后下单会直接报"列不存在"。
+  const required = [
+    'surcharge_amount',
+    'expires_at',
+    'terminal_at',
+    'terminal_reason',
+    'amount_reservation_id',
+    'pay_address',
+    'pay_token_contract'
+  ]
+  for (const column of required) {
+    assert.match(allSql, new RegExp(`ADD COLUMN IF NOT EXISTS ${column}\\b`),
+      `没有任何 migration 创建 recharges.${column}`)
+  }
+})
+
+test('下单代码写入的每一列都能在 migration 里找到', () => {
+  const create = routeSource.slice(
+    routeSource.indexOf("router.post('/userRecharge/create'"),
+    routeSource.indexOf("router.get('/team/info'")
+  )
+  const insert = create.slice(create.indexOf('INSERT INTO recharges'), create.indexOf('RETURNING *'))
+  const migrationsDir = path.join(root, 'migrations')
+  const allSql = fs.readdirSync(migrationsDir)
+    .filter(f => f.endsWith('.js'))
+    .map(f => fs.readFileSync(path.join(migrationsDir, f), 'utf8'))
+    .join('\n')
+  const base = fs.readFileSync(path.join(migrationsDir, '001_initial_schema.js'), 'utf8')
+
+  // 从 INSERT 的列清单里逐个提取
+  const columnsPart = insert.slice(insert.indexOf('(') + 1, insert.indexOf(')'))
+  const columns = columnsPart.split(',').map(c => c.trim()).filter(Boolean)
+  assert.ok(columns.length > 10, '列清单没解析出来')
+  for (const column of columns) {
+    const inBase = new RegExp(`\\b${column}\\b`).test(base)
+    const inNew = new RegExp(`ADD COLUMN IF NOT EXISTS ${column}\\b`).test(allSql)
+    assert.ok(inBase || inNew,
+      `下单写入的列 ${column} 既不在建表语句里，也没有 migration 添加`)
+  }
 })

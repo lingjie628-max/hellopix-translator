@@ -156,10 +156,10 @@ class CoreService {
 
     return {
       qty, rate,
-      // 展示用（Number）—— 不要拿这三个去做金额运算
-      originalPrice: Number(formatMilli(originalMilli)),
-      paidAmount: Number(formatMilli(paidMilli)),
-      discountAmount: Number(formatMilli(discountMilli)),
+      // 展示用（固定 3 位小数的字符串，与订单接口同形）—— 不要拿这三个去做金额运算
+      originalPrice: formatMilli(originalMilli),
+      paidAmount: formatMilli(paidMilli),
+      discountAmount: formatMilli(discountMilli),
       // 精确值（字符串形式的 milli 整数）—— 金额运算一律用这三个
       originalMilli: originalMilli.toString(),
       paidMilli: paidMilli.toString(),
