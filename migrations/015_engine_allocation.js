@@ -46,8 +46,8 @@ exports.up = pgm => {
     SELECT p.id, m.engine_id
     FROM (
       VALUES
-        ('basic', 'baidu'), ('basic', 'niutrans'),
-        ('advanced', 'baidu'), ('advanced', 'niutrans'),
+        ('basic', 'niutrans'),
+        ('advanced', 'niutrans'),
         ('advanced', 'google'), ('advanced', 'gemini'), ('advanced', 'deepseek')
     ) AS m(package_code, engine_id)
     JOIN packages p ON p.code = m.package_code
@@ -82,8 +82,8 @@ exports.down = pgm => {
     SELECT p.id, m.engine_id
     FROM (
       VALUES
-        ('basic', 'baidu'), ('basic', 'niutrans'), ('basic', 'google'),
-        ('advanced', 'baidu'), ('advanced', 'niutrans'), ('advanced', 'google'), ('advanced', 'gemini')
+        ('basic', 'niutrans'), ('basic', 'google'),
+        ('advanced', 'niutrans'), ('advanced', 'google'), ('advanced', 'gemini')
     ) AS m(package_code, engine_id)
     JOIN packages p ON p.code = m.package_code
     ON CONFLICT (package_id, engine_id) DO NOTHING;

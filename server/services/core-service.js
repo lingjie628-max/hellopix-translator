@@ -4,6 +4,7 @@ const crypto = require('crypto')
 const defaultTranslator = require('./translation-provider')
 const platforms = require('../../desktop/platforms')
 const { ApiError } = require('../lib/http')
+const { toMilli, formatMilli } = require('../lib/money')
 const { mapRow, mapRows } = require('../repositories/production-repository')
 const { RedisTranslationCache, RedisShareGrantStore } = require('../stores')
 const catalog = require('../lib/client-catalog')
@@ -117,17 +118,52 @@ class CoreService {
     })
   }
 
+  /**
+   * 报价。
+   *
+   * ## 为什么内部改成整数运算（RC-02）
+   *
+   * 原实现是 `Math.round(originalPrice * rate * 100) / 100` —— 全程 JS 浮点。
+   * 金额上浮点误差不可接受：`pack.price` 从库里读出来是字符串，
+   * `number()` 一转就进了浮点世界，之后的每一次乘除都可能带误差。
+   * 而 RC-02 要拿报价去和链上金额做**相等比较**，差 1e-15 就匹配不上。
+   *
+   * 现在：价格与折扣都用 milli-USDT 整数算，**只有展示字段才转回 Number**。
+   *
+   * ## 两套字段并存是有意的
+   *
+   *   originalPrice / paidAmount / discountAmount   Number，仅供展示
+   *   originalMilli / paidMilli / discountMilli     字符串，金额运算只能用这三个
+   *
+   * 前端已经在用 Number 那组渲染，贸然改类型会连带改一片页面；
+   * 而把精确值单列出来，调用方想用错都难 —— 名字里带 Milli 的一眼就知道是整数毫。
+   */
   async quote(data) {
     const pack = await this.repo.package(data.baseid || data.id)
     if (!pack) throw new ApiError(404, '套餐不存在', 'PACKAGE_NOT_FOUND')
     const qty = Math.max(1, Math.floor(number(data.month || data.qty, 1)))
     const discounts = setting(await this.repo.settings(), 'billing.discounts', {})
     const rate = number(discounts[qty >= 50 ? '50' : (qty >= 10 ? '10' : '1')], qty >= 50 ? 0.75 : (qty >= 10 ? 0.8 : 0.9))
-    const originalPrice = number(pack.price) * qty
-    const paidAmount = Math.round(originalPrice * rate * 100) / 100
+
+    // pack.price 是 numeric(14,2)，pg 返回字符串 —— 直接进整数世界，不经过 Number
+    const priceMilli = toMilli(pack.price)
+    const originalMilli = priceMilli * BigInt(qty)
+    // 折扣率来自后台配置，本身是浮点。在这里**一次性**转成百万分之一整数，
+    // 之后全程整数乘除。rate 是配置而非逐单金额，这一次转换是可控且确定的。
+    const rateMicro = BigInt(Math.round(rate * 1_000_000))
+    const paidMilli = (originalMilli * rateMicro + 500_000n) / 1_000_000n  // 四舍五入
+    const discountMilli = originalMilli - paidMilli
+
     return {
-      qty, rate, originalPrice, paidAmount,
-      discountAmount: Math.round((originalPrice - paidAmount) * 100) / 100,
+      qty, rate,
+      // 展示用（Number）—— 不要拿这三个去做金额运算
+      originalPrice: Number(formatMilli(originalMilli)),
+      paidAmount: Number(formatMilli(paidMilli)),
+      discountAmount: Number(formatMilli(discountMilli)),
+      // 精确值（字符串形式的 milli 整数）—— 金额运算一律用这三个
+      originalMilli: originalMilli.toString(),
+      paidMilli: paidMilli.toString(),
+      discountMilli: discountMilli.toString(),
       subQuotaAdded: qty,
       chars: number(pack.includedChars) * qty
     }

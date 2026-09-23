@@ -10,6 +10,8 @@ const captcha = require('../lib/captcha')
 const { encryptSecret, credentialsKeyReady, KEY_ENV } = require('../lib/credentials')
 const { providers, channelStatus } = require('../services/translation-provider')
 const { AdminTotpService } = require('../services/admin-totp-service')
+const { RechargeAmountService } = require('../services/recharge-amount-service')
+const { parseMilli, formatMilli } = require('../lib/money')
 const { validTronAddress, normalizeTronAddress } = require('../lib/tron-address')
 const { objectSetting, readAlertTo, setting: settingOf } = require('../lib/mailer')
 
@@ -58,6 +60,8 @@ function productionRouter(context) {
 
   // 超管两步验证
   const adminTotp = new AdminTotpService(repo, core.redis)
+  // 充值金额预约：随机尾数分配 + 24 小时复用保护（RC-02）
+  const rechargeAmount = new RechargeAmountService()
   // 第二步的限流按来源 IP：票据本身还有尝试次数上限，两层叠加
   const adminTotpLimit = limit('admin-totp-ip', 20, 15 * 60_000)
   // 动态码/密钥相关操作只可能在已登录会话里发生，给个宽松上限防脚本刷
@@ -182,34 +186,52 @@ function productionRouter(context) {
     const channel = channels.find(item => item.id === String(data.channelId || '')) || channels[0]
 
     const order = await repo.transaction(async client => {
-      // 挑一个当前待支付订单没在用的尾数
-      const pending = await repo.query(
-        "SELECT paid_amount FROM recharges WHERE status=0 AND created_at > now() - interval '7 days'",
-        [], client
-      )
-      const used = new Set(pending.rows.map(row => Number(row.paidAmount).toFixed(2)))
-      let suffix = 0
-      for (let i = 0; i < 200; i++) {
-        const candidate = crypto.randomInt(1, 100) / 100
-        if (!used.has((quote.paidAmount + candidate).toFixed(2))) { suffix = candidate; break }
-      }
-      const round2 = value => Math.round(value * 100) / 100
-      const paidAmount = round2(quote.paidAmount + suffix)
-      const originalAmount = round2(quote.originalPrice + suffix)
-      const orderNumber = `HP${Date.now()}${crypto.randomInt(100, 999)}`
+      const now = new Date()
+      // 有效期 30 分钟。到期后金额仍被保护 24 小时（见 recharge-amount-service），
+      // 保护期内到账的迟到款会被识别成"原订单的迟到款"而不是新订单的钱。
+      const expiresAt = new Date(now.getTime() + RECHARGE_TTL_MINUTES * 60 * 1000)
 
-      const created = await repo.query(
+      // 金额全部走 milli-USDT 整数，**不经过任何浮点**。
+      // quote.paidMilli 是折后价（字符串形式的毫），尾数直接加在整数上。
+      // 注意用 parseMilli 而不是 toMilli：paidMilli 已经是「毫」，
+      // 用 toMilli 会再乘 1000，订单金额静默放大一千倍（踩过）
+      const baseMilli = parseMilli(quote.paidMilli)
+      const allocation = await rechargeAmount.allocate(client, {
+        payAddress: channel.address,
+        tokenContract: USDT_TRC20_CONTRACT,
+        baseAmountMilli: baseMilli,
+        expiresAt,
+        now
+      })
+
+      const orderNumber = `HP${Date.now()}${crypto.randomInt(100, 999)}`
+      const created = await client.query(
         `INSERT INTO recharges(user_id,package_id,order_number,kind,payment_type,quantity,chars,
-         original_amount,discount_amount,paid_amount,status,idempotency_key)
-         VALUES($1,$2,$3,'package',$4,$5,$6,$7,$8,$9,0,$10) RETURNING *`,
+         original_amount,discount_amount,surcharge_amount,paid_amount,status,idempotency_key,
+         expires_at,pay_address,pay_token_contract,amount_reservation_id)
+         VALUES($1,$2,$3,'package',$4,$5,$6,$7,$8,$9,$10,0,$11,$12,$13,$14,$15) RETURNING *`,
         [req.pixUser.parent.id, pack.id, orderNumber, `USDT-${channel.network}`,
-          quote.qty, quote.chars, originalAmount, quote.discountAmount, paidAmount,
-          `recharge:${orderNumber}`], client
+          quote.qty, quote.chars,
+          formatMilli(quote.originalMilli),      // 标准价，不含尾数
+          formatMilli(quote.discountMilli),      // 折扣
+          formatMilli(allocation.suffixMilli),   // 尾数（0.001–0.999）
+          formatMilli(allocation.amountMilli),   // 实付 = 标准价 − 折扣 + 尾数
+          `recharge:${orderNumber}`,
+          expiresAt.toISOString(),
+          channel.address,
+          USDT_TRC20_CONTRACT,
+          String(allocation.reservationId)], client
       )
+      // 预约先于订单插入（订单要引用它），这里回填归属
+      await rechargeAmount.attachToRecharge(client, allocation.reservationId, created.rows[0].id)
+
       // 这里**不写** repo.audit：audit_logs 是「超管操作记录」，
       // 其 admin_id 有指向 admins 表的外键，商户下单写进去会外键冲突。
       // 下单本身在 recharges 表里已有完整记录（时间/金额/状态），足够追溯。
-      return mapRow(created.rows[0])
+      return Object.assign(mapRow(created.rows[0]), {
+        _suffixMilli: allocation.suffixMilli,
+        _baseMilli: baseMilli
+      })
     })
 
     res.json({
@@ -219,11 +241,23 @@ function productionRouter(context) {
       chars: Number(order.chars),
       originalAmount: Number(order.originalAmount),
       discountAmount: Number(order.discountAmount),
+      surchargeAmount: Number(order.surchargeAmount),
       payAmount: Number(order.paidAmount),
       // 明确告诉前端尾数是多少，好向商户解释"为什么不是整数"
-      matchSuffix: Math.round((Number(order.paidAmount) - quote.paidAmount) * 100) / 100,
-      channel: { id: channel.id, name: channel.name, network: channel.network, address: channel.address, note: channel.note },
-      expiresHint: '请按此金额准确转账，金额即订单标识'
+      matchSuffix: Number(formatMilli(order._suffixMilli)),
+      expiresAt: order.expiresAt,
+      expiresInMinutes: RECHARGE_TTL_MINUTES,
+      channel: {
+        id: channel.id,
+        name: channel.name,
+        network: channel.network,
+        address: channel.address,
+        tokenContract: USDT_TRC20_CONTRACT,
+        note: channel.note
+      },
+      // 金额就是订单标识：链上按"地址 + 合约 + 金额"三者匹配，
+      // 所以必须一分不差地转账，多转少转都会进异常池等人工处理
+      expiresHint: `请按 ${formatMilli(order.paidAmount)} USDT 准确转账（金额即订单标识，多付少付都无法自动入账）`
     })
   }))
 
@@ -1300,6 +1334,20 @@ function productionRouter(context) {
   // 收款渠道默认值。只支持 TRC20 USDT：
   // 跨境客户用不了微信/支付宝，TRC20 手续费低（约 $1-3）、无拒付。
   const PAYMENT_NETWORKS = { TRC20: 'TRC20（波场）' }
+
+  /**
+   * TRC20 USDT 官方合约地址。
+   *
+   * **故意写成常量而不是后台配置项**：链上叫 "USDT" 的仿盘合约有很多，
+   * 转进来同样数量但一文不值。把它做成可编辑的输入框，
+   * 等于给"手滑改成仿盘合约"留了一扇门，而那种错误要到对账时才会发现。
+   * 真需要换合约时改代码、走一次评审，比在后台点一下安全得多。
+   */
+  const USDT_TRC20_CONTRACT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'
+
+  /** 充值订单有效期（分钟）。到期后不再接受自动匹配，迟到款进异常池。 */
+  const RECHARGE_TTL_MINUTES = 30
+
   const PAYMENT_DEFAULTS = [
     { id: 'usdt-trc20', name: 'USDT', network: 'TRC20', address: '', note: '', enabled: 0 }
   ]
@@ -1335,6 +1383,8 @@ function productionRouter(context) {
           name: String(saved.name || item.name),
           network: 'TRC20',
           address: normalizeTronAddress(saved.address),
+          // 合约地址跟着渠道一起下发，下单时快照进订单 —— 只认这一个合约
+          tokenContract: USDT_TRC20_CONTRACT,
           note: String(saved.note || ''),
           enabled: Number(saved.enabled) ? 1 : 0
         })
