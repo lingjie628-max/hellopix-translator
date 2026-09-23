@@ -182,3 +182,90 @@ test('报价对非法价格文本会拒绝，而不是静默算出一个数', as
   const core = new CoreService(fakeRepo('not-a-price', 1500000), fakeRedis(), null, {})
   await assert.rejects(() => core.quote({ baseid: 1, qty: 1 }), /金额格式不合法/)
 })
+
+// ------------------------------------------ 前端不得自行计算应付金额（Phase 1 决策 2）
+
+/**
+ * 剥掉注释再检查。
+ *
+ * 否则解释性注释里写的"旧代码长这样"会把守卫自己触发 ——
+ * 我第一版就踩了：注释里引用 `Number(pack.price) * qty` 导致测试误报。
+ * 守卫要盯的是**实际执行的代码**，不是文档。
+ */
+function stripComments(text) {
+  return text
+    .replace(/\/\*[\s\S]*?\*\//g, '')   // /* ... */
+    .replace(/<!--[\s\S]*?-->/g, '')        // <!-- ... -->
+    .replace(/(^|[^:])\/\/.*$/gm, '$1')     // // ...（避开 https://）
+}
+
+const rechargePageRaw = fs.readFileSync(
+  path.join(root, 'src/components/user/UserRechargePage.vue'), 'utf8')
+const rechargePage = stripComments(rechargePageRaw)
+
+/**
+ * 金额运算的特征：**除以 100 的舍入**。
+ * 注意与「折扣百分比格式化」区分 —— 后者是 `Math.round(x * 100) / 10`（除以 10 得折数），
+ * 属于展示，不涉及金额。所以这里必须连除数一起匹配。
+ */
+const MONEY_ROUNDING = /Math\.round\([^)]*\*\s*100\s*\)\s*\/\s*100/
+
+test('充值页不再自行报价：删掉了本地浮点公式', () => {
+  assert.doesNotMatch(rechargePage, /Number\(pack\.price/,
+    '前端不该再读 pack.price 做运算')
+  assert.doesNotMatch(rechargePage, MONEY_ROUNDING,
+    '前端不该再做「乘 100 取整再除 100」这类金额运算')
+  assert.doesNotMatch(rechargePage, /selectedPack/,
+    'selectedPack 计算属性只是旧报价逻辑的附属，应一并删除')
+  assert.doesNotMatch(rechargePage, /toFixed\(2\)/, '前端不该对金额做 toFixed(2)')
+})
+
+test('充值页改为向服务端要报价，服务端是唯一真源', () => {
+  assert.match(rechargePage, /getRequest\('\/user\/quote'/, '必须调用服务端报价接口')
+  assert.match(rechargePage, /quote:\s*\{\s*originalPrice:\s*null/, 'quote 应是展示用的数据字段')
+})
+
+test('前端只展示服务端返回的金额字段，不重新计算', () => {
+  assert.match(rechargePage, /quote\.paidAmount/)
+  assert.match(rechargePage, /quote\.discountAmount/)
+  assert.doesNotMatch(rechargePage, /\+\s*suffix|suffix\s*\+/, '前端不得自行拼装尾数')
+  assert.doesNotMatch(rechargePage, /parseFloat/, '前端不得使用 parseFloat')
+})
+
+test('报价请求做了防抖与过期响应丢弃', () => {
+  assert.match(rechargePage, /quoteSeq/, '需要请求序号来丢弃过期响应')
+  assert.match(rechargePage, /seq !== this\.quoteSeq/, '过期响应必须被丢弃')
+  assert.match(rechargePage, /setTimeout\(/, '需要防抖，避免数量输入每敲一下打一个请求')
+})
+
+test('报价未就绪时不允许下单', () => {
+  const onSubmit = rechargePage.slice(rechargePage.indexOf('onSubmit()'))
+  assert.match(onSubmit, /quote\.paidAmount === null/, '报价没到手就不该让用户提交订单')
+})
+
+test('全前端不得出现浮点金额运算', () => {
+  const dir = path.join(root, 'src')
+  const offenders = []
+  const walk = current => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name)
+      if (entry.isDirectory()) { walk(full); continue }
+      if (!/\.(vue|js)$/.test(entry.name)) continue
+      const text = stripComments(fs.readFileSync(full, 'utf8'))
+      const rel = path.relative(root, full)
+      if (MONEY_ROUNDING.test(text)) offenders.push(`${rel} → Math.round(x * 100) / 100`)
+      if (/parseFloat/.test(text)) offenders.push(`${rel} → parseFloat`)
+    }
+  }
+  walk(dir)
+  assert.deepEqual(offenders, [],
+    '前端出现了浮点金额运算：\n' + offenders.join('\n'))
+})
+
+test('折扣百分比展示不算金额运算 —— 守卫要能区分这两者', () => {
+  // 这是允许保留的：把 0.9 显示成「9折」，除数是 10 不是 100
+  const fold = 'return (Math.round(Number(n || 0) * 100) / 10) + \'折\''
+  assert.doesNotMatch(fold, MONEY_ROUNDING, '折扣展示不该被误判为金额运算')
+  // 而真正的金额舍入必须被抓到
+  assert.match('const paid = Math.round(originalPrice * rate * 100) / 100', MONEY_ROUNDING)
+})

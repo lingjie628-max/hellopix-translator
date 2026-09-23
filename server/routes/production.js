@@ -11,6 +11,7 @@ const { encryptSecret, credentialsKeyReady, KEY_ENV } = require('../lib/credenti
 const { providers, channelStatus } = require('../services/translation-provider')
 const { AdminTotpService } = require('../services/admin-totp-service')
 const { RechargeAmountService } = require('../services/recharge-amount-service')
+const { STATUS: RECHARGE_STATUS, assertTransition } = require('../services/recharge-state')
 const { parseMilli, formatMilli } = require('../lib/money')
 const { validTronAddress, normalizeTronAddress } = require('../lib/tron-address')
 const { objectSetting, readAlertTo, setting: settingOf } = require('../lib/mailer')
@@ -862,10 +863,14 @@ function productionRouter(context) {
       const order = mapRow(found.rows[0])
       if (!order) throw new ApiError(404, '订单不存在', 'RECHARGE_NOT_FOUND')
 
-      if (Number(order.status) === 1) {
+      if (Number(order.status) === RECHARGE_STATUS.PAID) {
         // 已经确认过了：不重复加字符，也不报错（运维可能重复点了或刷新后重提）
         return { order, alreadyPaid: true }
       }
+      // 状态机把关：pending(0) 与 exception(4) 可以入账；
+      // expired(2) / cancelled(3) 是终态，不能直接改成已支付 ——
+      // 过期后收到的钱走异常池，而不是把历史改写成"没过期"。
+      assertTransition(Number(order.status), RECHARGE_STATUS.PAID)
 
       // 链上交易号重复 = 同一笔钱想充两次，交给唯一索引拦下并给出明确文案
       if (txId) {
@@ -879,11 +884,19 @@ function productionRouter(context) {
       }
 
       await repo.adjustChars(client, 'main', order.userId, Number(order.chars))
+      // terminal_at 必须一起写：021 的 recharges_terminal_consistency_check
+      // 要求「非 pending 一定有终态时间」，只改 status 会被约束直接拒绝
       await repo.query(
-        `UPDATE recharges SET status=1,paid_at=NOW(),provider_transaction_id=COALESCE(NULLIF($2,''),provider_transaction_id),
-         updated_at=NOW() WHERE id=$1`,
-        [id, txId], client
+        `UPDATE recharges
+            SET status=$2::smallint, paid_at=NOW(),
+                terminal_at=NOW(), terminal_reason='settled',
+                provider_transaction_id=COALESCE(NULLIF($3,''),provider_transaction_id),
+                updated_at=NOW()
+          WHERE id=$1`,
+        [id, RECHARGE_STATUS.PAID, txId], client
       )
+      // 订单进终态 → 金额进入 24 小时保护期，防止迟到款错配到新订单
+      await rechargeAmount.extendProtection(client, found.rows[0].amount_reservation_id, new Date())
       await repo.audit(client, req.pixAdmin, '确认收款',
         `${order.orderNumber} +${order.chars} 字符${txId ? ' tx:' + txId : ''}`, req.ip,
         { type: 'user', id: order.userId })

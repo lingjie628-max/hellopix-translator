@@ -30,8 +30,13 @@
       </div>
       <div class="pay-row">
         <span>订单总计</span>
-        <b class="total">{{ currencySymbol }} {{ quote.paidAmount }}</b>
-        <span v-if="quote.discountAmount" class="off">已优惠 {{ currencySymbol }} {{ quote.discountAmount }}</span>
+        <!-- 金额全部来自服务端报价，前端只做展示 -->
+        <template v-if="quote.paidAmount !== null && quote.paidAmount !== undefined">
+          <b class="total">{{ currencySymbol }} {{ quote.paidAmount }}</b>
+          <span v-if="quote.discountAmount" class="off">已优惠 {{ currencySymbol }} {{ quote.discountAmount }}</span>
+        </template>
+        <span v-else-if="quoteError" class="warn">{{ quoteError }}</span>
+        <span v-else class="hint">报价中…</span>
       </div>
       <p class="warn">注意：如果购买版本与当前使用版本不一致，充值成功后当前版本字符余额会按规则折算成充值版本字符。</p>
       <el-button type="primary" style="width: 180px" :loading="submitting"
@@ -94,6 +99,17 @@ export default {
       order: null,
       qrSvg: '',
       submitting: false,
+      // 报价**全部来自服务端**。前端不再自己算价格 ——
+      // 曾经这里有一份和 core-service 平行的浮点公式
+      // （Number(pack.price) * qty，再 Math.round(x*100)/100），
+      // 三处实现迟早会分叉，而分叉的表现是"页面显示 35，实际扣 35.427"。
+      // 现在服务端是唯一真源，这里只放展示值。
+      quote: { originalPrice: null, discountAmount: null, paidAmount: null },
+      quoteLoading: false,
+      quoteError: '',
+      // 报价请求序号：数量快速增减时只认最后一次响应，避免旧结果覆盖新结果
+      quoteSeq: 0,
+      quoteTimer: null,
       form: {
         id: '',
         month: 1,
@@ -101,25 +117,9 @@ export default {
       }
     }
   },
-  computed: {
-    selectedPack() {
-      return this.version.find(p => String(p.id) === String(this.form.id)) || null
-    },
-    quote() {
-      const pack = this.selectedPack
-      const qty = Math.max(1, Number(this.form.month) || 1)
-      if (!pack) {
-        return { originalPrice: 0, discountAmount: 0, paidAmount: '0.00' }
-      }
-      const rate = qty >= 50 ? this.discount50 : (qty >= 10 ? this.discount10 : this.discount1)
-      const originalPrice = Number(pack.price || 0) * qty
-      const paidAmount = Math.round(originalPrice * rate * 100) / 100
-      return {
-        originalPrice: originalPrice,
-        discountAmount: Math.round((originalPrice - paidAmount) * 100) / 100,
-        paidAmount: paidAmount.toFixed(2)
-      }
-    }
+  watch: {
+    'form.id'() { this.loadQuote() },
+    'form.month'() { this.loadQuote() }
   },
   mounted() {
     this.getRequest('/userVersion/getUserVersion').then(resp => {
@@ -138,8 +138,49 @@ export default {
   },
   beforeDestroy() {
     if (this.timer) clearInterval(this.timer)
+    if (this.quoteTimer) clearTimeout(this.quoteTimer)
   },
   methods: {
+    /**
+     * 向服务端要报价。
+     *
+     * 防抖 200ms + 序号丢弃过期响应：数量输入框每敲一下都会触发，
+     * 不防抖会打出一串请求；不做序号校验则可能「先发的慢响应」后到，
+     * 把新数量的价格覆盖成旧价格的。
+     */
+    loadQuote() {
+      if (this.quoteTimer) clearTimeout(this.quoteTimer)
+      const baseid = this.form.id
+      if (!baseid) {
+        this.quote = { originalPrice: null, discountAmount: null, paidAmount: null }
+        this.quoteError = ''
+        return
+      }
+      this.quoteLoading = true
+      this.quoteTimer = setTimeout(() => {
+        const seq = ++this.quoteSeq
+        const qty = Math.max(1, Number(this.form.month) || 1)
+        this.getRequest('/user/quote', { baseid, qty }).then(resp => {
+          // 过期响应直接丢掉，不能让旧价格覆盖新价格
+          if (seq !== this.quoteSeq) return
+          this.quoteLoading = false
+          if (!resp || !resp.data) { this.quoteError = '报价失败，请重试'; return }
+          const d = resp.data
+          this.quoteError = ''
+          // 只做展示格式化，**不重新计算业务金额**
+          this.quote = {
+            originalPrice: d.originalPrice,
+            discountAmount: d.discountAmount,
+            paidAmount: d.paidAmount
+          }
+        }).catch(() => {
+          if (seq !== this.quoteSeq) return
+          this.quoteLoading = false
+          this.quoteError = '报价失败，请重试'
+          this.quote = { originalPrice: null, discountAmount: null, paidAmount: null }
+        })
+      }, 200)
+    },
     /** 复制到剪贴板。加密地址复制错一位就是资金损失，所以尽量走剪贴板而不是手抄 */
     copy(text) {
       const value = String(text || '')
@@ -194,6 +235,10 @@ export default {
     onSubmit() {
       if (this.submitting) return
       if (!this.form.id) { this.$message.warning('请先选择套餐'); return }
+      // 报价没就绪就不让下单：金额以服务端为准，本地没有可依据的价格
+      if (this.quote.paidAmount === null || this.quote.paidAmount === undefined) {
+        this.$message.warning(this.quoteError || '报价尚未就绪，请稍候'); return
+      }
       if (!this.channels.length) { this.$message.warning('收款方式尚未配置，请联系客服'); return }
       this.submitting = true
       this.postRequest('/userRecharge/create', {

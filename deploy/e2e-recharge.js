@@ -136,6 +136,14 @@ async function main() {
   const merchantJar = makeJar()
   let userId = null
 
+  // 这个脚本会临时改写 payment.channels 来测"地址校验"和"未启用时拒绝下单"。
+  // 原实现结束时直接 DELETE 这条配置 —— 在生产上跑一次就等于把管理员
+  // 配好的真实收款地址抹掉，而收款地址丢失意味着用户没法付款。
+  // 现在：先快照，结束时原样还原；快照为空才删。
+  const channelSnapshot = (await db.query(
+    "SELECT value FROM app_settings WHERE key='payment.channels'")).rows[0]
+  const originalChannels = channelSnapshot ? JSON.stringify(channelSnapshot.value) : null
+
   try {
     // ---------- 超管登录 ----------
     const adminLogin = await login(adminJar, 'pix', adminPass, totpSecret)
@@ -185,8 +193,49 @@ async function main() {
     check('创建充值订单', order1.status === 200 && !!o1.orderNum, o1.orderNum || order1.text.slice(0, 80))
     check('订单带唯一匹配尾数', Number(o1.matchSuffix) > 0, `尾数 ${o1.matchSuffix}`)
     check('订单返回收款地址', o1.channel && o1.channel.address === GOOD_ADDRESS, o1.channel && o1.channel.address)
-    check('转账金额 = 原价+尾数', Math.abs((o1.payAmount - o1.matchSuffix) - (o1.originalAmount - o1.discountAmount - o1.matchSuffix)) < 0.001,
-      `${o1.payAmount} USDT`)
+
+    // RC-02：金额恒等式改为 实付 = 标准价 − 折扣 + 尾数。
+    // 旧断言是「实付 = 标准价 − 折扣」，加尾数后必然不成立。
+    const milli = v => Math.round(Number(v) * 1000)
+    check('尾数落在 0.001–0.999',
+      milli(o1.matchSuffix) >= 1 && milli(o1.matchSuffix) <= 999,
+      `尾数 ${o1.matchSuffix}`)
+    check('金额恒等式：实付 = 标准价 − 折扣 + 尾数',
+      milli(o1.payAmount) === milli(o1.originalAmount) - milli(o1.discountAmount) + milli(o1.surchargeAmount),
+      `${o1.originalAmount} − ${o1.discountAmount} + ${o1.surchargeAmount} ≠ ${o1.payAmount}`)
+    check('surchargeAmount 与 matchSuffix 一致',
+      milli(o1.surchargeAmount) === milli(o1.matchSuffix),
+      `${o1.surchargeAmount} vs ${o1.matchSuffix}`)
+    check('订单返回有效期（约 30 分钟）', (() => {
+      if (!o1.expiresAt) return false
+      const left = (new Date(o1.expiresAt).getTime() - Date.now()) / 60000
+      return left > 25 && left <= 30
+    })(), o1.expiresAt)
+    check('订单快照了代币合约', o1.channel && o1.channel.tokenContract === USDT_CONTRACT,
+      o1.channel && o1.channel.tokenContract)
+
+    // ---------- 落库字段检查（冒烟测试的核心）----------
+    const dbOrder = (await db.query(
+      `SELECT original_amount, discount_amount, surcharge_amount, paid_amount,
+              expires_at, pay_address, pay_token_contract, amount_reservation_id, status
+         FROM recharges WHERE order_number=$1`, [o1.orderNum])).rows[0]
+    check('surcharge_amount 已落库', milli(dbOrder.surcharge_amount) === milli(o1.surchargeAmount),
+      dbOrder.surcharge_amount)
+    check('paid_amount 三位精度未被截断',
+      String(dbOrder.paid_amount).split('.')[1] && String(dbOrder.paid_amount).split('.')[1].length <= 3,
+      dbOrder.paid_amount)
+    check('pay_address 快照已落库', dbOrder.pay_address === GOOD_ADDRESS, dbOrder.pay_address)
+    check('pay_token_contract 快照已落库', dbOrder.pay_token_contract === USDT_CONTRACT,
+      dbOrder.pay_token_contract)
+    check('expires_at 已落库', !!dbOrder.expires_at, dbOrder.expires_at)
+    check('amount_reservation_id 已关联', !!dbOrder.amount_reservation_id, dbOrder.amount_reservation_id)
+    const reservation = dbOrder.amount_reservation_id
+      ? (await db.query('SELECT state, suffix FROM recharge_amount_reservations WHERE id=$1',
+        [dbOrder.amount_reservation_id])).rows[0]
+      : null
+    check('金额预约处于 held 且尾数一致',
+      !!reservation && reservation.state === 'held' && Number(reservation.suffix) === milli(o1.matchSuffix),
+      reservation)
 
     // ---------- 商户不能自己加字符 ----------
     const selfGrant = await request('POST', '/apis/admin/translate/grant', {
@@ -258,13 +307,22 @@ async function main() {
         await db.query("DELETE FROM audit_logs WHERE resource_type='user' AND resource_id=$1", [String(userId)])
         await db.query('DELETE FROM users WHERE id=$1', [userId])
       }
-      await db.query("DELETE FROM app_settings WHERE key='payment.channels'")
+      // 还原收款配置：有快照就写回原值，没快照才删
+      if (originalChannels === null) {
+        await db.query("DELETE FROM app_settings WHERE key='payment.channels'")
+      } else {
+        await db.query(
+          `INSERT INTO app_settings(key,value,description) VALUES('payment.channels',$1::jsonb,'收款渠道')
+           ON CONFLICT (key) DO UPDATE SET value=$1::jsonb`,
+          [originalChannels]
+        )
+      }
+      console.log('  收款配置已还原:', originalChannels === null ? '(原本就没有)' : '已恢复原值')
     } catch (e) {
       console.log('  清理时出错（请手动检查）:', e.message)
     }
     await db.end()
   }
-
   const passed = results.filter(r => r.ok).length
   console.log(`\n  ${passed}/${results.length} 项通过`)
   if (passed !== results.length) process.exitCode = 1
