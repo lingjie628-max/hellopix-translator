@@ -2,6 +2,7 @@ import axios from 'axios'
 import { Message } from 'element-ui'
 import router from '../router'
 import store from '../store'
+import { encodeForm } from './encode-form'
 
 axios.defaults.baseURL = '/apis'
 axios.defaults.withCredentials = true
@@ -28,22 +29,8 @@ axios.interceptors.request.use(config => {
   return config
 })
 
-function encodeForm(data) {
-  if (!data) return ''
-  const parts = []
-  Object.keys(data).forEach(key => {
-    const value = data[key]
-    if (value === undefined || value === null) return
-    if (Array.isArray(value)) {
-      parts.push(encodeURIComponent(key) + '=' + encodeURIComponent(value.join(',')))
-    } else if (typeof value === 'object') {
-      parts.push(encodeURIComponent(key) + '=' + encodeURIComponent(JSON.stringify(value)))
-    } else {
-      parts.push(encodeURIComponent(key) + '=' + encodeURIComponent(value))
-    }
-  })
-  return parts.join('&')
-}
+// encodeForm 见 ./encode-form.js —— 抽出去是为了能单测（数组里放对象曾把
+// 收款方式页的保存打成「提交的数据不是合法 JSON」）
 
 axios.interceptors.response.use(
   success => success,
