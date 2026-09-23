@@ -12,7 +12,7 @@
  * ## 顺带修掉的一个真 bug
  *
  * 原实现读的是 `settings.mail.alertTo` / `settings.mail.smtp`（**嵌套**），
- * 而 `repo.settings()` 返回的是**扁平点号键** `'mail.alertTo'` / `'mail.smtp'`。
+ * 而 `repo.settings()` 返回的是**扁平点号键** `'mail.alert_to'` / `'mail.smtp'`。
  * 结果是收件人永远取不到，每次都走「告警无法送达」分支 ——
  * **告警从来没发出去过**。这和邮件服务那个 bug 是同一类错误。
  *
@@ -48,10 +48,10 @@ function shouldAlert(key, state, silenceHours) {
   return Date.now() - last > hours * 3600 * 1000
 }
 
-/** 取告警收件地址：优先 mail.alertTo，退回发件地址 */
+/** 取告警收件地址：优先 mail.alert_to，退回发件地址 */
 function resolveRecipient(settings) {
   const s = settings || {}
-  const alertTo = String(s['mail.alertTo'] || '').trim()
+  const alertTo = String(s['mail.alert_to'] || '').trim()
   if (alertTo) return alertTo
   const smtp = s['mail.smtp']
   const from = smtp && typeof smtp === 'object' ? String(smtp.from || '').trim() : ''
@@ -109,7 +109,7 @@ async function sendOpsAlert(options) {
     const recipient = resolveRecipient(await repo.settings())
     if (!recipient) {
       // 不能静默丢弃 —— 否则等于没有告警。写日志让巡检脚本能发现。
-      console.error('告警无法送达：后台未配置收件地址（mail.alertTo）')
+      console.error('告警无法送达：后台未配置收件地址（mail.alert_to）')
       return { sent: false, reason: 'NO_RECIPIENT' }
     }
     const mailer = new Mailer(repo)

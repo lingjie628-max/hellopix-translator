@@ -1,0 +1,20 @@
+[Unit]
+Description=Hello Pix · 健康巡检与告警
+Documentation=file:/opt/hello-pix/scripts/alert.js
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/hello-pix
+ExecStart=/opt/hello-pix/deploy/ops-run.sh alert /var/log/hello-pix/alert.log \
+  /opt/hello-pix/deploy/with-env.sh /usr/bin/node scripts/alert.js
+TimeoutStartSec=300
+Nice=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hello-pix-alert
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -2,6 +2,11 @@
 
 > 版本：RC-02 前置审计
 > 日期：2026-09-23
+> **⚠ 2026-09-23 更正**：本文第 6 节把 `/etc/cron.d/hello-pix-ops` 当作
+> 「已有的定时任务挂载点」，这是**错的** —— 本机没有安装 cron，该文件从未生效，
+> 每日备份 / 分区维护 / 健康巡检**从来没有自动执行过**。相关段落已就地更正。
+> 调度现已迁移到 systemd timer（`deploy/hello-pix-*.timer`），并已用真实产物验收。
+>
 > 范围：**只审计现状，不含任何实现**。所有结论均来自生产库与代码实测，标注了文件与行号。
 > 本轮不做：私钥保存、自动提现、自动转账、以及充值以外的任何功能。
 
@@ -191,7 +196,7 @@ WHERE id=$1 AND char_balance+$2>=0 RETURNING *
 | `repo.transaction` / `repo.audit` | 仓储层 | 直接调用 |
 | `normalizeTronAddress` / `validTronAddress` | `lib/tron-address.js` | 校验订单快照地址与链上 to 地址 |
 | **幂等任务范式** | `scripts/maintenance.js --apply` | 定时补扫照这个写：默认真跑干跑、`--apply` 才落库 |
-| **定时任务挂载点** | `/etc/cron.d/hello-pix-ops` | 已有 3 条任务，加第 4 条即可，不用新建 systemd timer |
+| ~~**定时任务挂载点**~~ | ~~`/etc/cron.d/hello-pix-ops`~~ | **【2026-09-23 更正】此结论错误。** 这台机器**没有安装 cron**（`which cron crond` 为空，`systemctl status cron` → Unit could not be found），该文件里的任务从未执行过。调度已全部迁移到 systemd timer，见 `deploy/hello-pix-*.timer` |
 | **告警通道** | `scripts/alert.js` | 异常池积压要发告警 |
 
 ### 现有 `/admin/recharges/status` 的结算流程（要抽成服务）
@@ -243,7 +248,7 @@ repo.transaction(async client => {
 | --- | --- |
 | `scripts/recharge-watcher.js` | 定时扫描：读游标 → 拉新区块 → 解 TRC20 转账 → 交给 SettlementService。**自己不碰余额** |
 | `scripts/recharge-rescan.js` | 补扫：从 `cursor - N` 重扫，防链 API 故障或服务重启漏单。靠 TXID 幂等去重 |
-| `deploy/cron.d/hello-pix-ops` 追加 | 每 1 分钟扫描 + 每 10 分钟补扫 |
+| ~~`deploy/cron.d/hello-pix-ops` 追加~~ | **【已更正】** 改用 `deploy/hello-pix-recharge-watcher.timer`（systemd，每 1 分钟）。cron 方案在本机不可用 |
 
 ### 7.4 接口
 
@@ -389,4 +394,7 @@ COMMIT
 - `server/repositories/production-repository.js:388` `adjustChars`
 - `server/lib/tron-address.js` 全文
 - 全库 grep `tronscan|tronweb|txid|confirmations|watcher` → 零命中
-- `/etc/cron.d/hello-pix-ops` 实查
+- `/etc/cron.d/hello-pix-ops` 实查（**该文件当时被误认为生效，实际 cron 未安装**）
+- 【2026-09-23 补查】`which cron crond` 无输出；`systemctl status cron` → Unit could not be found；
+  `systemd-detect-virt` = none（非容器）；`/var/log/hello-pix-maintenance.log` 与
+  `hello-pix-alert.log` 均不存在 —— 证明这些任务从未执行

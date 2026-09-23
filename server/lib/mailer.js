@@ -77,7 +77,7 @@ function readConfig(settings) {
 
 /** 运维告警收件地址。它和 SMTP 分开存：SMTP 还没配好时也要能收告警。 */
 function readAlertTo(settings) {
-  return String(setting(settings, 'mail.alertTo', '') || '').trim()
+  return String(setting(settings, 'mail.alert_to', '') || '').trim()
 }
 
 /**

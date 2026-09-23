@@ -368,3 +368,51 @@ test('SettlementService 是唯一写 char_balance 的地方（除已知的历史
   // 链上路径不得自己拼 UPDATE
   assert.doesNotMatch(settlement, /UPDATE\s+users\s+SET\s+char_balance/i)
 })
+
+// ------------------------------- app_settings 键必须满足数据库约束（这次真踩了）
+
+test('代码里引用的 app_settings 键全部满足数据库约束', () => {
+  // 约束：CHECK (key ~ '^[a-z][a-z0-9_.-]{1,119}$') —— **只允许小写**
+  // 踩过的坑：`mail.alertTo` 含大写 T，这个键在库里根本不可能存在。
+  // 后果不只是"告警收件人存不进去"，而是 /admin/mail 的保存会整个事务回滚 ——
+  // 因为它同时写 mail.smtp 和 mail.alertTo。
+  const KEY_PATTERN = /^[a-z][a-z0-9_.-]{1,119}$/
+  const files = [
+    'server/routes/production.js',
+    'server/lib/mailer.js',
+    'server/lib/ops-alert.js',
+    'server/services/core-service.js'
+  ]
+  // 形如 'xxx.yyy' 的字符串字面量，且出现在 setting/objectSetting/settings 取值语境里
+  const offenders = []
+  for (const rel of files) {
+    const text = fs.readFileSync(path.join(root, rel), 'utf8')
+    const literals = text.match(/'[a-z][a-zA-Z0-9_]*\.[a-zA-Z0-9_.]+'/g) || []
+    for (const lit of literals) {
+      const key = lit.slice(1, -1)
+      // SQL 别名（s.username / o.title 之类）不是配置键，跳过
+      if (/^(s|u|o|r|t|p|e|c)\./.test(key)) continue
+      if (!KEY_PATTERN.test(key)) offenders.push(`${rel}: ${key}`)
+    }
+  }
+  assert.deepEqual(offenders, [],
+    'app_settings 键违反数据库小写约束（会导致整笔事务失败）：\n' + offenders.join('\n'))
+})
+
+test('mail 配置的读写键一致，不会一边写一边读另一个名字', () => {
+  const mailer = fs.readFileSync(path.join(root, 'server/lib/mailer.js'), 'utf8')
+  const route = fs.readFileSync(path.join(root, 'server/routes/production.js'), 'utf8')
+  const alert = fs.readFileSync(path.join(root, 'server/lib/ops-alert.js'), 'utf8')
+  // 三处必须用同一个键名
+  assert.match(mailer, /'mail\.alert_to'/)
+  assert.match(alert, /\['mail\.alert_to'\]/)
+  assert.match(route, /\['mail\.alert_to',/)
+  // 剥掉注释再查：注释里会引用旧键名来说明这次修的是什么，那是文档不是代码
+  const stripComments = t => t
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1')
+  for (const [name, text] of [['mailer', mailer], ['ops-alert', alert], ['production', route]]) {
+    assert.doesNotMatch(stripComments(text), /mail\.alertTo/,
+      `${name} 的**可执行代码**里还有旧键名 mail.alertTo`)
+  }
+})

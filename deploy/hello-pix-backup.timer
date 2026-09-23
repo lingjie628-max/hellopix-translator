@@ -1,0 +1,15 @@
+[Unit]
+Description=Hello Pix · 每日数据库备份（Persistent 补跑）
+
+[Timer]
+# 每天 03:10。加抖动避免与其它整点任务挤在一起。
+OnCalendar=*-*-* 03:10:00
+RandomizedDelaySec=600
+# 停机错过的备份开机后补做 —— 备份静默缺失是最危险的：
+# 你以为有，实际没有，直到需要它的那一天
+Persistent=true
+AccuracySec=1min
+Unit=hello-pix-backup.service
+
+[Install]
+WantedBy=timers.target

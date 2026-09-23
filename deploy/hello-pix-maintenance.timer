@@ -1,0 +1,14 @@
+[Unit]
+Description=Hello Pix · 消息分区维护（每小时，Persistent 补跑）
+
+[Timer]
+# 每小时 25 分。分区维护是幂等的，多跑几次没有副作用。
+OnCalendar=*-*-* *:25:00
+# 机器停机错过时，开机后补执行一次 —— 分区缺失会导致写入直接失败，
+# 不能因为"当时没开机"就漏掉
+Persistent=true
+AccuracySec=1min
+Unit=hello-pix-maintenance.service
+
+[Install]
+WantedBy=timers.target

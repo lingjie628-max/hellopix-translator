@@ -1,0 +1,24 @@
+[Unit]
+Description=Hello Pix · 数据库备份
+Documentation=file:/opt/hello-pix/deploy/backup-db.sh
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/hello-pix
+ExecStart=/opt/hello-pix/deploy/ops-run.sh backup /var/log/hello-pix/backup.log \
+  /opt/hello-pix/deploy/backup-db.sh
+# 备份可能较慢，给足时间；超时会被 systemd 记为 failed 而不是静默消失
+TimeoutStartSec=1800
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hello-pix-backup
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -449,11 +449,13 @@ test('logrotate 配置存在且不会让日志无限增长', () => {
   assert.match(conf, /recharge-watcher-stats\.jsonl/)
 })
 
-test('告警收件人用扁平键读取 —— 嵌套读法会让告警永远发不出去', () => {
+test('告警收件人用扁平键读取，且键名小写（DB 约束只允许小写）', () => {
   const { resolveRecipient } = require('../server/lib/ops-alert')
-  assert.equal(resolveRecipient({ 'mail.alertTo': 'ops@x.test' }), 'ops@x.test')
+  assert.equal(resolveRecipient({ 'mail.alert_to': 'ops@x.test' }), 'ops@x.test')
   assert.equal(resolveRecipient({ 'mail.smtp': { from: 'noreply@x.test' } }), 'noreply@x.test')
   assert.equal(resolveRecipient({}), '')
   // 旧写法（嵌套）读不出来 —— 这正是修复前的行为
   assert.equal(resolveRecipient({ mail: { alertTo: 'ops@x.test' } }), '')
+  // 旧键名（含大写）在库里不可能存在，读了也只会是空
+  assert.equal(resolveRecipient({ 'mail.alertTo': 'ops@x.test' }), '')
 })

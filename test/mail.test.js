@@ -88,8 +88,8 @@ test('setting / objectSetting 的取值语义', () => {
   assert.deepEqual(objectSetting({}, 'a.b', {}), {})
 })
 
-test('告警收件地址独立于 SMTP 配置存放', () => {
-  assert.equal(readAlertTo({ 'mail.alertTo': 'ops@pixfanyi.com' }), 'ops@pixfanyi.com')
+test('告警收件地址独立于 SMTP 配置存放（键名必须小写，见 DB 约束）', () => {
+  assert.equal(readAlertTo({ 'mail.alert_to': 'ops@pixfanyi.com' }), 'ops@pixfanyi.com')
   assert.equal(readAlertTo({}), '')
 })
 

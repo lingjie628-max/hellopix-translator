@@ -1,0 +1,22 @@
+[Unit]
+Description=Hello Pix · 消息分区维护（提前建分区 + 清理过期分区）
+Documentation=file:/opt/hello-pix/scripts/maintenance.js
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/hello-pix
+# 走统一包装：独立日志 + 时间/退出码/耗时 + 体积保护
+ExecStart=/opt/hello-pix/deploy/ops-run.sh maintenance /var/log/hello-pix/maintenance.log \
+  /opt/hello-pix/deploy/with-env.sh /usr/bin/node scripts/maintenance.js --apply
+TimeoutStartSec=600
+Nice=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hello-pix-maintenance
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

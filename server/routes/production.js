@@ -570,7 +570,7 @@ function productionRouter(context) {
       await repo.query(
         `INSERT INTO app_settings(key,value,description) VALUES($1,$2::jsonb,$3)
          ON CONFLICT (key) DO UPDATE SET value=$2::jsonb`,
-        ['mail.alertTo', JSON.stringify(String(data.alertTo || '').trim()), '运维告警收件地址'], client
+        ['mail.alert_to', JSON.stringify(String(data.alertTo || '').trim()), '运维告警收件地址'], client
       )
       await repo.audit(client, req.pixAdmin, '修改邮件服务配置',
         smtp.host + ' / ' + smtp.from, req.ip, { type: 'settings' })
