@@ -109,5 +109,25 @@ module.exports = Object.freeze({
     connectTimeout: integer('REDIS_CONNECT_TIMEOUT_MS', 5_000, 500, 60_000),
     commandTimeout: integer('REDIS_COMMAND_TIMEOUT_MS', 5_000, 500, 60_000),
     maxRetriesPerRequest: integer('REDIS_MAX_RETRIES', 2, 0, 10)
+  }),
+  /**
+   * 链监听与自动结算（RC-02 Phase 2）。
+   *
+   * `autoSettlementEnabled` **默认 false** —— 默认走 Shadow/Dry-run：
+   * 照常查链、落库、推进游标、匹配订单，但绝不改余额、绝不改订单状态，
+   * 只记录"如果开启本来会做什么"。先证明看得准，再允许动钱。
+   *
+   * 打开它需要显式设置 AUTO_SETTLEMENT_ENABLED=true。
+   * 用 `=== 'true'` 而不是布尔转换：写成 =1 或 =yes 这类"看着像真"的值
+   * 不会意外开启资金路径。
+   */
+  chain: Object.freeze({
+    provider: String(process.env.TRON_PROVIDER || 'trongrid'),
+    trongridApiKey: String(process.env.TRONGRID_API_KEY || ''),
+    baseUrl: String(process.env.TRONGRID_BASE_URL || ''),
+    timeoutMs: integer('TRON_API_TIMEOUT_MS', 15_000, 1_000, 120_000),
+    autoSettlementEnabled: String(process.env.AUTO_SETTLEMENT_ENABLED || '') === 'true',
+    maxTransfersPerScan: integer('TRON_MAX_TRANSFERS_PER_SCAN', 500, 1, 5_000),
+    backoffBaseMs: integer('TRON_BACKOFF_BASE_MS', 30_000, 1_000, 3_600_000)
   })
 })

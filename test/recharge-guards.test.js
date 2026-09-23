@@ -324,3 +324,47 @@ test('下单代码写入的每一列都能在 migration 里找到', () => {
       `下单写入的列 ${column} 既不在建表语句里，也没有 migration 添加`)
   }
 })
+
+// ------------------------------------------ 自动结算闸门（Phase 2 Shadow 模式）
+
+const { execFileSync } = require('node:child_process')
+
+/** 在干净的子进程里读 config，避免被本进程已有的 env 影响 */
+function chainFlag(envValue) {
+  const env = Object.assign({}, process.env, { DATABASE_URL: 'postgres://x@127.0.0.1:1/x' })
+  if (envValue === null) delete env.AUTO_SETTLEMENT_ENABLED
+  else env.AUTO_SETTLEMENT_ENABLED = envValue
+  const out = execFileSync(process.execPath, ['-e',
+    'process.stdout.write(String(require("./server/config").chain.autoSettlementEnabled))'
+  ], { cwd: root, env, encoding: 'utf8' })
+  return out.trim()
+}
+
+test('自动结算默认关闭 —— 不设环境变量时必须是 shadow 模式', () => {
+  assert.equal(chainFlag(null), 'false', '默认必须是关闭的，绝不能默认动钱')
+  assert.equal(chainFlag(''), 'false')
+})
+
+test('只有严格的 "true" 才开启自动结算', () => {
+  assert.equal(chainFlag('true'), 'true')
+  // 这些"看着像真"的写法绝不能意外打开资金路径
+  for (const v of ['1', 'yes', 'on', 'TRUE', 'True', 'y', 'enabled']) {
+    assert.equal(chainFlag(v), 'false', `AUTO_SETTLEMENT_ENABLED=${v} 不该开启自动结算`)
+  }
+})
+
+test('ChainWatcher 只通过 SettlementService 动钱，自己不碰余额', () => {
+  const watcher = fs.readFileSync(path.join(root, 'scripts/recharge-watcher.js'), 'utf8')
+  assert.doesNotMatch(watcher, /adjustChars/, 'watcher 不得直接调 adjustChars')
+  assert.doesNotMatch(watcher, /UPDATE\s+recharges\s+SET\s+status/i, 'watcher 不得直接改订单状态')
+  assert.doesNotMatch(watcher, /UPDATE\s+users\s+SET\s+char_balance/i, 'watcher 不得直接改余额')
+  assert.match(watcher, /settlement\.handleTransfer/, 'watcher 必须把交易交给结算服务')
+})
+
+test('SettlementService 是唯一写 char_balance 的地方（除已知的历史入口）', () => {
+  const settlement = fs.readFileSync(
+    path.join(root, 'server/services/recharge-settlement-service.js'), 'utf8')
+  assert.match(settlement, /adjustChars/, '结算服务应当走 adjustChars')
+  // 链上路径不得自己拼 UPDATE
+  assert.doesNotMatch(settlement, /UPDATE\s+users\s+SET\s+char_balance/i)
+})
