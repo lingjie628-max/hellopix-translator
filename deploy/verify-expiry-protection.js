@@ -22,14 +22,18 @@
  * 所以第 1 条不能靠"看 status 是不是 2"来证明，必须**真的喂一笔转账进去**，
  * 看结算服务把它判成 MATCHED 还是 LATE_PAYMENT。
  *
- * 用法：cd /opt/hello-pix && node deploy/verify-expiry-protection.js
+ * 用法：cd /opt/hello-pix && node deploy/verify-expiry-protection.js [订单号]
  */
 
 const fs = require('node:fs')
 const path = require('node:path')
 
 const APP = process.env.APP_DIR || '/opt/hello-pix'
-const ORDER_NUMBER = 'HP1790182973367652'
+// 订单号从命令行取，默认是第一次做保护期验证的那张。
+// 参数化是为了同一套验证能复用到后续每一张"故意过期"的订单。
+const ORDER_NUMBER = (process.argv[2] && !process.argv[2].startsWith('--'))
+  ? process.argv[2]
+  : 'HP1790182973367652'
 
 let pass = 0
 let fail = 0
@@ -155,6 +159,9 @@ async function main() {
     const txTime = now.getTime() // 链上时间在有效期之后
     const transfer = makeTransfer({
       txId: require('crypto').randomBytes(32).toString('hex'),
+      // 事件位置必须给：真实 Provider 从交易回执的 log[] 下标解析，这里直接指定。
+      // 不给会走 SKIPPED_UNRESOLVED（那是「位置未知」的正确行为，不是本脚本要测的）
+      eventIndex: 0,
       tokenContract: order.pay_token_contract,
       fromAddress: 'TJRabPrwbZy45sbavfcjinPJC18kjpRTv8',
       toAddress: order.pay_address,
