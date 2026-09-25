@@ -50,10 +50,6 @@ function productionRouter(context) {
   // 注册与找回密码：每 IP 每 10 分钟 20 次。
   // 验证码本身有 5 次尝试上限，这里只挡批量刷接口。
   const registerLimit = limit('register-ip', 20, 10 * 60_000)
-  const shareIpLimit = limit('share-ip', 30, 10 * 60_000)
-  const shareOrderLimit = limit('share-order', 15, 10 * 60_000, req =>
-    String(input(req).serialNumber || input(req).orderNum || 'missing')
-  )
   const translateIpLimit = limit('translate-ip', 180, 60_000)
   const translateAccountLimit = limit('translate-account', 120, 60_000, req =>
     req.pixUser ? `${req.pixUser.kind}:${req.pixUser.account.id}` : 'missing'
@@ -359,115 +355,9 @@ function productionRouter(context) {
     ok(res, '客户端绑定已重置')
   }))
 
-  router.post('/order/getOrder', asyncRoute(async (req, res) => {
-    const paging = pagination(req)
-    const result = await core.listOrders(req.pixUser.parent.id, input(req), paging)
-    res.json(page(result.rows, result.total, paging))
-  }))
-  router.post('/order/editOrder', asyncRoute(async (req, res) => {
-    await core.saveOrder(req.pixUser.parent.id, input(req), req.query.orderOperates)
-    ok(res, req.query.orderOperates === 'add' ? '创建成功' : '保存成功')
-  }))
-  router.post('/order/deleteOrder', asyncRoute(async (req, res) => {
-    const ids = String(input(req).orderIds || '').split(',').filter(Boolean)
-    await core.deleteOrders(req.pixUser.parent.id, ids)
-    ok(res, '删除成功')
-  }))
-  router.post('/order/orderCloseOrOpen', asyncRoute(async (req, res) => {
-    const data = input(req)
-    const nums = String(data.orderNums || '').split(',').filter(Boolean)
-    await repo.query('UPDATE orders SET status=$3,updated_at=NOW() WHERE user_id=$1 AND serial_number=ANY($2::text[])', [req.pixUser.parent.id, nums, number(data.type, 1)])
-    ok(res, '操作成功')
-  }))
-  router.post('/order/setOrderExpTime', asyncRoute(async (req, res) => {
-    const data = input(req)
-    const nums = String(data.orderNums || '').split(',').filter(Boolean)
-    await repo.query(
-      `UPDATE orders SET expires_at=NOW()+($3::text||' days')::interval,updated_at=NOW()
-       WHERE user_id=$1 AND serial_number=ANY($2::text[])`,
-      [req.pixUser.parent.id, nums, Math.max(1, Math.floor(number(data.orderDays, 1)))]
-    )
-    ok(res, '续时成功')
-  }))
-  router.post('/order/cancelShare', asyncRoute(async (req, res) => {
-    const data = input(req)
-    await repo.query(`UPDATE orders SET share_password_hash=NULL,share_password_expires_at=NULL,updated_at=NOW() WHERE user_id=$1 AND (id::text=$2 OR serial_number=$2)`, [req.pixUser.parent.id, String(data.id || data.orderNum || '')])
-    ok(res, '已取消分享')
-  }))
-  const updateShare = asyncRoute(async (req, res) => {
-    const data = input(req)
-    const hash = await auth.hashSecret(data.sharePassword || data.password)
-    const result = await repo.query(
-      `UPDATE orders SET share_password_hash=$3,share_password_expires_at=COALESCE($4::timestamptz,NOW()+interval '7 days'),updated_at=NOW()
-       WHERE user_id=$1 AND (id::text=$2 OR serial_number=$2) RETURNING id`,
-      [req.pixUser.parent.id, String(data.id || data.orderNum || ''), hash, data.passwordExpirationTime || null]
-    )
-    if (!result.rows[0]) throw new ApiError(404, '工单不存在', 'ORDER_NOT_FOUND')
-    ok(res, '分享密码已更新')
-  })
-  router.post('/order/updateSharePwd', updateShare)
-  router.post('/order/editSharePwd', updateShare)
-  router.post('/order/getServerTime', (_req, res) => res.json({ data: Date.now() }))
-  router.post('/order/selectOrderBySerialNumber', shareIpLimit, shareOrderLimit, asyncRoute(async (req, res) => {
-    const result = await repo.query(
-      `SELECT serial_number,title,zero_time,share_password_expires_at AS password_expiration_time,status
-       FROM orders WHERE serial_number=$1`,
-      [input(req).serialNumber]
-    )
-    if (!result.rows[0]) throw new ApiError(404, '工单不存在', 'ORDER_NOT_FOUND')
-    res.json({ data: mapRow(result.rows[0]) })
-  }))
-  router.post('/order/checkSharePwd', shareIpLimit, shareOrderLimit,
-    asyncRoute(async (req, res) => res.json(await core.sharePassword(input(req)))))
-  router.post('/orderDetails/shareOrder', shareIpLimit, shareOrderLimit, asyncRoute(async (req, res) => {
-    const data = input(req)
-    await core.assertShare(data.shareToken, data.orderNum)
-    const paging = pagination(req)
-    const values = [data.orderNum]
-    const result = await repo.query(
-      `SELECT d.*,d.nickname AS nick_name,o.serial_number AS order_num
-       FROM order_details d JOIN orders o ON o.id=d.order_id
-       WHERE o.serial_number=$1 ORDER BY d.id DESC LIMIT $2 OFFSET $3`,
-      [data.orderNum, paging.size, paging.offset]
-    )
-    const count = await repo.query(
-      'SELECT count(*)::int AS total FROM order_details d JOIN orders o ON o.id=d.order_id WHERE o.serial_number=$1',
-      values
-    )
-    const order = await repo.query('SELECT * FROM orders WHERE serial_number=$1', values)
-    res.json(Object.assign(page(mapRows(result.rows), count.rows[0].total, paging), { object: mapRow(order.rows[0]) || {} }))
-  }))
-  const sharedFans = asyncRoute(async (req, res) => {
-    const data = input(req)
-    await core.assertShare(data.shareToken, data.orderNum)
-    const paging = pagination(req)
-    const result = await repo.query(
-      `SELECT f.*,f.nickname AS nick_name,f.fan_type AS type,o.serial_number AS order_num
-       FROM order_fans f JOIN orders o ON o.id=f.order_id
-       WHERE o.serial_number=$1 ORDER BY f.id DESC LIMIT $2 OFFSET $3`,
-      [data.orderNum, paging.size, paging.offset]
-    )
-    const count = await repo.query(
-      'SELECT count(*)::int AS total FROM order_fans f JOIN orders o ON o.id=f.order_id WHERE o.serial_number=$1',
-      [data.orderNum]
-    )
-    res.json(page(mapRows(result.rows), count.rows[0].total, paging))
-  })
-  router.post('/orderDetails/getOrderFans', shareIpLimit, shareOrderLimit, sharedFans)
-  router.get('/orderDetails/getOrderFans', shareIpLimit, shareOrderLimit, sharedFans)
-  router.post('/orderDetails/getTodayFansCount', shareIpLimit, shareOrderLimit, asyncRoute(async (req, res) => {
-    const data = input(req)
-    const serial = data.serialNumber || data.orderNum
-    await core.assertShare(data.shareToken, serial)
-    const result = await repo.query(
-      `SELECT count(*)::int AS total_fans_count,
-       count(*) FILTER (WHERE f.created_at>=CURRENT_DATE)::int AS today_fans_count,
-       count(*) FILTER (WHERE f.created_at>=CURRENT_DATE AND f.repeated=true)::int AS today_rep_fans_count
-       FROM order_fans f JOIN orders o ON o.id=f.order_id WHERE o.serial_number=$1`,
-      [serial]
-    )
-    res.json({ data: mapRow(result.rows[0]) })
-  }))
+  // 旧的商户端「工单」接口（/order/*、/orderDetails/*）已于 2026-09-25 移除：
+  // 对应的 7 个前端页面在同日删除，生产库 orders / order_details / order_fans
+  // 均为 0 行。超管后台的 /admin/orders 与「全部工单」页**不在此列**，仍然保留。
 
   router.get('/translate/engines', asyncRoute(async (req, res) => res.json(await core.engines(req.pixUser))))
   router.post('/translate/engines/active', asyncRoute(async (req, res) => {

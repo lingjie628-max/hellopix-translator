@@ -6,7 +6,6 @@ const {
   RedisSessionStore,
   RedisFixedWindowStore,
   RedisVerificationStore,
-  RedisShareGrantStore,
   RedisTranslationCache,
   createMemoryStores
 } = require('../server/redis-security')
@@ -135,16 +134,6 @@ test('email resend reservation and code scene are isolated', async () => {
   assert.equal((await store.verifyEmailCode('user@example.com', '123456', 'register', true)).ok, true)
 })
 
-test('share grants are scoped and revocable', async () => {
-  const store = new RedisShareGrantStore(new FakeRedis())
-  const token = await store.issue('ORDER-1')
-  assert.equal(await store.validate(token, 'ORDER-2'), false)
-  const second = await store.issue('ORDER-1')
-  assert.equal(await store.validate(second, 'ORDER-1'), true)
-  await store.revoke(second)
-  assert.equal(await store.validate(second, 'ORDER-1'), false)
-})
-
 test('translation cache is tenant scoped', async () => {
   const store = new RedisTranslationCache(new FakeRedis())
   const request = { engine: 'deepseek', from: 'en', to: 'zh', text: 'hello' }
@@ -159,6 +148,4 @@ test('memory stores expose the same asynchronous interfaces', async () => {
   assert.equal((await stores.sessions.resolve('token', 'admin')).subjectId, '1')
   assert.equal((await stores.rateLimits.increment('admin')).allowed, true)
   assert.equal((await stores.rateLimits.increment('admin')).allowed, false)
-  const grant = await stores.shareGrants.create('ORDER')
-  assert.equal(await stores.shareGrants.verify(grant, 'ORDER'), true)
 })

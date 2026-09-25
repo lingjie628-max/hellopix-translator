@@ -202,44 +202,6 @@ test('production cookies carry secure attributes', () => {
   assert.ok(values.every(value => value.includes('SameSite=')))
 })
 
-test('public order sharing requires a short-lived grant', async t => {
-  const api = await startApi()
-  t.after(api.close)
-  const orderNum = 'HP20260902001'
-
-  let response = await request(api.base, '/apis/order/selectOrderBySerialNumber', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ serialNumber: orderNum })
-  })
-  const summary = await response.json()
-  assert.equal(response.status, 200)
-  assert.equal(summary.data.sharePassword, undefined)
-
-  response = await request(api.base, '/apis/orderDetails/shareOrder', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ orderNum })
-  })
-  assert.equal(response.status, 403)
-
-  response = await request(api.base, '/apis/order/checkSharePwd', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ serialNumber: orderNum, sharePassword: 'abc123' })
-  })
-  const grant = await response.json()
-  assert.equal(response.status, 200)
-  assert.ok(grant.token)
-
-  response = await request(api.base, '/apis/orderDetails/shareOrder', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ orderNum, shareToken: grant.token })
-  })
-  assert.equal(response.status, 200)
-})
-
 test('demo identities and payment are disabled unless explicitly enabled', async t => {
   const locked = await startApi({ testMode: false })
   t.after(locked.close)
@@ -257,36 +219,6 @@ test('demo identities and payment are disabled unless explicitly enabled', async
     headers: { Cookie: cookieHeader(login.jar) }
   })
   assert.equal(response.status, 503)
-})
-
-test('order edits cannot overwrite ownership or immutable identifiers', async t => {
-  const api = await startApi()
-  t.after(api.close)
-  const login = await clientLogin(api.base, 'pix', '123456', 'order-test')
-
-  let response = await request(api.base, '/apis/order/editOrder', {
-    method: 'POST',
-    headers: authHeaders(login),
-    body: new URLSearchParams({
-      id: '1',
-      userId: '10002',
-      serialNumber: 'ATTACKER',
-      title: '安全标题'
-    })
-  })
-  assert.equal(response.status, 200)
-
-  response = await request(api.base, '/apis/order/getOrder', {
-    method: 'POST',
-    headers: authHeaders(login),
-    body: new URLSearchParams({ page: '1', rows: '500' })
-  })
-  const list = await response.json()
-  const order = list.rows.find(item => String(item.id) === '1')
-  assert.equal(order.userId, 10001)
-  assert.equal(order.serialNumber, 'HP20260902001')
-  assert.equal(order.title, '安全标题')
-  assert.ok(list.rows.length <= 100)
 })
 
 test('translation cache is tenant scoped and cached work remains billable', async t => {
@@ -345,24 +277,6 @@ test('translation balance is reserved before concurrent provider work', async t 
   })
   const dashboard = await response.json()
   assert.equal(dashboard.charBalance, 0)
-})
-
-test('share password attempts are rate limited', async t => {
-  const api = await startApi()
-  t.after(api.close)
-  let status = 0
-  for (let i = 0; i < 7; i += 1) {
-    const response = await request(api.base, '/apis/order/checkSharePwd', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        serialNumber: 'HP20260902001',
-        sharePassword: 'wrong-password'
-      })
-    })
-    status = response.status
-  }
-  assert.equal(status, 429)
 })
 
 test('operator accounts are read-only for admin mutations', async t => {

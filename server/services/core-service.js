@@ -6,7 +6,7 @@ const platforms = require('../../desktop/platforms')
 const { ApiError } = require('../lib/http')
 const { toMilli, formatMilli } = require('../lib/money')
 const { mapRow, mapRows } = require('../repositories/production-repository')
-const { RedisTranslationCache, RedisShareGrantStore } = require('../stores')
+const { RedisTranslationCache } = require('../stores')
 const catalog = require('../lib/client-catalog')
 
 function number(value, fallback) {
@@ -41,8 +41,6 @@ class CoreService {
     this.translator = options && options.translator || defaultTranslator
     this.translationCache = options && options.translationCache ||
       new RedisTranslationCache(redis)
-    this.shareGrants = options && options.shareGrants ||
-      new RedisShareGrantStore(redis)
     this.reservationTtlMs = Math.max(30_000, Number(options && options.reservationTtlMs) || 120_000)
     // 公共翻译网络（如"谷歌翻译"的免费端点）默认关闭，只有显式配置才放行。
     // 关闭时相关通道直接 ok:false，不产生任何译文或计费。
@@ -258,75 +256,6 @@ class CoreService {
       )
       return { username: sub.username, chars }
     })
-  }
-
-  async listOrders(userId, data, paging) {
-    const values = [userId]
-    const clauses = ['user_id=$1']
-    if (data.serialNumber) { values.push(`%${data.serialNumber}%`); clauses.push(`serial_number ILIKE $${values.length}`) }
-    if (data.title) { values.push(`%${data.title}%`); clauses.push(`title ILIKE $${values.length}`) }
-    if (data.status !== undefined && data.status !== '') { values.push(number(data.status)); clauses.push(`status=$${values.length}`) }
-    const result = await this.repo.list('orders', { where: clauses.join(' AND '), values, limit: paging.size, offset: paging.offset })
-    result.rows = result.rows.map(row => Object.assign(row, {
-      port: row.portLimit,
-      totalUser: row.totalUsers,
-      completeTarget: row.completedTarget,
-      expirationTime: row.expiresAt,
-      passwordExpirationTime: row.sharePasswordExpiresAt
-    }))
-    return result
-  }
-
-  async saveOrder(userId, data, operation) {
-    if (operation === 'add' || !data.id) {
-      await this.repo.query(
-        `INSERT INTO orders(user_id,serial_number,title,type,port_limit,total_target,day_target,
-          expires_at,distribution_mode,status,zero_time,remarks,assistant)
-         VALUES($1,$2,$3,$4,$5,$6,$7,COALESCE($8::timestamptz,NOW()+interval '30 days'),$9,1,$10,$11,$12)`,
-        [userId, `HP${Date.now()}${crypto.randomInt(100, 999)}`, String(data.title || '新工单').slice(0, 200),
-          data.type || 'whatsApp', Math.max(0, number(data.port, 1)), Math.max(0, number(data.totalTarget)),
-          Math.max(0, number(data.dayTarget, 1)), data.expirationTime || null, number(data.distributionMode, 1),
-          data.zeroTime || '00:00:00', String(data.remarks || '').slice(0, 1000), String(data.assistant || '').slice(0, 200)]
-      )
-      return
-    }
-    const result = await this.repo.query(
-      `UPDATE orders SET title=COALESCE($3,title),type=COALESCE($4,type),
-       port_limit=COALESCE($5,port_limit),total_target=COALESCE($6,total_target),
-       day_target=COALESCE($7,day_target),expires_at=COALESCE($8::timestamptz,expires_at),
-       zero_time=COALESCE($9::time,zero_time),remarks=COALESCE($10,remarks),
-       assistant=COALESCE($11,assistant),updated_at=NOW()
-       WHERE id=$1 AND user_id=$2 RETURNING id`,
-      [data.id, userId, data.title || null, data.type || null,
-        data.port === undefined ? null : Math.max(0, number(data.port)),
-        data.totalTarget === undefined ? null : Math.max(0, number(data.totalTarget)),
-        data.dayTarget === undefined ? null : Math.max(0, number(data.dayTarget)),
-        data.expirationTime || null, data.zeroTime || null,
-        data.remarks === undefined ? null : String(data.remarks).slice(0, 1000), data.assistant || null]
-    )
-    if (!result.rows[0]) throw new ApiError(404, '工单不存在', 'ORDER_NOT_FOUND')
-  }
-
-  deleteOrders(userId, ids) {
-    return this.repo.query('DELETE FROM orders WHERE user_id=$1 AND id=ANY($2::bigint[])', [userId, ids])
-  }
-
-  async sharePassword(data) {
-    const order = mapRow((await this.repo.query('SELECT * FROM orders WHERE serial_number=$1', [data.serialNumber])).rows[0])
-    if (!order || !order.sharePasswordHash || !(await this.auth.verify(order.sharePasswordHash, data.sharePassword))) {
-      throw new ApiError(403, '分享密码错误', 'BAD_SHARE_PASSWORD')
-    }
-    if (!order.sharePasswordExpiresAt || new Date(order.sharePasswordExpiresAt).getTime() <= Date.now()) {
-      throw new ApiError(410, '工单分享已过期', 'SHARE_EXPIRED')
-    }
-    const token = await this.shareGrants.issue(order.serialNumber)
-    return { code: 200, msg: order.zeroTime, data: order.sharePasswordExpiresAt, token }
-  }
-
-  async assertShare(token, serial) {
-    if (!await this.shareGrants.validate(token, serial)) {
-      throw new ApiError(403, '分享凭证无效或已过期', 'INVALID_SHARE_GRANT')
-    }
   }
 
   /**

@@ -168,34 +168,6 @@ class MemoryVerificationStore {
   }
 }
 
-class MemoryShareGrantStore {
-  constructor(options) {
-    this.ttlMs = positiveInteger(options && options.ttlMs, 60 * 60_000)
-    this.grants = new Map()
-  }
-
-  async issue(serialNumber, options) {
-    const opts = options || {}
-    const token = opts.token || crypto.randomBytes(24).toString('base64url')
-    let ttl = positiveInteger(opts.ttlMs, this.ttlMs)
-    if (opts.expiresAt != null) ttl = Math.min(ttl, Math.max(1, Number(opts.expiresAt) - Date.now()))
-    this.grants.set(token, { serialNumber: String(serialNumber), expiresAt: Date.now() + ttl })
-    return token
-  }
-
-  async validate(token, serialNumber) {
-    const grant = this.grants.get(String(token))
-    const valid = !!grant && grant.expiresAt > Date.now() &&
-      grant.serialNumber === String(serialNumber || '')
-    if (grant && !valid) this.grants.delete(String(token))
-    return valid
-  }
-
-  async revoke(token) { return this.grants.delete(String(token)) ? 1 : 0 }
-  create(serialNumber, options) { return this.issue(serialNumber, options) }
-  verify(token, serialNumber) { return this.validate(token, serialNumber) }
-}
-
 class MemoryTranslationCache {
   constructor(options) {
     this.ttlMs = positiveInteger(options && options.ttlMs, 24 * 60 * 60_000)
@@ -230,6 +202,5 @@ module.exports = {
   MemorySessionStore,
   MemoryFixedWindowStore,
   MemoryVerificationStore,
-  MemoryShareGrantStore,
   MemoryTranslationCache
 }

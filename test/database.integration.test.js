@@ -135,11 +135,6 @@ test('PostgreSQL and Redis preserve billing under concurrency', {
     assert.equal(webLogin.status, 200)
     const webCookie = webLogin.headers.getSetCookie()
       .map(value => value.split(';')[0]).join('; ')
-    const writeHeaders = {
-      cookie: webCookie,
-      'x-csrf-token': webLogin.headers.get('x-csrf-token'),
-      'content-type': 'application/x-www-form-urlencoded'
-    }
     assert.equal((await fetch(`${base}/user/dashboard`, {
       headers: { cookie: webCookie }
     })).status, 200)
@@ -165,34 +160,6 @@ test('PostgreSQL and Redis preserve billing under concurrency', {
       })
     })
     assert.equal(adminLogin.status, 200)
-    const createOrder = await fetch(`${base}/order/editOrder?orderOperates=add`, {
-      method: 'POST',
-      headers: writeHeaders,
-      body: form({ title: 'Integration Order', type: 'telegram', port: 1 })
-    })
-    assert.equal(createOrder.status, 200)
-    const orderList = await fetch(`${base}/order/getOrder`, {
-      method: 'POST',
-      headers: writeHeaders,
-      body: form({})
-    })
-    const orders = await orderList.json()
-    assert.equal(orderList.status, 200)
-    assert.equal(orders.total, 1)
-    const serialNumber = orders.rows[0].serialNumber
-    const share = await fetch(`${base}/order/updateSharePwd`, {
-      method: 'POST',
-      headers: writeHeaders,
-      body: form({ orderNum: serialNumber, sharePassword: 'Share-9!' })
-    })
-    assert.equal(share.status, 200)
-    const shareCheck = await fetch(`${base}/order/checkSharePwd`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: form({ serialNumber, sharePassword: 'Share-9!' })
-    })
-    assert.equal(shareCheck.status, 200)
-
     const session = await repo.sessionAccount(`main:${userId}`)
     const core = new CoreService(repo, redis, {}, {
       translator,

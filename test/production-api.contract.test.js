@@ -166,40 +166,6 @@ test('reservation reconciliation atomically refunds main and sub accounts', asyn
   assert.deepEqual(updates, [10, 11])
 })
 
-test('share password issues and validates Redis grants', async () => {
-  const issued = []
-  const shareGrants = {
-    async issue(serial) {
-      issued.push(serial)
-      return 'grant-token'
-    },
-    async validate(token, serial) {
-      return token === 'grant-token' && serial === 'HP1'
-    }
-  }
-  const repository = {
-    async query() {
-      return {
-        rows: [{
-          serial_number: 'HP1',
-          share_password_hash: 'hash',
-          share_password_expires_at: new Date(Date.now() + 60_000).toISOString(),
-          zero_time: '00:00:00'
-        }]
-      }
-    }
-  }
-  const core = new CoreService(repository, { get() {}, set() {} }, {
-    async verify() { return true }
-  }, { shareGrants })
-  const result = await core.sharePassword({ serialNumber: 'HP1', sharePassword: 'Share-9!' })
-  assert.equal(result.code, 200)
-  assert.equal(result.token, 'grant-token')
-  assert.deepEqual(issued, ['HP1'])
-  await core.assertShare('grant-token', 'HP1')
-  await assert.rejects(core.assertShare('bad', 'HP1'), error => error.code === 'INVALID_SHARE_GRANT')
-})
-
 test('translation request digest is deterministic and payload-sensitive', () => {
   const first = requestDigest({ engine: 'deepseek', text: 'hello' })
   assert.equal(first, requestDigest({ engine: 'deepseek', text: 'hello' }))
