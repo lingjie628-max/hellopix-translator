@@ -104,29 +104,62 @@ function openAiCompatible(cfg) {
           `保持原有的语气、专业术语与格式（换行、编号、表情）。`
         : `你是专业翻译。判断用户文本的语种并翻译成${target}。只输出译文本身。`
 
+      // temperature 只在需要时带上：部分推理模型只接受默认温度（见下方重试说明）
+      const buildBody = includeTemperature => {
+        const body = {
+          model,
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: text }
+          ],
+          stream: false
+        }
+        if (includeTemperature) body.temperature = 0   // 翻译要稳定，不要发挥
+        return body
+      }
+
+      const send = includeTemperature => options.fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify(buildBody(includeTemperature)),
+        signal: AbortSignal.timeout(options.timeoutMs || DEFAULT_TIMEOUT_MS)
+      })
+
       let response
       try {
-        response = await options.fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-          body: JSON.stringify({
-            model,
-            messages: [
-              { role: 'system', content: system },
-              { role: 'user', content: text }
-            ],
-            temperature: 0,   // 翻译要稳定，不要发挥
-            stream: false
-          }),
-          signal: AbortSignal.timeout(options.timeoutMs || DEFAULT_TIMEOUT_MS)
-        })
+        response = await send(true)
       } catch (error) {
         return { ok: false, msg: `${cfg.name} 请求失败：${timeoutReason(error)}` }
       }
 
       if (!response.ok) {
         const detail = await readErrorDetail(response)
-        return { ok: false, msg: `${cfg.name} 返回 HTTP ${response.status}${detail ? '：' + detail : ''}` }
+        /**
+         * 推理类模型（GPT-5 系列、o 系列…）只接受默认 temperature(=1)，
+         * 传 0 会被直接拒：
+         *   400 "Unsupported value: 'temperature' does not support 0 with this model."
+         *
+         * 这里刻意**不维护模型名清单**去预判：模型名会换代、新模型层出不穷，
+         * 写死的清单迟早过期，而且误判会把本来正常的厂商也改坏。
+         * 改成"先按常规带上 temperature，被明确因 temperature 拒绝时去掉重试一次" ——
+         * 对其他厂商零影响、不产生额外请求，对新模型自愈。
+         */
+        if ((response.status === 400 || response.status === 422) && /temperature/i.test(detail)) {
+          try {
+            response = await send(false)
+          } catch (error) {
+            return { ok: false, msg: `${cfg.name} 请求失败：${timeoutReason(error)}` }
+          }
+          if (!response.ok) {
+            const retryDetail = await readErrorDetail(response)
+            return {
+              ok: false,
+              msg: `${cfg.name} 返回 HTTP ${response.status}${retryDetail ? '：' + retryDetail : ''}`
+            }
+          }
+        } else {
+          return { ok: false, msg: `${cfg.name} 返回 HTTP ${response.status}${detail ? '：' + detail : ''}` }
+        }
       }
 
       let data

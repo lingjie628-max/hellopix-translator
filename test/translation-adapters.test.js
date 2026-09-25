@@ -155,3 +155,80 @@ test('百度已下架 —— 注册表里不应再有它', () => {
   assert.ok(provider.providers.niutrans, '小牛应仍在')
   assert.ok(provider.providers.aws, 'AWS 应已实现')
 })
+
+// ---------------------------------------------------------------------------
+// temperature 兼容：推理类模型只接受默认温度
+
+/** 依次返回多个响应，用于验证"重试一次"这类行为 */
+function sequence(responses) {
+  const calls = []
+  let index = 0
+  return {
+    calls,
+    fetch: async (url, init) => {
+      calls.push({ url: String(url), init })
+      const spec = responses[Math.min(index, responses.length - 1)]
+      index += 1
+      return {
+        ok: (spec.status || 200) < 400,
+        status: spec.status || 200,
+        json: async () => spec.body
+      }
+    }
+  }
+}
+
+test('GPT：模型拒绝 temperature 时去掉它重试一次（GPT-5 系列只接受默认温度）', async () => {
+  // 真实报文：400 "Unsupported value: 'temperature' does not support 0 with this model"
+  const seq = sequence([
+    {
+      status: 400,
+      body: {
+        error: {
+          message: "Unsupported value: 'temperature' does not support 0 with this model. " +
+            'Only the default (1) value is supported.'
+        }
+      }
+    },
+    { status: 200, body: { choices: [{ message: { content: '你好' } }] } }
+  ])
+  const r = await provider.translate({ id: 'gpt', enabled: true, model: 'gpt-5.6-luna' }, payload,
+    opts(seq.fetch, { apiKey: 'k' }))
+
+  assert.equal(r.ok, true, '去掉 temperature 后应当成功')
+  assert.equal(r.text, '你好')
+  assert.equal(seq.calls.length, 2, '应当正好重试一次')
+  assert.equal(JSON.parse(seq.calls[0].init.body).temperature, 0, '第一次仍按常规带上 temperature')
+  assert.ok(!('temperature' in JSON.parse(seq.calls[1].init.body)), '重试必须去掉 temperature')
+})
+
+test('GPT：与 temperature 无关的 400 不重试（别把真错误掩盖成重试）', async () => {
+  const seq = sequence([
+    { status: 400, body: { error: { message: 'The model `nope` does not exist' } } }
+  ])
+  const r = await provider.translate({ id: 'gpt', enabled: true }, payload, opts(seq.fetch, { apiKey: 'k' }))
+
+  assert.equal(r.ok, false)
+  assert.match(r.msg, /does not exist/)
+  assert.equal(seq.calls.length, 1, '与该参数无关的错误不该多打一次请求')
+})
+
+test('GPT：去掉 temperature 后仍失败，透出第二次的错误', async () => {
+  const seq = sequence([
+    { status: 400, body: { error: { message: "temperature does not support 0" } } },
+    { status: 429, body: { error: { message: 'quota exceeded' } } }
+  ])
+  const r = await provider.translate({ id: 'gpt', enabled: true }, payload, opts(seq.fetch, { apiKey: 'k' }))
+
+  assert.equal(r.ok, false)
+  assert.equal(seq.calls.length, 2)
+  assert.match(r.msg, /429/)
+  assert.match(r.msg, /quota exceeded/)
+})
+
+test('Grok：正常返回时不应产生多余的第二次请求', async () => {
+  const cap = capture({ choices: [{ message: { content: 'Hello' } }] })
+  const r = await provider.translate({ id: 'grok', enabled: true }, payload, opts(cap.fetch, { apiKey: 'k' }))
+  assert.equal(r.ok, true)
+  assert.equal(cap.calls.length, 1, '成功路径不该因为重试逻辑多一次调用')
+})
