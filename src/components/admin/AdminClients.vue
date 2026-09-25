@@ -13,7 +13,9 @@
       <el-table-column prop="group" label="分组" width="100"></el-table-column>
       <el-table-column prop="title" label="名称" width="160"></el-table-column>
       <el-table-column prop="os" label="系统" width="130"></el-table-column>
-      <el-table-column prop="arch" label="架构" width="110"></el-table-column>
+      <el-table-column label="架构" width="150">
+        <template slot-scope="scope">{{ archLabel(scope.row.arch) }}</template>
+      </el-table-column>
       <el-table-column label="对应 App" width="160">
         <template slot-scope="scope">{{ appLabel(scope.row.app) }}</template>
       </el-table-column>
@@ -40,7 +42,13 @@
         </el-form-item>
         <el-form-item label="名称"><el-input v-model="form.title"></el-input></el-form-item>
         <el-form-item label="系统"><el-input v-model="form.os"></el-input></el-form-item>
-        <el-form-item label="架构"><el-input v-model="form.arch" placeholder="64位 / Apple 芯片 / 可空"></el-input></el-form-item>
+        <el-form-item label="架构">
+          <el-select v-model="form.arch" style="width:100%" clearable placeholder="不限架构（任意系统都能用）">
+            <el-option label="x64（Intel/AMD 64 位）" value="x64"></el-option>
+            <el-option label="arm64（Apple 芯片 / ARM 64 位）" value="arm64"></el-option>
+            <el-option label="不限架构" value=""></el-option>
+          </el-select>
+        </el-form-item>
         <el-form-item label="对应 App">
           <el-select v-if="isStandalone" v-model="form.app" style="width:100%" placeholder="选择平台应用 ID">
             <el-option v-for="item in standaloneApps" :key="item.id" :label="item.name + '（' + item.id + '）'" :value="item.id"></el-option>
@@ -116,6 +124,25 @@ export default {
           if (resp.data.standaloneApps) this.standaloneApps = resp.data.standaloneApps
         }
       }).catch(() => { this.loading = false })
+    },
+    /**
+     * 架构展示。
+     *
+     * 这一列历史上是自由文本，库里可能同时躺着 `x64`、`64位`、`Apple 芯片`
+     * 等写法。这里统一归一后再显示，让人一眼看出**这条记录会被哪些客户端选中** ——
+     * 而不是把原始字符串原样端出来，让运营自己去猜它匹配谁。
+     *
+     * 判断顺序与服务端 release-arch.js 一致：ARM 必须先判，
+     * 否则 `arm64` 会被里面的 "64" 抢成 x64。
+     */
+    archLabel(raw) {
+      const t = String(raw || '').trim().toLowerCase()
+      if (!t) return '不限架构'
+      if (/arm|apple|aarch/.test(t) || /^m[1-9]$/.test(t)) return 'arm64（Apple 芯片）'
+      if (/x64|x86[_-]?64|amd64|intel/.test(t)) return 'x64（Intel/AMD）'
+      if (/ia32|x86|win32|32/.test(t)) return 'ia32（32 位）'
+      if (/64/.test(t)) return 'x64（Intel/AMD）'
+      return '无法识别（不会被选中）'
     },
     open(row) {
       this.form = row ? Object.assign({}, row) : { group: 'Windows', title: '', os: '', arch: '', app: '', version: '1.0.0', url: '', enabled: 0, note: '' }

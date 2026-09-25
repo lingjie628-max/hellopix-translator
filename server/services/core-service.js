@@ -675,31 +675,72 @@ class CoreService {
     return platforms.filter(item => item.listed !== false)
   }
 
+  /**
+   * 客户端更新检查。
+   *
+   * ## 架构必须参与筛选，而不是加分
+   *
+   * 原实现用模糊文本打分挑记录：
+   *
+   *     if ((arch === 'x64' || arch === 'ia32') && /intel|64|32/i.test(String(row.arch)))
+   *
+   * `x64` 与 `ia32` 得分相同、正则又同时匹配 "64" 和 "32"，于是
+   * **32 位客户端会被推送 64 位安装包** —— 它根本装不上，而用户是
+   * 下载了 80MB、卸载了旧版、打开才发现打不开的。
+   *
+   * 现在架构是**筛选条件**：不匹配的记录直接出局，宁可这次不发更新。
+   * 归一与匹配规则见 server/lib/release-arch.js。
+   *
+   * @returns 多了 `compatible` 与 `reason`，便于客户端与排障区分
+   *          「没有新版本」和「有更新但架构不匹配」。
+   */
   async findUpdate(data) {
     const os = String(data.os || '')
     const arch = String(data.arch || '')
     const app = String(data.app || '').trim()
+    const { archCompatible } = require('../lib/release-arch')
+
     const listed = this.publicReleases(
       (await this.repo.query('SELECT * FROM client_releases WHERE enabled=true ORDER BY created_at DESC,id DESC')).rows
     ).filter(row => !app
       ? row.releaseGroup !== 'standalone' && row.releaseGroup !== 'counter'
       : row.app === app)
+
+    const osMatches = row => {
+      const text = [row.releaseGroup, row.os].join(' ')
+      if (os === 'darwin') return /mac/i.test(text)
+      if (os === 'win32') return /windows/i.test(text)
+      if (os === 'linux') return /linux/i.test(text)
+      return false
+    }
+
+    const forOs = listed.filter(osMatches)
+    const usable = forOs.filter(row => archCompatible(arch, row.arch))
+
     const score = row => {
       let points = 0
-      if (os === 'darwin' && /mac/i.test([row.releaseGroup, row.os].join(' '))) points += 10
-      if (os === 'win32' && /windows/i.test([row.releaseGroup, row.os].join(' '))) points += 10
-      if (os === 'linux' && /linux/i.test([row.releaseGroup, row.os].join(' '))) points += 10
-      if (arch === 'arm64' && /apple|arm/i.test(String(row.arch))) points += 4
-      if ((arch === 'x64' || arch === 'ia32') && /intel|64|32/i.test(String(row.arch))) points += 2
+      // 写明了架构且能匹配上的优先于"不限架构"的
+      if (String(row.arch || '').trim() && archCompatible(arch, row.arch)) points += 4
       if (!row.app) points += 1
       return points
     }
-    const row = listed.slice().sort((left, right) => score(right) - score(left))[0] || {}
+    const row = usable.slice().sort((left, right) => score(right) - score(left))[0] || {}
     const settings = await this.repo.settings()
+
+    // 有该系统的发布记录、却没有一条架构匹配 —— 明确告知，不推错包
+    const archBlocked = !row.version && forOs.length > 0
+    const reason = archBlocked
+      ? `当前系统架构（${arch || '未知'}）暂无对应的安装包`
+      : (row.version ? '' : '暂无可用版本')
+
     return {
       success: true,
+      compatible: !archBlocked,
+      reason,
       version: row.version || '',
-      url: row.url || (app ? '' : setting(settings, 'downloads.client_url', '')),
+      // 架构不匹配时**不给兜底下载地址** —— 那个地址指向的同样是不匹配的包。
+      // 只有"这个系统压根没有发布记录"时才退回通用配置。
+      url: row.url || (app || archBlocked ? '' : setting(settings, 'downloads.client_url', '')),
       title: row.title || '',
       os: row.os || '',
       app: row.app || app
