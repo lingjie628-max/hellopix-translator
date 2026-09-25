@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2200" height="1224" viewBox="0 0 1100 612" font-family="PingFang SC, Hiragino Sans GB, Heiti SC, sans-serif">
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#94A3B8"/></marker></defs>
+<rect width="1100" height="612" fill="#F7F9FC"/>
+<text x="40" y="52" font-size="26" fill="#0F172A" font-weight="700">0.1.5 后台运行 · 关窗决策状态机</text>
+<text x="40" y="78" font-size="14" fill="#667085">三道闸门依次判断；任一道给出「放行」就真的退出。每一条放宽都必须有理由：宁可退出，也不要藏得找不回来</text>
+<rect x="40.0" y="132" width="191.2" height="84" rx="10" fill="#EAF2FF" stroke="#C7D6EE" stroke-width="1.2"/>
+<text x="135.6" y="162" font-size="13" fill="#1E3A8A" font-weight="700" text-anchor="middle">用户点击窗口 ×</text>
+<text x="135.6" y="182" font-size="10.5" fill="#667085" text-anchor="middle">触发 win.on('close')</text>
+<text x="135.6" y="203" font-size="10" fill="#94A3B8" text-anchor="middle">第 1 步</text>
+<path d="M233.2 174 L245.2 174" stroke="#94A3B8" stroke-width="1.8" fill="none" marker-end="url(#ah)"/>
+<rect x="247.2" y="132" width="191.2" height="84" rx="10" fill="#FFFFFF" stroke="#DBE3EE" stroke-width="1.2"/>
+<text x="342.79999999999995" y="162" font-size="13" fill="#172033" font-weight="700" text-anchor="middle">正在退出？</text>
+<text x="342.79999999999995" y="182" font-size="10.5" fill="#667085" text-anchor="middle">isQuitting</text>
+<text x="342.79999999999995" y="203" font-size="10" fill="#94A3B8" text-anchor="middle">第 2 步</text>
+<path d="M440.4 174 L452.4 174" stroke="#94A3B8" stroke-width="1.8" fill="none" marker-end="url(#ah)"/>
+<text x="342.79999999999995" y="240" font-size="10" fill="#B91C1C" text-anchor="middle">是 → 放行（必须！否则 app.</text>
+<text x="342.79999999999995" y="256" font-size="10" fill="#B91C1C" text-anchor="middle">quit() 被自己拦下）</text>
+<rect x="454.4" y="132" width="191.2" height="84" rx="10" fill="#FFFFFF" stroke="#DBE3EE" stroke-width="1.2"/>
+<text x="550.0" y="162" font-size="13" fill="#172033" font-weight="700" text-anchor="middle">后台运行已开？</text>
+<text x="550.0" y="182" font-size="10.5" fill="#667085" text-anchor="middle">backgroundRunning</text>
+<text x="550.0" y="203" font-size="10" fill="#94A3B8" text-anchor="middle">第 3 步</text>
+<path d="M647.5999999999999 174 L659.5999999999999 174" stroke="#94A3B8" stroke-width="1.8" fill="none" marker-end="url(#ah)"/>
+<text x="550.0" y="240" font-size="10" fill="#B91C1C" text-anchor="middle">否 → 放行，尊重「关窗即退出」的</text>
+<text x="550.0" y="256" font-size="10" fill="#B91C1C" text-anchor="middle">用户设置</text>
+<rect x="661.5999999999999" y="132" width="191.2" height="84" rx="10" fill="#FFFFFF" stroke="#DBE3EE" stroke-width="1.2"/>
+<text x="757.1999999999999" y="162" font-size="13" fill="#172033" font-weight="700" text-anchor="middle">托盘建出来了？</text>
+<text x="757.1999999999999" y="182" font-size="10.5" fill="#667085" text-anchor="middle">hasTray</text>
+<text x="757.1999999999999" y="203" font-size="10" fill="#94A3B8" text-anchor="middle">第 4 步</text>
+<path d="M854.8 174 L866.8 174" stroke="#94A3B8" stroke-width="1.8" fill="none" marker-end="url(#ah)"/>
+<text x="757.1999999999999" y="240" font-size="10" fill="#B91C1C" text-anchor="middle">否 → 放行（没有托盘就没有唤回窗</text>
+<text x="757.1999999999999" y="256" font-size="10" fill="#B91C1C" text-anchor="middle">口的入口）</text>
+<rect x="868.8" y="132" width="191.2" height="84" rx="10" fill="#DCFCE7" stroke="#86EFAC" stroke-width="1.2"/>
+<text x="964.4" y="162" font-size="13" fill="#065F46" font-weight="700" text-anchor="middle">拦截关闭</text>
+<text x="964.4" y="182" font-size="10.5" fill="#667085" text-anchor="middle">隐藏到托盘 · 翻译继续跑</text>
+<text x="964.4" y="203" font-size="10" fill="#94A3B8" text-anchor="middle">结果</text>
+<text x="40" y="314" font-size="11.5" fill="#667085">左边三道闸门任一给出「放行」→ 真的退出；全部通过 → 隐藏到托盘（绿色结果）</text>
+<text x="40" y="356" font-size="13.5" fill="#2563EB" font-weight="700">另外三条路径 —— 都会真的退出，且必须退出</text>
+<rect x="40.0" y="374" width="328.0" height="110" rx="8" fill="#FFFFFF" stroke="#DBE3EE" stroke-width="1"/>
+<text x="54.0" y="400" font-size="12.5" fill="#065F46" font-weight="700">托盘菜单 →「退出 Hello Pix」</text>
+<text x="54.0" y="424" font-size="11" fill="#667085">quitApp() 先立 isQuitting = tr</text>
+<text x="54.0" y="440" font-size="11" fill="#667085">ue 再 app.quit()</text>
+<rect x="386.0" y="374" width="328.0" height="110" rx="8" fill="#FFFFFF" stroke="#DBE3EE" stroke-width="1"/>
+<text x="400.0" y="400" font-size="12.5" fill="#92400E" font-weight="700">关掉了后台运行开关</text>
+<text x="400.0" y="424" font-size="11" fill="#667085">window-all-closed 必须退出，不能拿「托</text>
+<text x="400.0" y="440" font-size="11" fill="#667085">盘还在」当借口赖着不走</text>
+<rect x="732.0" y="374" width="328.0" height="110" rx="8" fill="#FFFFFF" stroke="#DBE3EE" stroke-width="1"/>
+<text x="746.0" y="400" font-size="12.5" fill="#667085" font-weight="700">窗口被异常带走（渲染进程崩溃）</text>
+<text x="746.0" y="424" font-size="11" fill="#667085">托盘还在 → 留在托盘等唤回；托盘也没了 → 退出</text>
+<rect x="40" y="502" width="1020" height="66" rx="10" fill="#FFF7E8" stroke="#FDE68A" stroke-width="1.2"/>
+<text x="60" y="528" font-size="11.5" fill="#92400E" font-weight="700">★ 最容易写错：app.quit() 会先触发 close —— 那时若还按「关闭=隐藏」处理，退出就被自己吃掉了（现象：点了退出没反应，只能去任务管理器杀进程）</text>
+<text x="60" y="552" font-size="11.5" fill="#92400E">★ 第二易错：托盘创建失败必须把 tray 置空，判定据此放行退出 ——否则窗口藏了、又没有任何入口能找回来，进程就成了用户看不见也关不掉的僵尸</text>
+<text x="40" y="590" font-size="11" fill="#94A3B8">两个入口改的是同一个设置：托盘右键菜单 + 界面「系统操作」菜单。改任一处，主进程推送事件同步另一处，避免两处显示各说各话</text>
+</svg>

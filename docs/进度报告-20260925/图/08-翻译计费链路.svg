@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2200" height="1220" viewBox="0 0 1100 610" font-family="PingFang SC, Hiragino Sans GB, Heiti SC, sans-serif">
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#94A3B8"/></marker></defs>
+<rect width="1100" height="610" fill="#F7F9FC"/>
+<text x="40" y="52" font-size="26" fill="#0F172A" font-weight="700">翻译一次 · 从划词到落库的完整链路</text>
+<text x="40" y="78" font-size="14" fill="#667085">这条链路的工程质量高：幂等键 + 请求指纹 + Redis 锁 + 余额悲观锁 + 失败退款，重复扣费的入口都堵住了</text>
+<rect x="40" y="122" width="500" height="78" rx="8" fill="#F1F5F9" stroke="#CBD5E1" stroke-width="1.2"/>
+<text x="56" y="148" font-size="13" fill="#667085" font-weight="700">① 划词</text>
+<text x="136" y="148" font-size="11" fill="#667085">guest-inject.js</text>
+<text x="56" y="172" font-size="11" fill="#2B3748">选中文本 → 注入浮层</text>
+<path d="M550 161 L560 161" stroke="#94A3B8" stroke-width="1.6" fill="none" marker-end="url(#ah)"/>
+<rect x="560" y="122" width="500" height="78" rx="8" fill="#F1F5F9" stroke="#CBD5E1" stroke-width="1.2"/>
+<text x="576" y="148" font-size="13" fill="#667085" font-weight="700">② 取词</text>
+<text x="656" y="148" font-size="11" fill="#667085">preload 桥接</text>
+<text x="576" y="172" font-size="11" fill="#2B3748">text + incoming 方向</text>
+<path d="M810.0 200 L1070 175" stroke="#94A3B8" stroke-width="1.6" fill="none" marker-end="url(#ah)" stroke-dasharray="4 4"/>
+<rect x="40" y="214" width="500" height="78" rx="8" fill="#F1F5F9" stroke="#CBD5E1" stroke-width="1.2"/>
+<text x="56" y="240" font-size="13" fill="#667085" font-weight="700">③ 长度闸门</text>
+<text x="136" y="240" font-size="11" fill="#667085">main.js</text>
+<text x="56" y="264" font-size="11" fill="#2B3748">&gt;5000 字符直接拒；纯 emoji 返回空</text>
+<path d="M550 253 L560 253" stroke="#94A3B8" stroke-width="1.6" fill="none" marker-end="url(#ah)"/>
+<rect x="560" y="214" width="500" height="78" rx="8" fill="#F1F5F9" stroke="#CBD5E1" stroke-width="1.2"/>
+<text x="576" y="240" font-size="13" fill="#667085" font-weight="700">④ 本地缓存</text>
+<text x="656" y="240" font-size="11" fill="#667085">translate-cache</text>
+<text x="576" y="264" font-size="11" fill="#2B3748">命中即返回，不产生扣费</text>
+<path d="M810.0 292 L1070 267" stroke="#94A3B8" stroke-width="1.6" fill="none" marker-end="url(#ah)" stroke-dasharray="4 4"/>
+<rect x="40" y="306" width="500" height="78" rx="8" fill="#EAF2FF" stroke="#C7D6EE" stroke-width="1.2"/>
+<text x="56" y="332" font-size="13" fill="#1E3A8A" font-weight="700">⑤ 服务端</text>
+<text x="136" y="332" font-size="11" fill="#667085">core-service</text>
+<text x="56" y="356" font-size="11" fill="#2B3748">套餐校验 → 引擎 wired 校验</text>
+<path d="M550 345 L560 345" stroke="#94A3B8" stroke-width="1.6" fill="none" marker-end="url(#ah)"/>
+<rect x="560" y="306" width="500" height="78" rx="8" fill="#FFF7E8" stroke="#FDE68A" stroke-width="1.2"/>
+<text x="576" y="332" font-size="13" fill="#92400E" font-weight="700">⑥ 计费</text>
+<text x="656" y="332" font-size="11" fill="#667085">reservations</text>
+<text x="576" y="356" font-size="11" fill="#2B3748">幂等键 + Redis 锁 + 悲观锁预扣</text>
+<path d="M810.0 384 L1070 359" stroke="#94A3B8" stroke-width="1.6" fill="none" marker-end="url(#ah)" stroke-dasharray="4 4"/>
+<rect x="40" y="398" width="500" height="78" rx="8" fill="#DCFCE7" stroke="#86EFAC" stroke-width="1.2"/>
+<text x="56" y="424" font-size="13" fill="#065F46" font-weight="700">⑦ 落库</text>
+<text x="136" y="424" font-size="11" fill="#667085">translate_logs</text>
+<text x="56" y="448" font-size="11" fill="#2B3748">非 refundable 才写流水 + char_used</text>
+<path d="M550 437 L560 437" stroke="#94A3B8" stroke-width="1.6" fill="none" marker-end="url(#ah)"/>
+<rect x="40" y="496" width="1020" height="96" rx="10" fill="#FFFFFF" stroke="#DBE3EE" stroke-width="1"/>
+<text x="60" y="524" font-size="13" fill="#2563EB" font-weight="700">退款路径（关键）</text>
+<text x="60" y="548" font-size="11.5" fill="#2B3748">翻译失败 / 译文为空 / 译文与原文本一致 → 视为 refundable → 退回预扣，**不**写 translate_logs、**不**加 char_used、**不**加 translate_count</text>
+<text x="60" y="570" font-size="11.5" fill="#2B3748">只有真正产生了有效译文才计费 —— 这一点由 254 项以上测试与 「同一 reservation 出现多行即异常」的重复扣费检测共同守住</text>
+</svg>

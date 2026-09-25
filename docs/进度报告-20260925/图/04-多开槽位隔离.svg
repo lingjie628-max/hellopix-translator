@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2200" height="1092" viewBox="0 0 1100 546" font-family="PingFang SC, Hiragino Sans GB, Heiti SC, sans-serif">
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#94A3B8"/></marker></defs>
+<rect width="1100" height="546" fill="#F7F9FC"/>
+<text x="40" y="52" font-size="26" fill="#0F172A" font-weight="700">多开分区隔离 · 0.1.3 的问题与 0.1.5 的解法</text>
+<text x="40" y="78" font-size="14" fill="#667085">0.1.3 两个实例会撞同一个 session 分区，第二个窗口直接看到第一个的登录态</text>
+<rect x="40" y="118" width="500" height="300" rx="12" fill="#FEF2F2" stroke="#FECACA" stroke-width="1.2"/>
+<text x="60" y="148" font-size="14" fill="#B91C1C" font-weight="700">0.1.3 · 撞分区（复现的问题）</text>
+<rect x="60" y="172" width="460" height="60" rx="8" fill="#FFFFFF" stroke="#FECACA" stroke-width="1"/>
+<text x="76" y="196" font-size="12.5" fill="#B91C1C" font-weight="700">进程 A</text>
+<text x="76" y="217" font-size="11" fill="#667085">usedCount{telegram-z:1} → 打开 → index=2</text>
+<rect x="60" y="246" width="460" height="60" rx="8" fill="#FFFFFF" stroke="#FECACA" stroke-width="1"/>
+<text x="76" y="270" font-size="12.5" fill="#B91C1C" font-weight="700">进程 B</text>
+<text x="76" y="291" font-size="11" fill="#667085">usedCount{telegram-z:1} → 打开 → index=2</text>
+<text x="60" y="330" font-size="11.5" fill="#B91C1C">原因：序号来自**进程内**内存计数器，</text>
+<text x="60" y="350" font-size="11.5" fill="#B91C1C">而 Partitions/ 目录是**所有进程共享**的。</text>
+<text x="60" y="378" font-size="11.5" fill="#2B3748">结果：两个进程拿到同一个分区名 →</text>
+<text x="60" y="398" font-size="11.5" fill="#2B3748">共享 Cookie/登录态，并并发读写同一目录</text>
+<rect x="560" y="118" width="500" height="300" rx="12" fill="#DCFCE7" stroke="#86EFAC" stroke-width="1.2"/>
+<text x="580" y="148" font-size="14" fill="#065F46" font-weight="700">0.1.5 · 槽位锁（已修复）</text>
+<rect x="580" y="168" width="460" height="72" rx="8" fill="#FFFFFF" stroke="#86EFAC" stroke-width="1"/>
+<text x="596" y="192" font-size="12.5" fill="#065F46" font-weight="700">进程 A → 抢到槽位 1</text>
+<text x="596" y="216" font-size="11" fill="#667085">persist:pix-用户-telegram-z-1</text>
+<rect x="580" y="254" width="460" height="72" rx="8" fill="#FFFFFF" stroke="#86EFAC" stroke-width="1"/>
+<text x="596" y="278" font-size="12.5" fill="#065F46" font-weight="700">进程 B → 抢到槽位 2</text>
+<text x="596" y="302" font-size="11" fill="#667085">persist:pix-用户-s2-telegram-z-1</text>
+<text x="580" y="356" font-size="11.5" fill="#065F46">用 wx 独占创建抢锁，锁里记 PID；</text>
+<text x="580" y="376" font-size="11.5" fill="#065F46">持有者已死则接管（崩溃不会永久占位）</text>
+<text x="580" y="400" font-size="11.5" fill="#065F46" font-weight="700">★ 槽位 1 不加中缀 → 单实例用户升级不丢登录态</text>
+<rect x="40" y="436" width="1020" height="92" rx="10" fill="#EAF2FF" stroke="#C7D6EE" stroke-width="1"/>
+<text x="60" y="464" font-size="13" fill="#1E3A8A" font-weight="700">验收怎么判定（这一步是产品核心卖点，必须真机确认）</text>
+<text x="60" y="490" font-size="11.5" fill="#2B3748">开第二个实例 → 看它的 Telegram 首屏：直接进已登录状态 = 隔离失败（复现）；显示二维码/要重新登录 = 隔离正常</text>
+<text x="60" y="512" font-size="11.5" fill="#2B3748">并核对 Partitions 目录：出现 telegram-z-1 与 telegram-z-2 两个目录 = 正常；只有一个共同目录 = 失败</text>
+</svg>
