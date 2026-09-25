@@ -5,15 +5,7 @@ import Login from '../components/Login.vue'
 import Landing from '../components/Landing.vue'
 import Home from '../components/Home.vue'
 import HomeIndex from '../components/HomeIndex.vue'
-import OrderInfo from '../components/order/OrderInfo.vue'
-import OrderDetails from '../components/order/OrderDetails.vue'
-import OrderFans from '../components/order/OrderFans.vue'
-import OrderDetailsLog from '../components/order/OrderDetailsLog.vue'
-import OrderUserLogin from '../components/order/OrderUserLogin.vue'
-import OrderShareDetails from '../components/order/OrderShareDetails.vue'
-import OrderShareFans from '../components/order/OrderShareFans.vue'
-import ShortLink from '../components/shortLink/ShortLink.vue'
-import AssistantGroup from '../components/assistant/AssistantGroup.vue'
+// 下面这些旧「工单」模块的页面已整体删除，原因见本文件末尾的说明。
 import TranslateChannels from '../components/translate/TranslateChannels.vue'
 import UserRecharge from '../components/user/UserRecharge.vue'
 import UserRechargePage from '../components/user/UserRechargePage.vue'
@@ -54,7 +46,7 @@ Vue.use(VueRouter)
 
 // '/' 是官网落地页（未登录可看），商户登录移到 '/login'。
 // 之前根路径直接渲染登录页 —— 访客打开域名只看到一个登录框，看不到任何产品介绍。
-const publicPages = ['/', '/login', '/register', '/forgot', '/regSuccess', '/order/shareDetails', '/order/shareFans', '/empty', '/paySuccess', '/payError']
+const publicPages = ['/', '/login', '/register', '/forgot', '/regSuccess', '/empty', '/paySuccess', '/payError']
 
 const routes = [
   { path: '/', name: '官网', component: Landing },
@@ -65,8 +57,6 @@ const routes = [
   { path: '/empty', name: '空状态', component: Empty },
   { path: '/paySuccess', name: '支付成功', component: PaySuccess },
   { path: '/payError', name: '支付失败', component: PayError },
-  { path: '/order/shareDetails', name: '分享工单', component: OrderShareDetails },
-  { path: '/order/shareFans', name: '分享粉丝', component: OrderShareFans },
   { path: '/admin/login', name: '超管登录', component: AdminLogin },
   {
     path: '/admin',
@@ -106,13 +96,6 @@ const routes = [
     redirect: '/home/index',
     children: [
       { path: '/home/index', name: '首页', component: HomeIndex, meta: { keepAlive: true } },
-      { path: '/order/info', name: '工单管理', component: OrderInfo, meta: { keepAlive: true } },
-      { path: '/order/details', name: '工单明细', component: OrderDetails },
-      { path: '/order/fans', name: '粉丝明细', component: OrderFans },
-      { path: '/order/detailsLog', name: '工单日志', component: OrderDetailsLog },
-      { path: '/order/userLogin', name: '登录日志', component: OrderUserLogin },
-      { path: '/short/link', name: '分流链接', component: ShortLink },
-      { path: '/assistant/Group', name: '聊天翻译', component: AssistantGroup },
       { path: '/translate/channels', name: '翻译通道', component: TranslateChannels },
       { path: '/user/Recharge', name: '充值记录', component: UserRecharge },
       { path: '/user/rechargePage', name: '充值中心', component: UserRechargePage },
@@ -181,3 +164,29 @@ router.beforeEach((to, from, next) => {
 })
 
 export default router
+
+/**
+ * 关于被删除的旧「工单」模块
+ * =====================================================================
+ *
+ * 2026-09-25 删除了 7 个页面及其路由：
+ *
+ *   /order/info        工单管理      /order/details    工单明细
+ *   /order/fans        粉丝明细      /order/detailsLog 工单日志
+ *   /order/userLogin   登录日志      /short/link       分流链接
+ *   /assistant/Group   聊天翻译      /order/shareDetails、/order/shareFans
+ *
+ * 为什么删：这套页面属于旧「工单」模型（工单号 / 主号 / 端口 / 当日进粉），
+ * 该模型在当前产品里已经不存在。它们调用的 20 多个接口
+ * （/order/*、/orderDetails/*、/orderTarget/*、/shortLink/*、/assistant/*）
+ * 后端一个都没有实现 —— 生产库对应的表（orders / order_details / order_fans /
+ * short_links / scripts）**一行数据都没有**，请求只会撞 503「该兼容模块尚未迁移
+ * 到 PostgreSQL」或 404。
+ *
+ * 更关键的是：这些页面在商户端菜单（Home.vue）里**根本没有入口**，
+ * 只能靠手输 URL 到达。留着它们只有坏处 —— 谁不小心点到就是一张报错页，
+ * 而且会让人误以为产品里还有"工单"这个概念。
+ *
+ * 现在商户端只保留：首页 / 子账号管理 / 充值中心 / 充值记录 / 翻译通道。
+ * 客户与撞单相关的能力已经迁移到超管后台的「统一客户」与「撞单规则」。
+ */
