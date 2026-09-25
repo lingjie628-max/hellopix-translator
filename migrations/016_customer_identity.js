@@ -185,7 +185,9 @@ exports.up = pgm => {
       ON messages(conversation_id, source_msg_id, sent_at, md5(body))
       WHERE source_msg_id <> '';
 
-    -- 首月分区。后续按月自动建（见 server/services/customer-identity-service.js）
+    -- 首月分区。后续按月自动建 —— 实现与调度都在 scripts/maintenance.js 的
+    -- ensurePartitions()，由 hello-pix-maintenance.timer 每小时执行，
+    -- 范围是「上个月 ~ 未来 AHEAD_MONTHS 个月」。
     CREATE TABLE IF NOT EXISTS messages_2026_09 PARTITION OF messages
       FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
     CREATE TABLE IF NOT EXISTS messages_2026_10 PARTITION OF messages
