@@ -53,11 +53,25 @@ test('remote pages have no page-world IPC bridge or dynamic code injection', () 
 })
 
 test('Vue dialogs do not enable raw HTML rendering', () => {
+  // 原来只抽检 OrderInfo.vue 与 UserRechargePage.vue 两个文件 ——
+  // 而 OrderInfo.vue 属于已删除的旧工单模块，文件没了测试就崩。
+  // 与其换成另外两个文件继续抽检，不如扫**全部** .vue：
+  // 覆盖面严格更大，也不会再被"某个文件被删"这种事弄挂。
   const root = path.join(__dirname, '..', 'src')
-  const order = fs.readFileSync(path.join(root, 'components', 'order', 'OrderInfo.vue'), 'utf8')
-  const recharge = fs.readFileSync(path.join(root, 'components', 'user', 'UserRechargePage.vue'), 'utf8')
-  assert.equal(order.includes('dangerouslyUseHTMLString'), false)
-  assert.equal(recharge.includes('dangerouslyUseHTMLString'), false)
+  const offenders = []
+  const walk = dir => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) { walk(full); continue }
+      if (!entry.name.endsWith('.vue')) continue
+      const text = fs.readFileSync(full, 'utf8')
+      if (text.includes('dangerouslyUseHTMLString')) {
+        offenders.push(path.relative(path.join(__dirname, '..'), full))
+      }
+    }
+  }
+  walk(root)
+  assert.deepEqual(offenders, [], '这些组件开了原始 HTML 渲染，存在 XSS 风险')
 })
 
 test('production refuses to boot the in-memory demo backend', () => {

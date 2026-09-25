@@ -3,7 +3,7 @@ if (!electron || !electron.app || !electron.ipcMain) {
   console.error('请在 desktop 目录执行 npx electron . ，不要用 node 直接跑 main.js')
   process.exit(1)
 }
-const { app, BrowserWindow, WebContentsView, session, ipcMain, shell, safeStorage, nativeImage, net, Menu } = electron
+const { app, BrowserWindow, WebContentsView, session, ipcMain, shell, safeStorage, nativeImage, net, Menu, Tray } = electron
 const path = require('path')
 const fs = require('fs')
 const crypto = require('crypto')
@@ -11,6 +11,8 @@ const { spawn } = require('child_process')
 const fallbackPlatforms = require('./platforms')
 const builtinLines = require('./lines')
 const proxyPresets = require('./proxy-presets')
+const instanceSlot = require('./instance-slot')
+const backgroundMode = require('./background-mode')
 const {
   csvHosts,
   trustedApiHosts,
@@ -143,8 +145,46 @@ function accountSlug() {
   return safe || 'anon'
 }
 
+/**
+ * 本进程独占的多开槽位。
+ *
+ * 启动时分配一次，之后所有分区命名都用它。**必须在创建任何 webview 之前拿到**，
+ * 否则会退回"每个进程各自从 1 数"的老问题 —— 两个实例撞同一个分区。
+ */
+let instanceSlotHandle = null
+
+function instanceSlotDir() {
+  return path.join(app.getPath('userData'), 'instances')
+}
+
+function acquireInstanceSlot() {
+  if (instanceSlotHandle) return instanceSlotHandle
+  try {
+    instanceSlotHandle = instanceSlot.acquireSlot(instanceSlotDir())
+  } catch (e) {
+    // 抢锁失败不能拦住客户端启动 —— 退化成一次性随机槽位，
+    // 隔离性仍然成立（只是这次的分区是全新的）。
+    instanceSlotHandle = { slot: 'x' + crypto.randomBytes(3).toString('hex'), file: null }
+  }
+  return instanceSlotHandle
+}
+
+function currentSlot() {
+  return instanceSlotHandle ? instanceSlotHandle.slot : 1
+}
+
+/**
+ * 分区名。
+ *
+ * 槽位 1 **不加任何中缀**，与历史命名完全一致 —— 单实例用户升级后
+ * 不会丢 Telegram / WhatsApp 登录态。槽位 2+ 才带 `s<N>-`：
+ *
+ *   槽位 1 → persist:pix-alice-telegram-z-1
+ *   槽位 2 → persist:pix-alice-s2-telegram-z-1
+ */
 function makePartition(platformId, index) {
-  return 'persist:pix-' + accountSlug() + '-' + platformId + '-' + index
+  return 'persist:pix-' + accountSlug() + '-' + instanceSlot.slotInfix(currentSlot())
+    + platformId + '-' + index
 }
 
 function saveOpenApps() {
@@ -322,6 +362,50 @@ function scheduleSaveWindowBounds() {
   }, 500)
 }
 
+/**
+ * 窗口尺寸边界 —— **单一来源**。
+ *
+ * 这些值原先在两处各写了一遍（restoreWindowBounds 的夹取、createWindow 的构造），
+ * 改一处漏一处就会出现"存档能到 900，但拖拽被卡在 1160"这种自相矛盾的行为。
+ *
+ * ## 最小值是怎么定出来的
+ *
+ * 不是拍脑袋，是用 CDP 在真实渲染层上逐档量出来的（见下方注释）。
+ *
+ * ### 宽度 900
+ *
+ * 页脚是 `grid-template-columns: minmax(max-content,1fr) auto minmax(max-content,1fr)`，
+ * 两侧轨道的可用宽度取决于中间"版本块"的宽度，光读 CSS 算不准。
+ * 实测（真机 DOM）：
+ *
+ *   900px  页脚 900 = 左组 261 + 版本块 103 + 右组 508   溢出 0   ✓
+ *   890px  溢出 0   ✓
+ *   885px  溢出 4px  ← 临界点在这
+ *   860px  溢出 29px，右组越出视口
+ *
+ * 取 900 留出约 12px 余量。窄于此，页脚右组（下载入口）会被 `overflow:hidden` 裁掉。
+ *
+ * 原先的 1160 是根据"竞品最小宽 ≈1150（4 列 ×(70 标签 + 215 控件)）"推出来的，
+ * 但渲染层其实**早就有响应式断点**（1100px 降 3 列、860px 降 2 列、1080px 压缩页脚），
+ * 1160 把这些断点全挡在外面，一个都触发不到 ——
+ * 用户在小屏上只能忍受一个占掉半屏还多的窗口。
+ *
+ * ### 高度 560
+ *
+ * 顶部 chrome 固定 112px（标签栏 + 翻译条）、页脚 30px，所以
+ * 网页可视高度 = 窗口高 − 142：
+ *
+ *   680 → 538px    560 → 418px    500 → 358px
+ *
+ * 取 560（网页区 418px）—— 聊天窗口在这个高度仍然可读，
+ * 再矮就会让 Telegram / WhatsApp 的消息区显得局促。
+ */
+const WINDOW_MIN_WIDTH = 900
+const WINDOW_MIN_HEIGHT = 560
+/** 上限。不是"屏幕没那么大"，而是防存档被写坏成一个荒唐的值。 */
+const WINDOW_MAX_WIDTH = 3200
+const WINDOW_MAX_HEIGHT = 2000
+
 function restoreWindowBounds(fallback) {
   const saved = readJson(userFile(WINDOW_BOUNDS_FILE), null)
   if (!saved) return fallback
@@ -343,8 +427,8 @@ function restoreWindowBounds(fallback) {
   }
   return {
     x, y,
-    width: Math.min(Math.max(width, 1160), 3200),
-    height: Math.min(Math.max(height, 680), 2000)
+    width: Math.min(Math.max(width, WINDOW_MIN_WIDTH), WINDOW_MAX_WIDTH),
+    height: Math.min(Math.max(height, WINDOW_MIN_HEIGHT), WINDOW_MAX_HEIGHT)
   }
 }
 
@@ -352,6 +436,7 @@ function saveConfig() {
   writeJson(userFile('config.json'), {
     apiBase: apiBase,
     theme: theme,
+    backgroundRunning: backgroundRunning,
     lineId: lineId,
     lines: lines.map(l => ({
       id: l.id,
@@ -374,6 +459,10 @@ function applyLine(id) {
 
 function loadConfig() {
   const cfg = readJson(userFile('config.json'), {})
+  // 缺省为 true（后台运行）。只有显式存了 false 才关掉 ——
+  // 用 `!== false` 而不是 `=== true`，是为了让老版本升级上来的用户
+  // （config.json 里压根没这个键）直接获得新行为，而不是被动保持旧的。
+  backgroundRunning = cfg.backgroundRunning !== false
   theme = cfg.theme === 'dark' ? 'dark' : 'light'   // 默认日间
   const cached = Array.isArray(cfg.lines) ? cfg.lines.filter(l => !isLegacyLine(l)) : []
   lines = builtinLines.slice()
@@ -662,7 +751,10 @@ function sendPlatforms() {
 function platformHasCache(id) {
   const dir = path.join(app.getPath('userData'), 'Partitions')
   try {
-    return fs.readdirSync(dir).some(name => name.indexOf('pix-' + id + '-') === 0)
+    // 原来的 `name.indexOf('pix-' + id + '-') === 0` 假设目录名以平台开头，
+    // 而实际是 `pix-<用户名>-<平台>-<序号>` —— 前缀永远对不上，这个函数
+    // 一直返回 false，"该平台有缓存"的判断从来没生效过。
+    return fs.readdirSync(dir).some(name => instanceSlot.partitionBelongsTo(name, id))
   } catch (e) {
     return false
   }
@@ -766,7 +858,8 @@ async function clearPlatformWebCache(id) {
   const dir = path.join(app.getPath('userData'), 'Partitions')
   try {
     fs.readdirSync(dir).forEach(name => {
-      if (name.indexOf('pix-' + id + '-') === 0) seen.add(session.fromPartition('persist:' + name))
+      // 同样不能用前缀匹配：用户名在平台前面，且槽位 2+ 还会多一段 s2-。
+      if (instanceSlot.partitionBelongsTo(name, id)) seen.add(session.fromPartition('persist:' + name))
     })
   } catch (e) {}
   for (const ses of seen) {
@@ -1435,6 +1528,126 @@ function openPlatform(payload) {
   return { success: true, id: id }
 }
 
+/**
+ * 后台运行状态。
+ *
+ * `isQuitting` 是关键：`app.quit()` 会先触发窗口的 `close` 事件，
+ * 如果那时还按"关闭=隐藏"处理，退出流程会被自己拦下来 —— 表现是
+ * 点了退出没反应，只能去任务管理器杀进程。
+ */
+let tray = null
+let isQuitting = false
+/** 默认开启：这是多开翻译工具，用户关掉界面往往只是"先收起来"，不是"别翻了"。 */
+let backgroundRunning = true
+let backgroundTipShown = false
+
+function backgroundEnabled() {
+  return backgroundRunning
+}
+
+/**
+ * 建立系统托盘。
+ *
+ * 托盘不只是"后台运行的配套"，它是隐藏之后**唯一能把窗口叫回来的入口** ——
+ * 所以创建失败必须被感知：`shouldHideOnClose` 会在 hasTray 为假时拒绝隐藏。
+ */
+function createTray() {
+  if (tray) return tray
+  try {
+    const img = appIconImage()
+    if (!img) throw new Error('图标读取失败')
+    const size = backgroundMode.trayIconSize(process.platform)
+    const small = img.resize({ width: size, height: size, quality: 'best' })
+    tray = new Tray(small)
+    tray.setToolTip(backgroundMode.trayTooltip(APP_VERSION))
+    refreshTrayMenu()
+    // 左键单击直接唤回窗口：这是用户最自然的动作，不该逼他右键找菜单
+    tray.on('click', () => showMainWindow())
+    tray.on('double-click', () => showMainWindow())
+    return tray
+  } catch (e) {
+    // 建不出来就把 tray 留在 null —— 关窗逻辑会据此放行退出，
+    // 绝不会出现"窗口藏了、没有任何入口能找回来"的僵尸进程
+    console.error('[hello-pix] 托盘创建失败，将退化为关闭即退出：', e && e.message)
+    tray = null
+    return null
+  }
+}
+
+function refreshTrayMenu() {
+  if (!tray) return
+  try {
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: '显示主界面', click: () => showMainWindow() },
+      { type: 'separator' },
+      {
+        label: '关闭窗口时后台运行',
+        type: 'checkbox',
+        checked: backgroundRunning,
+        click: menuItem => setBackgroundRunning(!!menuItem.checked)
+      },
+      {
+        label: '开机自动启动',
+        type: 'checkbox',
+        checked: loginItemEnabled(),
+        click: menuItem => setLoginItem(!!menuItem.checked)
+      },
+      { type: 'separator' },
+      { label: '退出 Hello Pix', click: () => quitApp() }
+    ]))
+  } catch (e) {
+    console.error('[hello-pix] 托盘菜单构建失败：', e && e.message)
+  }
+}
+
+function setBackgroundRunning(next) {
+  backgroundRunning = !!next
+  saveConfig()
+  refreshTrayMenu()
+  // 同步渲染层的开关状态：托盘菜单和界面里那一项是同一个设置，
+  // 从托盘改完之后界面上的显示不能还是旧的。
+  try {
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('config:backgroundRunning', backgroundRunning)
+    }
+  } catch (e) {}
+}
+
+/** 把窗口唤回来并聚焦。窗口可能被隐藏或最小化，两种情况都要处理。 */
+function showMainWindow() {
+  if (!win || win.isDestroyed()) {
+    // 窗口被销毁了（异常路径）—— 重建一个，总比让用户对着托盘图标干瞪眼好
+    createWindow()
+    return
+  }
+  if (!win.isVisible()) win.show()
+  if (win.isMinimized()) win.restore()
+  win.focus()
+}
+
+/** 真正退出。必须先立 isQuitting，否则 close 拦截会把这次退出吃掉。 */
+function quitApp() {
+  isQuitting = true
+  app.quit()
+}
+
+function loginItemEnabled() {
+  try {
+    return !!app.getLoginItemSettings().openAtLogin
+  } catch (e) {
+    return false
+  }
+}
+
+function setLoginItem(enabled) {
+  try {
+    app.setLoginItemSettings({ openAtLogin: !!enabled, openAsHidden: false })
+  } catch (e) {
+    console.error('[hello-pix] 设置开机启动失败：', e && e.message)
+  }
+  refreshTrayMenu()
+}
+
 function createWindow() {
   // 按屏幕可用区域自适应开窗：此前固定 1280x820，小屏尚可、大屏浪费，
   // 而窄屏下顶部翻译设置区会被挤压换行。取下 92% 并设上下限，保证完整显示。
@@ -1442,11 +1655,10 @@ function createWindow() {
   const { workAreaSize } = electronScreen.getPrimaryDisplay()
   // 高度优先：顶部设置区两行需要空间，因此尽量吃满可用高度（只留 16px 余量），
   // 而不是按比例缩。1280x800 这类逻辑分辨率下可用高度约 775px，这就是物理上限。
-  // 竞品的设计最小宽 ≈1150（4 列 ×(70 标签 + 215 控件) + 内边距），我们取 1160
-  const MIN_WIDTH = 1160
+  // 最小尺寸见 WINDOW_MIN_WIDTH / WINDOW_MIN_HEIGHT 的注释（含实测依据）。
   const fallback = {
-    width: Math.max(MIN_WIDTH, Math.min(1920, workAreaSize.width - 16)),
-    height: Math.max(680, Math.min(1600, workAreaSize.height - 16))
+    width: Math.max(WINDOW_MIN_WIDTH, Math.min(1920, workAreaSize.width - 16)),
+    height: Math.max(WINDOW_MIN_HEIGHT, Math.min(1600, workAreaSize.height - 16))
   }
   const saved = restoreWindowBounds(fallback)
   const width = saved.width
@@ -1455,8 +1667,8 @@ function createWindow() {
     width,
     height,
     center: true,
-    minWidth: 1160,
-    minHeight: 680,
+    minWidth: WINDOW_MIN_WIDTH,
+    minHeight: WINDOW_MIN_HEIGHT,
     title: 'Hello Pix',
     icon: APP_ICON,
     backgroundColor: '#070b14',
@@ -1478,6 +1690,36 @@ function createWindow() {
     height
   })
   if (!hasSavedPosition) win.center()
+  /**
+   * 关闭窗口 → 隐藏到托盘（后台继续跑），而不是退出。
+   *
+   * 翻译靠的是各个 webview 里注入的脚本，窗口一旦真关掉、webContents 被销毁，
+   * 翻译就停了。用户点右上角的 ×，多数时候意思是"先收起来"，
+   * 不是"别翻了" —— 尤其是这个产品的多开窗口本来就要一直挂着。
+   *
+   * 但**不是无条件拦截**：托盘没建出来时必须放行退出，
+   * 否则窗口藏了、又没有任何入口能找回来，进程就成了用户看不见也关不掉的僵尸。
+   * 判定集中放在 background-mode.js，那里有单测。
+   */
+  win.on('close', event => {
+    if (!backgroundMode.shouldHideOnClose({
+      isQuitting,
+      backgroundEnabled: backgroundEnabled(),
+      hasTray: !!tray
+    })) return
+    event.preventDefault()
+    win.hide()
+    // 只提示一次，避免每次关窗都弹一下惹人烦
+    if (!backgroundTipShown && tray && process.platform === 'win32') {
+      backgroundTipShown = true
+      try {
+        tray.displayBalloon({
+          title: 'Hello Pix 仍在后台运行',
+          content: '翻译会继续工作。要完全退出，请右键托盘图标选择「退出」。'
+        })
+      } catch (e) { /* 某些系统不支持气泡，忽略即可 */ }
+    }
+  })
   win.on('resize', layoutViews)
   win.on('resized', layoutViews)
   win.on('resize', scheduleSaveWindowBounds)
@@ -1534,6 +1776,9 @@ ipcMain.on('chrome:barHeight', (event, height) => {
 ipcMain.handle('config:get', () => ({
   apiBase: apiBase,
   theme: theme,
+  // 后台运行开关：渲染层的「系统操作」菜单要显示当前状态，托盘菜单之外的
+  // 第二个入口 —— 不能指望用户去右键托盘图标找设置。
+  backgroundRunning: backgroundRunning,
   lineId: currentLine().id,
   lines: lines
 }))
@@ -1545,6 +1790,15 @@ ipcMain.handle('config:setTheme', (event, value) => {
   theme = next
   saveConfig()
   return { success: true, theme: theme }
+})
+
+// 后台运行开关（关闭窗口时隐藏到托盘，而不是退出）。
+// 只接受布尔值语义：任何非 false 的输入都按开启处理，与 loadConfig 的
+// `!== false` 默认值保持一致 —— 免得 renderer 传个 undefined 把开关关掉。
+ipcMain.handle('config:setBackgroundRunning', (event, value) => {
+  if (!isMainSender(event)) return rejectUntrustedSender()
+  setBackgroundRunning(value !== false)
+  return { success: true, backgroundRunning: backgroundRunning }
 })
 
 ipcMain.handle('auth:get', event => isMainSender(event) ? publicAuth() : rejectUntrustedSender())
@@ -1862,6 +2116,12 @@ ipcMain.handle('customer:ingest', async (event, payload) => {
     platform: tab.platform,
     accountKey: accountSlug()
   })
+  // 出向消息的发送方是**本账号**，不是对方。
+  // 服务端在缺失时拿 peerKey 兜底 —— 那是"接收"的语义，用在出向上会把
+  // 发送方记成客户，于是"我方发了什么"在归档里看起来像"客户发了什么"。
+  // 和 platform/accountKey 一样放在主进程补：渲染进程在网页上下文里，
+  // 让它自报"我是谁"等于把归属判断交给不可信的一侧。
+  if (data.direction === 'out' && !data.senderKey) data.senderKey = data.accountKey
   try {
     return await api('/customer/ingest', { method: 'POST', form: data })
   } catch (e) {
@@ -1949,15 +2209,43 @@ ipcMain.handle('app:overlay', (event, on) => {
 
 app.whenReady().then(() => {
   applyAppIdentity()
+  // 槽位必须在任何 webview 之前拿到 —— 分区名依赖它。
+  const handle = acquireInstanceSlot()
+  console.log('[hello-pix] 多开槽位 =', handle.slot,
+    handle.file ? '' : '（槽位已满，本次使用一次性分区）')
   try { fs.rmSync(userFile('translate-cache.json'), { force: true }) } catch (e) {}
   loadConfig()
+  // 托盘要先于窗口建好：关闭拦截依赖 `tray` 是否为真来决定"隐藏还是退出"。
+  createTray()
   createWindow()
 })
 
 app.on('before-quit', () => {
+  // 必须在最前面：后面 saveOpenApps / releaseSlot 都可能触发窗口操作，
+  // 而那些操作若被 close 拦截当成"隐藏"，退出流程就会被自己吃掉。
+  isQuitting = true
   saveOpenApps()
+  // 归还槽位，让下一个窗口能拿回同一个分区（登录态得以保留）。
+  // 崩溃时不会执行到这里，由 acquireSlot 的陈旧锁接管逻辑兜底。
+  try { instanceSlot.releaseSlot(instanceSlotHandle) } catch (e) {}
+  try { if (tray) { tray.destroy(); tray = null } } catch (e) {}
 })
 
 app.on('window-all-closed', () => {
-  app.quit()
+  // 后台运行时窗口只是 hide、并没有 close，所以这里正常情况下不会触发。
+  // 真触发只有两种情形，答案不一样（判定集中在 background-mode.js，带单测）：
+  //   1. 用户关掉了后台运行 → 此时必须退出，不能拿"托盘还在"当借口赖着不走
+  //   2. 后台运行中窗口被异常带走（渲染进程崩溃）→ 留在托盘，点一下能重建窗口，
+  //      退出反而会让翻译静默中断。只有托盘也没建出来时才退出，
+  //      否则会剩一个没有窗口、也没有任何入口的程序。
+  if (backgroundMode.shouldQuitOnAllClosed({
+    isQuitting,
+    backgroundEnabled: backgroundEnabled(),
+    hasTray: !!tray
+  })) app.quit()
 })
+
+// macOS：点 Dock 图标要把（可能已隐藏到托盘的）窗口唤回来。
+// 与托盘左键单击走同一条路径；窗口被异常销毁时 showMainWindow 会重建，
+// 避免"图标点了没反应"。
+app.on('activate', () => showMainWindow())

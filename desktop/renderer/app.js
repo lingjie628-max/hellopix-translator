@@ -36,6 +36,8 @@ const systemOpsWrap = document.getElementById('systemOpsWrap')
 const systemOpsTrigger = document.getElementById('systemOpsTrigger')
 const systemUpdateBtn = document.getElementById('systemUpdateBtn')
 const systemRestartBtn = document.getElementById('systemRestartBtn')
+const systemBackgroundBtn = document.getElementById('systemBackgroundBtn')
+const systemBackgroundIco = document.getElementById('systemBackgroundIco')
 const updatePanel = document.getElementById('updatePanel')
 const updateVersionText = document.getElementById('updateVersionText')
 const updateDesc = document.getElementById('updateDesc')
@@ -1977,6 +1979,47 @@ if (systemRestartBtn) {
     systemRestartBtn.classList.remove('danger-confirm')
     flashMenuButton(systemRestartBtn, '正在重启…', 10000)
     window.pix.restartApp()
+  }
+}
+
+// --- 后台运行开关（关闭窗口时隐藏到托盘，而不是退出）-------------------------
+// 和托盘右键菜单里那一项是同一个设置，读写都走主进程 config.json。
+// 之所以要在界面上再放一个：多数用户不会去翻托盘菜单，等他把窗口关掉了
+// 才发现"程序好像没退"，这时再去找托盘已经晚了。
+function paintBackgroundButton(enabled) {
+  const on = enabled !== false
+  if (systemBackgroundIco) systemBackgroundIco.textContent = on ? '◉' : '○'
+  if (systemBackgroundBtn) {
+    systemBackgroundBtn.setAttribute('aria-pressed', on ? 'true' : 'false')
+    systemBackgroundBtn.title = on
+      ? '当前：关闭窗口后仍在后台运行。点一下改为「关闭即退出」'
+      : '当前：关闭窗口即退出。点一下改为「关闭窗口后仍后台运行」'
+  }
+}
+if (systemBackgroundBtn) {
+  ;(async () => {
+    let enabled = true
+    try {
+      const cfg = await window.pix.getConfig()
+      if (cfg && typeof cfg.backgroundRunning === 'boolean') enabled = cfg.backgroundRunning
+    } catch (e) {}
+    paintBackgroundButton(enabled)
+  })()
+  // 托盘菜单里改了同一个开关 → 主进程推过来，这里跟上，避免两处显示不一致
+  if (window.pix.onBackgroundRunning) {
+    window.pix.onBackgroundRunning(enabled => paintBackgroundButton(enabled))
+  }
+  systemBackgroundBtn.onclick = async () => {
+    const current = systemBackgroundBtn.getAttribute('aria-pressed') !== 'false'
+    const next = !current
+    paintBackgroundButton(next)   // 先动界面，点击立刻有反馈
+    try {
+      const res = await window.pix.setBackgroundRunning(next)
+      // 以主进程回执为准；失败就退回原状态，避免界面和真实设置不一致
+      paintBackgroundButton(res && res.success ? res.backgroundRunning : current)
+    } catch (e) {
+      paintBackgroundButton(current)
+    }
   }
 }
 

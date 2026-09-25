@@ -245,7 +245,7 @@ const pixBridge = {
    * 上报一条线索。body 为空表示"只是打开了会话"——
    * 服务端据此建立跟进关系，这正是撞单检测的触发点。
    */
-  function reportClue(body, direction) {
+  function reportClue(body, direction, sentAt) {
     var pix = api()
     if (!pix || !pix.reportCustomer) return
     var peer = currentPeer()
@@ -269,10 +269,87 @@ const pixBridge = {
         sourceMsgId: peer.sourceMsgId || '',
         // 手机号是跨平台合并的关键线索，能拿到就一定要带上
         phone: peer.phone || '',
-        sentAt: new Date().toISOString()
+        // 历史消息的发送时间是"过去"，用 now() 会把三个月的旧消息记成刚刚发生。
+        // 能从 DOM 解析出来就用真实时间，解析不出才退回 now()。
+        sentAt: sentAt || new Date().toISOString()
       })
     } catch (e) {}
     lastPeerKey = peer.peerKey
+  }
+
+  /**
+   * 尽量从 DOM 里解析出这条消息的真实发送时间。
+   *
+   * 解析不出来就返回 null，由调用方退回 now()。**刻意不做更复杂的推断** ——
+   * 猜错时间比没有时间更糟：消息归档里一条时间错乱记录，会让"什么时候聊的"
+   * 这个最基本的判断失真，而且很难事后发现。
+   */
+  function messageTime(node) {
+    // WhatsApp：容器上有 data-pre-plain-text="[4:32 PM, 9/25/2026] 名字: "
+    var holder = node.closest ? node.closest('[data-pre-plain-text]') : null
+    if (holder) {
+      var raw = holder.getAttribute('data-pre-plain-text') || ''
+      var m = /\[([^\]]+)\]/.exec(raw)
+      if (m) {
+        // 窄空格（U+202F）是 WhatsApp 用的，Safari/部分环境 Date.parse 不认
+        var t = Date.parse(m[1].replace(/[\u202f\u00a0]/g, ' '))
+        if (!isNaN(t)) return new Date(t).toISOString()
+      }
+    }
+    // Telegram Web A / K：消息里有 <time datetime="..."> 或带 title 的 .time
+    var timeEl = node.querySelector ? node.querySelector('time[datetime]') : null
+    if (timeEl) {
+      var dt = timeEl.getAttribute('datetime')
+      var t2 = dt ? Date.parse(dt) : NaN
+      if (!isNaN(t2)) return new Date(t2).toISOString()
+      var title = timeEl.getAttribute('title')
+      var t3 = title ? Date.parse(title) : NaN
+      if (!isNaN(t3)) return new Date(t3).toISOString()
+    }
+    return null
+  }
+
+  /**
+   * 消息归档去重。
+   *
+   * scan() 由 MutationObserver 驱动，页面稍有变化就会重扫全部已渲染的消息 ——
+   * 没有去重的话同一条消息会被反复上报。这里用「会话 + 方向 + 正文哈希」做键：
+   * Telegram 拿不到稳定的消息 ID，而同一会话里同方向同内容的消息本来就极少，
+   * 偶尔把两条一模一样的消息并成一条，也比把一条消息存十遍要好。
+   */
+  var reportedKeys = Object.create(null)
+  var reportedCount = 0
+  var REPORTED_CAP = 4000
+
+  function textHash(s) {
+    var h = 5381
+    for (var i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0
+    return (h >>> 0).toString(36)
+  }
+
+  /**
+   * 上报一条真实消息正文。
+   *
+   * 与此前的 `reportIfPeerChanged()` 的区别：那个只上报"我打开了这个会话"
+   * （body 为空），服务端据此建 conversations/customers，但**不写 messages**；
+   * 服务端的写入条件是 `if (payload.body)`，而 body 恒为空，
+   * 于是 messages 表永远是空的 —— 消息归档能力等于没接上。
+   */
+  function reportMessage(node, direction, text) {
+    var peer = currentPeer()
+    if (!peer) return
+    if (document.hidden) return
+    var key = peer.peerKey + '|' + direction + '|' + textHash(text)
+    if (reportedKeys[key]) return
+    // 键表满了就整体清空而不是拒绝新消息：宁可让最早那批有机会被重报一次
+    // （服务端还有唯一索引兜底），也不要让归档从此停止工作。
+    if (reportedCount >= REPORTED_CAP) {
+      reportedKeys = Object.create(null)
+      reportedCount = 0
+    }
+    reportedKeys[key] = 1
+    reportedCount++
+    reportClue(text, direction, messageTime(node))
   }
 
   /** 会话切换时上报一次 —— 打开新客户就是撞单检测的触发时机 */
@@ -638,6 +715,10 @@ const pixBridge = {
       }
       if (!text || text.length > 4000) continue
       if (isBusyText(text) || isDeletedText(text)) continue
+      // 消息归档：**放在翻译开关判断之前**。
+      // 归档和"要不要翻译这条"是两件事 —— 中文消息（includeZh 关闭）、
+      // 群聊（transGroup 关闭）同样是需要留档的往来记录，不能因为不翻译就不归档。
+      try { reportMessage(node, isOwn(node) ? 'out' : 'in', text) } catch (e) {}
       if (!prefs.transRecv) {
         clearExtras(host)
         continue

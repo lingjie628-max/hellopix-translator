@@ -98,6 +98,9 @@
             <div class="op-title"><i></i>Hello Pix</div>
             <button id="systemUpdateBtn" type="button"><span>⇧</span><b>检查软件更新</b></button>
             <button id="systemRestartBtn" type="button"><span>↯</span><b>重启软件</b></button>
+            <!-- 后台运行开关：和托盘右键菜单里的那一项是同一个设置。
+                 放在这里是因为多数用户不会去翻托盘菜单，关窗之后才发现窗口不见了。 -->
+            <button id="systemBackgroundBtn" type="button" aria-pressed="true"><span id="systemBackgroundIco">◉</span><b id="systemBackgroundText">关闭窗口时后台运行</b></button>
           </div>
         </div>
       </div>

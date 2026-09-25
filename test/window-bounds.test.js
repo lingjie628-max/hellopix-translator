@@ -44,6 +44,29 @@ const WINDOW_BOUNDS_FILE_CONST = (() => {
   return m[0]
 })()
 
+/**
+ * 窗口尺寸边界同样**从源码抽**，不在测试里另抄一份。
+ *
+ * 抄一份的后果很具体：改了实现的 900、忘了改测试的 1160，
+ * 测试要么直接挂（还算好），要么在新数值下变成一条恒真的废断言（更糟）。
+ */
+const SIZE_CONSTS = (() => {
+  const names = ['WINDOW_MIN_WIDTH', 'WINDOW_MIN_HEIGHT', 'WINDOW_MAX_WIDTH', 'WINDOW_MAX_HEIGHT']
+  const out = {}
+  const lines = []
+  for (const n of names) {
+    const m = MAIN.match(new RegExp('^const ' + n + ' = (\\d+)$', 'm'))
+    if (!m) throw new Error(`main.js 里找不到常量 ${n}，测试需要同步更新`)
+    out[n] = Number(m[1])
+    lines.push(m[0])
+  }
+  return { values: out, source: lines.join('\n') }
+})()
+const MIN_W = SIZE_CONSTS.values.WINDOW_MIN_WIDTH
+const MIN_H = SIZE_CONSTS.values.WINDOW_MIN_HEIGHT
+const MAX_W = SIZE_CONSTS.values.WINDOW_MAX_WIDTH
+const MAX_H = SIZE_CONSTS.values.WINDOW_MAX_HEIGHT
+
 const HELPERS = `
   const path = require('path')
   const fs = require('fs')
@@ -79,7 +102,7 @@ function buildSandbox({ savedFile = null, displays = [] } = {}) {
   }
   vm.createContext(sandbox)
   vm.runInContext(
-    HELPERS + '\n' + WINDOW_BOUNDS_FILE_CONST + '\n' + extractFn('scheduleSaveWindowBounds') + '\n' + extractFn('restoreWindowBounds') +
+    HELPERS + '\n' + WINDOW_BOUNDS_FILE_CONST + '\n' + SIZE_CONSTS.source + '\n' + extractFn('scheduleSaveWindowBounds') + '\n' + extractFn('restoreWindowBounds') +
     '\nthis.__schedule = scheduleSaveWindowBounds; this.__restore = restoreWindowBounds; this.__setWin = w => { win = w };',
     sandbox,
     { filename: 'main.js#window-bounds' }
@@ -92,8 +115,8 @@ const MAIN_DISPLAY = { workArea: { x: 0, y: 25, width: 1920, height: 1055 } }
 const SECOND_DISPLAY = { workArea: { x: 1920, y: 0, width: 1440, height: 900 } }
 const FALLBACK = { width: 1600, height: 900 }
 
-const clampW = w => Math.min(Math.max(w, 1160), 3200)
-const clampH = h => Math.min(Math.max(h, 680), 2000)
+const clampW = w => Math.min(Math.max(w, MIN_W), MAX_W)
+const clampH = h => Math.min(Math.max(h, MIN_H), MAX_H)
 
 test('restoreWindowBounds', async t => {
   await t.test('没有存档时返回 fallback', () => {
@@ -141,11 +164,12 @@ test('restoreWindowBounds', async t => {
     assert.deepStrictEqual({ ...restore(FALLBACK) }, { x: 2200, y: 100, width: 1300, height: 900 })
   })
 
-  await t.test('过小的存档尺寸被抬到 minWidth 1160 / minHeight 680', () => {
+  await t.test(`过小的存档尺寸被抬到 minWidth ${MIN_W} / minHeight ${MIN_H}`, () => {
     const { restore } = buildSandbox({ savedFile: { x: 100, y: 100, width: 300, height: 200 }, displays: [MAIN_DISPLAY] })
     const got = restore(FALLBACK)
-    assert.strictEqual(got.width, 1160, '必须抬到 1160，否则四列网格会被挤压')
-    assert.strictEqual(got.height, 680)
+    assert.strictEqual(got.width, MIN_W,
+      `必须抬到 ${MIN_W}。这个数是 CDP 实测出来的：885px 时页脚开始溢出，900 有余量。`)
+    assert.strictEqual(got.height, MIN_H)
   })
 
   await t.test('过大的存档尺寸被夹到 3200x2000', () => {
@@ -155,13 +179,13 @@ test('restoreWindowBounds', async t => {
     assert.strictEqual(got.height, 2000)
   })
 
-  await t.test('夹取边界与常量一致（1160/3200/680/2000）', () => {
-    const cases = [[1159, 1160], [1160, 1160], [3200, 3200], [3201, 3200]]
+  await t.test(`夹取边界与常量一致（${MIN_W}/${MAX_W}/${MIN_H}/${MAX_H}）`, () => {
+    const cases = [[MIN_W - 1, MIN_W], [MIN_W, MIN_W], [MAX_W, MAX_W], [MAX_W + 1, MAX_W]]
     for (const [input, want] of cases) {
       const { restore } = buildSandbox({ savedFile: { x: 10, y: 10, width: input, height: 900 }, displays: [MAIN_DISPLAY] })
       assert.strictEqual(restore(FALLBACK).width, want, `width ${input} 应夹到 ${want}`)
     }
-    assert.strictEqual(clampW(1159), 1160)
+    assert.strictEqual(clampW(MIN_W - 1), MIN_W)
     assert.strictEqual(clampH(2001), 2000)
   })
 
@@ -186,7 +210,7 @@ test('scheduleSaveWindowBounds', async t => {
 
   await t.test('连续调用只落盘最后一次（防抖）', async () => {
     const { sandbox, userData } = buildSandbox({ displays: [MAIN_DISPLAY] })
-    const boxes = [{ x: 1, y: 1, width: 1160, height: 680 }, { x: 2, y: 2, width: 1200, height: 700 }, { x: 3, y: 3, width: 1300, height: 800 }]
+    const boxes = [{ x: 1, y: 1, width: MIN_W, height: MIN_H }, { x: 2, y: 2, width: 1200, height: 700 }, { x: 3, y: 3, width: 1300, height: 800 }]
     let cur = boxes[0]
     sandbox.__setWin({ isDestroyed: () => false, isFullScreen: () => false, isMaximized: () => false, getBounds: () => cur })
     for (const b of boxes) { cur = b; sandbox.__schedule() }

@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld('pix', {
   getConfig: () => ipcRenderer.invoke('config:get'),
   // 界面主题：'dark' | 'light'，读写都走主进程（存 config.json）
   setTheme: (value) => ipcRenderer.invoke('config:setTheme', value),
+  // 后台运行（关闭窗口时隐藏到托盘）。开关状态随 getConfig() 一起下发。
+  setBackgroundRunning: (value) => ipcRenderer.invoke('config:setBackgroundRunning', value),
   // 渲染层把工具条真实高度上报给主进程，供原生视图定位使用
   reportBarHeight: (height) => ipcRenderer.send('chrome:barHeight', height),
   // 顶部 chrome 底边的实测位置（哨兵元素 bottom），原生视图直接用它作为起始 y
@@ -60,6 +62,10 @@ contextBridge.exposeInMainWorld('pix', {
   },
   onKicked: (cb) => {
     ipcRenderer.on('auth:kicked', (_event, msg) => cb(msg))
+  },
+  // 托盘菜单改了后台运行开关时，主进程会推给渲染层同步显示
+  onBackgroundRunning: (cb) => {
+    ipcRenderer.on('config:backgroundRunning', (_event, enabled) => cb(enabled))
   },
   onContextCommand: (cb) => {
     ipcRenderer.on('context:command', (_event, command) => cb(command))
