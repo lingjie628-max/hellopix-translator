@@ -238,6 +238,11 @@ async function cmdWho(username) {
   console.log(`  已用字符   ${u.char_used}`)
   console.log(`  翻译次数   ${u.translate_count}`)
   console.log(`  当前通道   ${u.active_engine_id || '(未设置，走套餐默认)'}`)
+  // 设备绑定：客户端登录会带 deviceId，若账号已绑到别的设备，
+  // 登录直接被 409 DEVICE_BOUND 拒掉 —— 这是开工前必须确认的一件事，
+  // 否则会在 Windows 上折腾半天才发现压根登不上。
+  console.log(`  绑定设备   ${u.bound_device || '(未绑定，任意设备可登录)'}`)
+  console.log(`  账号状态   ${u.status === 0 || u.status === '0' ? '★ 已禁用' : '正常'}`)
 
   line()
   console.log('  翻译流水（最近 30 条）：')
