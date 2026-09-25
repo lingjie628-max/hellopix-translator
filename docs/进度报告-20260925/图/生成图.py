@@ -101,81 +101,103 @@ def wrap(s, n):
 
 # ---------------------------------------------------------------- 图 1 未完成项全景
 def fig01():
-    b = [head("未完成项全景 · 截至 2026-09-25",
-              "按上线阻断级别分档。红色 = 不做完不能上线；橙色 = 影响体验或收入；灰色 = 可延后")]
+    b = [head("未完成项全景 · 截至 2026-09-25（当日二次更新）",
+              "上一版列出的 10 项里，8 项已在本轮做完并实测；剩下 2 项都不阻断上线")]
+    # ---- 本轮已清零（8 项）
+    by = 116
+    b.append(rect(40, by, 1020, 176, GREENBG, GREENBD, 12, 1.2))
+    b.append(txt(58, by + 30, "✅  本轮已清零（8 项）", 15, GREENTX, "700"))
+    done = [
+        ("Windows 真机验收", "已在真机跑通，无问题"),
+        ("代码签名证书", "签名问题已解决"),
+        ("基础版无可用引擎", "接通 google，4 商户恢复"),
+        ("macOS 未构建", "0.1.6 已构建上架"),
+        ("客户端不写日志", "0.1.6 已落地文件日志"),
+        ("旧工单接口残留", "后端死接口已清理"),
+        ("迁移 016 注释", "已修正指向"),
+        ("免安装版未更新", "已随 0.1.6 重打"),
+    ]
+    gap, cols = 14, 4
+    cw = (1020 - 36 - (cols - 1) * gap) / cols
+    for i, (t, s) in enumerate(done):
+        col, row = i % cols, i // cols
+        cx = 58 + col * (cw + gap)
+        cy = by + 46 + row * 62
+        b.append(rect(cx, cy, cw, 54, "#FFFFFF", GREENBD, 8))
+        b.append(txt(cx + 12, cy + 22, "✓ " + t, 12.5, GREENTX, "700"))
+        b.append(txt(cx + 12, cy + 40, s, 10.5, MUTED))
+    y = by + 176 + 14
+    # ---- 仍待办
     lanes = [
-        ("🔴  上线阻断", REDBG, REDBD, REDTX, 4, [
-            ("Windows 真机验收", "唯一不能用自动化替代的一项", "你 + 我", "半天"),
-            ("代码签名证书", "用户下载会被 Defender 拦", "你", "3–10 天"),
-            ("基础版套餐无可用引擎", "4 个商户完全不能翻译", "你定方案", "1 小时"),
-            ("macOS 0.1.5 未构建", "mac 用户停留在 0.1.3", "我", "1 小时"),
+        ("🟠  待办 · 不阻断上线", WARNBG, WARNBD, WARNTX, [
+            ("5 个引擎「可选中但未接通」", "选中即 503，会转成「翻译坏了」的客服工单",
+             "你（给凭据）/ 我（摘除）", "按厂商 / 1 小时"),
+            ("USDT 自动充值的真实资金未验证", "影子模式已跑通，但从未走过真实资金",
+             "你 + 我", "1 天"),
         ]),
-        ("🟠  高", WARNBG, WARNBD, WARNTX, 3, [
-            ("7 个引擎未接通", "可选中，选中即 503 报错", "你（凭据）", "按厂商"),
-            ("USDT 真实资金未验", "自动充值只跑过影子模式", "你 + 我", "1 天"),
-            ("客户端不写日志文件", "故障只能靠截图反查", "我", "半天"),
-        ]),
-        ("⚪  可延后", GRAYBG, GRAYBD, MUTED, 3, [
-            ("旧工单后端接口残留", "前端已删，后端仍在", "我", "1 小时"),
-            ("迁移 016 注释指错文件", "文档漂移，不影响运行", "我", "10 分钟"),
-            ("免安装版未随版本更新", "仅影响便携用户", "我", "随下次构建"),
+        ("⚪  可选加固 · 本轮新增建议", GRAYBG, GRAYBD, MUTED, [
+            ("引擎连通性探针接入监控", "「wired=true 但翻不了」能自动告警，不必等商户报障",
+             "我", "1 小时"),
+            ("接通引擎的接口地址加校验", "端点填成控制台网址会静默变成 405/403",
+             "我", "1 小时"),
         ]),
     ]
-    y = 116
-    for label, bg, bd, tx, n, items in lanes:
-        lane_h = 172
+    for label, bg, bd, tx, items in lanes:
+        n = len(items)
+        lane_h = 118
         b.append(rect(40, y, 1020, lane_h, bg, bd, 12, 1.2))
         b.append(txt(58, y + 30, label, 15, tx, "700"))
-        gap = 14
-        cw = (1020 - 36 - (n - 1) * gap) / n
+        gapx = 14
+        cw = (1020 - 36 - (n - 1) * gapx) / n
         for i, (t, s, who, eta) in enumerate(items):
-            cx = 58 + i * (cw + gap)
-            cy = y + 48
-            b.append(rect(cx, cy, cw, 106, "#FFFFFF", bd, 8))
-            b.append(txt(cx + 12, cy + 24, t, 13.5, tx, "700"))
-            for j, ln in enumerate(wrap(s, int(cw / 12.4))[:2]):
-                b.append(txt(cx + 12, cy + 45 + j * 17, ln, 11, MUTED))
-            b.append(txt(cx + 12, cy + 92, "谁做：" + who, 10.5, FAINT))
-            b.append(txt(cx + cw - 12, cy + 92, eta, 10.5, tx, "700", "end"))
+            cx = 58 + i * (cw + gapx)
+            cy = y + 44
+            b.append(rect(cx, cy, cw, 62, "#FFFFFF", bd, 8))
+            b.append(txt(cx + 12, cy + 22, t, 12.5, tx, "700"))
+            for ln in wrap(s, int(cw / 12.4))[:1]:
+                b.append(txt(cx + 12, cy + 40, ln, 10.5, MUTED))
+            b.append(txt(cx + 12, cy + 56, "谁做：" + who, 10, FAINT))
+            b.append(txt(cx + cw - 12, cy + 56, eta, 10, tx, "700", "end"))
         y += lane_h + 14
-    b.append(txt(40, y + 14, "「谁做」里的『你』= 必须你本人操作（真实账号 / 购买 / 商业决定）；"
+    b.append(txt(40, y + 12, "「谁做」里的『你』= 必须你本人操作（真实账号 / 购买 / 商业决定）；"
                             "『我』= 我可以直接做完，不需要你介入", 11.5, FAINT))
-    return svg(1100, y + 34, "\n".join(b))
+    return svg(1100, y + 32, "\n".join(b))
 
 
 # ---------------------------------------------------------------- 图 2 阻断项依赖
 def fig02():
-    b = [head("四项上线阻断 · 依赖关系与解锁顺序",
-              "箭头的含义是「先做完上游，下游才动得了」")]
-    # 节点
-    nodes = [
-        (60, 130, 300, 96, "① 代码签名证书", "企业实名核验 → 签发 → 重新构建签名", "3–10 天", REDBG, REDBD, REDTX),
-        (400, 130, 300, 96, "③ 基础版套餐", "加一个已接通引擎，或下架该套餐", "1 小时", WARNBG, WARNBD, WARNTX),
-        (740, 130, 300, 96, "④ macOS 0.1.5", "pack:mac 构建 + 登记", "1 小时", WARNBG, WARNBD, WARNTX),
-        (230, 330, 640, 110, "② Windows 真机验收", "真实账号 · 真实消息 · 真实翻译 · 真实扣费证据", "半天（需你操作）",
-         BLUEBG, BLUEBD, "#1E3A8A"),
+    b = [head("四道上线阻断 · 已全部解除（截至 2026-09-25）",
+              "上一版列出的四项阻断已逐条落实，当前没有「不做完就不能上线」的项")]
+    cards = [
+        ("① 代码签名证书", "签名问题已解决 —— 下载安装不再被 Defender / SmartScreen 拦截。"
+                          "这是上一版关键路径上等待期最长的一项。", "你", "已解除"),
+        ("② Windows 真机验收", "真实 Windows 机器上端到端跑通：装包 → 登录 → 多开 → "
+                              "收发消息 → 翻译 → 扣费，验收结论：无问题。", "你 + 我", "已通过"),
+        ("③ 基础版套餐无可用引擎", "接通 google 后，基础版 4 个在用商户恢复可翻译"
+                                  "（原先报的是「当前套餐未包含此通道」）。", "你 + 我", "已解除"),
+        ("④ macOS 未构建", "0.1.6 已构建并上架（arm64 + x64），含本轮全部修复，"
+                         "不再停留在 0.1.3。", "我", "已上架"),
     ]
-    for x, y, w, h, t, s, eta, f, st, tx in nodes:
-        b.append(rect(x, y, w, h, f, st, 10, 1.2))
-        b.append(txt(x + w / 2, y + 30, t, 16, tx, "700", "middle"))
-        for j, ln in enumerate(wrap(s, 34 if w > 500 else 22)[:2]):
-            b.append(txt(x + w / 2, y + 54 + j * 17, ln, 11.5, MUTED, "400", "middle"))
-        b.append(txt(x + w / 2, y + h - 12, eta, 11, tx, "700", "middle"))
-    # 依赖箭头
-    b.append(arrow(210, 226, 400, 330, REDTX, 2, "6 5"))       # ① → ②
-    b.append(arrow(550, 226, 550, 330, WARNBD, 2, "6 5"))      # ③ → ②
-    b.append(arrow(890, 226, 700, 330, WARNBD, 2, "6 5"))      # ④ → ②
-    b.append(txt(300, 300, "未签名 → 装不上，无从验收", 11, REDTX, "700"))
-    b.append(txt(560, 300, "验收账号需能翻译", 11, WARNTX, "700"))
-    b.append(txt(760, 300, "mac 侧同理需验收", 11, WARNTX, "700"))
-    # 收束
-    b.append(rect(230, 500, 640, 76, GREENBG, GREENBD, 10, 1.2))
-    b.append(txt(550, 528, "验收通过 → 0.1.5 保持上架（Windows）／补上 macOS", 14, GREENTX, "700", "middle"))
-    b.append(txt(550, 552, "目标：2026-10-01 上线", 12, GREENTX, "400", "middle"))
-    b.append(arrow(550, 440, 550, 500, GREENTX, 2))
-    b.append(txt(40, 600, "★ 关键路径：① 签名证书等待期最长（3–10 天），今天就该启动 —— "
-                          "它卡住的是②，而②是唯一无法用自动化测试替代的一项", 12, REDTX, "700"))
-    return svg(1100, 632, "\n".join(b))
+    gap = 16
+    cw = (1020 - gap) / 2
+    for i, (t, s, who, eta) in enumerate(cards):
+        col, row = i % 2, i // 2
+        x = 40 + col * (cw + gap)
+        y = 116 + row * 176
+        b.append(rect(x, y, cw, 160, "#FFFFFF", GREENBD, 12, 1.2))
+        b.append(rect(x + cw - 80, y + 16, 64, 24, GREENBG, GREENBD, 12))
+        b.append(txt(x + cw - 48, y + 33, "✅ 解除", 11.5, GREENTX, "700", "middle"))
+        b.append(txt(x + 18, y + 38, t, 14.5, DARK, "700"))
+        for j, ln in enumerate(wrap(s, int((cw - 40) / 12.2))[:3]):
+            b.append(txt(x + 18, y + 64 + j * 19, ln, 11.5, BODY))
+        b.append(txt(x + 18, y + 140, "谁做：" + who, 10.5, FAINT))
+        b.append(txt(x + cw - 18, y + 140, eta, 11, GREENTX, "700", "end"))
+    y = 116 + 2 * 176 + 6
+    b.append(rect(40, y, 1020, 76, GREENBG, GREENBD, 10, 1.2))
+    b.append(txt(60, y + 32, "✅  上线阻断项：0 项", 15, GREENTX, "700"))
+    b.append(txt(60, y + 56, "剩下的两项 —— USDT 真实资金验证、5 个引擎未接通 —— 都不阻断上线，"
+                             "属于体验与风险加固（见第 15 节）", 11.5, BODY))
+    return svg(1100, y + 100, "\n".join(b))
 
 
 # ---------------------------------------------------------------- 图 3 后台运行状态机
@@ -281,28 +303,28 @@ def fig04():
 # ---------------------------------------------------------------- 图 5 版本上架现状
 def fig05():
     b = [head("客户端版本上架现状 · 生产库实测",
-              "Windows 已到 0.1.5；macOS 仍停在 0.1.3（本次只构建了 Windows 目标）")]
+              "Windows 与 macOS 均已到 0.1.6，两个平台都带上本轮全部修复")]
     cols = [
-        ("Windows x64", "0.1.5", True, [
+        ("Windows x64", "0.1.6", [
             ("上架状态", "✅ enabled = true"),
-            ("安装包", "HelloPix-Setup-0.1.5.exe"),
-            ("SHA-256", "599af13b…034316"),
-            ("本次新增", "后台运行 / 分区隔离"),
-            ("", "消息归档 / 最小 900×560"),
-            ("签名", "❌ 未签名（被 Defender 拦）"),
+            ("安装包", "安装版 + 免安装版"),
+            ("本轮新增", "客户端文件日志"),
+            ("已有能力", "后台运行 / 分区隔离"),
+            ("真机验收", "✅ 已通过（无问题）"),
+            ("签名", "✅ 签名问题已解决"),
         ]),
-        ("macOS arm64 / x64", "0.1.3", False, [
+        ("macOS arm64 / x64", "0.1.6", [
             ("上架状态", "✅ enabled = true"),
-            ("安装包", "HelloPix-0.1.3-*.dmg"),
-            ("说明", "仍是上一版"),
-            ("缺失", "❌ 无后台运行"),
-            ("", "❌ 无分区隔离修复"),
-            ("待办", "pack:mac 构建 0.1.5"),
+            ("安装包", "HelloPix-0.1.6-*.dmg"),
+            ("本轮新增", "客户端文件日志"),
+            ("已有能力", "后台运行 / 分区隔离"),
+            ("构建", "arm64 与 x64 双架构"),
+            ("签名", "ad-hoc（公证仍是可选项）"),
         ]),
     ]
-    for i, (os_name, ver, ok, rows) in enumerate(cols):
+    for i, (os_name, ver, rows) in enumerate(cols):
         x = 40 + i * 520
-        f, st, tx = (BLUEBG, BLUEBD, "#1E3A8A") if ok else (GRAYBG, GRAYBD, MUTED)
+        f, st, tx = BLUEBG, BLUEBD, "#1E3A8A"
         b.append(rect(x, 118, 500, 330, f, st, 12, 1.2))
         b.append(txt(x + 24, 152, os_name, 15, tx, "700"))
         b.append(txt(x + 476, 156, ver, 26, tx, "700", "end"))
@@ -314,20 +336,19 @@ def fig05():
             b.append(txt(x + 140, yy + 24, v, 11.5, BODY))
             yy += 44
         b.append(line(x + 20, yy, x + 480, yy, st, 1))
-    b.append(rect(40, 468, 1020, 74, WARNBG, WARNBD, 10, 1.2))
-    b.append(txt(60, 496, "⚠ 必须留痕的一次操作：0.1.5 曾在 14:16 被上架过一次，"
-                          "但那份不含后台运行（功能代码 14:21 才写完）", 12, WARNTX, "700"))
-    b.append(txt(60, 520, "已用「同 URL 换文件」修正：版本号 / URL / 数据库记录都没变。"
-                          "代价是 14:16–14:37 之间下载过 0.1.5 的人拿到的是旧包，需重新下载", 11.5, WARNTX))
+    b.append(rect(40, 468, 1020, 74, GREENBG, GREENBD, 10, 1.2))
+    b.append(txt(60, 496, "✅ 两平台同步到 0.1.6 —— 上一版「mac 仍停在 0.1.3」「免安装版未更新」均已不成立", 12, GREENTX, "700"))
+    b.append(txt(60, 520, "客户端文件日志：保留 7 天、单文件 5MB 上限、崩溃走同步写入；"
+                          "日志目录可从右键菜单或托盘菜单的「打开日志目录」直达", 11.5, BODY))
     return svg(1100, 562, "\n".join(b))
 
 
 # ---------------------------------------------------------------- 图 6 套餐 × 引擎矩阵
 def fig06():
-    b = [head("套餐 × 翻译引擎矩阵 · 生产库实测",
-              "9 个引擎里只有 deepseek 与 gpt 真正接通；基础版一个都没有 —— 这是仍存在的上线阻断项")]
+    b = [head("套餐 × 翻译引擎矩阵 · 生产库实测（2026-09-25 二次更新）",
+              "9 个引擎里 4 个已接通，且探针实测 4/4 全部能翻；基础版已恢复可用")]
     engines = ["deepseek", "gpt", "aws", "deepl", "gemini", "google", "grok", "niutrans", "papago"]
-    wired = {"deepseek": True, "gpt": True}
+    wired = {"deepseek": True, "gpt": True, "google": True, "grok": True}
     pkgs = [
         ("基础版", 4, {"google", "niutrans"}),
         ("高级版", 0, {"deepseek", "gemini", "google", "niutrans"}),
@@ -338,16 +359,15 @@ def fig06():
     # 表头
     for j, e in enumerate(engines):
         x = left + j * cw
-        col = GREENTX if wired.get(e) else MUTED
+        col = GREENTX if wired.get(e) else FAINT
         b.append(txt(x + cw / 2, top - 26, e, 10.5, col, "700", "middle"))
     for i, (name, cnt, has) in enumerate(pkgs):
         y = top + i * 76
-        bad = bool(has) and not any(wired.get(e) for e in has)
-        b.append(rect(40, y, 1020, 66, REDBG if bad else "#FFFFFF", REDBD if bad else CARDBD, 8))
-        b.append(txt(60, y + 28, name, 14, REDTX if bad else DARK, "700"))
+        usable = [e for e in has if wired.get(e)]
+        b.append(rect(40, y, 1020, 66, "#FFFFFF", CARDBD, 8))
+        b.append(txt(60, y + 28, name, 14, DARK, "700"))
         b.append(txt(60, y + 48, f"{cnt} 个商户", 10.5, MUTED))
-        if bad:
-            b.append(txt(140, y + 28, "★ 无可用引擎", 11, REDTX, "700"))
+        b.append(txt(140, y + 28, f"✅ {len(usable)} 个可用", 11, GREENTX, "700"))
         for j, e in enumerate(engines):
             x = left + j * cw
             if e not in has:
@@ -360,21 +380,21 @@ def fig06():
                 b.append(rect(x + 6, y + 18, cw - 12, 30, WARNBG, WARNBD, 6))
                 b.append(txt(x + cw / 2, y + 38, "✗", 15, WARNTX, "700", "middle"))
     yy = top + 3 * 76 + 10
-    b.append(txt(40, yy + 22, "✓ = wired，能翻译      ✗ = enabled 但未接通，选中即 503「真实翻译通道尚未配置」"
+    b.append(txt(40, yy + 22, "✓ = wired，探针实测能翻      ✗ = enabled 但未接通，选中即 503「真实翻译通道尚未配置」"
                               "      – = 该套餐不包含此引擎", 11.5, MUTED))
-    b.append(rect(40, yy + 42, 1020, 88, REDBG, REDBD, 10, 1.2))
-    b.append(txt(60, yy + 70, "🔴 基础版 4 个商户一翻译就报错，且报的是「当前套餐未包含此通道」—— 商户看不懂为什么", 12.5, REDTX, "700"))
-    b.append(txt(60, yy + 94, "三条路（任选）：① 给基础版加 deepseek（改 package_engines，最小改动）"
-                              "　② 把 google/niutrans 真正接通（配凭据）　③ 暂时下架基础版", 11.5, BODY))
-    b.append(txt(60, yy + 116, "上线前建议一并处理：7 个「可选中但未接通」的引擎，"
-                               "要么接通、要么从套餐里摘掉 —— 否则客服会被「翻译坏了」的工单淹没", 11.5, BODY))
+    b.append(rect(40, yy + 42, 1020, 110, GREENBG, GREENBD, 10, 1.2))
+    b.append(txt(60, yy + 70, "✅ 三个套餐现在都能翻译：基础版靠 google，高级版有 deepseek / google，专业版 4 个都在", 12.5, GREENTX, "700"))
+    b.append(txt(60, yy + 94, "⚠ 一个重要教训：上一版把「wired=true」直接当成「能用」，因此漏掉了两个坏通道 —— "
+                              "deepseek 的端点被填成用量控制台页面（405），gpt 的模型不接受 temperature=0。", 11.5, BODY))
+    b.append(txt(60, yy + 116, "现在改用 scripts/probe-translate-engines.js 真实调用厂商 API 验证，"
+                               "「已接通」必须由实测背书。", 11.5, BODY))
     return svg(1100, yy + 148, "\n".join(b))
 
 
 # ---------------------------------------------------------------- 图 7 时间线
 def fig07():
-    b = [head("距 10-01 上线 · T-6 天排期建议",
-              "关键路径是签名证书（等待期最长），不是代码 —— 代码今天就能做完")]
+    b = [head("距 10-01 上线 · 剩余事项排期建议",
+              "四项阻断已全部解除；剩下的两件都不占关键路径，可按你的节奏推进")]
     b.append(line(70, 240, 1050, 240, "#CBD5E1", 3))
     days = [("09-25", "今天", 70), ("09-26", "T-5", 262), ("09-27", "T-4", 434),
             ("09-28", "T-3", 606), ("09-29", "T-2", 778), ("10-01", "上线", 1020)]
@@ -383,10 +403,10 @@ def fig07():
         b.append(txt(x, 276, d, 12, DARK, "700", "middle"))
         b.append(txt(x, 294, tag, 10.5, MUTED, "400", "middle"))
     cards = [
-        (70, 120, 380, "① 启动签名证书申请", "企业实名核验 → OV/EV 签发\n今天就递交，等待期 3–10 天", REDBG, REDBD, REDTX),
-        (70, 336, 380, "② Windows 真机验收", "装包 → Telegram/WhatsApp 真实翻译\n→ 多开隔离 → 后台运行", BLUEBG, BLUEBD, "#1E3A8A"),
-        (474, 120, 560, "③ 修基础版套餐（1 小时）", "给基础版加 deepseek，或下架该套餐\n同时决定 7 个未接通引擎怎么处置", WARNBG, WARNBD, WARNTX),
-        (474, 336, 560, "④ 并行：macOS 0.1.5 构建 + 客户端日志", "pack:mac 打包并登记；\n给客户端补日志文件（当前故障查不到痕迹）", GREENBG, GREENBD, GREENTX),
+        (70, 120, 380, "① 决定 5 个未接通引擎怎么处置", "接通（给凭据）或从套餐摘除（1 小时）\n不决定会持续产生「翻译坏了」的误报工单", WARNBG, WARNBD, WARNTX),
+        (70, 336, 380, "② USDT 真实资金验证（1 天）", "影子模式已跑通，真实资金尚未走过\n涉及资金，建议上线前完成", WARNBG, WARNBD, WARNTX),
+        (474, 120, 560, "③ 0.1.6 已上架，可直接分发", "Windows 安装版 / 免安装版 / macOS（arm64 + x64）\n均已登记并校验；签名问题已解决", GREENBG, GREENBD, GREENTX),
+        (474, 336, 560, "④ 可选加固：我可以并行做完", "引擎探针接入监控 + 端点地址加校验\n不再等商户报障才发现通道坏了", BLUEBG, BLUEBD, "#1E3A8A"),
     ]
     for x, y, w, t, s, f, st, tx in cards:
         h = 168
@@ -394,11 +414,10 @@ def fig07():
         b.append(txt(x + 16, y + 30, t, 13.5, tx, "700"))
         for j, ln in enumerate(s.split("\n")):
             b.append(txt(x + 16, y + 56 + j * 20, ln, 11.5, BODY))
-        b.append(txt(x + w - 16, y + h - 16, "", 11, tx, "700", "end"))
-    b.append(txt(40, 540, "★ 我的建议顺序：今天同时启动 ①（等证书）与 ②（你验收）——"
-                          "两者互不阻塞；③ 我随时能做，等你定方案；④ 我可以并行做完", 12, DARK, "700"))
-    b.append(txt(40, 562, "★ 如果 10-01 是硬期限而证书来不及：先按「无签名 + 提交误报 + 公开校验值 + 安装说明」上线，"
-                          "证书到位后再出一个签名版覆盖", 11.5, WARNTX))
+    b.append(txt(40, 540, "★ 建议顺序：③ 已完成，可以直接对外分发；① 越早决定越省客服工单；"
+                          "② 涉及真实资金，建议上线前走一遍", 12, DARK, "700"))
+    b.append(txt(40, 562, "★ 本轮最大的收获不是「接通数从 2 变成 4」，而是把「已接通」的判定"
+                          "从「看开关」换成了「实测调用」—— 上一版正是因此漏掉两个坏通道", 11.5, WARNTX))
     return svg(1100, 588, "\n".join(b))
 
 

@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="2200" height="1176" viewBox="0 0 1100 588" font-family="PingFang SC, Hiragino Sans GB, Heiti SC, sans-serif">
 <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#94A3B8"/></marker></defs>
 <rect width="1100" height="588" fill="#F7F9FC"/>
-<text x="40" y="52" font-size="26" fill="#0F172A" font-weight="700">距 10-01 上线 · T-6 天排期建议</text>
-<text x="40" y="78" font-size="14" fill="#667085">关键路径是签名证书（等待期最长），不是代码 —— 代码今天就能做完</text>
+<text x="40" y="52" font-size="26" fill="#0F172A" font-weight="700">距 10-01 上线 · 剩余事项排期建议</text>
+<text x="40" y="78" font-size="14" fill="#667085">四项阻断已全部解除；剩下的两件都不占关键路径，可按你的节奏推进</text>
 <path d="M70 240 L1050 240" stroke="#CBD5E1" stroke-width="3" fill="none"/>
 <path d="M70 226 L70 254" stroke="#94A3B8" stroke-width="2" fill="none"/>
 <text x="70" y="276" font-size="12" fill="#172033" font-weight="700" text-anchor="middle">09-25</text>
@@ -22,26 +22,22 @@
 <path d="M1020 226 L1020 254" stroke="#94A3B8" stroke-width="2" fill="none"/>
 <text x="1020" y="276" font-size="12" fill="#172033" font-weight="700" text-anchor="middle">10-01</text>
 <text x="1020" y="294" font-size="10.5" fill="#667085" text-anchor="middle">上线</text>
-<rect x="70" y="120" width="380" height="168" rx="10" fill="#FEF2F2" stroke="#FECACA" stroke-width="1.2"/>
-<text x="86" y="150" font-size="13.5" fill="#B91C1C" font-weight="700">① 启动签名证书申请</text>
-<text x="86" y="176" font-size="11.5" fill="#2B3748">企业实名核验 → OV/EV 签发</text>
-<text x="86" y="196" font-size="11.5" fill="#2B3748">今天就递交，等待期 3–10 天</text>
-<text x="434" y="272" font-size="11" fill="#B91C1C" font-weight="700" text-anchor="end"></text>
-<rect x="70" y="336" width="380" height="168" rx="10" fill="#EAF2FF" stroke="#C7D6EE" stroke-width="1.2"/>
-<text x="86" y="366" font-size="13.5" fill="#1E3A8A" font-weight="700">② Windows 真机验收</text>
-<text x="86" y="392" font-size="11.5" fill="#2B3748">装包 → Telegram/WhatsApp 真实翻译</text>
-<text x="86" y="412" font-size="11.5" fill="#2B3748">→ 多开隔离 → 后台运行</text>
-<text x="434" y="488" font-size="11" fill="#1E3A8A" font-weight="700" text-anchor="end"></text>
-<rect x="474" y="120" width="560" height="168" rx="10" fill="#FFF7E8" stroke="#FDE68A" stroke-width="1.2"/>
-<text x="490" y="150" font-size="13.5" fill="#92400E" font-weight="700">③ 修基础版套餐（1 小时）</text>
-<text x="490" y="176" font-size="11.5" fill="#2B3748">给基础版加 deepseek，或下架该套餐</text>
-<text x="490" y="196" font-size="11.5" fill="#2B3748">同时决定 7 个未接通引擎怎么处置</text>
-<text x="1018" y="272" font-size="11" fill="#92400E" font-weight="700" text-anchor="end"></text>
-<rect x="474" y="336" width="560" height="168" rx="10" fill="#DCFCE7" stroke="#86EFAC" stroke-width="1.2"/>
-<text x="490" y="366" font-size="13.5" fill="#065F46" font-weight="700">④ 并行：macOS 0.1.5 构建 + 客户端日志</text>
-<text x="490" y="392" font-size="11.5" fill="#2B3748">pack:mac 打包并登记；</text>
-<text x="490" y="412" font-size="11.5" fill="#2B3748">给客户端补日志文件（当前故障查不到痕迹）</text>
-<text x="1018" y="488" font-size="11" fill="#065F46" font-weight="700" text-anchor="end"></text>
-<text x="40" y="540" font-size="12" fill="#172033" font-weight="700">★ 我的建议顺序：今天同时启动 ①（等证书）与 ②（你验收）——两者互不阻塞；③ 我随时能做，等你定方案；④ 我可以并行做完</text>
-<text x="40" y="562" font-size="11.5" fill="#92400E">★ 如果 10-01 是硬期限而证书来不及：先按「无签名 + 提交误报 + 公开校验值 + 安装说明」上线，证书到位后再出一个签名版覆盖</text>
+<rect x="70" y="120" width="380" height="168" rx="10" fill="#FFF7E8" stroke="#FDE68A" stroke-width="1.2"/>
+<text x="86" y="150" font-size="13.5" fill="#92400E" font-weight="700">① 决定 5 个未接通引擎怎么处置</text>
+<text x="86" y="176" font-size="11.5" fill="#2B3748">接通（给凭据）或从套餐摘除（1 小时）</text>
+<text x="86" y="196" font-size="11.5" fill="#2B3748">不决定会持续产生「翻译坏了」的误报工单</text>
+<rect x="70" y="336" width="380" height="168" rx="10" fill="#FFF7E8" stroke="#FDE68A" stroke-width="1.2"/>
+<text x="86" y="366" font-size="13.5" fill="#92400E" font-weight="700">② USDT 真实资金验证（1 天）</text>
+<text x="86" y="392" font-size="11.5" fill="#2B3748">影子模式已跑通，真实资金尚未走过</text>
+<text x="86" y="412" font-size="11.5" fill="#2B3748">涉及资金，建议上线前完成</text>
+<rect x="474" y="120" width="560" height="168" rx="10" fill="#DCFCE7" stroke="#86EFAC" stroke-width="1.2"/>
+<text x="490" y="150" font-size="13.5" fill="#065F46" font-weight="700">③ 0.1.6 已上架，可直接分发</text>
+<text x="490" y="176" font-size="11.5" fill="#2B3748">Windows 安装版 / 免安装版 / macOS（arm64 + x64）</text>
+<text x="490" y="196" font-size="11.5" fill="#2B3748">均已登记并校验；签名问题已解决</text>
+<rect x="474" y="336" width="560" height="168" rx="10" fill="#EAF2FF" stroke="#C7D6EE" stroke-width="1.2"/>
+<text x="490" y="366" font-size="13.5" fill="#1E3A8A" font-weight="700">④ 可选加固：我可以并行做完</text>
+<text x="490" y="392" font-size="11.5" fill="#2B3748">引擎探针接入监控 + 端点地址加校验</text>
+<text x="490" y="412" font-size="11.5" fill="#2B3748">不再等商户报障才发现通道坏了</text>
+<text x="40" y="540" font-size="12" fill="#172033" font-weight="700">★ 建议顺序：③ 已完成，可以直接对外分发；① 越早决定越省客服工单；② 涉及真实资金，建议上线前走一遍</text>
+<text x="40" y="562" font-size="11.5" fill="#92400E">★ 本轮最大的收获不是「接通数从 2 变成 4」，而是把「已接通」的判定从「看开关」换成了「实测调用」—— 上一版正是因此漏掉两个坏通道</text>
 </svg>

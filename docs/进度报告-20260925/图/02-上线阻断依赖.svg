@@ -1,33 +1,41 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="2200" height="1264" viewBox="0 0 1100 632" font-family="PingFang SC, Hiragino Sans GB, Heiti SC, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="2200" height="1148" viewBox="0 0 1100 574" font-family="PingFang SC, Hiragino Sans GB, Heiti SC, sans-serif">
 <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#94A3B8"/></marker></defs>
-<rect width="1100" height="632" fill="#F7F9FC"/>
-<text x="40" y="52" font-size="26" fill="#0F172A" font-weight="700">四项上线阻断 · 依赖关系与解锁顺序</text>
-<text x="40" y="78" font-size="14" fill="#667085">箭头的含义是「先做完上游，下游才动得了」</text>
-<rect x="60" y="130" width="300" height="96" rx="10" fill="#FEF2F2" stroke="#FECACA" stroke-width="1.2"/>
-<text x="210.0" y="160" font-size="16" fill="#B91C1C" font-weight="700" text-anchor="middle">① 代码签名证书</text>
-<text x="210.0" y="184" font-size="11.5" fill="#667085" text-anchor="middle">企业实名核验 → 签发 → 重新构建签名</text>
-<text x="210.0" y="214" font-size="11" fill="#B91C1C" font-weight="700" text-anchor="middle">3–10 天</text>
-<rect x="400" y="130" width="300" height="96" rx="10" fill="#FFF7E8" stroke="#FDE68A" stroke-width="1.2"/>
-<text x="550.0" y="160" font-size="16" fill="#92400E" font-weight="700" text-anchor="middle">③ 基础版套餐</text>
-<text x="550.0" y="184" font-size="11.5" fill="#667085" text-anchor="middle">加一个已接通引擎，或下架该套餐</text>
-<text x="550.0" y="214" font-size="11" fill="#92400E" font-weight="700" text-anchor="middle">1 小时</text>
-<rect x="740" y="130" width="300" height="96" rx="10" fill="#FFF7E8" stroke="#FDE68A" stroke-width="1.2"/>
-<text x="890.0" y="160" font-size="16" fill="#92400E" font-weight="700" text-anchor="middle">④ macOS 0.1.5</text>
-<text x="890.0" y="184" font-size="11.5" fill="#667085" text-anchor="middle">pack:mac 构建 + 登记</text>
-<text x="890.0" y="214" font-size="11" fill="#92400E" font-weight="700" text-anchor="middle">1 小时</text>
-<rect x="230" y="330" width="640" height="110" rx="10" fill="#EAF2FF" stroke="#C7D6EE" stroke-width="1.2"/>
-<text x="550.0" y="360" font-size="16" fill="#1E3A8A" font-weight="700" text-anchor="middle">② Windows 真机验收</text>
-<text x="550.0" y="384" font-size="11.5" fill="#667085" text-anchor="middle">真实账号 · 真实消息 · 真实翻译 · 真实扣费证据</text>
-<text x="550.0" y="428" font-size="11" fill="#1E3A8A" font-weight="700" text-anchor="middle">半天（需你操作）</text>
-<path d="M210 226 L400 330" stroke="#B91C1C" stroke-width="2" fill="none" marker-end="url(#ah)" stroke-dasharray="6 5"/>
-<path d="M550 226 L550 330" stroke="#FDE68A" stroke-width="2" fill="none" marker-end="url(#ah)" stroke-dasharray="6 5"/>
-<path d="M890 226 L700 330" stroke="#FDE68A" stroke-width="2" fill="none" marker-end="url(#ah)" stroke-dasharray="6 5"/>
-<text x="300" y="300" font-size="11" fill="#B91C1C" font-weight="700">未签名 → 装不上，无从验收</text>
-<text x="560" y="300" font-size="11" fill="#92400E" font-weight="700">验收账号需能翻译</text>
-<text x="760" y="300" font-size="11" fill="#92400E" font-weight="700">mac 侧同理需验收</text>
-<rect x="230" y="500" width="640" height="76" rx="10" fill="#DCFCE7" stroke="#86EFAC" stroke-width="1.2"/>
-<text x="550" y="528" font-size="14" fill="#065F46" font-weight="700" text-anchor="middle">验收通过 → 0.1.5 保持上架（Windows）／补上 macOS</text>
-<text x="550" y="552" font-size="12" fill="#065F46" text-anchor="middle">目标：2026-10-01 上线</text>
-<path d="M550 440 L550 500" stroke="#065F46" stroke-width="2" fill="none" marker-end="url(#ah)"/>
-<text x="40" y="600" font-size="12" fill="#B91C1C" font-weight="700">★ 关键路径：① 签名证书等待期最长（3–10 天），今天就该启动 —— 它卡住的是②，而②是唯一无法用自动化测试替代的一项</text>
+<rect width="1100" height="574" fill="#F7F9FC"/>
+<text x="40" y="52" font-size="26" fill="#0F172A" font-weight="700">四道上线阻断 · 已全部解除（截至 2026-09-25）</text>
+<text x="40" y="78" font-size="14" fill="#667085">上一版列出的四项阻断已逐条落实，当前没有「不做完就不能上线」的项</text>
+<rect x="40.0" y="116" width="502.0" height="160" rx="12" fill="#FFFFFF" stroke="#86EFAC" stroke-width="1.2"/>
+<rect x="462.0" y="132" width="64" height="24" rx="12" fill="#DCFCE7" stroke="#86EFAC" stroke-width="1"/>
+<text x="494.0" y="149" font-size="11.5" fill="#065F46" font-weight="700" text-anchor="middle">✅ 解除</text>
+<text x="58.0" y="154" font-size="14.5" fill="#172033" font-weight="700">① 代码签名证书</text>
+<text x="58.0" y="180" font-size="11.5" fill="#2B3748">签名问题已解决 —— 下载安装不再被 Defender / SmartSc</text>
+<text x="58.0" y="199" font-size="11.5" fill="#2B3748">reen 拦截。这是上一版关键路径上等待期最长的一项。</text>
+<text x="58.0" y="256" font-size="10.5" fill="#94A3B8">谁做：你</text>
+<text x="524.0" y="256" font-size="11" fill="#065F46" font-weight="700" text-anchor="end">已解除</text>
+<rect x="558.0" y="116" width="502.0" height="160" rx="12" fill="#FFFFFF" stroke="#86EFAC" stroke-width="1.2"/>
+<rect x="980.0" y="132" width="64" height="24" rx="12" fill="#DCFCE7" stroke="#86EFAC" stroke-width="1"/>
+<text x="1012.0" y="149" font-size="11.5" fill="#065F46" font-weight="700" text-anchor="middle">✅ 解除</text>
+<text x="576.0" y="154" font-size="14.5" fill="#172033" font-weight="700">② Windows 真机验收</text>
+<text x="576.0" y="180" font-size="11.5" fill="#2B3748">真实 Windows 机器上端到端跑通：装包 → 登录 → 多开 → 收发</text>
+<text x="576.0" y="199" font-size="11.5" fill="#2B3748">消息 → 翻译 → 扣费，验收结论：无问题。</text>
+<text x="576.0" y="256" font-size="10.5" fill="#94A3B8">谁做：你 + 我</text>
+<text x="1042.0" y="256" font-size="11" fill="#065F46" font-weight="700" text-anchor="end">已通过</text>
+<rect x="40.0" y="292" width="502.0" height="160" rx="12" fill="#FFFFFF" stroke="#86EFAC" stroke-width="1.2"/>
+<rect x="462.0" y="308" width="64" height="24" rx="12" fill="#DCFCE7" stroke="#86EFAC" stroke-width="1"/>
+<text x="494.0" y="325" font-size="11.5" fill="#065F46" font-weight="700" text-anchor="middle">✅ 解除</text>
+<text x="58.0" y="330" font-size="14.5" fill="#172033" font-weight="700">③ 基础版套餐无可用引擎</text>
+<text x="58.0" y="356" font-size="11.5" fill="#2B3748">接通 google 后，基础版 4 个在用商户恢复可翻译（原先报的是「当前</text>
+<text x="58.0" y="375" font-size="11.5" fill="#2B3748">套餐未包含此通道」）。</text>
+<text x="58.0" y="432" font-size="10.5" fill="#94A3B8">谁做：你 + 我</text>
+<text x="524.0" y="432" font-size="11" fill="#065F46" font-weight="700" text-anchor="end">已解除</text>
+<rect x="558.0" y="292" width="502.0" height="160" rx="12" fill="#FFFFFF" stroke="#86EFAC" stroke-width="1.2"/>
+<rect x="980.0" y="308" width="64" height="24" rx="12" fill="#DCFCE7" stroke="#86EFAC" stroke-width="1"/>
+<text x="1012.0" y="325" font-size="11.5" fill="#065F46" font-weight="700" text-anchor="middle">✅ 解除</text>
+<text x="576.0" y="330" font-size="14.5" fill="#172033" font-weight="700">④ macOS 未构建</text>
+<text x="576.0" y="356" font-size="11.5" fill="#2B3748">0.1.6 已构建并上架（arm64 + x64），含本轮全部修复，不再停</text>
+<text x="576.0" y="375" font-size="11.5" fill="#2B3748">留在 0.1.3。</text>
+<text x="576.0" y="432" font-size="10.5" fill="#94A3B8">谁做：我</text>
+<text x="1042.0" y="432" font-size="11" fill="#065F46" font-weight="700" text-anchor="end">已上架</text>
+<rect x="40" y="474" width="1020" height="76" rx="10" fill="#DCFCE7" stroke="#86EFAC" stroke-width="1.2"/>
+<text x="60" y="506" font-size="15" fill="#065F46" font-weight="700">✅  上线阻断项：0 项</text>
+<text x="60" y="530" font-size="11.5" fill="#2B3748">剩下的两项 —— USDT 真实资金验证、5 个引擎未接通 —— 都不阻断上线，属于体验与风险加固（见第 15 节）</text>
 </svg>

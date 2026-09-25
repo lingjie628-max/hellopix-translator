@@ -2,50 +2,52 @@
 <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#94A3B8"/></marker></defs>
 <rect width="1100" height="562" fill="#F7F9FC"/>
 <text x="40" y="52" font-size="26" fill="#0F172A" font-weight="700">客户端版本上架现状 · 生产库实测</text>
-<text x="40" y="78" font-size="14" fill="#667085">Windows 已到 0.1.5；macOS 仍停在 0.1.3（本次只构建了 Windows 目标）</text>
+<text x="40" y="78" font-size="14" fill="#667085">Windows 与 macOS 均已到 0.1.6，两个平台都带上本轮全部修复</text>
 <rect x="40" y="118" width="500" height="330" rx="12" fill="#EAF2FF" stroke="#C7D6EE" stroke-width="1.2"/>
 <text x="64" y="152" font-size="15" fill="#1E3A8A" font-weight="700">Windows x64</text>
-<text x="516" y="156" font-size="26" fill="#1E3A8A" font-weight="700" text-anchor="end">0.1.5</text>
+<text x="516" y="156" font-size="26" fill="#1E3A8A" font-weight="700" text-anchor="end">0.1.6</text>
 <path d="M60 176 L520 176" stroke="#C7D6EE" stroke-width="1" fill="none"/>
 <text x="64" y="200" font-size="11.5" fill="#1E3A8A" font-weight="700">上架状态</text>
 <text x="180" y="200" font-size="11.5" fill="#2B3748">✅ enabled = true</text>
 <path d="M60 220 L520 220" stroke="#C7D6EE" stroke-width="1" fill="none"/>
 <text x="64" y="244" font-size="11.5" fill="#1E3A8A" font-weight="700">安装包</text>
-<text x="180" y="244" font-size="11.5" fill="#2B3748">HelloPix-Setup-0.1.5.exe</text>
+<text x="180" y="244" font-size="11.5" fill="#2B3748">安装版 + 免安装版</text>
 <path d="M60 264 L520 264" stroke="#C7D6EE" stroke-width="1" fill="none"/>
-<text x="64" y="288" font-size="11.5" fill="#1E3A8A" font-weight="700">SHA-256</text>
-<text x="180" y="288" font-size="11.5" fill="#2B3748">599af13b…034316</text>
+<text x="64" y="288" font-size="11.5" fill="#1E3A8A" font-weight="700">本轮新增</text>
+<text x="180" y="288" font-size="11.5" fill="#2B3748">客户端文件日志</text>
 <path d="M60 308 L520 308" stroke="#C7D6EE" stroke-width="1" fill="none"/>
-<text x="64" y="332" font-size="11.5" fill="#1E3A8A" font-weight="700">本次新增</text>
+<text x="64" y="332" font-size="11.5" fill="#1E3A8A" font-weight="700">已有能力</text>
 <text x="180" y="332" font-size="11.5" fill="#2B3748">后台运行 / 分区隔离</text>
 <path d="M60 352 L520 352" stroke="#C7D6EE" stroke-width="1" fill="none"/>
-<text x="180" y="376" font-size="11.5" fill="#2B3748">消息归档 / 最小 900×560</text>
+<text x="64" y="376" font-size="11.5" fill="#1E3A8A" font-weight="700">真机验收</text>
+<text x="180" y="376" font-size="11.5" fill="#2B3748">✅ 已通过（无问题）</text>
 <path d="M60 396 L520 396" stroke="#C7D6EE" stroke-width="1" fill="none"/>
 <text x="64" y="420" font-size="11.5" fill="#1E3A8A" font-weight="700">签名</text>
-<text x="180" y="420" font-size="11.5" fill="#2B3748">❌ 未签名（被 Defender 拦）</text>
+<text x="180" y="420" font-size="11.5" fill="#2B3748">✅ 签名问题已解决</text>
 <path d="M60 440 L520 440" stroke="#C7D6EE" stroke-width="1" fill="none"/>
-<rect x="560" y="118" width="500" height="330" rx="12" fill="#F1F5F9" stroke="#CBD5E1" stroke-width="1.2"/>
-<text x="584" y="152" font-size="15" fill="#667085" font-weight="700">macOS arm64 / x64</text>
-<text x="1036" y="156" font-size="26" fill="#667085" font-weight="700" text-anchor="end">0.1.3</text>
-<path d="M580 176 L1040 176" stroke="#CBD5E1" stroke-width="1" fill="none"/>
-<text x="584" y="200" font-size="11.5" fill="#667085" font-weight="700">上架状态</text>
+<rect x="560" y="118" width="500" height="330" rx="12" fill="#EAF2FF" stroke="#C7D6EE" stroke-width="1.2"/>
+<text x="584" y="152" font-size="15" fill="#1E3A8A" font-weight="700">macOS arm64 / x64</text>
+<text x="1036" y="156" font-size="26" fill="#1E3A8A" font-weight="700" text-anchor="end">0.1.6</text>
+<path d="M580 176 L1040 176" stroke="#C7D6EE" stroke-width="1" fill="none"/>
+<text x="584" y="200" font-size="11.5" fill="#1E3A8A" font-weight="700">上架状态</text>
 <text x="700" y="200" font-size="11.5" fill="#2B3748">✅ enabled = true</text>
-<path d="M580 220 L1040 220" stroke="#CBD5E1" stroke-width="1" fill="none"/>
-<text x="584" y="244" font-size="11.5" fill="#667085" font-weight="700">安装包</text>
-<text x="700" y="244" font-size="11.5" fill="#2B3748">HelloPix-0.1.3-*.dmg</text>
-<path d="M580 264 L1040 264" stroke="#CBD5E1" stroke-width="1" fill="none"/>
-<text x="584" y="288" font-size="11.5" fill="#667085" font-weight="700">说明</text>
-<text x="700" y="288" font-size="11.5" fill="#2B3748">仍是上一版</text>
-<path d="M580 308 L1040 308" stroke="#CBD5E1" stroke-width="1" fill="none"/>
-<text x="584" y="332" font-size="11.5" fill="#667085" font-weight="700">缺失</text>
-<text x="700" y="332" font-size="11.5" fill="#2B3748">❌ 无后台运行</text>
-<path d="M580 352 L1040 352" stroke="#CBD5E1" stroke-width="1" fill="none"/>
-<text x="700" y="376" font-size="11.5" fill="#2B3748">❌ 无分区隔离修复</text>
-<path d="M580 396 L1040 396" stroke="#CBD5E1" stroke-width="1" fill="none"/>
-<text x="584" y="420" font-size="11.5" fill="#667085" font-weight="700">待办</text>
-<text x="700" y="420" font-size="11.5" fill="#2B3748">pack:mac 构建 0.1.5</text>
-<path d="M580 440 L1040 440" stroke="#CBD5E1" stroke-width="1" fill="none"/>
-<rect x="40" y="468" width="1020" height="74" rx="10" fill="#FFF7E8" stroke="#FDE68A" stroke-width="1.2"/>
-<text x="60" y="496" font-size="12" fill="#92400E" font-weight="700">⚠ 必须留痕的一次操作：0.1.5 曾在 14:16 被上架过一次，但那份不含后台运行（功能代码 14:21 才写完）</text>
-<text x="60" y="520" font-size="11.5" fill="#92400E">已用「同 URL 换文件」修正：版本号 / URL / 数据库记录都没变。代价是 14:16–14:37 之间下载过 0.1.5 的人拿到的是旧包，需重新下载</text>
+<path d="M580 220 L1040 220" stroke="#C7D6EE" stroke-width="1" fill="none"/>
+<text x="584" y="244" font-size="11.5" fill="#1E3A8A" font-weight="700">安装包</text>
+<text x="700" y="244" font-size="11.5" fill="#2B3748">HelloPix-0.1.6-*.dmg</text>
+<path d="M580 264 L1040 264" stroke="#C7D6EE" stroke-width="1" fill="none"/>
+<text x="584" y="288" font-size="11.5" fill="#1E3A8A" font-weight="700">本轮新增</text>
+<text x="700" y="288" font-size="11.5" fill="#2B3748">客户端文件日志</text>
+<path d="M580 308 L1040 308" stroke="#C7D6EE" stroke-width="1" fill="none"/>
+<text x="584" y="332" font-size="11.5" fill="#1E3A8A" font-weight="700">已有能力</text>
+<text x="700" y="332" font-size="11.5" fill="#2B3748">后台运行 / 分区隔离</text>
+<path d="M580 352 L1040 352" stroke="#C7D6EE" stroke-width="1" fill="none"/>
+<text x="584" y="376" font-size="11.5" fill="#1E3A8A" font-weight="700">构建</text>
+<text x="700" y="376" font-size="11.5" fill="#2B3748">arm64 与 x64 双架构</text>
+<path d="M580 396 L1040 396" stroke="#C7D6EE" stroke-width="1" fill="none"/>
+<text x="584" y="420" font-size="11.5" fill="#1E3A8A" font-weight="700">签名</text>
+<text x="700" y="420" font-size="11.5" fill="#2B3748">ad-hoc（公证仍是可选项）</text>
+<path d="M580 440 L1040 440" stroke="#C7D6EE" stroke-width="1" fill="none"/>
+<rect x="40" y="468" width="1020" height="74" rx="10" fill="#DCFCE7" stroke="#86EFAC" stroke-width="1.2"/>
+<text x="60" y="496" font-size="12" fill="#065F46" font-weight="700">✅ 两平台同步到 0.1.6 —— 上一版「mac 仍停在 0.1.3」「免安装版未更新」均已不成立</text>
+<text x="60" y="520" font-size="11.5" fill="#2B3748">客户端文件日志：保留 7 天、单文件 5MB 上限、崩溃走同步写入；日志目录可从右键菜单或托盘菜单的「打开日志目录」直达</text>
 </svg>

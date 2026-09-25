@@ -1,28 +1,28 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="2200" height="1072" viewBox="0 0 1100 536" font-family="PingFang SC, Hiragino Sans GB, Heiti SC, sans-serif">
 <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#94A3B8"/></marker></defs>
 <rect width="1100" height="536" fill="#F7F9FC"/>
-<text x="40" y="52" font-size="26" fill="#0F172A" font-weight="700">套餐 × 翻译引擎矩阵 · 生产库实测</text>
-<text x="40" y="78" font-size="14" fill="#667085">9 个引擎里只有 deepseek 与 gpt 真正接通；基础版一个都没有 —— 这是仍存在的上线阻断项</text>
+<text x="40" y="52" font-size="26" fill="#0F172A" font-weight="700">套餐 × 翻译引擎矩阵 · 生产库实测（2026-09-25 二次更新）</text>
+<text x="40" y="78" font-size="14" fill="#667085">9 个引擎里 4 个已接通，且探针实测 4/4 全部能翻；基础版已恢复可用</text>
 <text x="293.8888888888889" y="124" font-size="10.5" fill="#065F46" font-weight="700" text-anchor="middle">deepseek</text>
 <text x="381.66666666666663" y="124" font-size="10.5" fill="#065F46" font-weight="700" text-anchor="middle">gpt</text>
-<text x="469.44444444444446" y="124" font-size="10.5" fill="#667085" font-weight="700" text-anchor="middle">aws</text>
-<text x="557.2222222222222" y="124" font-size="10.5" fill="#667085" font-weight="700" text-anchor="middle">deepl</text>
-<text x="645.0" y="124" font-size="10.5" fill="#667085" font-weight="700" text-anchor="middle">gemini</text>
-<text x="732.7777777777778" y="124" font-size="10.5" fill="#667085" font-weight="700" text-anchor="middle">google</text>
-<text x="820.5555555555555" y="124" font-size="10.5" fill="#667085" font-weight="700" text-anchor="middle">grok</text>
-<text x="908.3333333333333" y="124" font-size="10.5" fill="#667085" font-weight="700" text-anchor="middle">niutrans</text>
-<text x="996.1111111111111" y="124" font-size="10.5" fill="#667085" font-weight="700" text-anchor="middle">papago</text>
-<rect x="40" y="150" width="1020" height="66" rx="8" fill="#FEF2F2" stroke="#FECACA" stroke-width="1"/>
-<text x="60" y="178" font-size="14" fill="#B91C1C" font-weight="700">基础版</text>
+<text x="469.44444444444446" y="124" font-size="10.5" fill="#94A3B8" font-weight="700" text-anchor="middle">aws</text>
+<text x="557.2222222222222" y="124" font-size="10.5" fill="#94A3B8" font-weight="700" text-anchor="middle">deepl</text>
+<text x="645.0" y="124" font-size="10.5" fill="#94A3B8" font-weight="700" text-anchor="middle">gemini</text>
+<text x="732.7777777777778" y="124" font-size="10.5" fill="#065F46" font-weight="700" text-anchor="middle">google</text>
+<text x="820.5555555555555" y="124" font-size="10.5" fill="#065F46" font-weight="700" text-anchor="middle">grok</text>
+<text x="908.3333333333333" y="124" font-size="10.5" fill="#94A3B8" font-weight="700" text-anchor="middle">niutrans</text>
+<text x="996.1111111111111" y="124" font-size="10.5" fill="#94A3B8" font-weight="700" text-anchor="middle">papago</text>
+<rect x="40" y="150" width="1020" height="66" rx="8" fill="#FFFFFF" stroke="#DBE3EE" stroke-width="1"/>
+<text x="60" y="178" font-size="14" fill="#172033" font-weight="700">基础版</text>
 <text x="60" y="198" font-size="10.5" fill="#667085">4 个商户</text>
-<text x="140" y="178" font-size="11" fill="#B91C1C" font-weight="700">★ 无可用引擎</text>
+<text x="140" y="178" font-size="11" fill="#065F46" font-weight="700">✅ 1 个可用</text>
 <text x="293.8888888888889" y="190" font-size="14" fill="#CBD5E1" font-weight="700" text-anchor="middle">–</text>
 <text x="381.66666666666663" y="190" font-size="14" fill="#CBD5E1" font-weight="700" text-anchor="middle">–</text>
 <text x="469.44444444444446" y="190" font-size="14" fill="#CBD5E1" font-weight="700" text-anchor="middle">–</text>
 <text x="557.2222222222222" y="190" font-size="14" fill="#CBD5E1" font-weight="700" text-anchor="middle">–</text>
 <text x="645.0" y="190" font-size="14" fill="#CBD5E1" font-weight="700" text-anchor="middle">–</text>
-<rect x="694.8888888888889" y="168" width="75.77777777777777" height="30" rx="6" fill="#FFF7E8" stroke="#FDE68A" stroke-width="1"/>
-<text x="732.7777777777778" y="188" font-size="15" fill="#92400E" font-weight="700" text-anchor="middle">✗</text>
+<rect x="694.8888888888889" y="168" width="75.77777777777777" height="30" rx="6" fill="#DCFCE7" stroke="#86EFAC" stroke-width="1"/>
+<text x="732.7777777777778" y="188" font-size="15" fill="#065F46" font-weight="700" text-anchor="middle">✓</text>
 <text x="820.5555555555555" y="190" font-size="14" fill="#CBD5E1" font-weight="700" text-anchor="middle">–</text>
 <rect x="870.4444444444443" y="168" width="75.77777777777777" height="30" rx="6" fill="#FFF7E8" stroke="#FDE68A" stroke-width="1"/>
 <text x="908.3333333333333" y="188" font-size="15" fill="#92400E" font-weight="700" text-anchor="middle">✗</text>
@@ -30,6 +30,7 @@
 <rect x="40" y="226" width="1020" height="66" rx="8" fill="#FFFFFF" stroke="#DBE3EE" stroke-width="1"/>
 <text x="60" y="254" font-size="14" fill="#172033" font-weight="700">高级版</text>
 <text x="60" y="274" font-size="10.5" fill="#667085">0 个商户</text>
+<text x="140" y="254" font-size="11" fill="#065F46" font-weight="700">✅ 2 个可用</text>
 <rect x="256.0" y="244" width="75.77777777777777" height="30" rx="6" fill="#DCFCE7" stroke="#86EFAC" stroke-width="1"/>
 <text x="293.8888888888889" y="264" font-size="15" fill="#065F46" font-weight="700" text-anchor="middle">✓</text>
 <text x="381.66666666666663" y="266" font-size="14" fill="#CBD5E1" font-weight="700" text-anchor="middle">–</text>
@@ -37,8 +38,8 @@
 <text x="557.2222222222222" y="266" font-size="14" fill="#CBD5E1" font-weight="700" text-anchor="middle">–</text>
 <rect x="607.1111111111111" y="244" width="75.77777777777777" height="30" rx="6" fill="#FFF7E8" stroke="#FDE68A" stroke-width="1"/>
 <text x="645.0" y="264" font-size="15" fill="#92400E" font-weight="700" text-anchor="middle">✗</text>
-<rect x="694.8888888888889" y="244" width="75.77777777777777" height="30" rx="6" fill="#FFF7E8" stroke="#FDE68A" stroke-width="1"/>
-<text x="732.7777777777778" y="264" font-size="15" fill="#92400E" font-weight="700" text-anchor="middle">✗</text>
+<rect x="694.8888888888889" y="244" width="75.77777777777777" height="30" rx="6" fill="#DCFCE7" stroke="#86EFAC" stroke-width="1"/>
+<text x="732.7777777777778" y="264" font-size="15" fill="#065F46" font-weight="700" text-anchor="middle">✓</text>
 <text x="820.5555555555555" y="266" font-size="14" fill="#CBD5E1" font-weight="700" text-anchor="middle">–</text>
 <rect x="870.4444444444443" y="244" width="75.77777777777777" height="30" rx="6" fill="#FFF7E8" stroke="#FDE68A" stroke-width="1"/>
 <text x="908.3333333333333" y="264" font-size="15" fill="#92400E" font-weight="700" text-anchor="middle">✗</text>
@@ -46,6 +47,7 @@
 <rect x="40" y="302" width="1020" height="66" rx="8" fill="#FFFFFF" stroke="#DBE3EE" stroke-width="1"/>
 <text x="60" y="330" font-size="14" fill="#172033" font-weight="700">专业版</text>
 <text x="60" y="350" font-size="10.5" fill="#667085">4 个商户</text>
+<text x="140" y="330" font-size="11" fill="#065F46" font-weight="700">✅ 4 个可用</text>
 <rect x="256.0" y="320" width="75.77777777777777" height="30" rx="6" fill="#DCFCE7" stroke="#86EFAC" stroke-width="1"/>
 <text x="293.8888888888889" y="340" font-size="15" fill="#065F46" font-weight="700" text-anchor="middle">✓</text>
 <rect x="343.77777777777777" y="320" width="75.77777777777777" height="30" rx="6" fill="#DCFCE7" stroke="#86EFAC" stroke-width="1"/>
@@ -56,17 +58,17 @@
 <text x="557.2222222222222" y="340" font-size="15" fill="#92400E" font-weight="700" text-anchor="middle">✗</text>
 <rect x="607.1111111111111" y="320" width="75.77777777777777" height="30" rx="6" fill="#FFF7E8" stroke="#FDE68A" stroke-width="1"/>
 <text x="645.0" y="340" font-size="15" fill="#92400E" font-weight="700" text-anchor="middle">✗</text>
-<rect x="694.8888888888889" y="320" width="75.77777777777777" height="30" rx="6" fill="#FFF7E8" stroke="#FDE68A" stroke-width="1"/>
-<text x="732.7777777777778" y="340" font-size="15" fill="#92400E" font-weight="700" text-anchor="middle">✗</text>
-<rect x="782.6666666666666" y="320" width="75.77777777777777" height="30" rx="6" fill="#FFF7E8" stroke="#FDE68A" stroke-width="1"/>
-<text x="820.5555555555555" y="340" font-size="15" fill="#92400E" font-weight="700" text-anchor="middle">✗</text>
+<rect x="694.8888888888889" y="320" width="75.77777777777777" height="30" rx="6" fill="#DCFCE7" stroke="#86EFAC" stroke-width="1"/>
+<text x="732.7777777777778" y="340" font-size="15" fill="#065F46" font-weight="700" text-anchor="middle">✓</text>
+<rect x="782.6666666666666" y="320" width="75.77777777777777" height="30" rx="6" fill="#DCFCE7" stroke="#86EFAC" stroke-width="1"/>
+<text x="820.5555555555555" y="340" font-size="15" fill="#065F46" font-weight="700" text-anchor="middle">✓</text>
 <rect x="870.4444444444443" y="320" width="75.77777777777777" height="30" rx="6" fill="#FFF7E8" stroke="#FDE68A" stroke-width="1"/>
 <text x="908.3333333333333" y="340" font-size="15" fill="#92400E" font-weight="700" text-anchor="middle">✗</text>
 <rect x="958.2222222222222" y="320" width="75.77777777777777" height="30" rx="6" fill="#FFF7E8" stroke="#FDE68A" stroke-width="1"/>
 <text x="996.1111111111111" y="340" font-size="15" fill="#92400E" font-weight="700" text-anchor="middle">✗</text>
-<text x="40" y="410" font-size="11.5" fill="#667085">✓ = wired，能翻译      ✗ = enabled 但未接通，选中即 503「真实翻译通道尚未配置」      – = 该套餐不包含此引擎</text>
-<rect x="40" y="430" width="1020" height="88" rx="10" fill="#FEF2F2" stroke="#FECACA" stroke-width="1.2"/>
-<text x="60" y="458" font-size="12.5" fill="#B91C1C" font-weight="700">🔴 基础版 4 个商户一翻译就报错，且报的是「当前套餐未包含此通道」—— 商户看不懂为什么</text>
-<text x="60" y="482" font-size="11.5" fill="#2B3748">三条路（任选）：① 给基础版加 deepseek（改 package_engines，最小改动）　② 把 google/niutrans 真正接通（配凭据）　③ 暂时下架基础版</text>
-<text x="60" y="504" font-size="11.5" fill="#2B3748">上线前建议一并处理：7 个「可选中但未接通」的引擎，要么接通、要么从套餐里摘掉 —— 否则客服会被「翻译坏了」的工单淹没</text>
+<text x="40" y="410" font-size="11.5" fill="#667085">✓ = wired，探针实测能翻      ✗ = enabled 但未接通，选中即 503「真实翻译通道尚未配置」      – = 该套餐不包含此引擎</text>
+<rect x="40" y="430" width="1020" height="110" rx="10" fill="#DCFCE7" stroke="#86EFAC" stroke-width="1.2"/>
+<text x="60" y="458" font-size="12.5" fill="#065F46" font-weight="700">✅ 三个套餐现在都能翻译：基础版靠 google，高级版有 deepseek / google，专业版 4 个都在</text>
+<text x="60" y="482" font-size="11.5" fill="#2B3748">⚠ 一个重要教训：上一版把「wired=true」直接当成「能用」，因此漏掉了两个坏通道 —— deepseek 的端点被填成用量控制台页面（405），gpt 的模型不接受 temperature=0。</text>
+<text x="60" y="504" font-size="11.5" fill="#2B3748">现在改用 scripts/probe-translate-engines.js 真实调用厂商 API 验证，「已接通」必须由实测背书。</text>
 </svg>
