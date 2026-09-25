@@ -14,8 +14,8 @@
       <el-table-column prop="type" label="方式" width="90"></el-table-column>
       <el-table-column label="状态" width="110">
         <template slot-scope="scope">
-          <el-tag :type="scope.row.status === 1 ? 'success' : 'danger'" size="mini">
-            {{ scope.row.status === 1 ? '已支付' : '未支付' }}
+          <el-tag :type="statusMeta(scope.row).type" size="mini">
+            {{ statusMeta(scope.row).text }}
           </el-tag>
         </template>
       </el-table-column>
@@ -37,6 +37,22 @@ export default {
   },
   mounted() { this.load() },
   methods: {
+    // 订单状态展示。**必须用后端算好的有效状态**，不能直接读 status：
+    // 过期是惰性判定的，数据库里 status 还是 0，直接读会把早就过期、
+    // 再也付不了款的僵尸订单显示成"未支付"，运营就会一直等一笔不会来的钱。
+    statusMeta(row) {
+      // 后端 mapRow 会把 effective_status 驼峰成 effectiveStatus 下发；
+      // 两个名字都认，是为了兼容直连 SQL 的旧接口，避免哪天字段名一换就退回原始 status。
+      const status = row.effectiveStatus !== undefined ? row.effectiveStatus
+        : (row.effective_status !== undefined ? row.effective_status : row.status)
+      const table = {
+        1: { type: 'success', text: '已支付' },
+        2: { type: 'info', text: '已过期' },
+        3: { type: 'info', text: '已取消' },
+        4: { type: 'warning', text: '异常' }
+      }
+      return table[status] || { type: 'danger', text: '待支付' }
+    },
     load() {
       this.loading = true
       this.getRequest('/admin/recharges', { page: this.page, rows: this.size }).then(resp => {

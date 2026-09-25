@@ -139,6 +139,66 @@ function isExpired(order, now) {
   return Number.isFinite(expires) && at >= expires
 }
 
+/**
+ * 有效状态：把「惰性过期」算进去之后的**对外状态**。
+ *
+ * ## 为什么需要它
+ *
+ * 过期是**惰性判定**的 —— 数据库里的 `status` 不会因为时间到了就自动变成 2。
+ * 这是刻意的：为了"让列表显示 expired"而每分钟扫全表改状态，是无意义的写入，
+ * 而且会让 `terminal_at` 这类审计字段失去意义。
+ *
+ * 但惰性判定有个必须堵上的副作用：**`status=0` 不能直接当成"还在等付款"展示**。
+ * 一张三天前就该过期的订单，如果后台、报表、统计都按 pending 计，
+ * 运营看到的数字就是假的 —— 而且会真的去等一笔永远不会来的款。
+ *
+ * 所以规则统一为：
+ *   **凡是"展示"或"统计"订单状态的地方，一律用 effectiveStatus，不要直接读 status。**
+ *
+ *   status = 0 且 expires_at <= now  →  effective = EXPIRED(2)
+ *   其余情况                          →  effective = status
+ *
+ * 注意它**只影响读**，不写库。数据库里的 status 仍然是 0，
+ * 真实迁移由结算/扫描任务在需要时推进。
+ */
+function effectiveStatus(order, now) {
+  const raw = Number(order && order.status)
+  if (raw === STATUS.PENDING && isExpired(order, now)) return STATUS.EXPIRED
+  return raw
+}
+
+/** 有效状态的文案，供接口直接下发 */
+function effectiveStatusText(order, now) {
+  return statusText(effectiveStatus(order, now))
+}
+
+/**
+ * 订单当前是否**真的**在等付款。
+ *
+ * 与 `isPending(status)` 的区别：这个方法把"已过期但还没落状态"排除掉了。
+ * 统计"有效待支付"必须用它，否则会把一堆僵尸订单算进去。
+ */
+function isEffectivelyPending(order, now) {
+  return effectiveStatus(order, now) === STATUS.PENDING
+}
+
+/**
+ * `effectiveStatus` 的 SQL 等价写法，供**列表/统计**直接在库里算。
+ *
+ * 为什么要有两份实现：列表要能排序、能筛选、能分页，就必须在 SQL 里算；
+ * 单条订单在内存里判断时又不想多查一次库。两份实现共用同一个语义
+ * （`status=0 且 expires_at<=now() 视为已过期`），并由
+ * `test/recharge-effective-status.test.js` 里的守卫用例锁死一致性。
+ *
+ * @param {string} alias recharges 表别名，例如 'r'
+ * @param {string} [nowExpr] 可注入的时间表达式，测试用
+ */
+function effectiveStatusSql(alias = 'r', nowExpr = 'now()') {
+  const prefix = alias ? `${alias}.` : ''
+  return `CASE WHEN ${prefix}status = ${STATUS.PENDING} AND ${prefix}expires_at <= ${nowExpr}`
+    + ` THEN ${STATUS.EXPIRED} ELSE ${prefix}status END`
+}
+
 module.exports = {
   STATUS,
   STATUS_TEXT,
@@ -152,5 +212,9 @@ module.exports = {
   statusText,
   canTransition,
   assertTransition,
-  isExpired
+  isExpired,
+  effectiveStatus,
+  effectiveStatusText,
+  effectiveStatusSql,
+  isEffectivelyPending
 }

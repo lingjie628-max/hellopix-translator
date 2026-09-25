@@ -23,7 +23,29 @@ const databaseUrl = process.env.PIX_TEST_DATABASE_URL
 const ADDRESS = 'TEfCDDuYwYdjCn2WDa7TNWCU9bkBk9EXPX'
 const FROM = 'TJRabPrwbZy45sbavfcjinPJC18kjpRTv8'
 const TOKEN = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'
-const BASE_MILLI = 40000n
+/**
+ * 本文件专用的金额基数。
+ *
+ * ## 为什么每个测试文件必须有自己的一段金额区间
+ *
+ * `recharges_pending_amount_uq` 是**全局**唯一索引：
+ * `(payment_type, paid_amount) WHERE status = 0` ——
+ * 同一应付金额在未支付状态下只能有一张单。这不是缺陷，
+ * 而是自动匹配机制的基础：**金额本身就是订单身份**。
+ *
+ * 但 `node --test` 默认**并行跑各测试文件**。两个文件若用同一段基数
+ * （比如都用 40.000，尾数随机取 1~999），就会偶发地抢到同一个金额而报唯一冲突 ——
+ * 现象是"全量跑偶尔挂、单独跑永远过"，最容易被当成玄学忽略掉。
+ *
+ * 所以金额区块按文件划分，互不重叠：
+ *
+ *   10.000–17.000   recharge-effective-status.test.js（固定值）
+ *   35.000–35.999   recharge-amount.test.js
+ *   40.000–40.999   recharge-settlement.test.js
+ *   50.000–52.999   ← 本文件
+ *   180.000 起      recharge-create-route.test.js（由套餐价格推导）
+ */
+const BASE_MILLI = 50000n
 const SOLID_TS = Date.now()
 
 test('ChainWatcher：重复扫描、重启恢复、上游故障、未确认交易', { skip: !databaseUrl }, async t => {
@@ -509,7 +531,7 @@ test('分页跨多页全部处理，重扫同一批不重复入账', { skip: !da
     const o = await withTx(async client => {
       const expiresAt = new Date(Date.now() + 30 * 60 * 1000)
       const alloc = await amount.allocate(client, {
-        payAddress: addr, tokenContract: TOKEN, baseAmountMilli: 40000n + BigInt(i * 1000), expiresAt
+        payAddress: addr, tokenContract: TOKEN, baseAmountMilli: BASE_MILLI + BigInt(i * 1000), expiresAt
       })
       const no = `PG${Date.now()}${i}${Math.floor(Math.random() * 1e5)}`
       const r = (await client.query(
@@ -517,7 +539,7 @@ test('分页跨多页全部处理，重扫同一批不重复入账', { skip: !da
            original_amount, discount_amount, surcharge_amount, paid_amount, status,
            idempotency_key, expires_at, pay_address, pay_token_contract, amount_reservation_id)
          VALUES($1,$2,'package','USDT-TRC20',1,1000,$3,0,$4,$5,0,$6,$7,$8,$9,$10) RETURNING id`,
-        [u.id, no, formatMilli(40000n + BigInt(i * 1000)), formatMilli(alloc.suffixMilli),
+        [u.id, no, formatMilli(BASE_MILLI + BigInt(i * 1000)), formatMilli(alloc.suffixMilli),
           formatMilli(alloc.amountMilli), `pg:${no}`, expiresAt.toISOString(),
           addr, TOKEN, String(alloc.reservationId)])).rows[0]
       await amount.attachToRecharge(client, alloc.reservationId, r.id)
@@ -651,7 +673,7 @@ test('分页中途上游失败：整轮回滚，重扫后补全', { skip: !datab
     const o = await withTx(async client => {
       const expiresAt = new Date(Date.now() + 30 * 60 * 1000)
       const alloc = await amount.allocate(client, {
-        payAddress: addr, tokenContract: TOKEN, baseAmountMilli: 40000n, expiresAt
+        payAddress: addr, tokenContract: TOKEN, baseAmountMilli: BASE_MILLI, expiresAt
       })
       const no = `PI${Date.now()}`
       const r = (await client.query(
@@ -659,7 +681,7 @@ test('分页中途上游失败：整轮回滚，重扫后补全', { skip: !datab
            original_amount, discount_amount, surcharge_amount, paid_amount, status,
            idempotency_key, expires_at, pay_address, pay_token_contract, amount_reservation_id)
          VALUES($1,$2,'package','USDT-TRC20',1,1000,$3,0,$4,$5,0,$6,$7,$8,$9,$10) RETURNING id`,
-        [u.id, no, formatMilli(40000n), formatMilli(alloc.suffixMilli), formatMilli(alloc.amountMilli),
+        [u.id, no, formatMilli(BASE_MILLI), formatMilli(alloc.suffixMilli), formatMilli(alloc.amountMilli),
           `pi:${no}`, expiresAt.toISOString(), addr, TOKEN, String(alloc.reservationId)])).rows[0]
       await amount.attachToRecharge(client, alloc.reservationId, r.id)
       reservationId = alloc.reservationId

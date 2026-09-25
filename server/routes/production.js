@@ -11,7 +11,7 @@ const { encryptSecret, credentialsKeyReady, KEY_ENV } = require('../lib/credenti
 const { providers, channelStatus } = require('../services/translation-provider')
 const { AdminTotpService } = require('../services/admin-totp-service')
 const { RechargeAmountService } = require('../services/recharge-amount-service')
-const { STATUS: RECHARGE_STATUS, assertTransition } = require('../services/recharge-state')
+const { STATUS: RECHARGE_STATUS, assertTransition, effectiveStatus, effectiveStatusSql } = require('../services/recharge-state')
 const { parseMilli, formatMilli } = require('../lib/money')
 const { validTronAddress, normalizeTronAddress } = require('../lib/tron-address')
 const { objectSetting, readAlertTo, setting: settingOf } = require('../lib/mailer')
@@ -132,9 +132,14 @@ function productionRouter(context) {
     const values = [req.pixUser.parent.id]
     const clauses = ['user_id=$1']
     if (data.orderNum) { values.push(`%${data.orderNum}%`); clauses.push(`order_number ILIKE $${values.length}`) }
-    if (data.status !== undefined && data.status !== '') { values.push(number(data.status)); clauses.push(`status=$${values.length}`) }
+    // 按「有效状态」筛选：直接比 status 会让"已过期"筛出 0 条、让"待支付"混进僵尸单
+    if (data.status !== undefined && data.status !== '') {
+      values.push(number(data.status))
+      clauses.push(`${effectiveStatusSql('')}=$${values.length}`)
+    }
     const result = await repo.list('recharges', { where: clauses.join(' AND '), values, limit: paging.size, offset: paging.offset })
     result.rows = result.rows.map(row => Object.assign(row, {
+      effectiveStatus: effectiveStatus(row),
       orderNum: row.orderNumber,
       originalPrice: row.originalAmount,
       discountAmount: row.discountAmount,
@@ -749,7 +754,13 @@ function productionRouter(context) {
        (SELECT count(*) FROM sub_accounts)::int AS sub_count,
        (SELECT COALESCE(sum(char_balance),0) FROM users)::bigint AS char_balance,
        (SELECT COALESCE(sum(chars),0) FROM translate_logs)::bigint AS char_used,
-       (SELECT COALESCE(sum(paid_amount),0) FROM recharges WHERE status=1)::numeric AS recharge_sum`
+       (SELECT COALESCE(sum(paid_amount),0) FROM recharges WHERE status=1)::numeric AS recharge_sum,
+       -- 有效待支付：仍在有效期内、真的还能付款的单
+       (SELECT count(*) FROM recharges r
+         WHERE r.status=0 AND r.expires_at > now())::int AS recharge_pending,
+       -- 惰性过期：数据库里还写着 status=0，但其实早就过期了 —— 这些必须从"待支付"里剔除
+       (SELECT count(*) FROM recharges r
+         WHERE r.status=0 AND r.expires_at <= now())::int AS recharge_pending_stale`
     )
     res.json(mapRow(result.rows[0]))
   }))
@@ -810,7 +821,10 @@ function productionRouter(context) {
   })))
   router.get('/admin/recharges', asyncRoute((req, res) => adminJoinedList(req, res, {
     from: 'recharges r JOIN users u ON u.id=r.user_id LEFT JOIN packages p ON p.id=r.package_id',
-    select: `r.*,r.order_number AS order_num,r.original_amount AS original_price,
+    // effective_status：把「已过有效期但 status 还是 0」的惰性过期订单算成 expired。
+    // 后台必须按它展示/筛选，否则会把一堆再也付不了款的僵尸单显示成"待支付"。
+    select: `r.*,${effectiveStatusSql('r')} AS effective_status,
+      r.order_number AS order_num,r.original_amount AS original_price,
       r.paid_amount AS price,r.payment_type AS type,r.created_at AS create_time,u.username,p.title AS basename`,
     keyword: ['r.order_number', 'r.payment_type', 'u.username'],
     order: 'r.id DESC'
@@ -1216,6 +1230,118 @@ function productionRouter(context) {
               s.keyword, s.source, s.target
        FROM scripts s LEFT JOIN users u ON u.id=s.user_id
        WHERE TRUE${filter} ORDER BY s.id DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+      values.concat([paging.size, paging.offset]))
+    res.json(page(mapRows(rows.rows), total.rows[0].total, paging))
+  }))
+
+  // ---------------------------------------------------------------------
+  // 运营 · 在线账号 / 进粉统计
+  //
+  // 这两页原来查的是旧「工单」模型的 order_details / order_fans，
+  // 而那套模型（工单号 / 主号 / 端口 / 当日进粉）在现在的产品里已经不存在了，
+  // 生产库那几张表**一行数据都没有** —— 于是接口干脆没实现，直接返回
+  // 503「该兼容模块尚未迁移到 PostgreSQL」。运营点进去只能看到一个报错。
+  //
+  // 但这两页要表达的信息在新模型里是**真实存在**的：
+  //
+  //   在线账号  → conversations（哪个商户、用哪个账号、在跟哪个客户、多久没动）
+  //   进粉统计  → conversations 的首次出现时间，以及这个客户是不是别处也见过
+  //
+  // 所以这里按新模型重写，而不是去复活那两张空表 —— 后者只会得到一个
+  // 永远为空的假页面，比报错更糟（报错至少说明"这里没东西"）。
+  // ---------------------------------------------------------------------
+
+  /**
+   * 多久没活动就算离线。客户端切换会话时会更新 last_message_at。
+   *
+   * 这个值**直接内联进 SQL**而不是当绑定参数：它是个服务端常量，不是用户输入；
+   * 当参数传会带来一个很难查的坑 —— 无筛选时 count 查询里根本不出现这个占位符，
+   * 于是 pg 报 "bind message supplies 1 parameters, but prepared statement requires 0"。
+   * 内联之前做一次整数校验，杜绝拼字符串带来的注入面。
+   */
+  const ACCOUNT_ONLINE_WINDOW_MINUTES = 10
+  const ONLINE_WINDOW_SQL = Number.isInteger(ACCOUNT_ONLINE_WINDOW_MINUTES) && ACCOUNT_ONLINE_WINDOW_MINUTES > 0
+    ? String(ACCOUNT_ONLINE_WINDOW_MINUTES)
+    : '10'
+
+  router.get('/admin/accounts', asyncRoute(async (req, res) => {
+    const data = input(req)
+    const paging = pagination(req, { size: 50 })
+    const values = []
+    const clauses = ['TRUE']
+    if (data.keyword) {
+      values.push(`%${data.keyword}%`)
+      clauses.push(`(u.username ILIKE $${values.length} OR c.account_key ILIKE $${values.length}`
+        + ` OR c.peer_key ILIKE $${values.length} OR c.display_name ILIKE $${values.length})`)
+    }
+    if (data.online !== undefined && data.online !== '') {
+      clauses.push(Number(data.online) === 1
+        ? `c.last_message_at > now() - interval '${ONLINE_WINDOW_SQL} minutes'`
+        : `(c.last_message_at IS NULL OR c.last_message_at <= now() - interval '${ONLINE_WINDOW_SQL} minutes')`)
+    }
+    const where = clauses.join(' AND ')
+    const total = await repo.query(
+      `SELECT count(*)::bigint AS total FROM conversations c JOIN users u ON u.id=c.user_id WHERE ${where}`, values)
+    const rows = await repo.query(
+      `SELECT c.id, COALESCE(u.username,'') AS username, c.platform,
+              COALESCE(c.account_key,'') AS account,
+              COALESCE(c.peer_key,'') AS peer_key,
+              COALESCE(c.display_name,'') AS nick_name,
+              CASE WHEN c.last_message_at > now() - interval '${ONLINE_WINDOW_SQL} minutes'
+                   THEN 1 ELSE 0 END AS online_status,
+              COALESCE(co.status,'') AS owner_status,
+              COALESCE(cu.public_id,'') AS customer_no,
+              c.last_message_at,
+              c.created_at
+         FROM conversations c
+         JOIN users u ON u.id = c.user_id
+         LEFT JOIN customers cu ON cu.id = c.customer_id
+         LEFT JOIN customer_owners co
+                ON co.user_id = c.user_id AND co.customer_id = c.customer_id
+        WHERE ${where}
+        ORDER BY c.last_message_at DESC NULLS LAST, c.id DESC
+        LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+      values.concat([paging.size, paging.offset]))
+    res.json(page(mapRows(rows.rows), total.rows[0].total, paging))
+  }))
+
+  router.get('/admin/fans', asyncRoute(async (req, res) => {
+    const data = input(req)
+    const paging = pagination(req, { size: 50 })
+    const values = []
+    const clauses = ['TRUE']
+    if (data.keyword) {
+      values.push(`%${data.keyword}%`)
+      clauses.push(`(u.username ILIKE $${values.length} OR c.account_key ILIKE $${values.length}`
+        + ` OR c.peer_key ILIKE $${values.length} OR c.display_name ILIKE $${values.length})`)
+    }
+
+    // 新粉 / 重粉：同一个客户被几个会话见过。
+    // 「重粉」正是撞单信号 —— 同一个客户在别的账号/商户那里也出现过，
+    // 这正是运营最需要先看到的那批人，所以放在列表里而不是藏进详情页。
+    const seenCount = `(SELECT count(*) FROM conversations c2 WHERE c2.customer_id = c.customer_id)`
+    const fanTypeExpr = `CASE WHEN c.customer_id IS NOT NULL AND ${seenCount} > 1 THEN '重粉' ELSE '新粉' END`
+    if (data.type) {
+      values.push(String(data.type))
+      clauses.push(`${fanTypeExpr} = $${values.length}`)
+    }
+
+    const where = clauses.join(' AND ')
+    const total = await repo.query(
+      `SELECT count(*)::bigint AS total FROM conversations c JOIN users u ON u.id=c.user_id WHERE ${where}`, values)
+    const rows = await repo.query(
+      `SELECT c.id, COALESCE(u.username,'') AS username, c.platform,
+              COALESCE(c.peer_key,'') AS account,
+              COALESCE(c.display_name,'') AS nick_name,
+              ${fanTypeExpr} AS fan_type,
+              ${seenCount}::int AS seen_count,
+              COALESCE(c.account_key,'') AS login_account,
+              c.created_at AS create_time
+         FROM conversations c
+         JOIN users u ON u.id = c.user_id
+        WHERE ${where}
+        ORDER BY c.id DESC
+        LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
       values.concat([paging.size, paging.offset]))
     res.json(page(mapRows(rows.rows), total.rows[0].total, paging))
   }))
@@ -1706,7 +1832,8 @@ function productionRouter(context) {
     '/assistant/getAssistantGroup', '/assistant/getAssistantDetails', '/assistant/deleteAssistantDetails',
     '/assistant/deleteAssistantGroup', '/assistant/selectAssistantGroupById', '/assistant/editAssistant',
     '/assistant/editAssistantGroup', '/weixin/weixinPay', '/weixin/checkStatus', '/zfb/alipay',
-    '/admin/accounts', '/admin/fans'
+    // 注意：/admin/accounts 与 /admin/fans 曾在此当桩，
+    // 现已按新客户模型实现（见上方「运营 · 在线账号 / 进粉统计」）。
   ]
   // 公告没有独立接口：它以 site.notices 存在站点设置里，读写都走
   // /admin/settings 与 /admin/settings/save（前端 AdminNotices.vue 正是这么调的）。

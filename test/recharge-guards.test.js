@@ -416,3 +416,64 @@ test('mail 配置的读写键一致，不会一边写一边读另一个名字', 
       `${name} 的**可执行代码**里还有旧键名 mail.alertTo`)
   }
 })
+
+// ---------------------------------------------------------------- 测试隔离
+
+test('各测试文件的金额区间互不重叠（否则并行跑会偶发唯一冲突）', () => {
+  // `recharges_pending_amount_uq` 是全局唯一索引：
+  // (payment_type, paid_amount) WHERE status = 0 —— 同一金额只能有一张未支付单。
+  // 这是自动匹配的基础（金额即订单身份），不是缺陷。
+  //
+  // 但 node --test 默认并行跑各文件。两个文件用同一段基数、尾数又随机取，
+  // 就会偶发撞金额 → 报唯一冲突 → 表现为"全量跑偶尔挂、单独跑永远过"。
+  // 那种失败最容易被当成玄学忽略，所以在这里把区间划分钉死。
+  const fs = require('node:fs')
+  const path = require('node:path')
+  const dir = path.join(__dirname)
+
+  /** 从文件里抽出 amount_milli 的整数基数常量 */
+  const baseOf = (file, patterns) => {
+    const src = fs.readFileSync(path.join(dir, file), 'utf8')
+    for (const re of patterns) {
+      const m = re.exec(src)
+      if (m) return Number(m[1])
+    }
+    return null
+  }
+
+  const blocks = [
+    { file: 'recharge-amount.test.js', base: baseOf('recharge-amount.test.js', [/const BASE = (\d+)n/]), span: 1 },
+    { file: 'recharge-settlement.test.js', base: baseOf('recharge-settlement.test.js', [/const BASE_MILLI = (\d+)n/]), span: 1 },
+    // 这个文件有个 3 次循环，基数每次 +1000，所以占 3 个区块
+    { file: 'recharge-watcher.test.js', base: baseOf('recharge-watcher.test.js', [/const BASE_MILLI = (\d+)n/]), span: 3 }
+  ]
+
+  for (const b of blocks) {
+    assert.ok(b.base !== null, `没能从 ${b.file} 里解析出金额基数常量`)
+  }
+
+  for (let i = 0; i < blocks.length; i++) {
+    for (let j = i + 1; j < blocks.length; j++) {
+      const a = blocks[i]
+      const b = blocks[j]
+      const aEnd = a.base + a.span * 1000 - 1
+      const bEnd = b.base + b.span * 1000 - 1
+      const overlap = a.base <= bEnd && b.base <= aEnd
+      assert.equal(overlap, false,
+        `${a.file}(${a.base / 1000}~${aEnd / 1000}) 与 ${b.file}(${b.base / 1000}~${bEnd / 1000}) `
+        + '金额区间重叠，并行跑会偶发唯一冲突。请给其中一个换一段基数。')
+    }
+  }
+})
+
+test('recharge-watcher 测试里没有残留的金额硬编码字面量', () => {
+  // 原来 `BASE_MILLI` 之外还散落着 `40000n` 字面量，
+  // 改基数时只改常量、漏改字面量，就会造成"改了却没生效"或新的区间重叠。
+  const fs = require('node:fs')
+  const path = require('node:path')
+  const src = fs.readFileSync(path.join(__dirname, 'recharge-watcher.test.js'), 'utf8')
+  const base = /const BASE_MILLI = (\d+)n/.exec(src)[1]
+  const literals = [...src.matchAll(/\b(\d{4,})n\b/g)].map(m => m[1]).filter(v => v !== base)
+  assert.deepEqual(literals, [],
+    `应全部使用 BASE_MILLI 常量，但仍发现字面量：${literals.join(', ')}`)
+})

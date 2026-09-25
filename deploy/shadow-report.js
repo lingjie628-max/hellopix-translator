@@ -194,19 +194,26 @@ async function main() {
               (SELECT coalesce(sum(char_balance),0) FROM users) AS balance,
               (SELECT count(*) FROM char_ledger) AS ledger,
               (SELECT count(*) FROM recharges) AS recharges,
-              (SELECT count(*) FROM recharges WHERE status=0) AS pending,
+              -- pending 只算「仍在有效期内、真的还能付款」的单。
+              -- status=0 但已过 expires_at 的是惰性过期的僵尸单，混进来会让
+              -- "还有 N 单待支付"看起来像业务在正常流转，实际早就死单了。
+              (SELECT count(*) FROM recharges r WHERE r.status=0 AND r.expires_at > now()) AS pending,
+              (SELECT count(*) FROM recharges r WHERE r.status=0 AND r.expires_at <= now()) AS pending_expired,
               (SELECT count(*) FROM recharges WHERE status=1) AS paid,
               (SELECT coalesce(sum(char_used),0) FROM users) AS used`)).rows[0]
     console.log(`  用户数        ${g.users}`)
     console.log(`  字符余额合计  ${g.balance}   ${Number(g.balance) === 0 ? '✓ 未被改动' : '⚠ 有变化'}`)
     console.log(`  字符流水条数  ${g.ledger}   ${Number(g.ledger) === 0 ? '✓ 未写入' : '⚠ 有写入'}`)
-    console.log(`  订单总数      ${g.recharges}  (pending ${g.pending} / paid ${g.paid})`)
+    console.log(`  订单总数      ${g.recharges}  (有效 pending ${g.pending} / 惰性过期 ${g.pending_expired} / paid ${g.paid})`)
+    if (Number(g.paid) === 0) console.log('                ✓ 仍无任何订单被置为已支付')
     console.log(`  已用字符合计  ${g.used}   ${Number(g.used) === 0 ? '✓ 未消耗' : '⚠ 有消耗'}`)
     if (Number(g.paid) > 0) console.log('  ⚠⚠ 出现了已支付订单 —— Shadow 模式下不应发生！')
 
     bar('七、测试订单（故意不付款）')
     const probe = (await db.query(
-      `SELECT r.order_number, r.status, r.paid_amount, r.surcharge_amount,
+      `SELECT r.order_number, r.status,
+              (CASE WHEN r.status=0 AND r.expires_at <= now() THEN 2 ELSE r.status END) AS effective_status,
+              r.paid_amount, r.surcharge_amount,
               to_char(r.created_at,'MM-DD HH24:MI:SS') AS created,
               to_char(r.expires_at,'MM-DD HH24:MI:SS') AS expires,
               r.paid_at IS NULL AS never_paid,
@@ -221,7 +228,8 @@ async function main() {
     }
     for (const r of probe) {
       console.log(`  ${r.order_number}  应付 ${r.paid_amount}  尾数 ${r.surcharge_amount}`)
-      console.log(`    状态 ${r.status} (0=pending)  预约 ${r.reservation_state}  从未支付 ${r.never_paid ? '✓' : '✗'}`)
+      console.log(`    状态 ${r.status} → 有效 ${r.effective_status} (0=待支付 1=已支付 2=已过期)`
+        + `  预约 ${r.reservation_state}  从未支付 ${r.never_paid ? '✓' : '✗'}`)
       console.log(`    创建 ${r.created}  到期 ${r.expires}`)
     }
 

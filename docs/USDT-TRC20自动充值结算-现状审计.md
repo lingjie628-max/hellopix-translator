@@ -7,6 +7,10 @@
 > 每日备份 / 分区维护 / 健康巡检**从来没有自动执行过**。相关段落已就地更正。
 > 调度现已迁移到 systemd timer（`deploy/hello-pix-*.timer`），并已用真实产物验收。
 >
+> **⚠ 2026-09-24 补充**：第 24 行说「没有过期时间」已随 021 迁移补齐（`expires_at`）。
+> 但过期是**惰性判定**的，由此产生的展示/统计口径问题见第 11 节 —— 该节记录的是
+> **Phase 3B（Live）之前必须成立的前提**。
+>
 > 范围：**只审计现状，不含任何实现**。所有结论均来自生产库与代码实测，标注了文件与行号。
 > 本轮不做：私钥保存、自动提现、自动转账、以及充值以外的任何功能。
 
@@ -398,3 +402,82 @@ COMMIT
 - 【2026-09-23 补查】`which cron crond` 无输出；`systemctl status cron` → Unit could not be found；
   `systemd-detect-virt` = none（非容器）；`/var/log/hello-pix-maintenance.log` 与
   `hello-pix-alert.log` 均不存在 —— 证明这些任务从未执行
+
+---
+
+## 11. 惰性过期的展示与统计语义（2026-09-24 补齐）
+
+> 这一节记录的是 **Phase 3B（Live 真实入账）之前必须成立的前提**，
+> 已实现、已部署、已在生产上实测验收。
+
+### 11.1 问题：`status=0` 不等于「还在等付款」
+
+订单过期是**惰性判定**的 —— 数据库里的 `status` 不会因为时间到了就自动变成 2。
+这是刻意的：为了「让列表显示 expired」而每分钟扫全表改状态，是无意义的写入，
+而且会让 `terminal_at` 这类审计字段失去意义。
+
+但它有一个必须堵上的副作用：
+
+> **`status=0` 的订单，可能早就过了 `expires_at`，永远不可能再收到款。**
+
+只要有人直接读这个字段去做展示或统计，就会得到两种错误，而且都不报错：
+
+| 位置 | 错误表现 | 后果 |
+| --- | --- | --- |
+| 后台充值列表 | 僵尸单显示成「未支付」 | 运营一直等一笔永远不会来的款 |
+| 后台统计 | 僵尸单计入「待支付」 | 报表数字虚高，看不出业务其实停着 |
+| 商户端订单页 | 僵尸单显示成「未支付」 | 商户一直等一笔不会到账的付款 |
+| 商户端筛选 | 按「已过期」筛出 **0 条**；按「未支付」混进僵尸单 | 商户无法自查哪些单已作废 |
+| Shadow 报表 | `pending` 把僵尸单算进去 | 误以为还有 N 单在正常流转 |
+
+**生产实测（2026-09-24）**：修复前全库 3 张订单 `status` 全是 0，
+后台会显示「3 单待支付」—— 而实际上这 3 张**全部已过 `expires_at`、一张都不可能到账**。
+真实的待支付是 **0**。
+
+### 11.2 规则
+
+> **凡是「展示」或「统计」订单状态的地方，一律用 effective status，不要直接读 `status`。**
+
+```
+status = 0 且 expires_at <= now()   →   effective = EXPIRED(2)
+其余情况                             →   effective = status
+```
+
+它**只影响读，不写库**。数据库里的 `status` 仍然是 0，真实迁移由结算/扫描任务按需推进；
+接口把原始 `status` 和 `effectiveStatus` **一起下发**，不篡改原始值。
+
+有效状态只做 `pending → expired` 这**一个方向**的推断：已支付/已取消/异常单
+即使早过了有效期，也仍然显示为它们各自的状态。
+
+### 11.3 落点
+
+| 位置 | 改动 |
+| --- | --- |
+| `server/services/recharge-state.js` | 新增 `effectiveStatus` / `effectiveStatusText` / `isEffectivelyPending` / **`effectiveStatusSql`** |
+| `/admin/recharges` | select 里加 `effectiveStatusSql('r') AS effective_status` |
+| `/admin/stats` | 新增 `rechargePending`（有效待支付）与 `rechargePendingStale`（惰性过期） |
+| `/userRecharge/getUserRecharge` | 状态筛选改走有效状态；每行下发 `effectiveStatus` |
+| `src/components/admin/AdminRecharges.vue` | 状态列改用 `statusMeta()`，消费 `effectiveStatus` |
+| `src/components/user/UserRecharge.vue` | `formateStatus` / `opText` 改走 `effStatus()`；筛选文案「支付失败」→「已过期」 |
+| `deploy/shadow-report.js` | `pending` 排除惰性过期，单列 `pending_expired` |
+
+**为什么 `effectiveStatusSql` 要和 `effectiveStatus` 并存**：列表要能排序、筛选、分页，
+就必须在 SQL 里算；单条订单在内存里判断时又不想多查一次库。两份实现最大的风险是
+**改了一处忘了另一处**，所以 `test/recharge-effective-status.test.js` 里有一组真库用例
+拿同一批订单分别跑两条路径逐例比对 —— 语义一旦漂移立刻失败。
+
+### 11.4 验收（生产实测，2026-09-24）
+
+`deploy/verify-effective-status.js`（商户端走**完整真实 HTTP**：验证码 → 登录 → 带会话请求；
+管理端走线上那一份 productionRouter，只替换鉴权层）：**29 项通过 / 0 失败**。
+
+关键结论：
+
+- 三张真实订单：原始 `status=0`，有效状态 **2（已过期）**，`paid_at` 全空
+- 全库「有效待支付」= 1，且就是探针新造的那张活单 —— **三张真实订单一张都没被算进去**
+- 商户端按「未支付」筛选只返回真正能付款的那张；按「已过期」筛选能捞到僵尸单（修复前是 0 条）
+- 正向用例：有效期内的订单**没有**被误判成过期（证明不是「一律显示已过期」）
+- 字符余额 0、`char_ledger` 0、无订单被置为已支付 —— Shadow 未被破坏
+
+`test/recharge-effective-status.test.js`：17 项（含真库 JS↔SQL 一致性对照）。
+全量回归 473 项 / 472 通过 / 0 失败。

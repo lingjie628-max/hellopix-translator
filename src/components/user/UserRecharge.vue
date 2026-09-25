@@ -41,7 +41,7 @@
                              :formatter="formateStatus"></el-table-column>
             <el-table-column label="操作" width="90">
               <template slot-scope="scope">
-                <el-button type="text" disabled>{{ scope.row.status === 1 ? '已完成' : '待支付' }}</el-button>
+                <el-button type="text" disabled>{{ opText(scope.row) }}</el-button>
               </template>
             </el-table-column>
             <el-table-column prop="createTime" align="center" label="充值时间" width="180px">
@@ -91,7 +91,7 @@ export default {
         label: '支付成功'
       }, {
         value: '2',
-        label: '支付失败'
+        label: '已过期'
       }, {
         value: '0',
         label: '未支付'
@@ -106,14 +106,32 @@ export default {
     back() {
       this.$router.go(-1);//返回上一层
     },
+    // 订单状态展示统一走「有效状态」：过期是惰性判定的，库里 status 还是 0，
+    // 直接读 status 会把早就过期、再也付不了款的订单显示成"未支付"，
+    // 商户就会一直等一笔不会到账的付款。后端已把 effectiveStatus 一起下发。
+    effStatus(row) {
+      return row.effectiveStatus !== undefined ? row.effectiveStatus : row.status;
+    },
     formateStatus(row) {
-      if (row.status === 1) {
+      const status = this.effStatus(row);
+      if (status === 1) {
         return this.$createElement('el-button', { props: { type: 'success', size: 'mini', plain: true, disabled: true } }, '支付成功');
-      } else if (row.status === 2) {
-        return this.$createElement('el-button', { props: { type: 'warning', size: 'mini', plain: true, disabled: true } }, '支持失败');
-      } else if (row.status === 0) {
+      } else if (status === 2) {
+        return this.$createElement('el-button', { props: { type: 'warning', size: 'mini', plain: true, disabled: true } }, '已过期');
+      } else if (status === 3) {
+        return this.$createElement('el-button', { props: { type: 'info', size: 'mini', plain: true, disabled: true } }, '已取消');
+      } else if (status === 0) {
         return this.$createElement('el-button', { props: { type: 'danger', size: 'mini', plain: true, disabled: true } }, '未支付');
       }
+      return this.$createElement('el-button', { props: { type: 'warning', size: 'mini', plain: true, disabled: true } }, '异常');
+    },
+    opText(row) {
+      const status = this.effStatus(row);
+      if (status === 1) return '已完成';
+      if (status === 2) return '已过期';
+      if (status === 3) return '已取消';
+      if (status === 0) return '待支付';
+      return '异常';
     },
     isPc(){
       let userAgentInfo = navigator.userAgent;
