@@ -1,7 +1,7 @@
 {
   "name": "hello-pix-desktop",
   "productName": "Hello Pix",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "private": true,
   "description": "Hello Pix 桌面客户端",
   "author": "Hello Pix",
@@ -39,6 +39,7 @@
       "proxy-presets.js",
       "instance-slot.js",
       "background-mode.js",
+      "log-file.js",
       "package.json",
       "renderer/**/*",
       "!renderer/*.mp4",

@@ -20,6 +20,7 @@ const {
   isAllowedPlatformUrl,
   isAllowedExternalUrl
 } = require('./security-policy')
+const logFile = require('./log-file')
 
 const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 const TABS_HEIGHT = 72
@@ -59,7 +60,9 @@ function applyAppIdentity() {
   if (icon) {
     app.setAboutPanelOptions({
       applicationName: 'Hello Pix',
-      applicationVersion: '0.1.0',
+      // 之前这里写死 '0.1.0'，从 0.1.1 起就再没对过 ——
+      // 用户看"关于"报给我们的版本号是错的，排查时反而被误导。
+      applicationVersion: app.getVersion(),
       iconPath: APP_ICON
     })
   }
@@ -96,6 +99,55 @@ function readJson(file, fallback) {
 
 function writeJson(file, data) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2))
+}
+
+/* ---------------------------------------------------------------- 日志落盘 */
+
+// 见 desktop/log-file.js 与 test/desktop-log-file.test.js。
+// 这里只负责"何时建、装哪些钩子、放在哪个目录"。
+let clientLog = null
+
+/**
+ * 启动客户端日志落盘。
+ *
+ * **必须放在 applyAppIdentity() 之后调用**：那一步会 app.setName('Hello Pix')，
+ * 而 userData 目录是由 app name 推导出来的 —— 提前算会算到另一个目录去，
+ * 日志就和分区数据、配置分家，用户卸载时残留、我们找日志时找错地方。
+ *
+ * 之前客户端一条日志都不写：主进程抛异常、渲染进程被杀、翻译静默失败
+ * 全都没有痕迹，排查只能靠用户截图。这里做四件事：
+ *   1. 把已有的 console.* 输出接进日志文件（不必逐条改写调用点）
+ *   2. 挂上未捕获异常 / 未处理拒绝的钩子
+ *   3. 记录渲染进程崩溃与报错
+ *   4. 在「系统操作」菜单里给出「打开日志目录」，方便用户把日志发回来
+ */
+function initClientLog() {
+  let dir
+  try {
+    dir = path.join(app.getPath('userData'), 'logs')
+  } catch (e) {
+    try {
+      dir = path.join(app.getPath('temp'), 'hello-pix-logs')
+    } catch (e2) {
+      return null
+    }
+  }
+  const log = logFile.createLogger(dir, {
+    // 刻意走 stderr 而不是 console.error：console 已被下面桥接到本 logger，
+    // 用它上报"日志写入失败"会和自身形成回环。
+    onError: error => {
+      try {
+        process.stderr.write('[hello-pix] 日志写入失败：' + (error && error.message) + '\n')
+      } catch (e) {}
+    }
+  })
+  logFile.installConsoleBridge(console, log)
+  logFile.attachProcessHandlers(process, log, {
+    flush: () => log.flush(),
+    exit: code => app.exit(code)
+  })
+  clientLog = log
+  return log
 }
 
 function timingEqual(left, right) {
@@ -1593,6 +1645,7 @@ function refreshTrayMenu() {
         click: menuItem => setLoginItem(!!menuItem.checked)
       },
       { type: 'separator' },
+      { label: '打开日志目录', click: () => openLogDir() },
       { label: '退出 Hello Pix', click: () => quitApp() }
     ]))
   } catch (e) {
@@ -1680,6 +1733,37 @@ function createWindow() {
     }
   })
   win.setMenuBarVisibility(false)
+  // 渲染进程的报错与崩溃要留痕：此前"界面白屏""翻译没反应"这类问题在客户端
+  // 没有任何记录，只能靠用户复述当时点了什么。
+  if (clientLog) {
+    const wcLog = win.webContents
+    wcLog.on('console-message', (...args) => {
+      // Electron 33 是老签名 (event, level, message, line, sourceId)，
+      // 新版本改成单个对象。两种都兼容 —— 否则升级后日志会静默消失。
+      let level, message, line, source
+      if (args.length === 1 && args[0] && typeof args[0] === 'object') {
+        level = args[0].level
+        message = args[0].message
+        line = args[0].lineNumber
+        source = args[0].sourceId
+      } else {
+        level = args[1]
+        message = args[2]
+        line = args[3]
+        source = args[4]
+      }
+      // 只收警告与错误：渲染层的 info 量大且几乎没有诊断价值
+      if (level === 2 || level === 3 || level === 'warning' || level === 'error') {
+        clientLog.warn('renderer', String(message) + ' @' + (source || '') + ':' + line)
+      }
+    })
+    wcLog.on('render-process-gone', (_event, details) => {
+      clientLog.error('crash', '主窗口渲染进程退出：reason=' +
+        ((details && details.reason) || '?') + ' exitCode=' +
+        ((details && details.exitCode) == null ? '?' : details.exitCode))
+    })
+    wcLog.on('unresponsive', () => clientLog.warn('renderer', '主窗口无响应'))
+  }
   // macOS 会恢复上次的窗口框架，覆盖构造时的 width/height。
   // 这里显式再设一次并居中，确保"吃满可用区域"的尺寸真正生效。
   const hasSavedPosition = Number.isFinite(saved.x) && Number.isFinite(saved.y)
@@ -1942,6 +2026,23 @@ ipcMain.handle('app:savePreset', (event, payload) => {
 
 ipcMain.handle('app:tabs', () => tabPayload())
 
+/**
+ * 打开日志目录。
+ *
+ * 这是日志功能真正能用起来的关键一步 —— 日志写在本地，
+ * 如果用户找不到它，"请把日志发给我们"就只是一句空话。
+ * 放在「系统操作」菜单里：用户报障时最自然的入口。
+ */
+function openLogDir() {
+  if (!clientLog) {
+    console.error('[hello-pix] 日志未启用，无法打开日志目录')
+    return
+  }
+  Promise.resolve(shell.openPath(clientLog.dir)).then(error => {
+    if (error) console.error('[hello-pix] 打开日志目录失败：', error)
+  }).catch(error => console.error('[hello-pix] 打开日志目录失败：', error))
+}
+
 function popupTabContextMenu(payload) {
   const id = String((payload && payload.id) || '')
   const home = !!(payload && payload.home)
@@ -1960,6 +2061,7 @@ function popupTabContextMenu(payload) {
       { label: '个人中心', click: () => sendCommand('account') },
       { label: '检查软件更新', click: () => sendCommand('softwareUpdate') },
       { type: 'separator' },
+      { label: '打开日志目录', click: () => openLogDir() },
       { label: '重启软件', click: restart }
     ]
   } else {
@@ -1985,6 +2087,7 @@ function popupTabContextMenu(payload) {
       },
       { type: 'separator' },
       { label: '个人中心', click: () => sendCommand('account') },
+      { label: '打开日志目录', click: () => openLogDir() },
       { label: '关闭应用', click: () => closeTab(tab.id) }
     ]
   }
@@ -2209,6 +2312,14 @@ ipcMain.handle('app:overlay', (event, on) => {
 
 app.whenReady().then(() => {
   applyAppIdentity()
+  // 必须在 applyAppIdentity() 之后：日志目录由 app name 推导（见 initClientLog）。
+  const log = initClientLog()
+  if (log) {
+    log.info('app', '启动 Hello Pix v' + app.getVersion() +
+      ' · ' + process.platform + ' ' + process.arch +
+      ' · electron ' + process.versions.electron)
+    log.info('app', '日志目录：' + log.dir)
+  }
   // 槽位必须在任何 webview 之前拿到 —— 分区名依赖它。
   const handle = acquireInstanceSlot()
   console.log('[hello-pix] 多开槽位 =', handle.slot,
@@ -2229,6 +2340,9 @@ app.on('before-quit', () => {
   // 崩溃时不会执行到这里，由 acquireSlot 的陈旧锁接管逻辑兜底。
   try { instanceSlot.releaseSlot(instanceSlotHandle) } catch (e) {}
   try { if (tray) { tray.destroy(); tray = null } } catch (e) {}
+  // 把缓冲区里的日志刷到磁盘 —— 正常退出时不能把最后几条丢掉，
+  // 而"最后几条"往往正是退出前出的问题。
+  try { if (clientLog) clientLog.flush() } catch (e) {}
 })
 
 app.on('window-all-closed', () => {
