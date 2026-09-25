@@ -32,6 +32,9 @@ desktop/release/
 desktop/release-win/
 desktop/dists/
 安装包/
+# 验收包目录里的安装包同理：只留说明、校验和与采集脚本入库，
+# 80MB+ 的 exe 交给服务器 downloads/ 分发
+RC03-Windows验收包/*.exe
 
 # 独立客户端构建（tdesktop 源码树与产物，体积过大）
 standalone/build/
