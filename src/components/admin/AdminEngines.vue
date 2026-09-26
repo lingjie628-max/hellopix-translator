@@ -10,7 +10,12 @@
       <el-table-column label="档位" width="80">
         <template slot-scope="scope">{{ tierText(scope.row.tier) }}</template>
       </el-table-column>
-      <el-table-column prop="costPerMillion" label="成本元/百万字" width="120"></el-table-column>
+      <!--
+        币种必须跟着「系统设置 → 价格货币」走，不能写死。
+        这一列与 packages.price 要相减算毛利，写死币种就会出现
+        「收入是美元、成本标着人民币」这种没法看的对比（历史上真的发生过）。
+      -->
+      <el-table-column prop="costPerMillion" :label="'成本(' + currencyName + ')/百万字'" width="150"></el-table-column>
       <!--
         「真实模型」必须在列表里可见：这是"前台展示的模型与真实调用保持一致"
         这条要求的后台一侧。改模型是影响成本的敏感操作，如果不显示，
@@ -64,9 +69,12 @@
         <el-form-item label="启用">
           <el-switch v-model="form.enabled" :active-value="1" :inactive-value="0" :disabled="!!form.retired"></el-switch>
         </el-form-item>
-        <el-form-item label="成本元/百万字">
+        <el-form-item :label="'成本(' + currencyName + ')/百万字'">
           <el-input-number v-model="form.costPerMillion" :min="0" :precision="2"></el-input-number>
-          <span class="hint">粗估口径，权威成本见 translation_usage</span>
+          <span class="hint">
+            与套餐售价同币种（{{ currencyName }}，在「系统设置 → 价格货币」切换）。
+            粗估口径，权威成本见 translation_usage
+          </span>
         </el-form-item>
         <el-form-item label="真实模型 ID">
           <el-input v-model="form.model" placeholder="例如 gpt-4o-mini / claude-haiku-4-5"></el-input>

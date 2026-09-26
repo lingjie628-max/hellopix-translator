@@ -151,15 +151,18 @@ module.exports = function registerMock(app, options) {
       { id: 3, title: 'Hello Pix 专业版', subtitle: '定制化解决方案', port: 0, portUnlimited: 1, chars: 1500000, price: 850, engines: ['deepseek', 'baidu', 'niutrans', 'google', 'deepl', 'aws'], clients: { standalone: 1, mobile: 1, counter: 1 }, highlights: ['150万字符', 'DEEPL翻译', '亚马逊AWS翻译', '+高级版各翻译通道', '语种全，通道多，翻译准确性高', '独立应用版', '手机版'], features: { autoFill: 1, export: 1, moveMaster: 1, fanStats: 1, autoReply: 1, assistant: 1, repeatFan: 1, rotate: 1, keepChat: 1, counterRepeat: 1, ssl: 1, aws: 1, support: 1, feedback: 1 } }
     ],
     settings: loadSettings(),
+    // costPerMillion 的单位是**美元/百万字符**（与 packages.price 同币种，见迁移 032）。
+    // 这里有历史遗留的旧通道（baidu / niutrans）与缺失的新通道 —— 那是另一件事，
+    // 但币种必须与生产一致，否则本地开发会看到"表头写美元、数值是人民币"。
     engines: [
-      { id: 'deepseek', name: 'DeepSeek 翻译', provider: 'DeepSeek', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 6, model: 'deepseek-flash', apiKey: '', secret: '', endpoint: '', note: '需要 API Key 与模型名。' },
-      { id: 'baidu', name: '百度翻译', provider: '百度', tier: 'basic', enabled: 1, wired: 0, costPerMillion: 49, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
-      { id: 'niutrans', name: '小牛翻译', provider: '小牛', tier: 'basic', enabled: 1, wired: 0, costPerMillion: 50, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
-      { id: 'google', name: '谷歌翻译', provider: 'Google', tier: 'advanced', enabled: 1, wired: 0, costPerMillion: 134, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
-      { id: 'deepl', name: 'DeepL 翻译', provider: 'DeepL', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 168, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
-      { id: 'aws', name: '亚马逊 AWS 翻译', provider: 'Amazon', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 100, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
-      { id: 'gpt', name: 'GPT 翻译', provider: 'OpenAI', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 5, model: 'gpt-4o-mini', apiKey: '', secret: '', endpoint: '', note: 'Hello Pix 增补。成本超管手填，按 token 估算。未接厂商。' },
-      { id: 'grok', name: 'Grok 翻译', provider: 'xAI', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 29, model: 'grok-4.3', apiKey: '', secret: '', endpoint: '', note: 'Hello Pix 增补。成本超管手填，按 token 估算。未接厂商。' }
+      { id: 'deepseek', name: 'DeepSeek 翻译', provider: 'DeepSeek', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 0.83, model: 'deepseek-flash', apiKey: '', secret: '', endpoint: '', note: '需要 API Key 与模型名。' },
+      { id: 'baidu', name: '百度翻译', provider: '百度', tier: 'basic', enabled: 1, wired: 0, costPerMillion: 6.81, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
+      { id: 'niutrans', name: '小牛翻译', provider: '小牛', tier: 'basic', enabled: 1, wired: 0, costPerMillion: 6.94, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
+      { id: 'google', name: '谷歌翻译', provider: 'Google', tier: 'advanced', enabled: 1, wired: 0, costPerMillion: 18.61, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
+      { id: 'deepl', name: 'DeepL 翻译', provider: 'DeepL', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 23.33, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
+      { id: 'aws', name: '亚马逊 AWS 翻译', provider: 'Amazon', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 13.89, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
+      { id: 'gpt', name: 'GPT 翻译', provider: 'OpenAI', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 0.69, model: 'gpt-4o-mini', apiKey: '', secret: '', endpoint: '', note: 'Hello Pix 增补。成本超管手填，按 token 估算。未接厂商。' },
+      { id: 'grok', name: 'Grok 翻译', provider: 'xAI', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 4.03, model: 'grok-4.3', apiKey: '', secret: '', endpoint: '', note: 'Hello Pix 增补。成本超管手填，按 token 估算。未接厂商。' }
     ],
     translateLogs: [
       { id: 1, userId: 10001, username: 'pix', engine: 'deepseek', direction: 'en→zh', chars: 86, cost: 0.0041, sell: 0.0487, snippet: 'Hello, I want to know the price', createTime: now() },
