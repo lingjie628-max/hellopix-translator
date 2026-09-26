@@ -124,6 +124,12 @@ write_https() {
     location = /favicon.ico {
         include /etc/nginx/snippets/hello-pix-proxy.conf;
     }
+    # 主题预热脚本必须放行：index.html 会在业务 bundle 之前**同步**引用它，
+    # 用来保证首帧就是正确主题。被兜底 404 拦掉的话，深色模式用户会先闪一次浅色。
+    # 它只有 0.85KB，且不含任何业务数据，放行不扩大攻击面。
+    location = /theme.js {
+        include /etc/nginx/snippets/hello-pix-proxy.conf;
+    }
     # 后台页面同样出 index.html，交给前端路由接管
     location ^~ /admin {
         include /etc/nginx/snippets/hello-pix-proxy.conf;
