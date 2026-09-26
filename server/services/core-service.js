@@ -5,6 +5,7 @@ const defaultTranslator = require('./translation-provider')
 const platforms = require('../../desktop/platforms')
 const { ApiError } = require('../lib/http')
 const { toMilli, formatMilli } = require('../lib/money')
+const { estimateUpstreamCost } = require('../lib/upstream-pricing')
 const { mapRow, mapRows } = require('../repositories/production-repository')
 const { RedisTranslationCache } = require('../stores')
 const catalog = require('../lib/client-catalog')
@@ -277,38 +278,113 @@ class CoreService {
     return session.parent.packageAllowEngineSwitch !== false
   }
 
-  async resolveEngineId(session, explicit) {
+  /**
+   * 取该商户**有权使用**的通道列表。
+   *
+   * 关键在第二个参数：`packageCatalogVersion`。
+   * 套餐权益按"购买时的版本快照"解析，而不是读此刻的活表 ——
+   * 否则我们改一次套餐配置就会**回溯修改所有历史买家的权益**，
+   * 加通道是白送、删通道就是违约，两种都不该由一次配置变更自动发生。
+   * 版本为空（存量数据 / 单测 mock）时回落到活表，行为与改前一致。
+   */
+  packageChannels(session) {
+    return this.repo.packageEngines(
+      session.parent.packageId,
+      session.parent.packageCatalogVersion
+    )
+  }
+
+  /**
+   * 解析实际使用的翻译通道 id。
+   *
+   * 顺序：**本次请求显式指定** → 账号设置 → 主账号设置 → 权益内第一个可用通道 → 空串
+   *
+   * ## 显式指定与历史设置是两种东西，处理方式必须不同
+   *
+   * 这是本版最重要的行为变更，起因是两条硬要求：
+   * 「用户手动选择的渠道失败时，不要静默切换供应商」
+   * 「前台展示的模型与真实调用保持一致，不得静默换成低价模型」
+   *
+   * 原实现把两者混为一谈：只要选中的通道"启用但未接通"，就**悄悄换成**
+   * 权益内第一个可用通道。于是用户明明选了 A、界面也显示 A，
+   * 实际调用的是 B 且账单走 B —— 用户永远发现不了。
+   *
+   * 现在：
+   *   · **本次请求显式传了 engine** → 原样返回，一个都不替换。
+   *     不可用就由 translate() 拿着明确原因报错（未上线 / 已下架 / 未包含）。
+   *     这是用户刚刚做出的选择，替换它就是欺骗。
+   *   · **账号里存的旧选择** → 不可用时跳过，回落到第一个可用通道。
+   *     这不是一次"选择"，而是历史遗留的陈旧状态（旧版界面允许选中未接通通道，
+   *     存量账号里可能存着它）。直接沿用会让这个商户**每次翻译都撞 503**。
+   *     替换是合理的，而且**响应里会带上实际使用的通道**，不是偷偷换。
+   *
+   * 返回空串表示一个可用通道都没有，由调用方给出明确报错。
+   */
+  async resolveEngineId(session, explicit, packageRows) {
+    const rows = packageRows || await this.packageChannels(session)
+    // "可用" = 启用 + 已接通 + 未下架。三个条件缺一不可：
+    // 下架的通道 enabled 已被置 false，但仍显式判一次，避免将来有人
+    // 只改 retired_at 忘了改 enabled 时这里悄悄放行。
+    const usable = rows.filter(row => row.enabled && row.wired && !row.retired)
+
     // 不允许切换时**忽略**客户端传来的 engine。
     // 必须是服务端强制：只把前端下拉藏起来的话，直接调接口就能绕过。
-    const chosen = this.canSwitchEngine(session)
-      ? String(explicit || session.account.activeEngineId || session.parent.activeEngineId || '').trim()
+    const requested = this.canSwitchEngine(session) ? String(explicit || '').trim() : ''
+    if (requested) {
+      // 原样返回，由 translate() 判定到底哪里不行并给出对得上的文案。
+      // 这里**不做任何替换** —— 见方法头部的说明。
+      return requested
+    }
+
+    const stored = this.canSwitchEngine(session)
+      ? String(session.account.activeEngineId || session.parent.activeEngineId || '').trim()
       : ''
-    if (chosen) return chosen
-    const rows = await this.repo.packageEngines(session.parent.packageId)
-    const usable = rows.filter(row => row.enabled && row.wired)
+    if (stored && usable.some(row => row.id === stored)) return stored
     return (usable[0] || {}).id || ''
   }
 
   async engines(session) {
-    const rows = await this.repo.packageEngines(session.parent.packageId)
+    // 已下架的通道对商户**完全不可见**：不下发、不可选、也不会被解析到。
+    // 但它们在库里、在历史日志里都还在（见 migration 031），只是前台不再展示 ——
+    // 用户没必要看见一个自己用不了的通道，那只会增加困惑。
+    const rows = (await this.packageChannels(session)).filter(row => !row.retired)
     // 默认通道优先取"已接通且启用"的：套餐里按 id 排在前面的通道很可能还没配
     // 凭据，若把它当默认，商户第一次翻译必然撞 503「通道尚未配置」，得手动去
     // 下拉里翻出可用通道。没有已接通的才退回原行为（首个通道）。
     const usable = rows.filter(row => row.wired && row.enabled)
-    const fallbackId = (usable[0] || rows[0] || {}).id
+    const fallbackId = (usable[0] || {}).id
     const canSwitch = this.canSwitchEngine(session)
     // 不允许切换时不能把账号里存的旧选择当成"当前通道"——
     // 那会与实际使用的通道不一致，界面等于在骗人。判定口径与 resolveEngineId 保持一致。
-    const preferred = canSwitch ? (session.account.activeEngineId || session.parent.activeEngineId) : ''
+    const stored = canSwitch ? String(session.account.activeEngineId || session.parent.activeEngineId || '').trim() : ''
+    // 存量账号可能存着一个"套餐里有、但没接通"的通道（它在旧版界面上是可以选中的），
+    // 继续把它标成"当前"同样是在骗人：用户看到的是它，实际调用却会被跳过。
+    const preferred = usable.some(row => row.id === stored) ? stored : ''
     const active = preferred || fallbackId
+    const activeRow = rows.find(row => row.id === active)
     return {
       wired: rows.some(row => row.wired),
       // 前端据此隐藏/禁用下拉；服务端另有强制，两边都不能少
       canSwitch,
       packageTitle: session.parent.packageTitle || '',
+      // 权益版本一并下发：排障时能一眼看出"这个商户的套餐组合是哪一版"，
+      // 不用去库里对 packages.catalog_version 与 users.package_catalog_version。
+      packageCatalogVersion: number(session.parent.packageCatalogVersion) || null,
       charBalance: number(session.account.charBalance),
       activeEngine: active,
-      rows: rows.map(row => Object.assign(row, { allowed: true, active: row.id === active }))
+      // 真实调用的模型随通道一起下发。前台必须能显示它 ——
+      // 否则"展示的模型与真实调用一致"这条要求根本没有落脚点。
+      activeModel: (activeRow && activeRow.model) || '',
+      activeProvider: (activeRow && activeRow.provider) || '',
+      // 「已登记但未接通」的通道一律不可选用：选中它必然 503，而 503 在客户端
+      // 只表现为"没有译文"，用户只会来报"翻译坏了"。这里以 allowed=false 下发，
+      // 已下发的客户端（含 0.1.5/0.1.6）都按 allowed !== false 过滤，无需升级即可生效。
+      // comingSoon 供能显示列表的界面（Web 通道页）标记为「即将上线」。
+      rows: rows.map(row => Object.assign(row, {
+        allowed: Boolean(row.wired && row.enabled),
+        comingSoon: !row.wired,
+        active: row.id === active
+      }))
     }
   }
 
@@ -323,12 +399,32 @@ class CoreService {
     if (!/^(?:auto|[a-z]{2,3}(?:-[a-z0-9]{2,8})?)$/i.test(from) || !/^[a-z]{2,3}(?:-[a-z0-9]{2,8})?$/i.test(to)) {
       throw new ApiError(400, '语言参数无效', 'BAD_LANGUAGE')
     }
-    const engineId = await this.resolveEngineId(session, data.engine)
-    const allowed = await this.repo.packageEngines(session.parent.packageId)
-    const engine = allowed.find(row => row.id === engineId && row.enabled)
-    if (!engine) throw new ApiError(403, '当前套餐未包含此通道', 'ENGINE_NOT_ALLOWED')
+    // 套餐通道表只查一次：resolveEngineId 需要它来判断"套餐里有但没接通"，下面
+    // 的 engine 查找也需要它 —— 翻译是热路径，不能为了这层判断多打一次库。
+    // 走 packageChannels（按权益版本解析）而不是 packageEngines（活表）：
+    // 商户能用哪些通道，取决于他**购买时**的那一版，不是我们此刻的配置。
+    const allowed = await this.packageChannels(session)
+    const engineId = await this.resolveEngineId(session, data.engine, allowed)
+    if (!engineId) {
+      // 一个可用通道都没有：要么权益里全是"即将上线"的通道，要么套餐压根没配通道。
+      // 不能回 403「当前套餐未包含此通道」—— 那会把人引向"升级套餐"，而升级也解决不了。
+      throw new ApiError(503, '当前账号没有可用的翻译通道，请联系客服', 'ENGINE_NOT_CONFIGURED')
+    }
+    const engine = allowed.find(row => row.id === engineId)
+    // 已下架：给独立错误码与文案。混在「套餐未包含」里会让人以为升级套餐就能用，
+    // 而升级换不来一个已经下架的通道。
+    if (engine && engine.retired) {
+      throw new ApiError(503, `翻译通道「${engine.name}」已下架，请在通道列表里换一个`, 'ENGINE_RETIRED')
+    }
+    if (!engine || !engine.enabled) throw new ApiError(403, '当前套餐未包含此通道', 'ENGINE_NOT_ALLOWED')
     if (!engine.wired) {
-      throw new ApiError(503, '真实翻译通道尚未配置', 'ENGINE_NOT_CONFIGURED')
+      // 正常路径不该走到这里：engines() 已把未接通的通道以 allowed=false 下发，
+      // resolveEngineId 也会跳过它们。走到这里说明客户端**显式指定**了一个未接通的
+      // 通道（旧版客户端 / 手工调接口）。此时**不能**偷偷换成别的通道 ——
+      // 用户选的是它、界面显示的也是它，换掉就是"静默切换供应商"。
+      // 报错文案要说人话：用户看到的 503 只是"没有译文"，
+      // 得让他知道是"这个通道还没上线"，而不是"翻译坏了"。
+      throw new ApiError(503, `翻译通道「${engine.name}」尚未上线，请换一个通道`, 'ENGINE_NOT_CONFIGURED')
     }
     const chars = this.translator.countBillableChars(text)
     const key = String(idempotencyKey || data.requestId || '').trim()
@@ -350,7 +446,20 @@ class CoreService {
         )).rows[0])
         if (existing) {
           if (existing.requestHash !== requestHash) {
-            throw new ApiError(409, 'Idempotency-Key 已用于其他请求', 'IDEMPOTENCY_KEY_REUSED')
+            // 请求体或**通道**变了。换通道重译是一次新的翻译（厂商侧是真花钱的），
+            // 必须重新计费 —— 复用旧预留等于免费送一次。
+            // 但绝不能默默扣：客户端要拿新 requestId 重发，并且**先告诉用户**
+            // "换通道重译会再次扣字符"。所以这里用专门的错误码 + 明确文案，
+            // 让客户端能把这条提示原样贴给用户，而不是笼统的"请求号冲突"。
+            throw new ApiError(
+              409,
+              existing.engineId && existing.engineId !== engineId
+                ? '该请求号已用于其他翻译通道。换通道重新翻译会再次扣除字符，请确认后重试'
+                : 'Idempotency-Key 已用于其他请求',
+              existing.engineId && existing.engineId !== engineId
+                ? 'ENGINE_SWITCH_REQUIRES_NEW_REQUEST'
+                : 'IDEMPOTENCY_KEY_REUSED'
+            )
           }
           return existing
         }
@@ -410,6 +519,10 @@ class CoreService {
         const durationMs = Date.now() - started
         if (refundable) await this.repo.adjustChars(client, session.kind, session.account.id, chars)
         const balance = await this.repo.lockAccount(client, session.kind, session.account.id)
+        // 真实调用的模型与厂商，随响应一起回给客户端。
+        // 适配层可能因为参数不被接受而降级重试（比如某些模型不收 temperature），
+        // 降级后的模型以适配层报上来的为准 —— 展示的必须**就是**这次真正调用的那个。
+        const usedModel = String(result.model || engine.model || '')
         const response = {
           success: true,
           wired: Boolean(engine.wired),
@@ -419,22 +532,40 @@ class CoreService {
           chars: refundable ? 0 : chars,
           remain: number(balance.charBalance),
           from: from === 'auto' ? this.translator.detectLang(text) : from,
-          engine: engineId
+          engine: engineId,
+          engineName: engine.name || '',
+          provider: engine.provider || '',
+          model: usedModel
         }
+        let translateLogId = null
         if (!refundable) {
           const table = session.kind === 'sub' ? 'sub_accounts' : 'users'
           await this.repo.query(
             `UPDATE ${table} SET char_used=char_used+$2,translate_count=translate_count+1,updated_at=NOW() WHERE id=$1`,
             [session.account.id, chars], client
           )
-          await this.repo.query(
+          const logged = await this.repo.query(
             `INSERT INTO translate_logs(user_id,sub_account_id,engine_id,reservation_id,
              source_language,target_language,chars,cost_amount,sell_amount,source_hash,snippet,cached,duration_ms)
-             VALUES($1,$2,$3,$4,$5,$6,$7,$8,0,$9,$10,$11,$12)`,
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,0,$9,$10,$11,$12) RETURNING id`,
             [session.parent.id, session.kind === 'sub' ? session.account.id : null, engineId, reservation.id,
               response.from, to, chars, number(engine.costPerMillion) * chars / 1000000, sourceHash,
               text.slice(0, 300), Boolean(result.cached), durationMs], client
           )
+          translateLogId = logged.rows[0] && number(logged.rows[0].id) || null
+        }
+        // 上游真实消耗：**不管这次是否退款给客户都要记**。
+        //
+        // 为什么：退款是"这条译文没价值，不扣你的字符"，但厂商那边
+        // **是真的消耗了 token 也真的会产生账单**。把退款就当没发生过，
+        // 成本表上就凭空少了一块，月度对账必然对不上。
+        // 所以只要真打了上游（非缓存命中）就落一条内部台账，
+        // 与对客户的字符账本彻底分开、互不影响。
+        if (!result.cached) {
+          await this.recordUpstreamUsage(client, {
+            reservation, engine, result, session, translateLogId,
+            from: response.from, to, durationMs, refundable
+          })
         }
         const settlement = refundable
           ? `status='released',committed_chars=0,committed_at=NULL,released_at=NOW()`
@@ -460,6 +591,73 @@ class CoreService {
         'if redis.call("get",KEYS[1])==ARGV[1] then return redis.call("del",KEYS[1]) else return 0 end',
         1, lockKey, lockToken
       )
+    }
+  }
+
+  /**
+   * 记一条**上游真实消耗**（内部台账）。
+   *
+   * ## 为什么必须与客户字符账本分开
+   *
+   * `translate_logs.chars` 是"卖给客户多少字符"，`cost_amount` 是按通道成本表
+   * 折算的**估算值**。而厂商按 token 计费，且"一字符 ≈ 多少 token"随语种、
+   * 语言对、输出长度剧烈变化（中文一字≈1 token，英文一字符≈0.25 token）。
+   * 只靠估算值永远算不出真实毛利，所以厂商给的真实 token 数必须单独落库。
+   *
+   * ## 两个刻意的设计
+   *
+   * 1. **退款给客户时照样记账**。退款语义是"这条译文没价值，不扣你的字符"，
+   *    但厂商那边是**真的消耗了 token、真的会产生账单**。把退款当没发生过，
+   *    成本表就凭空少一块，月度对账必然对不上。
+   * 2. **缓存命中不记账**。缓存命中没有打上游，没有产生任何厂商费用
+   *    —— 这正是缓存的价值所在，记 0 成本才是如实的。
+   *
+   * 整条记录不参与任何扣费逻辑，写失败也不该让翻译失败：它是对账用的旁路，
+   * 不是主流程的一部分。所以这里吞掉异常并打日志。
+   */
+  async recordUpstreamUsage(client, { reservation, engine, result, session, translateLogId, from, to, durationMs }) {
+    try {
+      const usage = (result && result.usage) || {}
+      const model = String((result && result.model) || (engine && engine.model) || '')
+      const cost = estimateUpstreamCost({
+        model,
+        promptTokens: usage.promptTokens,
+        completionTokens: usage.completionTokens,
+        // 按字符计价的通道（谷歌）没有 token 数，用实际送翻的字符数
+        characters: (engine && engine.provider === 'Google') ? number(reservation && reservation.reservedChars) : 0
+      })
+      await this.repo.query(
+        `INSERT INTO translation_usage(reservation_id,translate_log_id,user_id,sub_account_id,
+         engine_id,provider,model,prompt_tokens,completion_tokens,reasoning_tokens,total_tokens,
+         billed_units,billed_unit,upstream_cost,currency,retries,cached,from_language,to_language,duration_ms)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+        [
+          reservation ? reservation.id : null,
+          translateLogId,
+          session.parent.id,
+          session.kind === 'sub' ? session.account.id : null,
+          engine.id,
+          cost.provider || engine.provider || '',
+          cost.model || model,
+          number(usage.promptTokens),
+          number(usage.completionTokens),
+          number(usage.reasoningTokens),
+          number(usage.totalTokens),
+          cost.unit === 'character' ? number(reservation && reservation.reservedChars) : number(usage.totalTokens),
+          cost.unit || '',
+          cost.cost,
+          cost.currency || '',
+          number(result && result.retries),
+          false,
+          from || 'auto',
+          to || '',
+          number(durationMs)
+        ],
+        client
+      )
+    } catch (error) {
+      // 台账是旁路：写失败要能在日志里看见，但不能把已经成功的翻译带崩
+      console.error('Upstream usage ledger write failed:', error.message)
     }
   }
 

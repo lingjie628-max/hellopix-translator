@@ -117,7 +117,8 @@ test('every engine seeded in migrations has an adapter entry', () => {
   const dir = path.join(__dirname, '../migrations')
   const seeded = new Set()
   for (const file of fs.readdirSync(dir).filter(name => name.endsWith('.js'))) {
-    const raw = fs.readFileSync(path.join(dir, file), 'utf8')
+    const full = path.join(dir, file)
+    const raw = fs.readFileSync(full, 'utf8')
     // **只扫 exports.up**：只有 up 会真正往库里种数据。
     // 回滚函数里出现的通道（例如 018 的 down 会把百度放回去）
     // 不该被当成「已种下的通道」，否则删掉一个通道就会让这个测试永久失败。
@@ -128,8 +129,17 @@ test('every engine seeded in migrations has an adapter entry', () => {
     for (const match of sql.matchAll(/\(\s*'([a-z0-9_-]+)',\s*'[^']*',\s*'[^']*',\s*'(?:basic|advanced|pro)'/g)) {
       seeded.add(match[1])
     }
+    /**
+     * 还有一种写法：迁移把通道行当**数据**导出（migration 031 就是），
+     * 由 up() 在运行时拼 SQL（备注很长、还带转义，写字面量既容易写错又难维护）。
+     * 这种迁移的正则扫不到 —— 与其为了迁就正则把同一份数据写两遍，
+     * 不如直接读导出的数据。require 迁移模块无副作用（只返回 up/down 与常量）。
+     */
+    for (const row of (require(full).engines || [])) {
+      if (row && row.id) seeded.add(row.id)
+    }
   }
-  assert.ok(seeded.size >= 9, `解析到的通道数偏少(${seeded.size})，迁移写法可能变了`)
+  assert.ok(seeded.size >= 11, `解析到的通道数偏少(${seeded.size})，迁移写法可能变了`)
   const missing = [...seeded].filter(id => !provider.providers[id])
   assert.deepEqual(missing, [], `这些通道在数据库里有、适配层没有: ${missing.join(', ')}`)
 })

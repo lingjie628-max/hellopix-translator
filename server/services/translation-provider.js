@@ -22,6 +22,10 @@ const crypto = require('node:crypto')
 const {
   gptAdapter, grokAdapter, deeplAdapter, papagoAdapter, niutransAdapter
 } = require('./translation-adapters')
+const {
+  claudeAdapter, qwenMtAdapter,
+  doubaoAdapter, kimiAdapter, glmAdapter, mistralAdapter, minimaxAdapter
+} = require('./translation-adapters-llm')
 const { awsAdapter } = require('./translation-adapters-aws')
 
 const DEFAULT_TIMEOUT_MS = 8000
@@ -467,17 +471,22 @@ async function deepseekTranslate(engine, payload, options) {
 }
 
 // --- 通道注册表 --------------------------------------------------------------
-// 未接入的通道保留 stub：即使有人把 wired 误置为 true，也不会拿到任何"演示译文"。
+// 表里的每个通道都必须是**真实现**：configured() 认凭据、translate() 真发请求。
+// 「登记了但调不通」正是百度那类占位通道的问题，本项目不再接受这种通道。
 
 const providers = {
-  // 谷歌只保留一条通道（原「稳定 / 极速」两条已合并）。
-  // 实现走的是公共端点 —— 那是唯一真实可用的实现：原「谷歌稳定」（官方付费 API）
-  // 一直是个 notWired 空壳，从未接过线，合并时直接去掉，不留假通道。
-  // 公共端点无 SLA、可能被限流甚至按来源封禁，所以**门禁照旧**：
-  // 未显式开启 PIX_ALLOW_PUBLIC_TRANSLATION 时一律 fail-closed。
-  // 合并只是去掉了重复的通道名，不放宽这个安全约定。
-  // 谷歌走官方 Cloud Translation API：有 SLA、按量计费，需要 API Key。
-  // （原公共端点实现已随本次改动移除，公共网络门禁的管线保留备用。）
+  // ---- 2026-09-25 换线后的正式通道 -------------------------------------------
+  //
+  // 全部 11 个通道按协议分三类（详见 translation-adapters-llm.js 的说明）：
+  //   OpenAI 兼容：gpt / grok / deepseek / qwen(专用翻译模型，实现单列)
+  //                + doubao / kimi / glm / mistral / minimax
+  //   Anthropic Messages：claude
+  //   官方翻译 API：google
+  //
+  // deepseek 单独保留在这份文件里（而不是并进 openAiCompatible）是**有意的**：
+  // 它已经在生产上跑着、且需要 `thinking:{type:'disabled'}` 这类厂商专属处理，
+  // 把它挪到通用实现属于"为了整齐去改一个正在工作的通道"。
+  // 整齐可以晚点要，生产翻译不能断。
   google: {
     name: '谷歌翻译',
     translate: googleTranslate,
@@ -485,24 +494,49 @@ const providers = {
       String(((credentials || {}).apiKey) || '').trim() || envValue('PIX_GOOGLE_API_KEY')
     )
   },
-  gemini: {
-    name: 'Gemini 翻译',
-    translate: geminiTranslate,
-    configured: (credentials) => Boolean(
-      String(((credentials || {}).apiKey) || '').trim() || envValue('PIX_GEMINI_API_KEY')
-    )
-  },
-  deepl: deeplAdapter,
-  gpt: gptAdapter,
-  grok: grokAdapter,
-  papago: papagoAdapter,
-  niutrans: niutransAdapter,
-  aws: awsAdapter,
   deepseek: {
     name: 'DeepSeek 翻译',
     translate: deepseekTranslate,
     configured: (credentials) => Boolean(
       String(((credentials || {}).apiKey) || '').trim() || envValue('PIX_DEEPSEEK_API_KEY')
+    )
+  },
+  gpt: gptAdapter,
+  grok: grokAdapter,
+  qwen: qwenMtAdapter,
+  claude: claudeAdapter,
+  doubao: doubaoAdapter,
+  kimi: kimiAdapter,
+  glm: glmAdapter,
+  mistral: mistralAdapter,
+  minimax: minimaxAdapter,
+
+  // ---- 已下架但保留实现 -------------------------------------------------------
+  //
+  // 下面这些通道在 2026-09-25 从**产品线**上撤掉了（migration 031 把他们软下架：
+  // `engines.retired_at` 置非空 + `enabled=false`，行本身和历史引用都留着），
+  // 原因见该迁移的文件头注释：都是专用翻译 API，
+  // 要么拿不到密钥、要么需要企业账号，接入成本高而实际一个都没接通。
+  //
+  // 但**实现保留**，不是舍不得删：
+  //   1. 它们全部是能用的代码（deepl/papago/niutrans 各有单测覆盖）；
+  //   2. 重新上架只需要往 engines / package_engines 各 INSERT 一行，
+  //      不必重写一遍适配器；
+  //   3. 一旦删掉实现，"迁移 002/005/012 种过的通道在适配层没有对应实现"
+  //      这条测试就只能一起放宽 —— 那是在拆自己的护栏。
+  //
+  // 它们在 engines 表里仍然有行（retired_at 非空），所以**对商户不可见、套餐里也选不到**
+  // （商户侧一律按 retired_at IS NULL 过滤），但在管理后台仍能查到、也能重新上架：
+  // 把 retired_at 置回 NULL 并填凭据即可，适配器不用重写。
+  deepl: deeplAdapter,
+  papago: papagoAdapter,
+  niutrans: niutransAdapter,
+  aws: awsAdapter,
+  gemini: {
+    name: 'Gemini 翻译',
+    translate: geminiTranslate,
+    configured: (credentials) => Boolean(
+      String(((credentials || {}).apiKey) || '').trim() || envValue('PIX_GEMINI_API_KEY')
     )
   }
 }
@@ -524,10 +558,14 @@ async function translate(engine, payload, options) {
   if (!provider) return { ok: false, msg: '通道不存在' }
   if (!engine.enabled) return { ok: false, msg: `${engine.name || id} 已关闭` }
 
+  // 通道里配了超时就用它（适配器内部还会再夹到 [1s, 30s]）。
+  // 放在这一层是为了让**没走统一限额**的老适配器（google/deepseek/aws/gemini）
+  // 也受同一个超时约束 —— 它们各自读 options.timeoutMs。
+  const configuredTimeout = Number((engine.callParams || {}).timeoutMs)
   const settings = Object.assign({
     allowPublicNetwork: false,
     fetch: globalThis.fetch,
-    timeoutMs: DEFAULT_TIMEOUT_MS
+    timeoutMs: Number.isFinite(configuredTimeout) && configuredTimeout > 0 ? configuredTimeout : DEFAULT_TIMEOUT_MS
   }, options || {})
   if (typeof settings.fetch !== 'function') {
     return { ok: false, msg: '运行环境缺少 fetch 实现' }
@@ -540,7 +578,16 @@ async function translate(engine, payload, options) {
     return { ok: false, msg: `${provider.name}调用异常：${(error && error.message) || error}` }
   }
   if (result && result.ok) return result
-  return { ok: false, msg: (result && result.msg) || `${provider.name}暂不可用` }
+  // 失败时**保留适配层报上来的附加信息**（model / retries / usage），不要只留一句 msg。
+  //
+  // 为什么：排除故障时第一个要问的就是"这次到底调的哪个模型、重试了几次"。
+  // 只回一句 msg 的话，排障只能靠翻厂商后台；而且 core-service 的
+  // 上游台账（translation_usage）也拿不到 model。
+  // `ok` 显式置 false，保证调用方仍然按失败处理。
+  return Object.assign({}, result, {
+    ok: false,
+    msg: (result && result.msg) || `${provider.name}暂不可用`
+  })
 }
 
 module.exports = {

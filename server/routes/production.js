@@ -222,8 +222,8 @@ function productionRouter(context) {
       const created = await client.query(
         `INSERT INTO recharges(user_id,package_id,order_number,kind,payment_type,quantity,chars,
          original_amount,discount_amount,surcharge_amount,paid_amount,status,idempotency_key,
-         expires_at,pay_address,pay_token_contract,amount_reservation_id)
-         VALUES($1,$2,$3,'package',$4,$5,$6,$7,$8,$9,$10,0,$11,$12,$13,$14,$15) RETURNING *`,
+         expires_at,pay_address,pay_token_contract,amount_reservation_id,package_catalog_version)
+         VALUES($1,$2,$3,'package',$4,$5,$6,$7,$8,$9,$10,0,$11,$12,$13,$14,$15,$16) RETURNING *`,
         [req.pixUser.parent.id, pack.id, orderNumber, `USDT-${channel.network}`,
           quote.qty, quote.chars,
           originalText, discountText, surchargeText, paidText,
@@ -231,7 +231,11 @@ function productionRouter(context) {
           expiresAt.toISOString(),
           channel.address,
           USDT_TRC20_CONTRACT,
-          String(allocation.reservationId)])
+          String(allocation.reservationId),
+          // 下单瞬间把「这一单卖的是哪一版套餐权益」钉死在订单上。
+          // 不存的话，日后调整套餐组合就再也证明不了当初卖给客户的是哪几个通道 ——
+          // 而客户付的钱是按当时那版算的。
+          Number(pack.catalogVersion) || null])
       // 预约先于订单插入（订单要引用它），这里回填归属
       await rechargeAmount.attachToRecharge(client, allocation.reservationId, created.rows[0].id)
 
@@ -363,7 +367,13 @@ function productionRouter(context) {
   router.post('/translate/engines/active', asyncRoute(async (req, res) => {
     const data = input(req)
     const available = await core.engines(req.pixUser)
-    if (!available.rows.some(row => String(row.id) === String(data.id) && row.allowed && number(row.enabled) === 1)) {
+    const target = available.rows.find(row => String(row.id) === String(data.id))
+    if (!target || !target.allowed || number(target.enabled) !== 1) {
+      // 分开报错：通道在套餐里但没接通时，用户真正需要知道的是"它还没上线"，
+      // 而不是"套餐未包含"（后者会让他以为升级套餐就能用）。
+      if (target && !target.allowed) {
+        throw new ApiError(503, '该翻译通道尚未上线，请换一个通道', 'ENGINE_NOT_CONFIGURED')
+      }
       throw new ApiError(403, '当前套餐未包含此通道', 'ENGINE_NOT_ALLOWED')
     }
     const table = req.pixUser.kind === 'sub' ? 'sub_accounts' : 'users'
@@ -687,7 +697,7 @@ function productionRouter(context) {
   router.get('/admin/users', asyncRoute((req, res) => adminJoinedList(req, res, {
     from: 'users u LEFT JOIN packages p ON p.id=u.package_id',
     select: `u.id,u.username,u.nickname,u.email,u.phone,u.status,u.package_id AS version_id,
-      p.title AS basename,u.char_balance,u.char_used,u.translate_count,u.sub_quota,u.auto_alloc_master,
+      p.title AS basename,u.package_catalog_version,u.char_balance,u.char_used,u.translate_count,u.sub_quota,u.auto_alloc_master,
       u.auto_reply,u.enterprise,u.port_limit AS port,u.ports_in_use AS user_ports,u.bound_device,
       u.expires_at AS expire_time,u.remarks,u.created_at AS create_time`,
     keyword: ['u.username', 'u.nickname'],
@@ -873,22 +883,48 @@ function productionRouter(context) {
         throw new ApiError(400, '余额只能通过字符调整接口变更', 'USE_CHARACTER_GRANT')
       }
       const passwordHash = data.password ? await auth.hash(data.password) : null
+      // 先取当前套餐与已钉权益版本 —— 下面要判断"这次编辑有没有换套餐"。
+      //
+      // 为什么必须判断：`users.package_catalog_version` 是"这位商户当初买到的是
+      // 哪一版通道组合"的凭据。如果每次编辑（哪怕只是改个备注、续个期）都顺手
+      // 把它刷成当前版本，那这个字段就形同虚设 —— 一次无关的编辑就能把老客户
+      // 已经付过钱的权益悄悄换掉，正是"擅自改变已售权益"。
+      // 所以：只有**换套餐**才重新钉，不换就原样保留。
+      const before = await repo.query(
+        'SELECT package_id,package_catalog_version FROM users WHERE id=$1', [data.id])
+      if (!before.rows[0]) throw new ApiError(404, '用户不存在', 'USER_NOT_FOUND')
+      const packageChanged = String(before.rows[0].package_id || '') !== String(pack.id)
+      const requestedVersion = data.catalogVersion === undefined || data.catalogVersion === ''
+        ? null
+        : number(data.catalogVersion)
+      if (requestedVersion !== null && requestedVersion < 1) {
+        throw new ApiError(400, '权益版本必须是正整数', 'BAD_CATALOG_VERSION')
+      }
+      // 显式指定优先；换套餐时钉到新套餐的当前版本；否则 NULL = 保持原值
+      const catalogVersion = requestedVersion !== null
+        ? requestedVersion
+        : (packageChanged ? (Number(pack.catalogVersion) || null) : null)
       const result = await repo.query(
         `UPDATE users SET nickname=COALESCE($2,nickname),status=COALESCE($3,status),
          package_id=$4,port_limit=COALESCE($5,port_limit),expires_at=COALESCE($6::timestamptz,expires_at),
          password_hash=COALESCE($7,password_hash),phone=COALESCE($8,phone),remarks=COALESCE($9,remarks),
          enterprise=COALESCE($10,enterprise),sub_quota=COALESCE($11,sub_quota),
-         updated_at=NOW() WHERE id=$1 RETURNING username,status`,
+         package_catalog_version=COALESCE($12,package_catalog_version),
+         updated_at=NOW() WHERE id=$1 RETURNING username,status,package_catalog_version`,
         [data.id, data.nickname || null, data.status === undefined ? null : number(data.status),
           pack.id, data.port === undefined ? null : number(data.port),
           data.expireTime || null, passwordHash, data.phone === undefined ? null : (data.phone || null),
           data.remarks === undefined ? null : data.remarks,
           data.enterprise === undefined || data.enterprise === '' ? null : Boolean(number(data.enterprise)),
-          data.subQuota === undefined || data.subQuota === '' ? null : number(data.subQuota)]
+          data.subQuota === undefined || data.subQuota === '' ? null : number(data.subQuota),
+          catalogVersion]
       )
       if (!result.rows[0]) throw new ApiError(404, '用户不存在', 'USER_NOT_FOUND')
       if (passwordHash || number(result.rows[0].status) !== 1) await auth.revokeUser('main', data.id)
-      await repo.audit(null, req.pixAdmin, '编辑商户', result.rows[0].username, req.ip, { type: 'user', id: data.id })
+      // 权益版本变了就把新旧版本写进审计：事后被问"谁把这家的通道换了"要有答案
+      await repo.audit(null, req.pixAdmin, '编辑商户', result.rows[0].username, req.ip, {
+        type: 'user', id: data.id, catalogVersion: Number(result.rows[0].packageCatalogVersion) || null
+      })
       return ok(res, '用户已更新')
     }
     if (!data.username) throw new ApiError(400, '请填写账号', 'USERNAME_REQUIRED')
@@ -904,16 +940,24 @@ function productionRouter(context) {
         defaultEngine = (usable.find(row => row.enabled && row.wired) || {}).id || ''
       }
     await repo.transaction(async client => {
+      // 新商户**在建号那一刻**钉住权益版本：他买到的就是当下这一版，
+      // 日后我们调整套餐组合不会回溯改到他头上。
+      // 管理员可以显式传 catalogVersion 指定（例如按老客户的旧合同开号）。
+      const newVersion = data.catalogVersion === undefined || data.catalogVersion === ''
+        ? (Number(pack.catalogVersion) || null)
+        : number(data.catalogVersion)
       const created = await repo.query(
         `INSERT INTO users(username,password_hash,nickname,status,package_id,port_limit,expires_at,
-         char_balance,auto_reply,phone,remarks,active_engine_id,enterprise,email,sub_quota)
+         char_balance,auto_reply,phone,remarks,active_engine_id,enterprise,email,sub_quota,
+         package_catalog_version)
          VALUES($1,$2,$3,1,$4,$5,COALESCE($6::timestamptz,NOW()+interval '30 days'),
-          $7,$8,$9,$10,$11,$12,$13,$14) RETURNING id,username`,
+          $7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id,username`,
         [String(data.username).trim(), await auth.hash(data.password), data.nickname || data.username,
           pack.id, number(data.port, number(pack.portLimit)), data.expireTime || null, gift,
           Boolean(number(data.autoReply)), data.phone || null, data.remarks || '',
           defaultEngine || null, Boolean(number(data.enterprise)),
-          data.email ? String(data.email).toLowerCase() : null, number(data.subQuota)], client
+          data.email ? String(data.email).toLowerCase() : null, number(data.subQuota),
+          newVersion], client
       )
       if (gift) {
         await repo.query(
@@ -950,6 +994,57 @@ function productionRouter(context) {
     return row && row.value ? String(row.value) : ''
   }
 
+  /**
+   * 校验并归一 `call_params`（通道调用参数）。
+   *
+   * 为什么要在路由层校验：这几个值会**直接进入出站请求**（超时、重试、输出上限），
+   * 一旦写进一个字符串或负数，故障现场会跑偏到"适配器莫名不工作"，
+   * 而不是"后台填错了"。这里挡在前面对排查友好得多。
+   *
+   * 上限在这里再夹一次（适配器里还有一层）：两边都要，
+   * 因为适配器可被脚本/测试直接调用，不能只靠路由把关。
+   */
+  function normalizeCallParams(raw) {
+    if (raw === undefined || raw === null || raw === '') return null
+    let value = raw
+    if (typeof value === 'string') {
+      try { value = JSON.parse(value) } catch (_error) {
+        throw new ApiError(400, '调用参数必须是 JSON 对象', 'BAD_CALL_PARAMS')
+      }
+    }
+    if (typeof value !== 'object' || Array.isArray(value)) {
+      throw new ApiError(400, '调用参数必须是 JSON 对象', 'BAD_CALL_PARAMS')
+    }
+    const out = {}
+    const numeric = { timeoutMs: [1000, 30000], maxRetries: [0, 2], maxOutputTokens: [0, 65536], maxInputTokens: [0, 1000000] }
+    for (const [key, [min, max]] of Object.entries(numeric)) {
+      if (value[key] === undefined || value[key] === null || value[key] === '') continue
+      const parsed = Number(value[key])
+      if (!Number.isFinite(parsed)) throw new ApiError(400, `调用参数 ${key} 必须是数字`, 'BAD_CALL_PARAMS')
+      out[key] = Math.min(max, Math.max(min, Math.trunc(parsed)))
+    }
+    // temperature: null 是**有意的空值语义**（该模型不能收这个字段，如 Kimi K3），
+    // 必须保留成 null 而不是被当成"没填"丢掉 —— 丢掉会让适配器把 0 发出去，
+    // 而 K3 收到 temperature 会直接报错。
+    if (Object.prototype.hasOwnProperty.call(value, 'temperature')) {
+      if (value.temperature === null) out.temperature = null
+      else {
+        const parsed = Number(value.temperature)
+        if (!Number.isFinite(parsed) || parsed < 0 || parsed > 2) {
+          throw new ApiError(400, 'temperature 必须在 0~2 之间，或填 null 表示不发送该参数', 'BAD_CALL_PARAMS')
+        }
+        out.temperature = parsed
+      }
+    }
+    if (value.extraBody !== undefined) {
+      if (!value.extraBody || typeof value.extraBody !== 'object' || Array.isArray(value.extraBody)) {
+        throw new ApiError(400, 'extraBody 必须是 JSON 对象', 'BAD_CALL_PARAMS')
+      }
+      out.extraBody = value.extraBody
+    }
+    return out
+  }
+
   router.get('/admin/engines', asyncRoute(async (_req, res) => {
     const rows = await repo.enginesForAdmin()
     const active = await activeEngineId()
@@ -970,8 +1065,13 @@ function productionRouter(context) {
           model: row.model || '',
           endpoint: row.endpoint || '',
           note: row.note || '',
+          callParams: row.callParams || {},
           enabled: Boolean(row.enabled),
           wired: Boolean(row.wired),
+          // 已下架：对商户不可见，但仍在库里、历史日志仍指向它。
+          // 后台保留可见是为了能重新上架，以及查"当初卖的是什么"。
+          retired: Boolean(row.retiredAt),
+          retiredAt: row.retiredAt || null,
           // 只暴露"够不够用"，不暴露密钥本身
           hasKey: Boolean(row.hasKey || row.hasSecret),
           credentialReady: Boolean(readiness[row.id]),
@@ -1009,36 +1109,53 @@ function productionRouter(context) {
       apiKey: apiKey || existing.apiKey,
       secret: secret || existing.secret
     }
-    const enabled = Boolean(Number(data.enabled))
+    // 下架：**不删行**，只打 retired_at 并停用。历史 translate_logs 仍指向它，
+    // 已售权益的凭据也还在 package_engines 里 —— 删了就查不出"当初卖过什么"。
+    const retired = data.retired === undefined ? Boolean(engine.retiredAt) : Boolean(Number(data.retired))
+    const enabled = retired ? false : Boolean(Number(data.enabled))
     const adapter = providers[id]
     const ready = Boolean(adapter && adapter.configured(effective))
     // wired 不让人手填：适配器实现 + 凭据齐备才允许接通，与 CLI 脚本同一把尺子
     const wired = enabled && ready
 
+    const callParams = normalizeCallParams(data.callParams)
+    const model = String(data.model || '').trim() || null
+    // 渠道换了真实模型就**必须显式可见**：台账、前台展示都读这个字段。
+    // 这里不阻止改，但改了要在审计里留下前后值（下面写审计）。
+    const modelChanged = (engine.model || '') !== (model || '')
+
     await repo.query(
       `UPDATE engines SET enabled=$2, wired=$3, cost_per_million=$4, model=$5, endpoint=$6, note=$7,
+              call_params=COALESCE($10::jsonb, call_params),
+              retired_at=${retired ? 'NOW()' : 'NULL'},
               api_key_ciphertext=COALESCE($8, api_key_ciphertext),
               secret_ciphertext=COALESCE($9, secret_ciphertext),
               updated_at=NOW()
        WHERE id=$1`,
       [id, enabled, wired,
         Math.max(0, Number(data.costPerMillion) || 0),
-        String(data.model || '').trim() || null,
+        model,
         endpoint || null,
         String(data.note || '').slice(0, 1000),
         apiKey ? encryptSecret(apiKey) : null,
-        secret ? encryptSecret(secret) : null]
+        secret ? encryptSecret(secret) : null,
+        callParams ? JSON.stringify(callParams) : null]
     )
-    await repo.audit(null, req.pixAdmin, '配置翻译通道', `${engine.name}: enabled=${enabled} wired=${wired}`, req.ip, {
-      type: 'engine', id
-    })
-    ok(res, wired ? `${engine.name} 已接通` : `${engine.name} 已保存（未接通：${adapter ? '凭据未就绪' : '适配器未实现'}）`)
+    await repo.audit(null, req.pixAdmin, retired ? '下架翻译通道' : '配置翻译通道',
+      `${engine.name}: enabled=${enabled} wired=${wired} retired=${retired}` +
+      (modelChanged ? ` 模型 ${engine.model || '(空)'} → ${model || '(空)'}` : ''), req.ip, {
+        type: 'engine', id
+      })
+    ok(res, retired
+      ? `${engine.name} 已下架（历史日志与已售权益保留，未删除）`
+      : (wired ? `${engine.name} 已接通` : `${engine.name} 已保存（未接通：${adapter ? '凭据未就绪' : '适配器未实现'}）`))
   }))
 
   router.post('/admin/engines/active', asyncRoute(async (req, res) => {
     const id = String(input(req).id || '').trim()
     const engine = await repo.engineById(id)
     if (!engine) throw new ApiError(404, '通道不存在', 'ENGINE_NOT_FOUND')
+    if (engine.retiredAt) throw new ApiError(400, '该通道已下架，不能设为默认', 'ENGINE_RETIRED')
     if (!engine.enabled) throw new ApiError(400, '该通道未启用，不能设为默认', 'ENGINE_DISABLED')
     await repo.query(
       `INSERT INTO app_settings(key,value,description) VALUES('translation.active_engine',to_jsonb($1::text),'默认翻译引擎')

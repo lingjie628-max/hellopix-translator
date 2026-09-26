@@ -63,6 +63,128 @@ function timeoutReason(error) {
 }
 
 // ===========================================================================
+// 调用限额与用量归一（所有适配器共用）
+// ===========================================================================
+
+/**
+ * 通道调用的硬边界。**默认值写在这里，具体值由通道的 call_params 决定**。
+ *
+ * 为什么要有上限而不是"用厂商默认"：
+ *   · 超时：不设的话一个卡住的厂商连接会把翻译请求吊到平台级超时，
+ *     商户侧表现为"一直在转圈"，比明确报错差得多。
+ *   · 重试：翻译是**按次计费**的，重试一次就多花一次钱。自动重试必须封顶，
+ *     否则遇到厂商持续 5xx 会连打多次，成本与延迟一起爆。
+ *   · 输出长度：不设上限时模型可能把"翻译"写成一篇解释文，
+ *     既不是用户要的，也按输出 token 全额计费。
+ */
+const CALL_LIMITS = Object.freeze({
+  timeoutMs: { min: 1000, max: 30000, fallback: 8000 },
+  maxRetries: { min: 0, max: 2, fallback: 2 },
+  maxOutputTokens: { min: 0, max: 65536, fallback: 0 },
+  maxInputTokens: { min: 0, max: 1000000, fallback: 0 }
+})
+
+function clampLimit(name, value) {
+  const spec = CALL_LIMITS[name]
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return spec.fallback
+  return Math.min(spec.max, Math.max(spec.min, Math.trunc(parsed)))
+}
+
+/**
+ * 合并"代码默认参数"与"通道表里配的参数"。
+ *
+ * 通道表（`engines.call_params`）优先 —— 那条要求「每个渠道必须配置明确的
+ * 供应商、实际模型 ID 和调用参数」要落在**可查、可改**的地方，
+ * 而不是散在代码常量里。超管在后台改完立刻生效，不用发版。
+ *
+ * `temperature: null` 是**有意的空值语义**：表示"这个模型不能收 temperature"。
+ * Kimi K3 就是这种情况（官方把采样参数固定在服务端，明确建议不要传）。
+ * 用 null 而不是 0，是因为 0 是"要它别发挥"这个真实意图，两者不能混。
+ */
+function callParamsOf(engine, defaults) {
+  const base = defaults || {}
+  const fromEngine = (engine && engine.callParams) || {}
+  const merged = Object.assign({}, base, fromEngine)
+  const out = {
+    temperature: merged.temperature === undefined ? 0 : merged.temperature,
+    maxOutputTokens: clampLimit('maxOutputTokens', merged.maxOutputTokens),
+    maxInputTokens: clampLimit('maxInputTokens', merged.maxInputTokens),
+    timeoutMs: clampLimit('timeoutMs', merged.timeoutMs === undefined ? base.timeoutMs : merged.timeoutMs),
+    maxRetries: clampLimit('maxRetries', merged.maxRetries === undefined ? base.maxRetries : merged.maxRetries)
+  }
+  if (merged.extraBody && typeof merged.extraBody === 'object') out.extraBody = merged.extraBody
+  out.stream = false
+  return out
+}
+
+/**
+ * 粗估输入 token 数。
+ *
+ * **刻意不用 tiktoken 之类的精确分词**：我们要的不是精确值，而是"该不该拒"。
+ * 一个保守的上界就够，而且没有额外依赖、不受模型换代影响。
+ *
+ * 口径（保守 = 高估 token 数，宁可拒掉也不发出超限请求）：
+ *   · CJK（中日韩）一字 ≈ 1 token —— 这already 是很保守的上界
+ *     （实际多数分词器 CJK 约 0.6~1.0 token/字）
+ *   · 其余字符按 3 字符 ≈ 1 token（英文实际约 4）
+ * 也就是说真实 token 通常**少于**这个估值，不会误伤正常文本。
+ */
+function estimateTokens(text) {
+  const value = String(text || '')
+  let cjk = 0
+  let other = 0
+  for (const char of value) {
+    if (/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/.test(char)) cjk += 1
+    else other += 1
+  }
+  return cjk + Math.ceil(other / 3)
+}
+
+/**
+ * 把各家五花八门的用量字段归一。
+ *
+ * OpenAI 兼容系是 prompt_tokens / completion_tokens，
+ * Anthropic 是 input_tokens / output_tokens。两者都要能进同一张
+ * `translation_usage` 表，否则成本对账得按厂商写四套查询。
+ */
+function normalizeUsage(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const pick = (...values) => {
+    for (const value of values) {
+      const parsed = Number(value)
+      if (Number.isFinite(parsed) && parsed > 0) return parsed
+    }
+    return 0
+  }
+  const promptTokens = pick(raw.prompt_tokens, raw.input_tokens)
+  const completionTokens = pick(raw.completion_tokens, raw.output_tokens)
+  const reasoningTokens = pick(
+    raw.completion_tokens_details && raw.completion_tokens_details.reasoning_tokens,
+    raw.output_tokens_details && raw.output_tokens_details.reasoning_tokens,
+    raw.reasoning_tokens
+  )
+  const totalTokens = pick(raw.total_tokens) || (promptTokens + completionTokens)
+  if (!promptTokens && !completionTokens && !totalTokens) return null
+  return { promptTokens, completionTokens, reasoningTokens, totalTokens }
+}
+
+/**
+ * 输入超限时**直接失败**，绝不静默截断。
+ *
+ * 截断的译文是"看起来成功、其实是残缺的"—— 商户拿它去谈生意会出错，
+ * 而我们照样扣了字符。这种失败比报错严重得多。
+ * 报错则很明确：让用户自己决定分段，费用可预期。
+ */
+function inputLimitError(name, estimate, limit) {
+  return {
+    ok: false,
+    msg: `${name} 单条文本过长（约 ${estimate} tokens，该通道上限 ${limit} tokens）。` +
+      '请分段翻译，本站不会静默截断原文。'
+  }
+}
+
+// ===========================================================================
 // 一、OpenAI 兼容系（GPT / Grok）
 // ===========================================================================
 
@@ -75,6 +197,8 @@ function timeoutReason(error) {
  * @param {string} cfg.defaultUrl 默认端点
  * @param {string} cfg.defaultModel 默认模型
  * @param {object} cfg.languages  语种映射（值为自然语言名，交给模型理解）
+ * @param {object} [cfg.extraBody] 厂商专属参数（如关掉思考模式）。**不确定就不传** ——
+ *   少传只是慢一点，乱传会直接 400。被厂商明确拒绝时下面的重试会把它去掉。
  */
 function openAiCompatible(cfg) {
   return {
@@ -95,6 +219,17 @@ function openAiCompatible(cfg) {
         (options.credentials && options.credentials.model) || (engine && engine.model) || ''
       ).trim() || cfg.defaultModel
 
+      // 调用参数：通道表优先，代码默认兜底（含超时/重试/输出上限）
+      const params = callParamsOf(engine, cfg.callParams)
+
+      // 输入超限直接拒，不截断（见 inputLimitError 的说明）
+      if (params.maxInputTokens) {
+        const estimate = estimateTokens(text)
+        if (estimate > params.maxInputTokens) {
+          return inputLimitError(cfg.name, estimate, params.maxInputTokens)
+        }
+      }
+
       // 用自然语言描述语种，而不是 ISO 码 —— 这几家都是大模型，
       // 说"把下面的内容翻译成简体中文"比给一个 "zh" 码更稳，
       // 尤其对小语种和语种变体（繁体/巴西葡语）差别很明显。
@@ -104,8 +239,19 @@ function openAiCompatible(cfg) {
           `保持原有的语气、专业术语与格式（换行、编号、表情）。`
         : `你是专业翻译。判断用户文本的语种并翻译成${target}。只输出译文本身。`
 
-      // temperature 只在需要时带上：部分推理模型只接受默认温度（见下方重试说明）
-      const buildBody = includeTemperature => {
+      const extraBody = Object.assign(
+        {},
+        typeof cfg.extraBody === 'function'
+          ? (cfg.extraBody(engine, options.credentials) || {})
+          : (cfg.extraBody || {}),
+        params.extraBody || {}
+      )
+      const extraKeys = Object.keys(extraBody)
+      // null = 这个模型不能收 temperature（如 Kimi K3 把采样参数固定在服务端）
+      const withTemperatureAllowed = params.temperature !== null && params.temperature !== undefined
+
+      // temperature 与厂商专属参数都只在需要时带上（见下方重试说明）
+      const buildBody = (withTemperature, withExtra, withMaxTokens) => {
         const body = {
           model,
           messages: [
@@ -114,51 +260,89 @@ function openAiCompatible(cfg) {
           ],
           stream: false
         }
-        if (includeTemperature) body.temperature = 0   // 翻译要稳定，不要发挥
+        if (withTemperature && withTemperatureAllowed) body.temperature = Number(params.temperature)
+        if (withExtra && extraKeys.length) Object.assign(body, extraBody)
+        // 输出上限：不设的话模型可能把翻译写成一篇解释文，按输出 token 全额计费
+        if (withMaxTokens && params.maxOutputTokens) body.max_tokens = params.maxOutputTokens
         return body
       }
 
-      const send = includeTemperature => options.fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify(buildBody(includeTemperature)),
-        signal: AbortSignal.timeout(options.timeoutMs || DEFAULT_TIMEOUT_MS)
-      })
+      /**
+       * 自愈式参数降级：**不维护"哪些模型不支持哪些参数"的清单**去预判。
+       *
+       * 四个真实案例：
+       *   1. 推理类模型（GPT-5 系列、o 系列…）只接受默认 temperature(=1)，
+       *      传 0 被直接拒：
+       *        400 "Unsupported value: 'temperature' does not support 0 with this model."
+       *   2. 厂商专属参数（关思考）不是每家都有，模型名换代后可能就没了：
+       *        400 "unknown parameter: thinking"
+       *   3. 新模型把 max_tokens 改名成 max_completion_tokens：
+       *        400 "Unsupported parameter: 'max_tokens' is not supported with this model."
+       *   4. 反过来，有的网关不认 max_completion_tokens 只认 max_tokens ——
+       *      所以这里只**去掉**被点名的那个参数，不主动换成另一个。
+       *
+       * 清单式预判迟早过期（模型名会换代、新模型层出不穷），而且误判会把本来
+       * 正常的厂商也改坏。改成"先按常规全部带上，被厂商**明确点名**拒绝时
+       * 去掉那一个重试" —— 对其他厂商零影响、成功路径不产生额外请求、对新模型自愈。
+       *
+       * 只对 400/422 降级：其它状态码（401 密钥、402 欠费、404 模型不存在、429 限流）
+       * 都是真问题，多打一次请求只会掩盖原因。
+       *
+       * 重试次数受 maxRetries 约束：每次重试都是**真的要花钱**的上游调用。
+       */
+      let withTemperature = true
+      let withExtra = extraKeys.length > 0
+      let withMaxTokens = Boolean(params.maxOutputTokens)
+      let attempts = 0
+      let retries = 0
+      let response = null
+      let detail = ''
 
-      let response
-      try {
-        response = await send(true)
-      } catch (error) {
-        return { ok: false, msg: `${cfg.name} 请求失败：${timeoutReason(error)}` }
+      for (let attempt = 0; attempt < 1 + params.maxRetries; attempt += 1) {
+        attempts += 1
+        if (attempt > 0) retries += 1
+        try {
+          response = await options.fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+            body: JSON.stringify(buildBody(withTemperature, withExtra, withMaxTokens)),
+            signal: AbortSignal.timeout(params.timeoutMs)
+          })
+        } catch (error) {
+          return {
+            ok: false,
+            msg: `${cfg.name} 请求失败：${timeoutReason(error)}`,
+            attempts, retries, model
+          }
+        }
+        if (response.ok) break
+
+        detail = await readErrorDetail(response)
+        const rejected = response.status === 400 || response.status === 422
+        if (rejected && withTemperature && /temperature/i.test(detail)) {
+          withTemperature = false
+          continue
+        }
+        if (rejected && withMaxTokens && /max_tokens|max_completion_tokens/i.test(detail)) {
+          withMaxTokens = false
+          continue
+        }
+        if (rejected && withExtra && extraKeys.some(key => new RegExp(key, 'i').test(detail))) {
+          withExtra = false
+          continue
+        }
+        return {
+          ok: false,
+          msg: `${cfg.name} 返回 HTTP ${response.status}${detail ? '：' + detail : ''}`,
+          attempts, retries, model
+        }
       }
 
-      if (!response.ok) {
-        const detail = await readErrorDetail(response)
-        /**
-         * 推理类模型（GPT-5 系列、o 系列…）只接受默认 temperature(=1)，
-         * 传 0 会被直接拒：
-         *   400 "Unsupported value: 'temperature' does not support 0 with this model."
-         *
-         * 这里刻意**不维护模型名清单**去预判：模型名会换代、新模型层出不穷，
-         * 写死的清单迟早过期，而且误判会把本来正常的厂商也改坏。
-         * 改成"先按常规带上 temperature，被明确因 temperature 拒绝时去掉重试一次" ——
-         * 对其他厂商零影响、不产生额外请求，对新模型自愈。
-         */
-        if ((response.status === 400 || response.status === 422) && /temperature/i.test(detail)) {
-          try {
-            response = await send(false)
-          } catch (error) {
-            return { ok: false, msg: `${cfg.name} 请求失败：${timeoutReason(error)}` }
-          }
-          if (!response.ok) {
-            const retryDetail = await readErrorDetail(response)
-            return {
-              ok: false,
-              msg: `${cfg.name} 返回 HTTP ${response.status}${retryDetail ? '：' + retryDetail : ''}`
-            }
-          }
-        } else {
-          return { ok: false, msg: `${cfg.name} 返回 HTTP ${response.status}${detail ? '：' + detail : ''}` }
+      if (!response || !response.ok) {
+        return {
+          ok: false,
+          msg: `${cfg.name} 返回 HTTP ${response && response.status}${detail ? '：' + detail : ''}`,
+          attempts, retries, model
         }
       }
 
@@ -166,19 +350,23 @@ function openAiCompatible(cfg) {
       try {
         data = await response.json()
       } catch (e) {
-        return { ok: false, msg: `${cfg.name} 返回体无法解析为 JSON` }
+        return { ok: false, msg: `${cfg.name} 返回体无法解析为 JSON`, attempts, retries, model }
       }
 
       const choice = Array.isArray(data && data.choices) ? data.choices[0] : null
       const translated = String((choice && choice.message && choice.message.content) || '').trim()
-      if (!translated) return { ok: false, msg: `${cfg.name} 未返回译文` }
+      if (!translated) return { ok: false, msg: `${cfg.name} 未返回译文`, attempts, retries, model }
 
       return {
         ok: true,
         text: translated,
         detected: payload.from || 'auto',
         engine: cfg.name,
-        usage: (data && data.usage) || null
+        // 真实调用的模型（含后台覆盖过的）与厂商给的用量：core-service 据此
+        // 写内部台账。展示给用户的 model 就是这里这个值 —— 同一个来源。
+        model,
+        retries,
+        usage: normalizeUsage(data && data.usage)
       }
     },
     // 只判"凭据是否填了"，不代表能调通 —— 真实可用性要靠实际调用验证
@@ -188,15 +376,39 @@ function openAiCompatible(cfg) {
 
 // 语种映射用自然语言名。这套表刻意做得宽一些：
 // 大模型能理解"巴西葡萄牙语"这类说法，比 ISO 码更不容易出错。
+//
+// 覆盖范围按**客户端语种下拉里实际能选到的**来定（见 desktop/renderer/app.js 的
+// LANGS）。表里没有的语种会在本地被拒（"不支持目标语种"），而不是发出去等厂商报错 ——
+// 本地拒的好处是不产生任何厂商请求与延迟。所以漏一个语种 = 用户选不了这个语种，
+// 加语种时请同步这张表。
 const LLM_LANGUAGES = {
   auto: '',
   zh: '简体中文', 'zh-cn': '简体中文', 'zh-hans': '简体中文',
   'zh-tw': '繁体中文', 'zh-hant': '繁体中文',
-  en: '英语', ja: '日语', ko: '韩语',
-  fr: '法语', de: '德语', es: '西班牙语', pt: '葡萄牙语',
+  en: '英语', 'en-us': '英语', 'en-gb': '英语',
+  ja: '日语', ko: '韩语',
+  fr: '法语', de: '德语', es: '西班牙语',
+  pt: '葡萄牙语', 'pt-br': '巴西葡萄牙语', 'pt-pt': '葡萄牙语',
   ru: '俄语', it: '意大利语', ar: '阿拉伯语', th: '泰语', vi: '越南语',
   id: '印尼语', ms: '马来语', hi: '印地语', tr: '土耳其语', nl: '荷兰语',
-  pl: '波兰语', uk: '乌克兰语', he: '希伯来语', fa: '波斯语', bn: '孟加拉语'
+  pl: '波兰语', uk: '乌克兰语', he: '希伯来语', fa: '波斯语', bn: '孟加拉语',
+  fil: '菲律宾语', tl: '菲律宾语',
+  sv: '瑞典语', da: '丹麦语', fi: '芬兰语', no: '挪威语', nb: '挪威语', nn: '挪威语',
+  cs: '捷克语', sk: '斯洛伐克语', sl: '斯洛文尼亚语', el: '希腊语',
+  ro: '罗马尼亚语', hu: '匈牙利语', bg: '保加利亚语', hr: '克罗地亚语',
+  sr: '塞尔维亚语', bs: '波斯尼亚语', mk: '马其顿语', sq: '阿尔巴尼亚语',
+  lt: '立陶宛语', lv: '拉脱维亚语', et: '爱沙尼亚语', is: '冰岛语',
+  ca: '加泰罗尼亚语', gl: '加利西亚语', eu: '巴斯克语', cy: '威尔士语',
+  af: '南非荷兰语', sw: '斯瓦希里语', am: '阿姆哈拉语', yo: '约鲁巴语',
+  ha: '豪萨语', zu: '祖鲁语', so: '索马里语', mg: '马尔加什语',
+  ta: '泰米尔语', te: '泰卢固语', ml: '马拉雅拉姆语', kn: '卡纳达语',
+  mr: '马拉地语', gu: '古吉拉特语', pa: '旁遮普语', ur: '乌尔都语',
+  ne: '尼泊尔语', si: '僧伽罗语', km: '高棉语', lo: '老挝语', my: '缅甸语',
+  mn: '蒙古语', kk: '哈萨克语', ky: '吉尔吉斯语', uz: '乌兹别克语',
+  tg: '塔吉克语', tk: '土库曼语', az: '阿塞拜疆语', hy: '亚美尼亚语',
+  ka: '格鲁吉亚语', ug: '维吾尔语', bo: '藏语',
+  yi: '意第绪语', mt: '马耳他语', lb: '卢森堡语', ga: '爱尔兰语',
+  jv: '爪哇语', su: '巽他语', ceb: '宿务语', haw: '夏威夷语'
 }
 
 const gptAdapter = openAiCompatible({
@@ -471,5 +683,22 @@ module.exports = {
   LLM_LANGUAGES,
   DEEPL_LANGUAGES,
   PAPAGO_LANGUAGES,
-  NIUTRANS_LANGUAGES
+  NIUTRANS_LANGUAGES,
+  // 以下是给同目录的 translation-adapters-llm.js 复用的构件。
+  // 导出它们是为了**只有一份** OpenAI 兼容实现与语种表 ——
+  // 两份实现分叉的代价是"改一处漏一处"，超时/错误处理尤其容易漏。
+  openAiCompatible,
+  pickKey,
+  endpointOf,
+  readErrorDetail,
+  timeoutReason,
+  envValue,
+  DEFAULT_TIMEOUT_MS,
+  // 调用限额 / 用量归一：Claude 与 Qwen-MT 这两条非 OpenAI 协议也要用，
+  // 从同一处导出，保证"超时上限、重试上限、token 估算口径"全局只有一份。
+  CALL_LIMITS,
+  callParamsOf,
+  estimateTokens,
+  normalizeUsage,
+  inputLimitError
 }

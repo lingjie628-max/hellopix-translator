@@ -246,24 +246,67 @@ class ProductionRepository {
   // 面向客户端的通道列表：**绝不能**带 api_key_ciphertext / secret_ciphertext。
   // 原先是 SELECT e.*，而 /translate/engines 是客户端接口，
   // 结果把密钥密文（bytea -> Buffer -> JSON）一路发给了商户端。
-  async packageEngines(packageId) {
+  /**
+   * 套餐包含的通道。
+   *
+   * `version` 是**套餐权益版本**（`packages.catalog_version` 的快照）。
+   *
+   * 为什么必须带版本：权益原来只查 `package_engines` 这张活表 ——
+   * 它只有"此刻"没有"当初"。这意味着**任何一次套餐调整都会回溯修改所有历史买家
+   * 的权益**：现在加通道是白送（老客户受益），下次删通道就是单方面拿走老客户
+   * 已经付过钱的东西，而我们手上没有任何证据能证明当初卖的是哪几个通道。
+   *
+   * 所以：
+   *   · 传了 version → 读 `package_engine_versions` 的**快照**，卖给谁就是谁的版本
+   *   · 没传 version → 读活表（兼容旧调用方与管理端视图）
+   *
+   * 返回里**包含已下架的通道**（带 `retired=true`）。这是刻意的：
+   * 该函数同时服务于"给商户选通道"和"对账/管理"两种场景，
+   * 是否过滤下架通道属于业务判断，交给调用方（core-service 商户侧过滤），
+   * 而不是在数据层把历史通道抹掉 —— 抹掉就再也查不出"当初卖过什么"。
+   */
+  async packageEngines(packageId, version) {
+    const columns = `e.id,e.name,e.provider,e.tier,e.enabled,e.wired,e.cost_per_million,
+            e.model,e.endpoint,e.call_params,e.note,e.updated_at,e.retired_at`
+    const scoped = Number.isFinite(Number(version)) && Number(version) >= 1
+    const result = scoped
+      ? await this.query(
+        `SELECT ${columns}
+         FROM engines e JOIN package_engine_versions v ON v.engine_id=e.id
+         WHERE v.package_id=$1 AND v.version=$2 ORDER BY e.id`,
+        [packageId, Number(version)]
+      )
+      : await this.query(
+        `SELECT ${columns}
+         FROM engines e JOIN package_engines pe ON pe.engine_id=e.id
+         WHERE pe.package_id=$1 ORDER BY e.id`,
+        [packageId]
+      )
+    return mapRows(result.rows).map(row => Object.assign(row, { retired: Boolean(row.retiredAt) }))
+  }
+
+  /**
+   * 超管显式提升某商户的权益版本。
+   *
+   * 版本一旦钉住就不会自己变 —— 这是"不擅自改变已售权益"的执行点。
+   * 想给老客户加通道，只能走这里（有审计），不能靠改活表顺带生效。
+   */
+  async setUserCatalogVersion(client, userId, version) {
     const result = await this.query(
-      `SELECT e.id,e.name,e.provider,e.tier,e.enabled,e.wired,e.cost_per_million,
-              e.model,e.note,e.updated_at
-       FROM engines e JOIN package_engines pe ON pe.engine_id=e.id
-       WHERE pe.package_id=$1 ORDER BY e.id`,
-      [packageId]
+      'UPDATE users SET package_catalog_version=$2,updated_at=NOW() WHERE id=$1 RETURNING id,package_catalog_version',
+      [userId, Number(version) || null], client
     )
-    return mapRows(result.rows)
+    return mapRow(result.rows[0])
   }
 
   /** 全部通道（管理端列表用），同样不带密钥本体，只带"是否已填"。 */
   async enginesForAdmin() {
     return mapRows((await this.query(
-      `SELECT id,name,provider,tier,enabled,wired,cost_per_million,model,endpoint,note,updated_at,
+      `SELECT id,name,provider,tier,enabled,wired,cost_per_million,model,endpoint,call_params,note,
+              retired_at,updated_at,
               (api_key_ciphertext IS NOT NULL) AS has_key,
               (secret_ciphertext IS NOT NULL) AS has_secret
-       FROM engines ORDER BY id`
+       FROM engines ORDER BY retired_at NULLS FIRST,id`
     )).rows)
   }
 

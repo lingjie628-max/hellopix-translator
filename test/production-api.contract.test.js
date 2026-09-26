@@ -323,3 +323,112 @@ test('字段缺失时按"允许切换"处理，不误伤存量数据', async () 
   const session = { account: { activeEngineId: 'niutrans' }, parent: { packageId: 1 } }
   assert.equal(await core.resolveEngineId(session, ''), 'niutrans')
 })
+
+// --- 「即将上线」通道不得被选中 -------------------------------------------------
+// 9 个通道里只有 4 个真接了凭据。其余 5 个在界面上曾经和可用通道长得一模一样，
+// 选中后一翻译就 503 —— 而 503 在客户端只表现为"没有译文"，用户只会来报
+// "翻译坏了"。修法是把未接通的通道以 allowed=false 下发（已下发的客户端都按
+// allowed !== false 过滤，无需升级即可生效），并在服务端兜住存量选择。
+
+const MIXED_ENGINE_ROWS = [
+  { id: 'baidu', name: '百度翻译', enabled: true, wired: false },
+  { id: 'deepseek', name: 'DeepSeek 翻译', enabled: true, wired: true }
+]
+
+test('未接通的通道以 allowed=false 下发，且不会被显示成「当前」', async () => {
+  const core = coreWithEngines(MIXED_ENGINE_ROWS)
+  const view = await core.engines({
+    // 存量账号：升级前在界面上选过 baidu，而 baidu 一直没接通
+    account: { activeEngineId: 'baidu', charBalance: 0 },
+    parent: { packageId: 2, packageAllowEngineSwitch: true, packageTitle: '高级版' }
+  })
+  const baidu = view.rows.find(row => row.id === 'baidu')
+  assert.equal(baidu.allowed, false, '未接通的通道不得可选用')
+  assert.equal(baidu.comingSoon, true, '需要能标记成「即将上线」')
+  assert.equal(baidu.active, false, '未接通的通道不能被标成当前通道')
+  assert.equal(view.activeEngine, 'deepseek', '显示值必须与实际使用的通道一致')
+})
+
+test('账号里存的未接通通道被跳过，但客户端显式点名时绝不替换', async () => {
+  const core = coreWithEngines(MIXED_ENGINE_ROWS)
+  const session = {
+    account: { activeEngineId: 'baidu' },
+    parent: { packageId: 2, packageAllowEngineSwitch: true }
+  }
+  // 不显式指定：用账号里存的那个（= baidu，未接通）。
+  // 这是**历史遗留的陈旧状态**（旧版界面允许选中未接通通道），不是一次"选择"，
+  // 沿用会让这个商户每次翻译都撞 503 —— 所以跳过它，回落到权益内第一个可用通道。
+  assert.equal(await core.resolveEngineId(session, ''), 'deepseek',
+    '存量的未接通选择必须被跳过，否则这个商户每次翻译都撞 503')
+
+  // 显式传 baidu：**原样返回**，由 translate() 给出"尚未上线"的明确报错。
+  //
+  // 这条断言与上一版契约相反（旧实现会静默换成 deepseek），是刻意的：
+  // 「用户手动选择的渠道失败时，不要静默切换供应商」。
+  // 旧行为下用户选了 A、界面也显示 A，实际调用与账单走的却是 B，用户永远发现不了 ——
+  // 这不是"容错"，是欺骗。已下发的客户端（含 0.1.5/0.1.6）都按 allowed !== false
+  // 过滤下拉，绝不会把未接通的通道传上来，所以改进不会误伤存量客户端。
+  assert.equal(await core.resolveEngineId(session, 'baidu'), 'baidu',
+    '显式选择必须原样返回，替换它就是静默切换供应商')
+})
+
+test('套餐里一个可用通道都没有时报「没有可用通道」，不是「套餐未包含」', async () => {
+  const repository = {
+    async packageEngines() { return [{ id: 'baidu', enabled: true, wired: false }] },
+    async transaction() { throw new Error('must not reserve') }
+  }
+  const core = new CoreService(repository, { get() {}, set() {} }, {})
+  const session = {
+    kind: 'main',
+    account: { id: 1, charBalance: 100, activeEngineId: null },
+    parent: { id: 1, packageId: 1 }
+  }
+  await assert.rejects(
+    core.translate(session, { text: 'hello', from: 'en', to: 'zh' }, 'no-usable-channel'),
+    error => {
+      // 报 ENGINE_NOT_ALLOWED（套餐未包含）会把人引向"升级套餐"，而升级也解决不了
+      assert.equal(error.code, 'ENGINE_NOT_CONFIGURED')
+      assert.match(error.message, /没有可用/)
+      return true
+    }
+  )
+})
+
+test('套餐外的通道不会被静默降级成套餐内通道', async () => {
+  const core = coreWithEngines(ENGINE_ROWS)
+  const session = {
+    account: { activeEngineId: null },
+    parent: { packageId: 2, packageAllowEngineSwitch: true }
+  }
+  // deepl 不在套餐里：必须原样返回，由 translate() 回 403「当前套餐未包含此通道」。
+  // 静默换成 niutrans 会把越权请求也"修好"，那是权限问题，不能糊过去。
+  assert.equal(await core.resolveEngineId(session, 'deepl'), 'deepl')
+})
+
+test('切换到未接通的通道时报「尚未上线」，不是「套餐未包含」', () => {
+  const source = fs.readFileSync(path.join(root, 'server/routes/production.js'), 'utf8')
+  const body = source.slice(
+    source.indexOf("router.post('/translate/engines/active'"),
+    source.indexOf('const translate = asyncRoute')
+  )
+  assert.match(body, /ENGINE_NOT_CONFIGURED/, '未接通的通道必须回「尚未上线」')
+  assert.match(body, /ENGINE_NOT_ALLOWED/, '套餐外的通道仍回「套餐未包含」')
+})
+
+test('生产库里未接通的通道确实被标成不可选用', async () => {
+  // 这条守住的是文案之外的实质：界面上不该再有"能点但点了必然失败"的通道。
+  const core = coreWithEngines([
+    { id: 'aws', name: 'AWS', enabled: true, wired: false },
+    { id: 'deepl', name: 'DeepL', enabled: true, wired: false },
+    { id: 'gemini', name: 'Gemini', enabled: true, wired: false },
+    { id: 'niutrans', name: '小牛翻译', enabled: true, wired: false },
+    { id: 'papago', name: 'Papago', enabled: true, wired: false },
+    { id: 'google', name: 'Google 翻译', enabled: true, wired: true }
+  ])
+  const view = await core.engines({
+    account: { activeEngineId: null, charBalance: 0 },
+    parent: { packageId: 3, packageAllowEngineSwitch: true, packageTitle: '专业版' }
+  })
+  assert.deepEqual(view.rows.filter(row => row.allowed).map(row => row.id), ['google'])
+  assert.equal(view.rows.filter(row => row.comingSoon).length, 5)
+})

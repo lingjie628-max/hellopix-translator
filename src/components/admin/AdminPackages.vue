@@ -19,7 +19,10 @@
       </el-table-column>
       <el-table-column label="翻译通道" min-width="200">
         <template slot-scope="scope">
-          <el-tag v-for="id in (scope.row.engines || [])" :key="id" size="mini" style="margin: 0 4px 4px 0">{{ nameOf(id) }}</el-tag>
+          <el-tag v-for="id in (scope.row.engines || [])" :key="id" size="mini"
+                  :type="wiredOf(id) ? '' : 'info'"
+                  :title="wiredOf(id) ? '' : '未接通：客户选中后会翻译失败，建议先摘除'"
+                  style="margin: 0 4px 4px 0">{{ nameOf(id) }}<template v-if="!wiredOf(id)">（未接通）</template></el-tag>
         </template>
       </el-table-column>
       <el-table-column label="操作" width="90">
@@ -45,9 +48,13 @@
         <el-form-item label="翻译通道">
           <el-checkbox-group v-model="form.engines">
             <el-checkbox v-for="item in engineList" :key="item.id" :label="item.id" style="width: 46%; margin: 4px 0">
-              {{ item.name }}
+              {{ item.name }}<span v-if="item.wired === false" class="coming-soon">（即将上线）</span>
             </el-checkbox>
           </el-checkbox-group>
+          <div class="coming-soon-tip">
+            标「即将上线」的通道还没配凭据，客户选中它会翻译失败。想让它真正可用，先去
+            「翻译通道」页填凭据并设为接通。
+          </div>
         </el-form-item>
         <el-form-item label="功能开关">
           <el-checkbox v-for="item in featureList" :key="item.key"
@@ -102,6 +109,12 @@ export default {
       const item = this.engineList.find(e => e.id === id)
       return item ? item.name : id
     },
+    // 未接通的通道是"套餐里有、但翻不了"的：选中它必然 503，客户只看到"没有译文"。
+    // 在套餐编辑处标出来，避免再配出一个"配了却不能翻"的套餐。
+    wiredOf(id) {
+      const item = this.engineList.find(e => e.id === id)
+      return !item || item.wired !== false
+    },
     setFeat(key, val) {
       if (!this.form.features) this.$set(this.form, 'features', {})
       this.$set(this.form.features, key, val ? 1 : 0)
@@ -138,4 +151,6 @@ export default {
 <style scoped>
 .admin-page { text-align: left; }
 .unit-tip { margin-left: 10px; color: var(--w-text-faint); font-size: 12px; }
+.coming-soon { color: var(--w-text-faint); font-size: 12px; }
+.coming-soon-tip { margin-top: 6px; color: var(--w-text-faint); font-size: 12px; line-height: 1.6; }
 </style>
