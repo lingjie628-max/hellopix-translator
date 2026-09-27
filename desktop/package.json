@@ -1,7 +1,7 @@
 {
   "name": "hello-pix-desktop",
   "productName": "Hello Pix",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "description": "Hello Pix 桌面客户端",
   "author": "Hello Pix",
@@ -28,6 +28,7 @@
       "output": "release",
       "buildResources": "build"
     },
+    "afterPack": "scripts/after-pack.js",
     "files": [
       "main.js",
       "preload.js",

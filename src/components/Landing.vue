@@ -92,6 +92,32 @@
             <strong>准备中</strong><em>请稍后刷新</em>
           </div>
         </div>
+        <!-- 安装引导：macOS 对未公证应用的拦截是"装不上"的头号原因，所以紧跟
+             下载按钮给出解法。默认折叠，一是避免在落地页制造"这软件有问题"
+             的错觉，二是它对绝大多数用户是无关内容。用原生 details 元素实现，
+             不需要 JS，也自带无障碍语义。 -->
+        <details v-if="hasMacDownload" class="install-help">
+          <summary>macOS 首次打开被系统拦截？点这里</summary>
+          <div class="install-help-body">
+            <p class="install-help-lead">
+              这不是安装包损坏，是 macOS 对<strong>尚未公证</strong>的应用的默认拦截。按提示分两种：
+            </p>
+            <ol>
+              <li>
+                <b>提示「无法验证开发者」</b>：在「应用程序」里<strong>右键点 Hello Pix → 打开</strong>，
+                再在弹窗里点一次「打开」。只需一次，之后就正常了。
+              </li>
+              <li>
+                <b>提示「已损坏，无法打开」</b>：说明你用的是旧安装包（0.1.6 及更早）。
+                请先下载上方的新版；若仍遇到，打开「终端」粘贴下面这行回车，再重新打开即可：
+                <code>xattr -cr /Applications/Hello\ Pix.app</code>
+              </li>
+            </ol>
+            <p class="install-help-foot">
+              我们正在申请 Apple 开发者证书并做公证。完成后双击即可打开，以上步骤都不再需要。
+            </p>
+          </div>
+        </details>
         <p v-if="extraDownloads.length" class="extra-dl">
           其他版本：
           <a v-for="d in extraDownloads" :key="d.url" :href="d.url" @click="onDownload($event, d)">{{ d.label }}</a>
@@ -295,6 +321,10 @@ export default {
     allDownloads() {
       return this.releaseList.map(r => ({ label: r.title || r.group, url: r.url, note: r.note }))
     },
+    /** 有没有 macOS 下载项 —— 决定是否展示安装引导（Windows 端没有这个问题） */
+    hasMacDownload() {
+      return this.releaseList.some(r => /mac|darwin/i.test(`${r.releaseGroup} ${r.os}`))
+    },
     /** 真实联系方式，来自后台「帮助与客服」与「官方链接」配置；没配就不显示这一列 */
     contactLinks() {
       const list = []
@@ -305,8 +335,7 @@ export default {
       if (this.site.officialUrl) list.push({ label: '官方渠道', href: this.site.officialUrl })
       return list
     },
-    /** 真实用户评价，后台没配就不显示这一节 */
-    testimonials() {
+    /** 真实用户评价，后台没配就不显示这一节 */    testimonials() {
       const list = this.site.testimonials
       if (!Array.isArray(list)) return []
       return list.filter(t => t && t.content && t.name)
@@ -507,6 +536,35 @@ export default {
 .extra-dl { margin-top: 24px; font-size: 13px; text-align: center; color: var(--w-text-muted, #6b7280); }
 .extra-dl a { color: var(--w-accent, #1677ff); text-decoration: none; margin: 0 3px; }
 .extra-dl a:hover { text-decoration: underline; }
+
+/* 安装引导。默认折叠：它只对 Mac 用户里有拦截遭遇的那部分人有用，
+   常开会在首页制造"这软件装不上"的错觉。 */
+.install-help {
+  max-width: 640px; margin: 30px auto 0; text-align: left;
+  padding: 0 20px; border-radius: var(--w-radius-lg, 12px);
+  background: var(--w-surface, #fff); border: 1px solid var(--w-border, #e5e7eb);
+}
+.install-help summary {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 15px 0; cursor: pointer; font-size: 14px; font-weight: 600;
+  color: var(--w-text, #111827); list-style: none;
+}
+.install-help summary::-webkit-details-marker { display: none; }
+.install-help summary::after { content: '▾'; color: var(--w-text-muted, #6b7280); transition: transform 0.18s ease; }
+.install-help[open] summary::after { transform: rotate(180deg); }
+.install-help[open] summary { border-bottom: 1px solid var(--w-border, #e5e7eb); }
+.install-help-body { padding: 15px 0 20px; font-size: 13px; line-height: 1.85; color: var(--w-text-muted, #6b7280); }
+.install-help-body ol { margin: 0 0 0 18px; padding: 0; }
+.install-help-body li { margin-bottom: 12px; }
+.install-help-body b { color: var(--w-text, #111827); }
+.install-help-lead { margin: 0 0 10px; }
+.install-help-body code {
+  display: inline-block; margin-top: 8px; padding: 7px 11px; border-radius: 6px;
+  background: var(--w-code-bg, #f3f4f6); color: var(--w-text, #111827);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  word-break: break-all;
+}
+.install-help-foot { margin: 14px 0 0; font-size: 12px; }
 
 /* 产品优势 */
 .advantages { grid-template-columns: repeat(4, 1fr); }
