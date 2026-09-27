@@ -102,6 +102,7 @@
             <p class="install-help-lead">
               这不是安装包损坏，是 macOS 对<strong>尚未公证</strong>的应用的默认拦截。
               按下面的步骤放行一次，之后就和自己装的软件一样，双击即可打开。
+              <br>安装包里也附了同一份说明（<code class="inline">首次打开说明.txt</code>），不用回来找。
             </p>
             <p class="install-help-step"><b>第 1 步：先把 Hello Pix 拖进「应用程序」文件夹，再从那里双击打开</b>
               —— 别直接在 dmg 或「下载」里运行，那样系统会把它当成临时文件。</p>
@@ -578,6 +579,11 @@ export default {
   background: var(--w-code-bg, #f3f4f6); color: var(--w-text, #111827);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
   word-break: break-all;
+}
+/* 行内引用文件名时用，不要块级的那种大内边距 */
+.install-help-body code.inline {
+  display: inline; margin: 0; padding: 1px 6px; font-size: 12px;
+  word-break: normal;
 }
 .install-help-foot { margin: 14px 0 0; font-size: 12px; }
 

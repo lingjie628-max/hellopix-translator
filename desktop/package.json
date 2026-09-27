@@ -1,7 +1,7 @@
 {
   "name": "hello-pix-desktop",
   "productName": "Hello Pix",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": true,
   "description": "Hello Pix 桌面客户端",
   "author": "Hello Pix",
@@ -74,17 +74,27 @@
     },
     "dmg": {
       "title": "Hello Pix ${version}",
+      "window": {
+        "width": 620,
+        "height": 470
+      },
       "contents": [
         {
           "x": 140,
-          "y": 200,
+          "y": 190,
           "type": "file"
         },
         {
           "x": 400,
-          "y": 200,
+          "y": 190,
           "type": "link",
           "path": "/Applications"
+        },
+        {
+          "x": 270,
+          "y": 330,
+          "type": "file",
+          "path": "build/首次打开说明.txt"
         }
       ]
     },
