@@ -158,7 +158,7 @@ module.exports = function registerMock(app, options) {
       { id: 'deepseek', name: 'DeepSeek 翻译', provider: 'DeepSeek', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 0.83, model: 'deepseek-flash', apiKey: '', secret: '', endpoint: '', note: '需要 API Key 与模型名。' },
       { id: 'baidu', name: '百度翻译', provider: '百度', tier: 'basic', enabled: 1, wired: 0, costPerMillion: 6.81, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
       { id: 'niutrans', name: '小牛翻译', provider: '小牛', tier: 'basic', enabled: 1, wired: 0, costPerMillion: 6.94, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
-      { id: 'google', name: '谷歌翻译', provider: 'Google', tier: 'advanced', enabled: 1, wired: 0, costPerMillion: 18.61, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
+      { id: 'google', name: '谷歌翻译', provider: 'Google', tier: 'advanced', enabled: 1, wired: 0, costPerMillion: 18.61, model: 'google-translate-v2', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
       { id: 'deepl', name: 'DeepL 翻译', provider: 'DeepL', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 23.33, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
       { id: 'aws', name: '亚马逊 AWS 翻译', provider: 'Amazon', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 13.89, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
       { id: 'gpt', name: 'GPT 翻译', provider: 'OpenAI', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 0.69, model: 'gpt-4o-mini', apiKey: '', secret: '', endpoint: '', note: 'Hello Pix 增补。成本超管手填，按 token 估算。未接厂商。' },

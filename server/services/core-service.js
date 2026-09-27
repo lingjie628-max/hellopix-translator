@@ -48,6 +48,10 @@ class CoreService {
     this.allowPublicNetwork = Boolean(options && options.allowPublicNetwork)
     this.reconciliationTimer = null
     this.reconciliationRun = null
+    // 价目表查不到时的告警去重（按 "渠道:模型"）。
+    // 不去重的话，一个未定价的通道在高峰期会把日志刷满，
+    // 而把日志淹掉的恰恰是"该去补价格"这个信号本身。
+    this.unverifiedCostReported = new Set()
   }
 
   /**
@@ -629,8 +633,10 @@ class CoreService {
       await this.repo.query(
         `INSERT INTO translation_usage(reservation_id,translate_log_id,user_id,sub_account_id,
          engine_id,provider,model,prompt_tokens,completion_tokens,reasoning_tokens,total_tokens,
-         billed_units,billed_unit,upstream_cost,currency,retries,cached,from_language,to_language,duration_ms)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+         billed_units,billed_unit,upstream_cost,currency,retries,cached,from_language,to_language,duration_ms,
+         cost_verified,cost_note,cost_source,cost_as_of)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+                $21,$22,$23,$24)`,
         [
           reservation ? reservation.id : null,
           translateLogId,
@@ -651,14 +657,45 @@ class CoreService {
           false,
           from || 'auto',
           to || '',
-          number(durationMs)
+          number(durationMs),
+          // 「未核实」必须落库：否则"价格没查到"的 0 与"真的没花钱"的 0
+          // 在库里完全一样，对账时看不出少算了整条通道。
+          Boolean(cost.verified),
+          String(cost.note || ''),
+          String(cost.source || ''),
+          String(cost.asOf || '')
         ],
         client
       )
+      // 落库之外再喊一声：库里的标记要人去查才看得到，日志是主动的。
+      if (!cost.verified) this.reportUnverifiedCost(engine, model, cost)
     } catch (error) {
       // 台账是旁路：写失败要能在日志里看见，但不能把已经成功的翻译带崩
       console.error('Upstream usage ledger write failed:', error.message)
     }
+  }
+
+  /**
+   * 价目表查不到价钱时喊一声。
+   *
+   * 为什么需要它：`estimateUpstreamCost` 查不到价会返回 cost=0，而 0 在成本表里
+   * 与"这条真的没花钱"完全一样。此前这个信号只在函数返回值里，谁也不看 ——
+   * 结果谷歌（官方价 $20/百万字符）被静默记成 0，对账时会以为那部分免费。
+   * 现在一行落库标记 + 一次日志，两道都有。
+   *
+   * 按 "渠道:模型" 去重：同一个未定价的通道翻一万次也只报一次。
+   * 被日志淹掉的告警等于没有告警。
+   */
+  reportUnverifiedCost(engine, model, cost) {
+    const key = `${(engine && engine.id) || '?'}:${model || '(空 model)'}`
+    if (this.unverifiedCostReported.has(key)) return
+    this.unverifiedCostReported.add(key)
+    console.warn(
+      `[usage-cost] 渠道「${(engine && engine.id) || '?'}」的模型「${model || '(空)'}」` +
+      `在价目表（server/lib/upstream-pricing.js）里查不到，本次成本按 0 记入 ` +
+      `translation_usage 并已标记 cost_verified=false —— 0 不代表免费。` +
+      `处置：补上官方单价，或把 model 改成价目表里已有的键。原因：${(cost && cost.note) || '未说明'}`
+    )
   }
 
   async releaseReservation(id, errorCode) {

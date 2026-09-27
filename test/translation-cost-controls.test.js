@@ -429,3 +429,124 @@ test('成本报告：表格里绝不给"查不到价"的通道印 0 成本', () 
   assert.deepEqual(zeroCells, [], `成本表里出现了 0.0 —— "未知"被当成"免费"了：\n${zeroCells.join('\n')}`)
 })
 
+// ---------------------------------------------------------------------------
+// 七、成本台账必须把「未核实」写进去
+//
+// 这一节是被真实数据打出来的。用测试账号走了一次真实端到端翻译，
+// 台账确实写了一行（链路是通的），但那行长这样：
+//
+//   engine_id=google  provider=Google  model=  upstream_cost=0  currency=''
+//
+// 根因是价目表按 `engines.model` 反查，而 google 的 model 是空串、
+// gpt 是价目表里没有的 `gpt-5.6-luna` —— 4 条在跑通道里有 2 条被静默记成 0。
+//
+// 比"记成 0"更糟的是：`estimateUpstreamCost` 明明返回了 `verified:false`
+// 与原因说明，入库时却被丢掉了，只写了 cost 和 currency。于是
+// **"价格没查到"的 0 与"真的没花钱"的 0 在库里一模一样**，对账时看不出
+// 少算了整整两条通道。所以这里锁死三件事：
+//
+//   1. verified / note / source / asOf 必须落库
+//   2. 查不到价时成本是 0（不得编数），但必须标未核实
+//   3. 查不到价必须留下日志 —— 库里的标记要人去查才看得到，日志是主动的
+// ---------------------------------------------------------------------------
+
+function ledgerRecorder() {
+  const inserts = []
+  const repository = {
+    async query(sql, params) {
+      inserts.push({ sql, params })
+      return { rows: [] }
+    }
+  }
+  return { core: new CoreService(repository, { get() {}, set() {} }, {}), inserts }
+}
+
+const LEDGER_SESSION = { kind: 'main', account: { id: 1 }, parent: { id: 1 } }
+
+async function recordOne(core, { engineId, provider, model, reservedChars = 1000, retries = 0 }) {
+  await core.recordUpstreamUsage(null, {
+    reservation: { id: 7, reservedChars },
+    engine: { id: engineId, provider, model },
+    result: { model, retries, usage: { promptTokens: 100, completionTokens: 50, totalTokens: 150 } },
+    session: LEDGER_SESSION,
+    translateLogId: 9,
+    from: 'en',
+    to: 'zh',
+    durationMs: 120
+  })
+}
+
+// INSERT 的占位顺序（$1..$24）→ 数组下标
+const COL = {
+  billedUnits: 11, billedUnit: 12, cost: 13, currency: 14,
+  verified: 20, note: 21, source: 22, asOf: 23
+}
+
+async function withCapturedWarnings(run) {
+  const warnings = []
+  const original = console.warn
+  console.warn = (...args) => warnings.push(args.join(' '))
+  try {
+    await run()
+  } finally {
+    console.warn = original
+  }
+  return warnings
+}
+
+test('台账：能查到价的模型，成本与「已核实」标记都要落库', async () => {
+  const { core, inserts } = ledgerRecorder()
+  await recordOne(core, { engineId: 'deepseek', provider: 'DeepSeek', model: 'deepseek-flash' })
+  const p = inserts[0].params
+  assert.equal(inserts.length, 1, '必须写了且只写了一条台账')
+  assert.equal(p[COL.verified], true, 'cost_verified 必须是 true')
+  assert.ok(Number(p[COL.cost]) > 0, '已知价的模型成本必须大于 0')
+  assert.equal(p[COL.currency], 'USD', '币种必须是 USD')
+  assert.match(String(p[COL.source]), /^https?:\/\//, 'cost_source 要能回答"这个价从哪来" —— 否则这个数是不可审计的')
+  assert.ok(String(p[COL.asOf]).length > 0, 'cost_as_of 要能回答"这个价截至什么时候"')
+})
+
+test('台账：查不到价的模型必须标未核实，0 不得伪装成「已核实」', async () => {
+  const { core, inserts } = ledgerRecorder()
+  await recordOne(core, { engineId: 'gpt', provider: 'OpenAI', model: 'gpt-5.6-luna' })
+  const p = inserts[0].params
+  assert.equal(Number(p[COL.cost]), 0, '查不到价时成本记 0（这是事实，不许编一个数出来）')
+  assert.equal(p[COL.verified], false, '但必须标记未核实 —— 这才是"0 不代表免费"的落点')
+  assert.match(String(p[COL.note]), /查不到|未核实/, 'cost_note 要说明为什么是 0，否则事后无从判断')
+})
+
+test('台账：按字符计价的通道用送翻字符数记账，且谷歌的官方价必须生效', async () => {
+  const { core, inserts } = ledgerRecorder()
+  await recordOne(core, {
+    engineId: 'google', provider: 'Google', model: 'google-translate-v2', reservedChars: 1_000_000
+  })
+  const p = inserts[0].params
+  assert.equal(p[COL.billedUnit], 'character', 'billed_unit 必须是 character，不能拿 token 数充数')
+  assert.equal(Number(p[COL.billedUnits]), 1_000_000, 'billed_units 是实际送翻的字符数')
+  assert.equal(Number(p[COL.cost]), 20, '谷歌 $20/百万字符 —— 这条通道的价是已知的，绝不该记 0')
+  assert.equal(p[COL.verified], true, '已知官方价，必须标已核实')
+})
+
+test('台账：查不到价要主动记日志，且同一渠道同一模型只报一次', async () => {
+  const { core } = ledgerRecorder()
+  const warnings = await withCapturedWarnings(async () => {
+    for (let i = 0; i < 3; i++) {
+      await recordOne(core, { engineId: 'gpt', provider: 'OpenAI', model: 'gpt-5.6-luna' })
+    }
+    // 换一个渠道（同样是空 model）应当再报一次
+    await recordOne(core, { engineId: 'google', provider: 'Google', model: '' })
+  })
+  assert.equal(warnings.length, 2, '同一「渠道:模型」报一次就够 —— 被日志淹掉的告警等于没有告警')
+  assert.match(warnings[0], /gpt-5\.6-luna/)
+  assert.match(warnings[1], /google/)
+})
+
+test('台账：价格已核实时不产生告警（否则告警会被日常噪声淹没）', async () => {
+  const { core } = ledgerRecorder()
+  const warnings = await withCapturedWarnings(async () => {
+    await recordOne(core, { engineId: 'deepseek', provider: 'DeepSeek', model: 'deepseek-flash' })
+  })
+  assert.deepEqual(warnings, [])
+})
+
+
