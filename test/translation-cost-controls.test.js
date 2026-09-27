@@ -363,7 +363,8 @@ test('换线的通道名单是完整 11 个，且包含 4 个已在生产上跑�
 //
 // 这一节也是被真实数据打出来的：报告里把 `model` 与套餐售价**抄成了常量**
 // （还标着"读自 packages 表"，其实一次都没读过）。而两个环境的值并不一样：
-//   · 模型：开发库 gpt = gpt-4o-mini，生产 = gpt-5.6-luna（价目表里查不到）
+//   · 模型：开发库 gpt = gpt-4o-mini，生产 = gpt-5.6-luna
+//     （生产原先用的是价目表里没有的名字，成本一直被静默记成 0；现已补上官方价）
 //   · 售价：开发库 200/350/850，生产 40/75/135（都是 USD）
 // 结果就是"报告算的是 A 环境，读的人以为在说 B 环境"，而表本身完全自洽。
 //
@@ -379,6 +380,16 @@ const path = require('node:path')
 
 const REPORT = path.join(__dirname, '..', 'scripts', 'translation-cost-report.js')
 
+/**
+ * 一个**故意不存在**于价目表里的模型名，专供「查不到官方价」这类断言使用。
+ *
+ * 为什么不拿某个真实模型当样本：这里原先用的是 `gpt-5.6-luna`（当时它确实不在
+ * 价目表里），等到真的给它补上官方价，三条断言就一起失败 —— 是**测试的前提**
+ * 被修正了，而不是被测的行为出了问题。换成人为构造的名字之后，这类断言就再也
+ * 不会因为"给某个真实模型补了价格"而误报。
+ */
+const UNLISTED_MODEL = 'model-not-in-pricing-table'
+
 function runReport(env) {
   return spawnSync(process.execPath, [REPORT], {
     cwd: path.join(__dirname, '..'),
@@ -389,15 +400,31 @@ function runReport(env) {
 }
 
 test('成本报告：查不到官方价的模型标 unverified，并写明"0 不代表免费"', () => {
-  // 生产 gpt 的真实模型就叫这个名字，价目表里没有它
-  assert.equal(resolvePricing('gpt-5.6-luna'), null, '这个模型本就不该在价目表里')
+  assert.equal(resolvePricing(UNLISTED_MODEL), null, '这个模型本就不该在价目表里')
   const estimate = estimateUpstreamCost({
-    model: 'gpt-5.6-luna', promptTokens: 1000, completionTokens: 500
+    model: UNLISTED_MODEL, promptTokens: 1000, completionTokens: 500
   })
   assert.equal(estimate.verified, false)
   assert.equal(estimate.cost, 0)
   assert.match(estimate.note, /不代表免费|未核实/,
     '成本记 0 时必须写明它不是免费，否则会被当成零成本参与定价')
+})
+
+test('成本报告：生产实际在调的 gpt-5.6-luna 必须有官方价，不得再落进未核实分支', () => {
+  // 生产库 engines.gpt 的 model 就是这个值（后台配置优先，所以线上真在调它）。
+  // 它曾经不在价目表里，导致 GPT 通道的成本长期被静默记成 0。
+  const pricing = resolvePricing('gpt-5.6-luna')
+  assert.ok(pricing, '生产在调的模型必须有价目条目')
+  assert.notEqual(pricing.unverified, true, '不能是占位式的未核实条目')
+
+  const estimate = estimateUpstreamCost({
+    model: 'gpt-5.6-luna', promptTokens: 1_000_000, completionTokens: 1_000_000
+  })
+  assert.equal(estimate.verified, true, '官方价已知，必须标已核实')
+  assert.equal(estimate.cost, 1.4, '官方 $0.20/百万输入 + $1.20/百万输出 = $1.40')
+  assert.equal(estimate.currency, 'USD')
+  assert.match(estimate.source, /developers\.openai\.com/, '价格必须有官方出处')
+  assert.ok(estimate.asOf, '价格必须有复核日期，厂商调价频繁')
 })
 
 test('成本报告：没有 DATABASE_URL 时明说用的是兜底值，不静默出表', () => {
@@ -439,6 +466,8 @@ test('成本报告：表格里绝不给"查不到价"的通道印 0 成本', () 
 //
 // 根因是价目表按 `engines.model` 反查，而 google 的 model 是空串、
 // gpt 是价目表里没有的 `gpt-5.6-luna` —— 4 条在跑通道里有 2 条被静默记成 0。
+// （两条后来都补上了：google 补 model、gpt 补官方价。这里保留原始记录，
+//  因为下面这几条不变量正是被那次事故逼出来的。）
 //
 // 比"记成 0"更糟的是：`estimateUpstreamCost` 明明返回了 `verified:false`
 // 与原因说明，入库时却被丢掉了，只写了 cost 和 currency。于是
@@ -508,7 +537,7 @@ test('台账：能查到价的模型，成本与「已核实」标记都要落�
 
 test('台账：查不到价的模型必须标未核实，0 不得伪装成「已核实」', async () => {
   const { core, inserts } = ledgerRecorder()
-  await recordOne(core, { engineId: 'gpt', provider: 'OpenAI', model: 'gpt-5.6-luna' })
+  await recordOne(core, { engineId: 'gpt', provider: 'OpenAI', model: UNLISTED_MODEL })
   const p = inserts[0].params
   assert.equal(Number(p[COL.cost]), 0, '查不到价时成本记 0（这是事实，不许编一个数出来）')
   assert.equal(p[COL.verified], false, '但必须标记未核实 —— 这才是"0 不代表免费"的落点')
@@ -531,13 +560,13 @@ test('台账：查不到价要主动记日志，且同一渠道同一模型只�
   const { core } = ledgerRecorder()
   const warnings = await withCapturedWarnings(async () => {
     for (let i = 0; i < 3; i++) {
-      await recordOne(core, { engineId: 'gpt', provider: 'OpenAI', model: 'gpt-5.6-luna' })
+      await recordOne(core, { engineId: 'gpt', provider: 'OpenAI', model: UNLISTED_MODEL })
     }
     // 换一个渠道（同样是空 model）应当再报一次
     await recordOne(core, { engineId: 'google', provider: 'Google', model: '' })
   })
   assert.equal(warnings.length, 2, '同一「渠道:模型」报一次就够 —— 被日志淹掉的告警等于没有告警')
-  assert.match(warnings[0], /gpt-5\.6-luna/)
+  assert.match(warnings[0], /model-not-in-pricing-table/)
   assert.match(warnings[1], /google/)
 })
 

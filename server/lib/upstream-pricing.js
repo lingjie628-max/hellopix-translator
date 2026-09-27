@@ -38,6 +38,12 @@
 
 const PRICING = Object.freeze({
   // ---- OpenAI -----------------------------------------------------------------
+  //
+  // 这里有两个 OpenAI 条目，不是冗余 —— 两个环境在跑不同的模型名，两个都得认识：
+  //   · 生产库 gpt 的 model 是 `gpt-5.6-luna`（后台把默认值改过，而**后台配置优先**，
+  //     所以线上真的在调它）；
+  //   · 代码兜底值与开发库是 `gpt-4o-mini`（translation-adapters 的 defaultModel）。
+  // 只登记其中一个，另一个环境就会把成本静默记成 0 —— 033 那次事故就是这么来的。
   'gpt-4o-mini': {
     provider: 'OpenAI',
     unit: 'token',
@@ -47,6 +53,20 @@ const PRICING = Object.freeze({
     asOf: '2026-09',
     source: 'https://developers.openai.com/api/docs/models/gpt-4o-mini',
     note: '缓存命中输入 $0.075/百万。Batch 五折。这里按未命中标准价计。'
+  },
+  'gpt-5.6-luna': {
+    provider: 'OpenAI',
+    unit: 'token',
+    currency: 'USD',
+    // 2026-07-30 降价 80% 后的价（本次核实于 2026-09-27）。
+    // 长上下文档（prompt > 272K tokens）是 2x 输入 / 1.5x 输出、**整单**套用，
+    // 但翻译单条上限 5000 字符（约 1700 token），加提示词也够不到 272K，
+    // 所以只取短档价 —— 与上面 grok-4.3 处理 20 万阈值的口径一致。
+    input: 0.2,
+    output: 1.2,
+    asOf: '2026-09-27',
+    source: 'https://developers.openai.com/api/docs/models/gpt-5.6-luna',
+    note: '缓存命中输入 $0.02/百万。超过 272K 输入时整单按 $0.40/$1.80（翻译场景够不到）。Batch/Flex 五折。GPT-5.6 中最低价档，对应早前 GPT-5 家族的 nano 级。'
   },
 
   // ---- DeepSeek ---------------------------------------------------------------
