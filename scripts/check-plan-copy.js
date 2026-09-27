@@ -23,9 +23,13 @@
  * **该套餐可获得**的通道集合里。可获得 = 本档授权 ∪ 更低档位授权
  * （因为文案用「+上一版各翻译通道」表达继承关系）。
  *
- * 一条声明算「违规」需满足其一：
+ * 一条渠道声明算「违规」需满足其一：
  *   1. 能解析到某个 engine，但该 engine 不在可获得集合里（含已停用/未启用）；
  *   2. 解析不到 engine，但形如「XX翻译」—— 那是在宣传一个不存在的通道。
+ *
+ * 另外核对**客户端权益**：`clients` 里标了 true 的端，必须真有对应的在架安装包
+ * （见 CLIENT_CLAIMS）。同一种病：`clients.mobile` 曾三个套餐都是 true，
+ * 而 `client_releases` 里只有 Windows 与 macOS —— 手机版没有任何东西在它后面。
  *
  * 用法：
  *   DATABASE_URL=... node scripts/check-plan-copy.js
@@ -42,6 +46,22 @@ const INHERIT_ITEM = /^\+.*各翻译通道$/
 const LOOKS_LIKE_CHANNEL = /翻译$/
 /** 渠道声明之间可能用的分隔符。 */
 const SPLIT = /[、,，/／·]+/
+
+/**
+ * 套餐权益里承诺的"端"，以及它必须对应到的在架安装包。
+ *
+ * 这里是**同一个病**的另一个面：`clients.mobile` 曾经三个套餐都是 true，
+ * 而 `client_releases` 里 15 条记录只有 Windows 与 macOS —— 手机版被当作权益
+ * 卖给客户，却没有任何东西在它后面（迁移 035）。
+ *
+ * 映射依据：`standalone` = 独立桌面应用（windows/macos 安装包），
+ * `mobile` = 手机应用（android/ios）。`clients.counter`（柜台版）不在其列 ——
+ * 它没有对应的发布渠道，映射未知，不敢靠猜断言。
+ */
+const CLIENT_CLAIMS = [
+  ['standalone', '独立应用版', /windows|macos|darwin|win/i],
+  ['mobile', '手机版', /android|ios|harmony/i]
+]
 
 function normalize(text) {
   return String(text || '')
@@ -77,8 +97,13 @@ async function main() {
     byAlias.set(normalize(e.id), e)
   }
 
+  // 在架的客户端安装包：用来核对"套餐承诺了某个端，是否真有对应的东西在架"。
+  const releases = (await pool.query(
+    'SELECT os FROM client_releases WHERE enabled=true'
+  )).rows
+
   const packages = (await pool.query(
-    `SELECT id,title,sort_order,highlights,catalog_version
+    `SELECT id,title,sort_order,highlights,clients,catalog_version
        FROM packages WHERE active=true ORDER BY sort_order,id`
   )).rows
 
@@ -117,8 +142,23 @@ async function main() {
         violations.push({ pkg: pkg.title, claim, detail: 'engines 表里没有这个通道' })
         console.log(`    ✗ 宣传「${claim}」→ engines 表里没有这个通道`)
       } else {
-        // 独立应用版 / 手机版 这类非渠道卖点，不参与核对。
-        console.log(`    · 「${claim}」不是渠道项，跳过`)
+        // 独立应用版 / 手机版 这类非渠道卖点，不参与渠道核对。
+        console.log(`    · 「${claim}」不是渠道项，跳过渠道核对`)
+      }
+    }
+
+    // 客户端权益：承诺了某个端，必须真有对应的在架安装包。
+    for (const [flag, label, match] of CLIENT_CLAIMS) {
+      if (!pkg.clients || !pkg.clients[flag]) continue
+      if (releases.some(r => match.test(String(r.os || '')))) {
+        console.log(`    ✓ 权益「${label}」有对应的在架安装包`)
+      } else {
+        violations.push({
+          pkg: pkg.title,
+          claim: label,
+          detail: `权益列表里承诺了「${label}」，但 client_releases 里没有任何对应的在架安装包`
+        })
+        console.log(`    ✗ 权益「${label}」→ 没有对应的在架安装包`)
       }
     }
   }
