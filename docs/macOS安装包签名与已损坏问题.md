@@ -108,13 +108,41 @@ ad-hoc 签名**不证明开发者身份**，也无法公证，用户仍要右键
 **不需要新增依赖**。届时 electron-builder 的正式签名会跑在 `afterPack` 之后，
 把 ad-hoc 签名覆盖掉，两者不冲突。
 
-## 客户侧应急解法（当前仍需）
+## 客户侧放行步骤（当前仍需，且**随系统版本不同**）
 
-安装后在「终端」执行，清掉下载隔离标记：
+> **最容易踩的坑**：很多网上流传的教程、甚至我们官网上第一版写的都是
+> 「右键点 App → 打开 → 再点打开」。这条路在 **macOS 15 Sequoia 已被 Apple 移除**。
+> Apple 官方原文：
+>
+> > "In macOS Sequoia, users will no longer be able to Control-click to override
+> > Gatekeeper when opening software that isn't signed correctly or notarized.
+> > They'll need to visit System Settings > Privacy & Security to review security
+> > information for software before allowing it to run."
+>
+> 照旧教程写引导，客户会**照着做却打不开**，然后认定我们的软件有问题。
+
+**macOS 15 Sequoia 及更新**（当前主流）：
+
+1. 先把 App 拖进「应用程序」文件夹，从那里双击（直接在 dmg / 「下载」里运行会触发
+   App Translocation，被当作临时文件）；
+2. 出现「无法验证开发者」提示，点「完成」关掉；
+3. 系统设置 → 隐私与安全性 → 向下滚到「安全性」一节 → 点「仍要打开」；
+4. 输入开机密码。此后双击即可打开。
+
+「仍要打开」按钮**只在尝试打开后约一小时内出现**，超时要重来一次第 2 步。
+
+**macOS 14 及更早**：在「应用程序」里右键点 App → 打开 → 再点「打开」。
+
+**通用快捷解法**（任何版本，跳过图形界面）：
 
 ```bash
 xattr -cr /Applications/Hello\ Pix.app
 ```
 
-官网下载区已放了一份折叠的图文说明（`src/components/Landing.vue` 里的
+原理是去掉 `com.apple.quarantine` 隔离标记 —— Gatekeeper 的启动检查正是由它触发的。
+注意 macOS 的放行例外按**签名身份（cdhash）缓存**，同一签名的 App 一旦放行过，
+之后哪怕重新下载、重新打隔离属性也不会再拦。这会让本地复现"被拦"变得困难
+（实测踩过：同一版本先成功打开过一次，后续测试就无法复现拦截态）。
+
+官网下载区已放了一份折叠的分版本说明（`src/components/Landing.vue` 里的
 `.install-help`），客户不用找客服就能自助解决。

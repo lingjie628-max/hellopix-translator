@@ -100,21 +100,34 @@
           <summary>macOS 首次打开被系统拦截？点这里</summary>
           <div class="install-help-body">
             <p class="install-help-lead">
-              这不是安装包损坏，是 macOS 对<strong>尚未公证</strong>的应用的默认拦截。按提示分两种：
+              这不是安装包损坏，是 macOS 对<strong>尚未公证</strong>的应用的默认拦截。
+              按下面的步骤放行一次，之后就和自己装的软件一样，双击即可打开。
             </p>
+            <p class="install-help-step"><b>第 1 步：先把 Hello Pix 拖进「应用程序」文件夹，再从那里双击打开</b>
+              —— 别直接在 dmg 或「下载」里运行，那样系统会把它当成临时文件。</p>
             <ol>
               <li>
-                <b>提示「无法验证开发者」</b>：在「应用程序」里<strong>右键点 Hello Pix → 打开</strong>，
-                再在弹窗里点一次「打开」。只需一次，之后就正常了。
+                <b>如果你的系统是 macOS 15（Sequoia）或更新</b>（大多数用户）：
+                双击后会出现「无法验证开发者」的提示，点「完成」关掉。然后打开
+                <strong>系统设置 → 隐私与安全性</strong>，向下滚到「安全性」一节，
+                点「<strong>仍要打开</strong>」，输入开机密码即可。
+                这个入口在你尝试打开后约一小时内有效。
               </li>
               <li>
-                <b>提示「已损坏，无法打开」</b>：说明你用的是旧安装包（0.1.6 及更早）。
-                请先下载上方的新版；若仍遇到，打开「终端」粘贴下面这行回车，再重新打开即可：
-                <code>xattr -cr /Applications/Hello\ Pix.app</code>
+                <b>如果你的系统是 macOS 14 或更早</b>：在「应用程序」里
+                <strong>右键点 Hello Pix → 打开</strong>，再在弹窗里点一次「打开」。
+              </li>
+              <li>
+                <b>如果提示「已损坏，无法打开」</b>：说明你下载的是 0.1.6 或更早的安装包，
+                它的签名有缺陷、系统不给放行入口。请回到上方重新下载新版即可解决。
               </li>
             </ol>
+            <p class="install-help-alt">
+              不想点这么多？也可以打开「终端」，粘贴下面这行回车，效果一样（把隔离标记去掉）：
+              <code>xattr -cr /Applications/Hello\ Pix.app</code>
+            </p>
             <p class="install-help-foot">
-              我们正在申请 Apple 开发者证书并做公证。完成后双击即可打开，以上步骤都不再需要。
+              我们正在申请 Apple 开发者证书并做公证。完成后连这一步都不再需要，双击即开。
             </p>
           </div>
         </details>
@@ -558,6 +571,8 @@ export default {
 .install-help-body li { margin-bottom: 12px; }
 .install-help-body b { color: var(--w-text, #111827); }
 .install-help-lead { margin: 0 0 10px; }
+.install-help-step { margin: 0 0 12px; }
+.install-help-alt { margin: 14px 0 0; }
 .install-help-body code {
   display: inline-block; margin-top: 8px; padding: 7px 11px; border-radius: 6px;
   background: var(--w-code-bg, #f3f4f6); color: var(--w-text, #111827);
