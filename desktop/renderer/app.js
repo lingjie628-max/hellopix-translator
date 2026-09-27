@@ -232,6 +232,49 @@ function applySupport(info) {
   footerDownloads = s.downloads
   supportBtn.textContent = s.btnText
   supportBtn.style.display = s.show ? '' : 'none'
+  syncFooterDownloads(s.downloads)
+}
+
+/**
+ * 纯函数：某个下载入口在当前下发数据下是否该显示。
+ *
+ * 刻意与 DOM 操作分开，是为了能被测试**直接执行** —— 渲染层没有 DOM 环境
+ * （仓库里没有 jsdom），抽不出纯逻辑的话就只能退化成正则匹配源码，那测不出
+ * "点击是否真的会失效"这种语义。
+ */
+function footerDownloadVisible(key, downloads) {
+  // app 走 checkUpdate、standalone 走 standaloneApps（空列表时会弹提示），
+  // 两者都不依赖 downloads[key]，因此不能按 URL 判断显隐。
+  if (key === 'app' || key === 'standalone') return true
+  return Boolean(String((downloads || {})[key] || ''))
+}
+
+/**
+ * 让底部下载入口按**真实上架情况**显隐。
+ *
+ * 背景：index.html 里「安卓手机版」「苹果手机版」是静态写死的按钮，而产品
+ * 没有任何移动端 —— 服务端 `clientDownloads.android` / `.ios` 下发的是空字符串
+ * （core-service.js 的 `download()` 在 client_releases 里找不到记录就返回 ''，
+ * 2026-09-27 在生产 /apis/site/info 上实测确实为空）。
+ *
+ * 于是用户点下去**毫无反应**：`runFooterAction` 对空 URL 直接 `return`，
+ * 既不打开链接也不报错，看起来就是"软件坏了"。这与迁移 035 的结论也直接冲突 ——
+ * 035 刚把「手机版」这个兑现不了的权益承诺从套餐文案里摘掉，客户端底部却还在
+ * 暗示有两个手机版可以下载。
+ *
+ * 两点讲究：
+ *
+ *   1. 用**排除法**而不是白名单：除了 app / standalone 这两个特例，其余一律
+ *      "没地址就不显示"。这样以后新增任何下载入口都自动安全，不会又冒出一个
+ *      死按钮 —— 白名单会让新入口默认可见。
+ *   2. 是**显隐**而不是删按钮：哪天移动端真上架、后台配了发布记录，
+ *      按钮自动出现，不需要再改客户端代码、也就不必再发一次版。
+ */
+function syncFooterDownloads(downloads) {
+  document.querySelectorAll('[data-footer-action="download"]').forEach(btn => {
+    const key = btn.dataset.downloadKey || ''
+    btn.style.display = footerDownloadVisible(key, downloads) ? '' : 'none'
+  })
 }
 
 async function loadSupport() {
