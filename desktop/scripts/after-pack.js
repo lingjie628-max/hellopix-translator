@@ -33,19 +33,33 @@
  *
  * 所以这一步把用户从"必须开终端"降到"右键打开一下"。
  *
- * ## 这不是终点
+ * ## ad-hoc 与正式签名怎么共存
  *
  * ad-hoc 签名**不证明开发者身份**，也无法公证。要让用户双击即开、零提示，
- * 唯一的路是 Apple Developer Program（$99/年）→ Developer ID Application
- * 证书 → 签名 + 公证。届时：
+ * 必须走 Apple Developer Program → Developer ID Application 证书 → 签名 + 公证。
  *
- *   1. 删掉 package.json 里 mac 的 `identity: null`（让它自动发现证书）；
- *   2. 设置 APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID；
- *   3. electron-builder 会自动签名并公证 —— @electron/notarize 已经作为
- *      electron-builder 的依赖装在 node_modules 里，**不需要新增依赖**。
+ * 配置侧已经铺好（见 package.json 的 mac 段）：`identity` 不再写死 `null`，
+ * 而是留空让 electron-builder **自动发现** Developer ID Application 证书
+ * （它只认这一种类型，不会误用 Apple Development）；并显式指定了
+ * hardenedRuntime / entitlements / notarize。
  *
- * 本钩子在本机没有证书时兜底；有证书时 electron-builder 的正式签名会跑在
- * 本钩子**之后**，把这里的 ad-hoc 签名覆盖掉，因此两者不冲突。
+ * **关键**：`identity: null` 会让 electron-builder 在 `sign()` 里直接 return，
+ * 连公证都不会尝试（`notarizeIfProvided` 排在那之后）。所以那三个字不删掉，
+ * 公证永远不可能发生 —— 这是它必须被移除的原因，不是风格问题。
+ *
+ * 本钩子的职责随之变成"**判断该不该兜底**"：
+ *
+ *   · 钥匙串里有 Developer ID Application → 交给 electron-builder 正式签名，
+ *     本钩子跳过（否则会留下 `--timestamp=none` 的 ad-hoc 签，而公证
+ *     **要求安全时间戳**，那是隐患 —— 虽然正式签名会覆盖它，但没必要冒这个险）。
+ *   · 没有证书 → 本钩子兜底做 ad-hoc，把用户从"必须开终端"降到"点一下放行"。
+ *
+ * 顺序上是安全的：本钩子（afterPack）跑在 electron-builder 签名**之前**
+ * （macPackager.js 里 emitAfterPack 在 doSignAfterPack 之上），
+ * 所以跳过与否都不会覆盖正式签名。
+ *
+ * 用 `PIX_ADHOC_SIGN=1` 可强制走 ad-hoc（调试用）；
+ * `PIX_ADHOC_SIGN=0` 则要求必须有证书，没有就构建失败。
  *
  * ## 失败即中断构建（fail-closed）
  *
@@ -75,6 +89,30 @@ function codesign(args) {
   return { status: result.status, output: `${result.stdout || ''}${result.stderr || ''}` }
 }
 
+/**
+ * 钥匙串里有没有可用的 Developer ID Application 证书。
+ *
+ * 用 electron-builder 自己用的同一条命令去问，而不是自己读文件 ——
+ * 判定口径必须与它一致，否则会出现"本钩子跳过了、它也没签"的空档，
+ * 那产出的就是 0.1.6 那种**连签名都没有**的包，比 ad-hoc 更糟。
+ *
+ * 返回证书的可读名（用于日志），没有则返回 null。
+ */
+function detectDeveloperIdIdentity() {
+  const result = spawnSync('security', ['find-identity', '-v', '-p', 'codesigning'], {
+    encoding: 'utf8',
+    timeout: 30 * 1000
+  })
+  if (result.error) throw result.error
+  if (result.status !== 0) return null
+  const line = (result.stdout || '')
+    .split('\n')
+    .find(it => /Developer ID Application/.test(it))
+  if (!line) return null
+  const quoted = /"([^"]+)"/.exec(line)
+  return quoted ? quoted[1] : 'Developer ID Application'
+}
+
 async function afterPack(context) {
   // 只管 macOS。Windows / Linux 的打包流程完全不受影响。
   if (context.electronPlatformName !== 'darwin') return
@@ -83,6 +121,37 @@ async function afterPack(context) {
   const appPath = path.join(context.appOutDir, `${productName}.app`)
   if (!fs.existsSync(appPath)) {
     throw new Error(`[adhoc-sign] 找不到待签名的应用：${appPath}`)
+  }
+
+  // ---- 决定该不该兜底 --------------------------------------------------------
+  //
+  // 判定优先级（高 →低）：
+  //   1. PIX_ADHOC_SIGN=1/0 —— 显式指定，用于调试与"必须公证"的发版流程
+  //   2. 钥匙串里有 Developer ID Application —— 让 electron-builder 正式签名
+  //   3. 都没有 —— 本钩子做 ad-hoc 兜底
+  const override = process.env.PIX_ADHOC_SIGN
+  if (override != null && override !== '' && override !== '0' && override !== '1') {
+    throw new Error(`[adhoc-sign] PIX_ADHOC_SIGN 只能是 0 或 1，收到「${override}」`)
+  }
+
+  const developerId = detectDeveloperIdIdentity()
+
+  if (override === '0' && !developerId) {
+    throw new Error(
+      '[adhoc-sign] PIX_ADHOC_SIGN=0 要求本机存在 Developer ID Application 证书，但钥匙串里没有。\n'
+      + '  这是刻意的 fail-closed：发版流程一旦要求公证，就不该在没证书的机器上\n'
+      + '  静默产出一个用户装不上的包。'
+    )
+  }
+
+  const doAdhoc = override === '1' ? true : (override === '0' ? false : !developerId)
+  if (!doAdhoc) {
+    console.log(`[adhoc-sign] 检测到 Developer ID Application${developerId ? `（${developerId}）` : ''}，`
+      + '跳过 ad-hoc —— 交由 electron-builder 正式签名并公证（afterSign 会复核票据）')
+    return
+  }
+  if (developerId) {
+    console.log(`[adhoc-sign] 本机有证书（${developerId}），但 PIX_ADHOC_SIGN=1 要求强制走 ad-hoc`)
   }
 
   console.log(`[adhoc-sign] 对 ${productName}.app 做 ad-hoc 签名（${context.arch}）…`)

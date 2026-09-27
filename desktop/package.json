@@ -9,6 +9,7 @@
   "scripts": {
     "start": "electron .",
     "pack:mac": "electron-builder --mac --publish never",
+    "pack:mac:release": "PIX_REQUIRE_NOTARIZED=1 electron-builder --mac --publish never",
     "pack:win": "electron-builder --win --publish never",
     "pack:all": "electron-builder --mac --win --publish never",
     "pack:dir": "electron-builder --dir --publish never"
@@ -29,6 +30,7 @@
       "buildResources": "build"
     },
     "afterPack": "scripts/after-pack.js",
+    "afterSign": "scripts/after-sign.js",
     "files": [
       "main.js",
       "preload.js",
@@ -70,7 +72,10 @@
         }
       ],
       "darkModeSupport": true,
-      "identity": null
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": true
     },
     "dmg": {
       "title": "Hello Pix ${version}",

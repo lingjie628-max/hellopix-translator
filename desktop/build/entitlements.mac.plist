@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    签名 macOS 应用时使用的 entitlements。
+
+    为什么是这三条（Electron 官方要求，缺了会直接崩或公证失败）：
+
+    1. com.apple.security.cs.allow-jit
+       V8 需要 JIT。Electron 20+ 在 arm64 上**没有这条会启动即崩**。
+    2. com.apple.security.cs.allow-unsigned-executable-memory
+       V8 仍会申请可写可执行内存（JIT 代码页）。
+    3. com.apple.security.cs.disable-library-validation
+       公证强制要求 hardened runtime，而它会开启 library validation ——
+       这会拒绝 Team ID 与主程序不同的框架。Electron 自带的 Framework
+       必须被允许加载，否则应用起不来。
+
+    注意：这三条与 electron-builder 内置的默认模板
+    （app-builder-lib/templates/entitlements.mac.plist）**内容完全一致**。
+    之所以还是显式写出来，是为了让它进版本管理、可被 review、日后要加
+    （比如接打印机、访问摄像头）时有个明确的落点 —— 而不是藏在依赖包里。
+
+    本文件同时用于主程序与嵌套二进制（见 package.json 的 entitlementsInherit）。
+  -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>
