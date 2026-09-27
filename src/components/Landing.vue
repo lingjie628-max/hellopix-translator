@@ -105,7 +105,10 @@
               <br>安装包里也附了同一份说明（<code class="inline">首次打开说明.txt</code>），不用回来找。
             </p>
             <p class="install-help-step"><b>第 1 步：先把 Hello Pix 拖进「应用程序」文件夹，再从那里双击打开</b>
-              —— 别直接在 dmg 或「下载」里运行，那样系统会把它当成临时文件。</p>
+              —— 别直接在 dmg 或「下载」里运行，那样系统会把它当成临时文件。
+              <br><b class="warn">装过旧版本的话，必须让它替换掉旧的那个</b>：Finder 会问「已存在同名项目，
+              要替换吗？」，选<strong>「替换」</strong>。否则你双击的仍然是旧版本，怎么放行都没用
+              —— 这是最常见的一种「试了还是打不开」。</p>
             <ol>
               <li>
                 <b>如果你的系统是 macOS 15（Sequoia）或更新</b>（大多数用户）：
@@ -119,8 +122,9 @@
                 <strong>右键点 Hello Pix → 打开</strong>，再在弹窗里点一次「打开」。
               </li>
               <li>
-                <b>如果提示「已损坏，无法打开」</b>：说明你下载的是 0.1.6 或更早的安装包，
-                它的签名有缺陷、系统不给放行入口。请回到上方重新下载新版即可解决。
+                <b>如果提示「已损坏，无法打开」</b>：说明你装的是 0.1.6 或更早的版本，
+                它的签名有缺陷、系统不给放行入口，<strong>怎么点都没用</strong>。
+                请重新下载上方的新版，并确认替换掉「应用程序」里的旧版本。
               </li>
             </ol>
             <p class="install-help-alt">
@@ -573,6 +577,9 @@ export default {
 .install-help-body b { color: var(--w-text, #111827); }
 .install-help-lead { margin: 0 0 10px; }
 .install-help-step { margin: 0 0 12px; }
+/* 「必须替换旧版本」这句是客户最常踩的坑（双击的其实是没换掉的旧版），
+   给一点视觉权重，别让它淹没在正文里。 */
+.install-help-step .warn { color: #b45309; }
 .install-help-alt { margin: 14px 0 0; }
 .install-help-body code {
   display: inline-block; margin-top: 8px; padding: 7px 11px; border-radius: 6px;
