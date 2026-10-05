@@ -41,6 +41,8 @@ contextBridge.exposeInMainWorld('pix', {
   showContextMenu: (payload) => ipcRenderer.invoke('app:showContextMenu', payload),
   restartApp: () => ipcRenderer.invoke('app:restart'),
   updateTabSettings: (id, settings) => ipcRenderer.invoke('app:updateSettings', { id: id, settings: settings }),
+  // 读取某条线路当前的代理配置（供「代理设置」弹窗回填，只回代理字段）
+  proxySettings: (id) => ipcRenderer.invoke('app:proxySettings', { id: id }),
   home: () => ipcRenderer.invoke('app:home'),
   version: () => ipcRenderer.invoke('app:version'),
   checkUpdate: () => ipcRenderer.invoke('app:checkUpdate'),
@@ -69,5 +71,9 @@ contextBridge.exposeInMainWorld('pix', {
   },
   onContextCommand: (cb) => {
     ipcRenderer.on('context:command', (_event, command) => cb(command))
+  },
+  // 右键菜单点了「代理设置」：主进程只回传线路 id，渲染层据此打开弹窗
+  onProxySettings: (cb) => {
+    ipcRenderer.on('context:proxySettings', (_event, id) => cb(id))
   }
 })

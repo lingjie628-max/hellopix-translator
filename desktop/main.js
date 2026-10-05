@@ -11,6 +11,18 @@ const { spawn } = require('child_process')
 const fallbackPlatforms = require('./platforms')
 const builtinLines = require('./lines')
 const proxyPresets = require('./proxy-presets')
+// 代理的构建与应用抽到独立模块：产品、单元测试、机制测试共用**同一份实现**。
+// 这几个函数原先内联在 main.js 里，而 main.js 一 require 就会加载 electron，
+// 普通 Node 加载不了 —— 于是最需要回归保护的代理逻辑一个测试都没有。
+const proxySettings = require('./proxy-settings')
+const {
+  sanitizeProxyPart,
+  parseProxyHostLine,
+  proxyRulesOf,
+  proxySettingsOf,
+  proxyFieldsChanged,
+  applyTabProxy
+} = proxySettings
 const instanceSlot = require('./instance-slot')
 const backgroundMode = require('./background-mode')
 const {
@@ -1150,10 +1162,26 @@ function tabPrefs(tab) {
   }
 }
 
-function updateTabSettings(id, patch) {
+/**
+ * 只 reload 目标线路自己的 webContents。
+ *
+ * 为什么必须 reload：`setProxy` 只影响**之后新建的连接**，已经建立的
+ * socket 会继续走旧代理。不 reload 的话用户会看到"保存成功但出口没变"，
+ * 正是本次要修的用户可感知症状。
+ * 只碰这一条线路的 webContents，其他 partition 完全不受影响。
+ */
+function reloadTabContents(tab) {
+  const wc = tab && tab.view && tab.view.webContents
+  if (!wc || wc.isDestroyed()) return
+  try { wc.reload() } catch (e) {}
+}
+
+async function updateTabSettings(id, patch) {
   const tab = tabs.find(t => t.id === String(id || ''))
   if (!tab) return { success: false, msg: '应用不存在' }
-  tab.settings = normalizeTabSettings(Object.assign({}, tab.settings || {}, patch || {}))
+  // 先留一份改动前的快照：下面要拿它和改完的结果比，判断"这次有没有动代理"。
+  const before = tab.settings || {}
+  tab.settings = normalizeTabSettings(Object.assign({}, before, patch || {}))
   if (tab.settings.muteAll !== undefined && tab.view && tab.view.webContents && !tab.view.webContents.isDestroyed()) {
     tab.view.webContents.setAudioMuted(!!tab.settings.muteAll)
   }
@@ -1167,7 +1195,18 @@ function updateTabSettings(id, patch) {
   saveOpenApps()
   if (barToggle && !showHome) animateChromeTo(chromeOffset())
   else layoutViews()
-  return { success: true }
+
+  // ── 代理即时生效 ──────────────────────────────────────────────
+  // 被修的缺陷：这个方法以前**只保存 settings**，从不把代理写进 session。
+  // applySessionProxy 全项目只有 startTabLoad 一个调用点，于是"改一条已存在
+  // 线路的代理"永远不生效，必须关掉线路重建才行。
+  // 修法：复用同一个 applyTabProxy（不另写一套），并只 reload 这条线路。
+  const proxyChanged = proxyFieldsChanged(before, tab.settings)
+  if (proxyChanged) {
+    await applyTabProxy(tab, { restartSshTunnel: startSshTunnel })
+    reloadTabContents(tab)
+  }
+  return { success: true, proxyChanged: proxyChanged }
 }
 
 function stripEmoji(text) {
@@ -1231,72 +1270,9 @@ function pushPrefsToGuest(view) {
   view.webContents.send('translate:prefs', prefs)
 }
 
-function proxyPresetOf(id) {
-  return proxyPresets.find(item => item.id === id) || proxyPresets[0]
-}
-
-function sanitizeProxyPart(raw, max) {
-  const text = String(raw || '').trim()
-  if (!text || text.length > (max || 260) || /[\s<>'"\\]/.test(text)) return ''
-  return text
-}
-
-function parseProxyHostLine(raw) {
-  const text = String(raw || '').trim().replace(/^(socks5h?|https?):\/\//i, '')
-  if (!text) return {}
-  const authAt = text.lastIndexOf('@')
-  if (authAt > 0) {
-    const auth = text.slice(0, authAt)
-    const hostPort = text.slice(authAt + 1)
-    const colon = auth.indexOf(':')
-    const hp = hostPort.split(':')
-    return {
-      user: colon >= 0 ? auth.slice(0, colon) : auth,
-      pass: colon >= 0 ? auth.slice(colon + 1) : '',
-      host: hp[0] || '',
-      port: hp[1] || ''
-    }
-  }
-  const parts = text.split(':')
-  if (parts.length >= 4) {
-    return { host: parts[0], port: parts[1], user: parts[2], pass: parts.slice(3).join(':') }
-  }
-  if (parts.length === 2 && /^\d+$/.test(parts[1])) {
-    return { host: parts[0], port: parts[1] }
-  }
-  return { host: text }
-}
-
-function proxyRulesOf(settings) {
-  const type = String((settings && settings.proxyType) || 'none')
-  if (!type || type === 'none') return ''
-  const preset = proxyPresetOf(type)
-  if (preset.kind === 'direct') return ''
-  if (type === 'ssh' && settings.proxyLocal) return 'socks5://' + settings.proxyLocal
-  let host = sanitizeProxyPart(settings.proxyHost, 180)
-  let port = sanitizeProxyPart(settings.proxyPort, 8)
-  let user = String((settings && settings.proxyUser) || '').trim()
-  let pass = String((settings && settings.proxyPass) || '').trim()
-  const parsed = parseProxyHostLine(settings.proxyHost || settings.proxyNode || '')
-  if (!host && parsed.host) host = sanitizeProxyPart(parsed.host, 180)
-  if (!port && parsed.port) port = sanitizeProxyPart(parsed.port, 8)
-  if (!user && parsed.user) user = String(parsed.user).trim()
-  if (!pass && parsed.pass) pass = String(parsed.pass).trim()
-  if (settings.proxyNode && !host) {
-    const node = parseProxyHostLine(settings.proxyNode)
-    host = sanitizeProxyPart(node.host, 180)
-    port = port || sanitizeProxyPart(node.port, 8)
-    user = user || String(node.user || '').trim()
-    pass = pass || String(node.pass || '').trim()
-  }
-  if (!host) return ''
-  const scheme = String((settings && settings.proxyScheme) || preset.scheme || 'socks5').toLowerCase()
-  const proto = scheme === 'https' ? 'https' : scheme === 'http' ? 'http' : 'socks5'
-  const auth = user || pass
-    ? encodeURIComponent(user) + ':' + encodeURIComponent(pass) + '@'
-    : ''
-  return proto + '://' + auth + host + (port ? ':' + port : '')
-}
+// 代理规则的构建（proxyPresetOf / sanitizeProxyPart / parseProxyHostLine /
+// proxyRulesOf）已移到 ./proxy-settings.js，这里通过上方解构引用同一份实现。
+// 不要在本文件里重新实现一套 —— 两份实现必然漂移，而这份逻辑是本次缺陷的中心。
 
 function stopSshTunnel(tab) {
   if (!tab || !tab.sshProc) return
@@ -1480,20 +1456,14 @@ async function detectProxyNode(payload) {
   }
 }
 
-function applySessionProxy(ses, settings) {
-  const rules = proxyRulesOf(settings)
-  const next = rules
-    ? ses.setProxy({ proxyRules: rules, proxyBypassRules: '<local>' })
-    : ses.setProxy({ mode: 'direct' })
-  return Promise.resolve(next).catch(() => {})
-}
+// applySessionProxy 的实现已移到 ./proxy-settings.js。
+// 这里不再保留第二份 —— 由 applyTabProxy 统一调度「ssh 隧道 → 写 session」。
 
 function startTabLoad(tab) {
   if (!tab || !tab.view || !tab.view.webContents || tab.view.webContents.isDestroyed()) return
-  const ready = String((tab.settings && tab.settings.proxyType) || '') === 'ssh'
-    ? startSshTunnel(tab)
-    : Promise.resolve()
-  ready.then(() => applySessionProxy(tab.view.webContents.session, tab.settings)).finally(() => {
+  // 新建线路 / 重启恢复走这里；修改已存在线路的代理走 updateTabSettings。
+  // 两条路径都必须经过 applyTabProxy，否则又会退回"改了不生效"的老缺陷。
+  applyTabProxy(tab, { restartSshTunnel: startSshTunnel }).finally(() => {
     if (!tab.view || !tab.view.webContents || tab.view.webContents.isDestroyed()) return
     tab.view.webContents.loadURL(tab.url)
   })
@@ -2046,6 +2016,17 @@ function openLogDir() {
   }).catch(error => console.error('[hello-pix] 打开日志目录失败：', error))
 }
 
+/**
+ * 在**已存在的线路**上打开「代理设置」。
+ *
+ * 只把线路 id 发给渲染层，由弹窗去编辑这条线路自己的 proxy settings：
+ * 不新建线路、不新建 partition、不动 usedCount、不改 tab id ——
+ * 这恰是旧版缺的入口（旧版只能新建线路，改不了已有线路的代理）。
+ */
+function openProxySettingsFor(id) {
+  if (win && !win.isDestroyed()) win.webContents.send('context:proxySettings', String(id || ''))
+}
+
 function popupTabContextMenu(payload) {
   const id = String((payload && payload.id) || '')
   const home = !!(payload && payload.home)
@@ -2078,6 +2059,7 @@ function popupTabContextMenu(payload) {
       { label: '还原缩放', accelerator: 'CmdOrCtrl+0', click: () => wc.setZoomFactor(1) },
       { type: 'separator' },
       { label: '刷新当前应用', accelerator: 'CmdOrCtrl+R', click: () => wc.reload() },
+      { label: '代理设置', click: () => openProxySettingsFor(tab.id) },
       { label: '检查应用更新', click: () => updatePlatformWeb(tab.platform) },
       {
         label: '清理当前应用缓存',
@@ -2194,6 +2176,21 @@ ipcMain.handle('app:restart', () => {
     app.exit(0)
   }, 120)
   return { success: true }
+})
+/**
+ * 读取一条线路当前的代理配置，供「代理设置」弹窗回填。
+ *
+ * 只回传代理字段（proxySettingsOf），不把整份 settings 抖给渲染层。
+ * proxyPass 在内存里本就是明文（与新建线路时一致），弹窗需要它回填 ——
+ * 这与「新增应用」弹窗从预设回填密码的行为保持一致；
+ * 落盘时仍由 saveOpenApps 走 sealSettings 加密。
+ */
+ipcMain.handle('app:proxySettings', (event, payload) => {
+  if (!isMainSender(event)) return rejectUntrustedSender()
+  const id = String((payload && payload.id) || '')
+  const tab = tabs.find(t => t.id === id)
+  if (!tab) return { success: false, msg: '应用不存在' }
+  return { success: true, data: proxySettingsOf(tab.settings) }
 })
 ipcMain.handle('app:updateSettings', (_event, payload) => updateTabSettings((payload && payload.id) || '', (payload && payload.settings) || {}))
 ipcMain.handle('app:home', () => goHome())

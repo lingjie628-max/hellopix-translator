@@ -141,6 +141,29 @@ const geoTz = document.getElementById('geoTz')
 const geoZip = document.getElementById('geoZip')
 const geoQuality = document.getElementById('geoQuality')
 const geoHistory = document.getElementById('geoHistory')
+
+// 「代理设置」（编辑已存在线路的代理）弹窗元素
+const proxySettings = document.getElementById('proxySettings')
+const proxySettingsCard = document.getElementById('proxySettingsCard')
+const proxySettingsFor = document.getElementById('proxySettingsFor')
+const proxySettingsX = document.getElementById('proxySettingsX')
+const psProxyType = document.getElementById('psProxyType')
+const psProxyScheme = document.getElementById('psProxyScheme')
+const psProxySchemeCell = document.getElementById('psProxySchemeCell')
+const psProxyHostSel = document.getElementById('psProxyHostSel')
+const psProxyHost = document.getElementById('psProxyHost')
+const psProxyHostCell = document.getElementById('psProxyHostCell')
+const psProxyPort = document.getElementById('psProxyPort')
+const psProxyPortCell = document.getElementById('psProxyPortCell')
+const psProxyUser = document.getElementById('psProxyUser')
+const psProxyUserCell = document.getElementById('psProxyUserCell')
+const psProxyPass = document.getElementById('psProxyPass')
+const psProxyPassCell = document.getElementById('psProxyPassCell')
+const psProxyTip = document.getElementById('psProxyTip')
+const psProxyMsg = document.getElementById('psProxyMsg')
+const psProxyDirect = document.getElementById('psProxyDirect')
+const psProxyCancel = document.getElementById('psProxyCancel')
+const psProxySave = document.getElementById('psProxySave')
 const addCard = document.querySelector('#addApp .add-card')
 
 /**
@@ -491,7 +514,7 @@ function show(el, on) {
 }
 
 function overlayVisible() {
-  return !profile.classList.contains('hidden') || !transPanel.classList.contains('hidden') || !lockScreen.classList.contains('hidden') || !addApp.classList.contains('hidden') || !updatePanel.classList.contains('hidden') || !standalonePanel.classList.contains('hidden')
+  return !profile.classList.contains('hidden') || !transPanel.classList.contains('hidden') || !lockScreen.classList.contains('hidden') || !addApp.classList.contains('hidden') || !proxySettings.classList.contains('hidden') || !updatePanel.classList.contains('hidden') || !standalonePanel.classList.contains('hidden')
 }
 
 function syncOverlay() {
@@ -504,6 +527,7 @@ function showOverlay(el, on) {
     show(transPanel, el === transPanel)
     show(lockScreen, el === lockScreen)
     show(addApp, el === addApp)
+    show(proxySettings, el === proxySettings)
     show(updatePanel, el === updatePanel)
     show(standalonePanel, el === standalonePanel)
   } else {
@@ -877,6 +901,158 @@ function showProxyCell(el, on) {
   if (el) el.style.display = on ? '' : 'none'
 }
 
+// ───────────────────────────────────────────────────────────────
+// 已存在线路的「代理设置」
+//
+// 只编辑**这一条线路自己**的代理：不新建线路、不新建 partition、
+// 不动 usedCount、不换 tab id —— 因此登录态不受影响。
+// 保存后由主进程 updateTabSettings 立刻把代理写进该线路的 session。
+// ───────────────────────────────────────────────────────────────
+
+let proxySettingsTabId = ''
+
+function psPresetOf() {
+  return proxyPresetRows.find(item => item.id === psProxyType.value) || proxyPresetRows[0] || { id: 'none', kind: 'direct' }
+}
+
+/**
+ * 类型下拉列出全部预设。
+ * 这样线路里已存的任何 proxyType（含各家厂商预设）都能原样回填，
+ * 不会因为弹窗不认识它而被悄悄改成直连。
+ */
+function psFillTypeOptions() {
+  if (psProxyType.options.length || !proxyPresetRows.length) return
+  psProxyType.innerHTML = proxyPresetRows.map(item => {
+    return '<option value="' + esc(item.id) + '">' + esc(item.name) + '</option>'
+  }).join('')
+}
+
+function psSchemeOptions(preset) {
+  const list = (preset && preset.schemes && preset.schemes.length) ? preset.schemes : ['socks5', 'http', 'https']
+  psProxyScheme.innerHTML = list.map(item => {
+    const label = item === 'socks5' ? 'Socks5' : item.toUpperCase()
+    return '<option value="' + item + '">' + label + '</option>'
+  }).join('')
+}
+
+function psApplyHostChoice(preset) {
+  const hosts = (preset && preset.hosts) || []
+  if (!hosts.length) return
+  const selected = hosts.find(item => item.id === psProxyHostSel.value) || hosts[0]
+  psProxyHost.value = selected.host
+  psProxyPort.value = String(selected.port || preset.defaultPort || '')
+  if (selected.scheme && Array.prototype.some.call(psProxyScheme.options, o => o.value === selected.scheme)) {
+    psProxyScheme.value = selected.scheme
+  }
+}
+
+/**
+ * 按选中的代理类型显示/隐藏字段，并尽量保留 keep 里的已有配置。
+ * 与「新增应用」的 syncProxyFields 是同一套语义，只是换了元素。
+ */
+function psSyncFields(keep) {
+  psFillTypeOptions()
+  const preset = psPresetOf()
+  const kind = preset.kind || 'direct'
+  const on = kind !== 'direct'
+  showProxyCell(psProxyHostCell, on)
+  showProxyCell(psProxyPortCell, on)
+  showProxyCell(psProxySchemeCell, on && kind !== 'ssh')
+  showProxyCell(psProxyUserCell, on)
+  showProxyCell(psProxyPassCell, on && kind !== 'ssh')
+  if (proxySettingsCard) proxySettingsCard.classList.toggle('wide', on)
+  psProxyTip.textContent = on ? (preset.tip || '只对这条线路生效，不影响其他线路。') : '直连，不走代理。'
+  if (!on) return
+  const hosts = preset.hosts || []
+  psProxyHostSel.style.display = hosts.length ? '' : 'none'
+  if (hosts.length) {
+    psProxyHostSel.innerHTML = hosts.map(item => {
+      return '<option value="' + esc(item.id) + '">' + esc(item.label || item.host) + '</option>'
+    }).join('') + (preset.hostEditable ? '<option value="custom">自定义主机</option>' : '')
+    const match = hosts.find(item => item.host === psProxyHost.value.trim())
+    psProxyHostSel.value = match ? match.id : (preset.hostEditable ? 'custom' : hosts[0].id)
+  }
+  psProxyHost.readOnly = !!(hosts.length && psProxyHostSel.value !== 'custom' && !preset.hostEditable && kind !== 'custom')
+  if (kind === 'custom' || kind === 'ssh') {
+    psProxyHost.readOnly = false
+    psProxyHost.placeholder = kind === 'ssh' ? 'ssh.example.com' : '127.0.0.1 或 主机:端口:账号:密码'
+  }
+  psSchemeOptions(preset)
+  const wanted = keep && keep.proxyScheme ? String(keep.proxyScheme) : String(preset.scheme || '')
+  if (wanted && Array.prototype.some.call(psProxyScheme.options, o => o.value === wanted)) {
+    psProxyScheme.value = wanted
+  }
+}
+
+/** 打开弹窗并回填这条线路**当前**的代理配置。 */
+async function openProxySettings(id) {
+  const tabId = String(id || '')
+  if (!tabId) return
+  proxySettingsTabId = tabId
+  psProxyMsg.textContent = ''
+  let data = {}
+  try {
+    const resp = await window.pix.proxySettings(tabId)
+    if (resp && resp.success && resp.data) data = resp.data
+  } catch (e) {}
+  const rows = (window.__lastTabState && window.__lastTabState.rows) || []
+  const tab = rows.find(item => item.id === tabId)
+  proxySettingsFor.textContent = tab
+    ? ('线路：' + (tab.title || tab.name || tabId))
+    : ('线路：' + tabId)
+  psFillTypeOptions()
+  if (psProxyType.options.length) {
+    psProxyType.value = data.proxyType || 'none'
+    if (!Array.prototype.some.call(psProxyType.options, o => o.value === psProxyType.value)) {
+      psProxyType.value = 'none'
+    }
+  }
+  psProxyHost.value = data.proxyHost || ''
+  psProxyPort.value = data.proxyPort ? String(data.proxyPort) : ''
+  psProxyUser.value = data.proxyUser || ''
+  psProxyPass.value = data.proxyPass || ''
+  psSyncFields(data)
+  const preset = psPresetOf()
+  if ((preset.hosts || []).length && !psProxyHost.value.trim() && psProxyHostSel.value !== 'custom') {
+    psApplyHostChoice(preset)
+  }
+  psProxySave.disabled = false
+  psProxySave.textContent = '保存'
+  showOverlay(proxySettings, true)
+}
+
+/** 只读取代理相关字段，绝不顺带写回其他设置。 */
+function readProxySettingsForm() {
+  const preset = psPresetOf()
+  const kind = preset.kind || 'direct'
+  if (kind === 'direct') {
+    return { proxyType: 'none', proxyScheme: '', proxyHost: '', proxyPort: '', proxyUser: '', proxyPass: '' }
+  }
+  return {
+    proxyType: psProxyType.value || 'none',
+    proxyScheme: psProxyScheme.value || preset.scheme || 'socks5',
+    proxyHost: psProxyHost.value.trim(),
+    proxyPort: psProxyPort.value.trim(),
+    proxyUser: psProxyUser.value.trim(),
+    proxyPass: psProxyPass.value
+  }
+}
+
+async function saveProxySettings(patch) {
+  if (!proxySettingsTabId) return
+  psProxySave.disabled = true
+  psProxySave.textContent = '保存中'
+  try {
+    const resp = await window.pix.updateTabSettings(proxySettingsTabId, patch)
+    if (!resp || resp.success === false) throw new Error((resp && resp.msg) || '保存失败')
+    showOverlay(proxySettings, false)
+  } catch (e) {
+    psProxyMsg.textContent = (e && e.message) || '保存失败'
+    psProxySave.disabled = false
+    psProxySave.textContent = '保存'
+  }
+}
+
 function fillGeoForm(geo) {
   const row = geo || {}
   geoIp.value = row.ip || ''
@@ -969,35 +1145,43 @@ function applyHostChoice(preset, keepValues) {
   if (selected.scheme) addProxyScheme.value = selected.scheme
 }
 
-function applyProxyPaste(raw) {
+/**
+ * 把「主机:端口:账号:密码」/「账号:密码@主机:端口」整行拆成字段。
+ * 「新增应用」和「代理设置」两个弹窗共用同一份解析 —— 不写第二套。
+ */
+function parseProxyLine(raw) {
   const text = String(raw || '').trim().replace(/^(socks5h?|https?):\/\//i, '')
-  if (!text) return
+  if (!text) return null
   const at = text.lastIndexOf('@')
   if (at > 0) {
     const auth = text.slice(0, at)
     const hostPort = text.slice(at + 1)
     const colon = auth.indexOf(':')
     const hp = hostPort.split(':')
-    addProxyUser.value = colon >= 0 ? auth.slice(0, colon) : auth
-    addProxyPass.value = colon >= 0 ? auth.slice(colon + 1) : ''
-    addProxyHost.value = hp[0] || ''
-    if (hp[1]) addProxyPort.value = hp[1]
-    return
+    return {
+      user: colon >= 0 ? auth.slice(0, colon) : auth,
+      pass: colon >= 0 ? auth.slice(colon + 1) : '',
+      host: hp[0] || '',
+      port: hp[1] || ''
+    }
   }
   const parts = text.split(':')
   if (parts.length >= 4) {
-    addProxyHost.value = parts[0]
-    addProxyPort.value = parts[1]
-    addProxyUser.value = parts[2]
-    addProxyPass.value = parts.slice(3).join(':')
-    return
+    return { host: parts[0], port: parts[1], user: parts[2], pass: parts.slice(3).join(':') }
   }
   if (parts.length === 2 && /^\d+$/.test(parts[1])) {
-    addProxyHost.value = parts[0]
-    addProxyPort.value = parts[1]
-    return
+    return { host: parts[0], port: parts[1] }
   }
-  addProxyHost.value = text
+  return { host: text }
+}
+
+function applyProxyPaste(raw) {
+  const parsed = parseProxyLine(raw)
+  if (!parsed) return
+  if (parsed.host) addProxyHost.value = parsed.host
+  if (parsed.port) addProxyPort.value = parsed.port
+  if (parsed.user) addProxyUser.value = parsed.user
+  if (parsed.pass !== undefined) addProxyPass.value = parsed.pass
 }
 
 function syncProxyFields(keepValues) {
@@ -1668,6 +1852,56 @@ standaloneList.onclick = (event) => {
   if (btn && btn.dataset.url) window.pix.openUrl(btn.dataset.url)
 }
 updateLaterBtn.onclick = () => showOverlay(updatePanel, false)
+// 已存在线路的「代理设置」弹窗
+proxySettingsX.onclick = () => showOverlay(proxySettings, false)
+psProxyCancel.onclick = () => showOverlay(proxySettings, false)
+psProxyType.onchange = () => {
+  const preset = psPresetOf()
+  psSchemeOptions(preset)
+  psSyncFields(null)
+  if ((preset.hosts || []).length && psProxyHostSel.value !== 'custom') psApplyHostChoice(preset)
+}
+psProxyHostSel.onchange = () => {
+  const preset = psPresetOf()
+  if (psProxyHostSel.value === 'custom') {
+    psProxyHost.readOnly = false
+    psProxyHost.focus()
+    return
+  }
+  psApplyHostChoice(preset)
+  psProxyHost.readOnly = !preset.hostEditable && preset.kind !== 'custom'
+}
+// 与「新增应用」一致：粘贴整行时自动拆成主机/端口/账号/密码
+psProxyHost.addEventListener('blur', () => {
+  const value = psProxyHost.value.trim()
+  if (!value.includes(':') || value.split(':').length < 2) return
+  const parsed = parseProxyLine(value)
+  if (!parsed) return
+  if (parsed.host) psProxyHost.value = parsed.host
+  if (parsed.port) psProxyPort.value = parsed.port
+  if (parsed.user) psProxyUser.value = parsed.user
+  if (parsed.pass !== undefined) psProxyPass.value = parsed.pass
+})
+psProxySave.onclick = () => {
+  const patch = readProxySettingsForm()
+  if (patch.proxyType !== 'none' && !patch.proxyHost) {
+    psProxyMsg.textContent = '请填写代理主机'
+    psProxyHost.focus()
+    return
+  }
+  psProxyMsg.textContent = ''
+  saveProxySettings(patch)
+}
+// 删除代理：显式写 proxyType='none'，主进程会把这条线路的 session 复位成 direct
+psProxyDirect.onclick = () => saveProxySettings({
+  proxyType: 'none',
+  proxyScheme: '',
+  proxyHost: '',
+  proxyPort: '',
+  proxyUser: '',
+  proxyPass: ''
+})
+bindModalDismiss(proxySettings)
 addAppX.onclick = () => showOverlay(addApp, false)
 addCancel.onclick = () => showOverlay(addApp, false)
 addProxyType.onchange = () => syncProxyFields(false)
@@ -2141,6 +2375,10 @@ if (window.pix.onContextCommand) {
     if (command === 'account') userBox.click()
     if (command === 'softwareUpdate') systemUpdateBtn.click()
   })
+}
+// 右键菜单点了「代理设置」：主进程只回传线路 id，这里为这条已存在的线路开弹窗
+if (window.pix.onProxySettings) {
+  window.pix.onProxySettings(id => openProxySettings(id))
 }
 
 window.pix.getConfig().then(async cfg => {

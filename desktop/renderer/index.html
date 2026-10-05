@@ -383,6 +383,60 @@
     </div>
   </div>
 
+  <!--
+    已存在线路的「代理设置」。
+    只编辑这条线路自己的 proxy settings：不新建线路、不新建 partition、
+    不动 usedCount、不换 tab id —— 因此不会丢登录态。
+  -->
+  <div id="proxySettings" class="modal hidden">
+    <div class="add-card" id="proxySettingsCard">
+      <div class="add-head">
+        <h3 id="proxySettingsTitle">代理设置</h3>
+        <button id="proxySettingsX" type="button" class="add-x" aria-label="关闭">×</button>
+      </div>
+      <div class="add-body">
+        <p id="proxySettingsFor" class="add-ver"></p>
+        <section class="add-sec">
+          <h4>当前线路代理</h4>
+          <div class="add-sec-body">
+            <div class="add-grid">
+              <label class="cell">代理类型
+                <select id="psProxyType"></select>
+              </label>
+              <label class="cell" id="psProxySchemeCell">代理类型 / 协议
+                <select id="psProxyScheme">
+                  <option value="socks5">Socks5</option>
+                  <option value="http">HTTP</option>
+                  <option value="https">HTTPS</option>
+                </select>
+              </label>
+              <label class="cell" id="psProxyHostCell">代理主机
+                <select id="psProxyHostSel"></select>
+                <input id="psProxyHost" type="text" placeholder="主机或 主机:端口:账号:密码" autocomplete="off" spellcheck="false">
+              </label>
+              <label class="cell" id="psProxyPortCell">代理端口
+                <input id="psProxyPort" type="text" placeholder="1080" autocomplete="off" spellcheck="false">
+              </label>
+              <label class="cell" id="psProxyUserCell">代理账号
+                <input id="psProxyUser" type="text" placeholder="代理账号" autocomplete="off" spellcheck="false" maxlength="200">
+              </label>
+              <label class="cell" id="psProxyPassCell">代理密码
+                <input id="psProxyPass" type="text" placeholder="代理密码" autocomplete="off" maxlength="200">
+              </label>
+            </div>
+            <p id="psProxyTip" class="add-proxy-tip"></p>
+            <p id="psProxyMsg" class="add-proxy-tip"></p>
+          </div>
+        </section>
+      </div>
+      <div class="add-foot">
+        <button id="psProxyDirect" type="button" class="add-cancel">删除代理（改直连）</button>
+        <button id="psProxyCancel" type="button" class="add-cancel">取消</button>
+        <button id="psProxySave" type="button" class="add-ok">保存</button>
+      </div>
+    </div>
+  </div>
+
   <div id="updatePanel" class="modal hidden">
     <div class="update-card">
       <div class="update-orbit" aria-hidden="true"><i></i><i></i></div>

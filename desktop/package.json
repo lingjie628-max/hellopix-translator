@@ -1,7 +1,7 @@
 {
   "name": "hello-pix-desktop",
   "productName": "Hello Pix",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "private": true,
   "description": "Hello Pix 桌面客户端",
   "author": "Hello Pix",
@@ -12,7 +12,8 @@
     "pack:mac:release": "PIX_REQUIRE_NOTARIZED=1 electron-builder --mac --publish never",
     "pack:win": "electron-builder --win --publish never",
     "pack:all": "electron-builder --mac --win --publish never",
-    "pack:dir": "electron-builder --dir --publish never"
+    "pack:dir": "electron-builder --dir --publish never",
+    "verify:proxy": "env -u ELECTRON_RUN_AS_NODE electron scripts/proxy-mechanism-electron.js"
   },
   "devDependencies": {
     "electron": "^33.2.1",
@@ -40,6 +41,7 @@
       "platforms.js",
       "security-policy.js",
       "proxy-presets.js",
+      "proxy-settings.js",
       "instance-slot.js",
       "background-mode.js",
       "log-file.js",
