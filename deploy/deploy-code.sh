@@ -28,7 +28,7 @@ mkdir -p "$STAGE"
 tar -czf - -C "$STAGE" server migrations dist scripts 2>/dev/null \
   | ssh -p "${SSH_PORT:-30071}" -i "$HOME/.ssh/pikesi_deploy" \
       -o BatchMode=yes -o ConnectTimeout=30 -o StrictHostKeyChecking=no \
-      "root@${SSH_HOST:-128.241.245.172}" "
+      "root@${SSH_HOST:-207.57.167.121}" "
 set -e; export LC_ALL=C.UTF-8
 rm -rf $APP/.incoming && mkdir -p $APP/.incoming
 tar -C $APP/.incoming -xzf -

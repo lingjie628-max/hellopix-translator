@@ -15,6 +15,7 @@ const { STATUS: RECHARGE_STATUS, assertTransition, effectiveStatus, effectiveSta
 const { parseMilli, formatMilli } = require('../lib/money')
 const { validTronAddress, normalizeTronAddress } = require('../lib/tron-address')
 const { objectSetting, readAlertTo, setting: settingOf } = require('../lib/mailer')
+const purge = require('../lib/merchant-purge')
 
 function publicUser(session) {
   return {
@@ -765,6 +766,56 @@ function productionRouter(context) {
     await repo.query(`UPDATE ${table} SET bound_device='',updated_at=NOW() WHERE id=$1`, [id])
     await auth.revokeUser(data.subId ? 'sub' : 'main', id)
     ok(res, '客户端绑定已重置')
+  }))
+  /**
+   * 回收字符：账号保留，余额归零。
+   *
+   * 为什么不复用 `/admin/translate/grant`：那个接口只加不减（`chars<=0` 直接
+   * 拒绝），而且会给商户造一张 manual 充值单。回收不是充值，为它造一张 0 元
+   * 充值单是**假账** —— 以后按 recharges 统计营收就会多出一笔不存在的流水。
+   *
+   * 这里走总账 `char_ledger` 追加一条 `reason='correction'` 的负数流水：
+   * 余额是**变动**出来的，不是被抹掉的，"为什么少了 N"必须有答案。
+   */
+  router.post('/admin/users/reclaim', asyncRoute(async (req, res) => {
+    const data = input(req)
+    const result = await purge.reclaimChars({
+      repo, admin: req.pixAdmin, ip: req.ip, id: data.id, note: data.note
+    })
+    ok(res, result.reclaimed > 0
+      ? `已回收 ${result.reclaimed} 字符，${result.username} 余额归零（已记入字符流水）`
+      : `${result.username} 余额本就是 0，无需回收`)
+  }))
+  /**
+   * 删除商户（不可逆）。
+   *
+   * 两道闸，缺一不可：
+   *   1. `confirmUsername` 必须**一字不差**等于账号名 —— 防"点错行"；
+   *   2. 账号里有生意痕迹时，首次请求返回 409 + 影响条数，前端渲染确认弹窗，
+   *      带上 `acknowledge=true` 再提交才真正执行 —— 防"没看清就点了确定"。
+   *
+   * 执行前先把商户行与账目快照写进 `deleted_merchants`（不挂外键）。
+   * 这是**必须的**：`char_ledger.user_id` 是 RESTRICT，删商户必然连带删流水，
+   * 所以删除的审计痕迹只能放存档表，不能放流水。
+   */
+  router.post('/admin/users/delete', asyncRoute(async (req, res) => {
+    const data = input(req)
+    const result = await purge.deleteMerchant({
+      repo,
+      admin: req.pixAdmin,
+      ip: req.ip,
+      id: data.id,
+      confirmUsername: data.confirmUsername,
+      acknowledge: data.acknowledge,
+      reason: data.reason
+    })
+    // 账号行已经不存在了，但 Redis 里的会话还没清。
+    // 撤销要放在提交之后：事务里撤销了却回滚，等于白撤。
+    await auth.revokeUser('main', result.userId)
+    const cleared = purge.describeRemoved(result.removed)
+    ok(res, `已删除商户 ${result.username}`
+      + (cleared.length ? `，一并清除 ${cleared.join('、')}` : '')
+      + `；字符余额 ${result.charBalance} 随账号清除，已存档`)
   }))
   router.post('/admin/orders/status', asyncRoute(async (req, res) => {
     const data = input(req)

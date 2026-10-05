@@ -1,10 +1,13 @@
 'use strict'
 
 class ApiError extends Error {
-  constructor(status, message, code) {
+  constructor(status, message, code, details) {
     super(message)
     this.status = status
     this.code = code || 'API_ERROR'
+    // 可选的结构化补充数据（如"删除会波及哪些表、各多少条"）。
+    // 前端要据此渲染"你确定要删吗"的二次确认弹窗，光有 msg 一句话不够。
+    this.details = details || null
   }
 }
 
@@ -42,7 +45,9 @@ function asyncRoute(handler) {
 function sendError(err, _req, res, next) {
   if (res.headersSent) return next(err)
   if (err instanceof ApiError) {
-    return res.status(err.status).json({ success: false, code: err.code, msg: err.message })
+    const body = { success: false, code: err.code, msg: err.message }
+    if (err.details) body.details = err.details
+    return res.status(err.status).json(body)
   }
   if (err && err.code === '23505') {
     return res.status(409).json({ success: false, code: 'CONFLICT', msg: '数据已存在' })

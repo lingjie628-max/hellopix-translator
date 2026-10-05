@@ -33,12 +33,14 @@
           <el-tag :type="scope.row.status === 1 ? 'success' : 'info'">{{ scope.row.status === 1 ? '启用' : '停用' }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="280">
+      <el-table-column label="操作" width="430">
         <template slot-scope="scope">
           <el-button type="text" @click="openEdit(scope.row)">编辑</el-button>
           <el-button type="text" @click="setEnterprise(scope.row)">{{ scope.row.enterprise ? '降为个人' : '升企业' }}</el-button>
           <el-button type="text" @click="unbind(scope.row)">踢下线</el-button>
           <el-button type="text" @click="toggle(scope.row)">{{ scope.row.status === 1 ? '停用' : '启用' }}</el-button>
+          <el-button type="text" @click="reclaim(scope.row)">回收字符</el-button>
+          <el-button type="text" class="danger-link" @click="openDelete(scope.row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -107,6 +109,47 @@
         </el-table-column>
       </el-table>
     </el-dialog>
+
+    <el-dialog title="回收字符" :visible.sync="reclaimVisible" width="460px">
+      <p>将把 <b>{{ reclaimRow.username }}</b> 的字符余额 <b>{{ reclaimRow.charBalance || 0 }}</b> 归零。</p>
+      <p class="dialog-tip">账号保留。本次回收会写入一条字符流水（correction），事后查得到。</p>
+      <el-form label-width="70px" style="margin-top:10px">
+        <el-form-item label="备注">
+          <el-input v-model="reclaimNote" placeholder="可不填"></el-input>
+        </el-form-item>
+      </el-form>
+      <span slot="footer">
+        <el-button @click="reclaimVisible=false">取消</el-button>
+        <el-button type="primary" @click="submitReclaim">确认回收</el-button>
+      </span>
+    </el-dialog>
+
+    <el-dialog :title="delStep === 1 ? '删除商户（1/2）' : '删除商户（2/2）'"
+               :visible.sync="delVisible" width="540px" @closed="resetDelete">
+      <template v-if="delStep === 1">
+        <p>删除<b>不可恢复</b>。请手工输入账号名以确认：<b>{{ delForm.username }}</b></p>
+        <el-input v-model="delForm.confirm" placeholder="输入完整账号名" style="margin-top:8px"></el-input>
+        <el-form label-width="70px" style="margin-top:12px">
+          <el-form-item label="删除原因">
+            <el-input v-model="delForm.reason" placeholder="如：测试账号清理（会写进存档）"></el-input>
+          </el-form-item>
+        </el-form>
+      </template>
+      <template v-else>
+        <p class="dialog-tip">该商户有业务记录，删除会<b>一并清除且不可恢复</b>：</p>
+        <ul class="impact-list">
+          <li v-for="row in delImpactRows" :key="row.key">{{ row.label }} <b>{{ row.count }}</b> 条</li>
+        </ul>
+        <p class="dialog-tip">执行前会把商户行与账目快照存档到「已删除商户」（不挂外键），事后可回溯。</p>
+      </template>
+      <span slot="footer">
+        <el-button @click="delVisible=false">取消</el-button>
+        <el-button v-if="delStep === 2" @click="delStep=1">上一步</el-button>
+        <el-button type="danger" :disabled="delStep === 1 && !delForm.confirm" @click="submitDelete">
+          {{ delStep === 1 ? '下一步' : '确认删除' }}
+        </el-button>
+      </span>
+    </el-dialog>
   </div>
 </template>
 <script>
@@ -125,7 +168,31 @@ export default {
       form: {},
       subVisible: false,
       subParent: {},
-      subs: []
+      subs: [],
+      reclaimVisible: false,
+      reclaimRow: {},
+      reclaimNote: '',
+      delVisible: false,
+      delStep: 1,
+      delForm: { id: null, username: '', confirm: '', reason: '' },
+      delRemoved: {}
+    }
+  },
+  computed: {
+    // 删除确认弹窗第二步要展示"到底会删掉什么"。
+    // 这些条数是服务端在 409 响应里带回来的（NEED_ACKNOWLEDGE），
+    // 不是前端估算 —— 以数据库实际行的 count 为准。
+    delImpactRows() {
+      const labels = {
+        recharges: '充值单', translate_logs: '翻译记录', translation_reservations: '翻译预留',
+        translation_usage: '翻译用量', orders: '工单', character_transfers: '字符划转',
+        char_ledger: '字符流水', sub_accounts: '子账号', conversations: '会话', messages: '消息',
+        customer_merchant_links: '客户绑定', customer_owners: '客户归属', scripts: '脚本',
+        login_logs: '登录日志', short_links: '短链', identity_match_events: '身份匹配'
+      }
+      return Object.keys(this.delRemoved || {})
+        .filter(key => Number(this.delRemoved[key]) > 0)
+        .map(key => ({ key, label: labels[key] || key, count: Number(this.delRemoved[key]) }))
     }
   },
   mounted() {
@@ -196,6 +263,52 @@ export default {
     toggle(row) {
       const status = row.status === 1 ? 0 : 1
       this.postRequest('/admin/users/status', { id: row.id, status }).then(() => this.load())
+    },
+    reclaim(row) {
+      this.reclaimRow = row
+      this.reclaimNote = ''
+      this.reclaimVisible = true
+    },
+    submitReclaim() {
+      this.postRequest('/admin/users/reclaim', { id: this.reclaimRow.id, note: this.reclaimNote }).then(resp => {
+        this.$message.success(resp.data.msg)
+        this.reclaimVisible = false
+        this.load()
+      }).catch(() => {})
+    },
+    openDelete(row) {
+      this.delForm = { id: row.id, username: row.username, confirm: '', reason: '' }
+      this.delRemoved = {}
+      this.delStep = 1
+      this.delVisible = true
+    },
+    resetDelete() {
+      this.delForm = { id: null, username: '', confirm: '', reason: '' }
+      this.delRemoved = {}
+      this.delStep = 1
+    },
+    submitDelete() {
+      const payload = {
+        id: this.delForm.id,
+        confirmUsername: this.delForm.confirm,
+        reason: this.delForm.reason
+      }
+      // 第二步才带 acknowledge：服务端据此判断"操作人已经看过影响清单"。
+      if (this.delStep === 2) payload.acknowledge = true
+      // silent：409 的 msg 是"要不要继续"的中间态，不该被拦成一条红色错误提示。
+      this.postRequest('/admin/users/delete', payload, { silent: true }).then(resp => {
+        this.$message.success(resp.data.msg)
+        this.delVisible = false
+        this.load()
+      }).catch(error => {
+        const data = (error.response && error.response.data) || {}
+        if (data.code === 'NEED_ACKNOWLEDGE') {
+          this.delRemoved = (data.details && data.details.removed) || {}
+          this.delStep = 2
+          return
+        }
+        this.$message.error(data.msg || '删除失败')
+      })
     }
   }
 }
@@ -204,4 +317,7 @@ export default {
 .admin-page { text-align: left; }
 .trial-tip { color: var(--w-text-faint); font-size: 12px; line-height: 1.4; }
 .admin-bar { margin-bottom: 12px; }
+.danger-link { color: #f56c6c; }
+.dialog-tip { color: var(--w-text-faint); font-size: 12px; line-height: 1.6; }
+.impact-list { margin: 10px 0; padding-left: 18px; font-size: 13px; line-height: 1.8; }
 </style>
