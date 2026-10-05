@@ -1908,13 +1908,16 @@ ipcMain.handle('lines:select', (_event, id) => {
 
 ipcMain.handle('lines:ping', async (_event, id) => pingLine(id))
 ipcMain.handle('lines:pingAll', async () => pingAllLines())
-ipcMain.handle('site:info', async () => {
-  try {
-    return await fetchFrom(apiBase, '/site/info', 2500)
-  } catch (e) {
-    return {}
-  }
-})
+  ipcMain.handle('site:info', async () => {
+    try {
+      // 带上 process.arch，服务端才能给对应架构的安装包。
+      // 不带的话 macOS 会固定下发 x64 —— Apple 芯片用户点「苹果电脑版」
+      // 拿到的是 Intel 包。
+      return await fetchFrom(apiBase, '/site/info?arch=' + encodeURIComponent(process.arch), 2500)
+    } catch (e) {
+      return {}
+    }
+  })
 ipcMain.handle('shell:open', async (event, url) => {
   if (!isMainSender(event)) return rejectUntrustedSender()
   const href = String(url || '')

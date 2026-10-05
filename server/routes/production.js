@@ -536,7 +536,9 @@ function productionRouter(context) {
     res.json(await customers.saveCollisionConfig(input(req), req.pixAdmin && req.pixAdmin.id))
   }))
 
-  router.get('/site/info', asyncRoute(async (_req, res) => res.json(await core.siteInfo())))
+  // 客户端会带 ?arch=<process.arch> 来要对应架构的安装包（见 desktop/main.js）。
+  // 不带的调用方（如官网）拿到的仍是列表第一条，行为不变。
+  router.get('/site/info', asyncRoute(async (req, res) => res.json(await core.siteInfo(input(req)))))
 
   // 官网（未登录可见）用的公开内容。
   // 只暴露营销信息：套餐标题/价格/额度/卖点，不含任何商户或凭据数据。

@@ -771,17 +771,28 @@ class CoreService {
     return (rows || []).map(row => catalog.publicRelease(mapRow(row) || row)).filter(Boolean)
   }
 
-  async siteInfo() {
-    const [settings, lines, clients] = await Promise.all([
-      this.repo.settings(),
-      this.repo.query('SELECT id,name,url,region,enabled FROM client_lines WHERE enabled=true ORDER BY sort_order,id'),
-      this.repo.query('SELECT * FROM client_releases WHERE enabled=true ORDER BY created_at DESC,id DESC')
-    ])
-    const listed = this.publicReleases(clients.rows)
-    const download = group => {
-      const row = listed.find(item => item.releaseGroup === group)
-      return row ? row.url : ''
-    }
+    async siteInfo(options) {
+      const wantArch = String((options || {}).arch || '').trim()
+      const [settings, lines, clients] = await Promise.all([
+        this.repo.settings(),
+        this.repo.query('SELECT id,name,url,region,enabled FROM client_lines WHERE enabled=true ORDER BY sort_order,id'),
+        this.repo.query('SELECT * FROM client_releases WHERE enabled=true ORDER BY created_at DESC,id DESC')
+      ])
+      const listed = this.publicReleases(clients.rows)
+      // 按客户端上报的 process.arch 挑包。
+      //
+      // 之前固定取第一条，而排序是 created_at DESC,id DESC —— macOS 的 x64 记录
+      // id 更大、排在前面，于是 **Apple 芯片用户点「苹果电脑版」拿到的是 x64 包**。
+      // 这里改成：优先挑架构匹配的那条（架构留空 = 不限架构，archCompatible 会放行）。
+      // 一条都不匹配时退回第一条，保持旧行为 —— 宁可给一个能跑的包，
+      // 也不要返回空串把下载按钮藏掉（那会让用户以为根本没有 mac 版）。
+      const { archCompatible } = require('../lib/release-arch')
+      const download = group => {
+        const rows = listed.filter(item => item.releaseGroup === group)
+        if (!rows.length) return ''
+        const row = (wantArch && rows.find(item => archCompatible(wantArch, item.arch))) || rows[0]
+        return row.url
+      }
     const standaloneApps = listed.filter(item => item.releaseGroup === 'standalone')
     const discounts = setting(settings, 'billing.discounts', {})
     return {

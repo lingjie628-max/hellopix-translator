@@ -176,3 +176,48 @@ test('没有硬编码 32 位构建（Electron v44 起不再发布 ia32）', () =
   }
   assert.ok(winTargets.some(t => t.arch.includes('x64')), 'Windows 必须有 x64 构建')
 })
+
+// --------------------------------------------------------- site/info 的架构选择
+
+test('siteInfo 按客户端架构下发 macOS 包：arm64 用户拿 arm64，不再固定 x64', async () => {
+  // 被修的缺陷：siteInfo 里的 download() 固定取 listed 的第一条，而排序是
+  // created_at DESC,id DESC —— macOS 的 x64 记录 id 更大、排在前面，
+  // 于是 **Apple 芯片用户点「苹果电脑版」拿到的是 x64 包**。
+  const { CoreService } = require('../server/services/core-service')
+  const rows = [
+    { id: 26, release_group: 'macos', title: 'Hello Pix', os: 'macOS', arch: 'x64', app: '', version: '0.1.9', url: 'https://pixfanyi.com/downloads/HelloPix-0.1.9-x64.dmg', enabled: true },
+    { id: 25, release_group: 'macos', title: 'Hello Pix', os: 'macOS', arch: 'Apple 芯片', app: '', version: '0.1.9', url: 'https://pixfanyi.com/downloads/HelloPix-0.1.9-arm64.dmg', enabled: true },
+    { id: 20, release_group: 'windows', title: 'Hello Pix', os: 'Windows', arch: 'x64', app: '', version: '0.1.9', url: 'https://pixfanyi.com/downloads/HelloPix-Setup-0.1.9.exe', enabled: true }
+  ]
+  const core = new CoreService({
+    async settings() { return { 'downloads.client_url': '' } },
+    async query(sql) {
+      if (/FROM client_lines/.test(sql)) return { rows: [] }
+      if (/FROM client_releases/.test(sql)) return { rows }
+      throw new Error(`Unexpected SQL: ${sql}`)
+    }
+  }, { get() {}, set() {} }, {})
+
+  const arm = await core.siteInfo({ arch: 'arm64' })
+  assert.equal(arm.clientDownloads.macos, 'https://pixfanyi.com/downloads/HelloPix-0.1.9-arm64.dmg')
+
+  const intel = await core.siteInfo({ arch: 'x64' })
+  assert.equal(intel.clientDownloads.macos, 'https://pixfanyi.com/downloads/HelloPix-0.1.9-x64.dmg')
+
+  // 不带 arch 的调用方（官网）保持旧行为：拿第一条，行为不变。
+  const noArch = await core.siteInfo()
+  assert.equal(noArch.clientDownloads.macos, 'https://pixfanyi.com/downloads/HelloPix-0.1.9-x64.dmg')
+
+  // 某个系统只有一种架构时，任何架构都拿得到 —— 不能返回空串把下载按钮藏掉。
+  assert.equal(arm.clientDownloads.windows, 'https://pixfanyi.com/downloads/HelloPix-Setup-0.1.9.exe')
+  assert.equal(intel.clientDownloads.windows, 'https://pixfanyi.com/downloads/HelloPix-Setup-0.1.9.exe')
+})
+
+test('arch 从请求一路传到 siteInfo —— 路由透传 + 客户端真的带上了 process.arch', () => {
+  const route = fs.readFileSync(path.join(root, 'server/routes/production.js'), 'utf8')
+  assert.match(route, /core\.siteInfo\(input\(req\)\)/, '路由必须把 input(req) 传给 siteInfo，否则 arch 永远是空的')
+
+  const main = fs.readFileSync(path.join(root, 'desktop/main.js'), 'utf8')
+  assert.ok(main.includes('/site/info?arch='), '客户端 site:info 必须带 arch 查询参数')
+  assert.ok(/site:info[\s\S]{0,400}process\.arch/.test(main), 'site:info 的 arch 必须取自 process.arch')
+})
