@@ -97,7 +97,7 @@ class MemoryFixedWindowStore {
 class MemoryVerificationStore {
   constructor(options) {
     const opts = options || {}
-    this.captchaTtlMs = positiveInteger(opts.captchaTtlMs, 5 * 60_000)
+    this.captchaTtlMs = positiveInteger(opts.captchaTtlMs, 10 * 60_000)
     this.emailTtlMs = positiveInteger(opts.emailTtlMs, 10 * 60_000)
     this.resendTtlMs = positiveInteger(opts.resendTtlMs, 60_000)
     this.captchas = new Map()

@@ -71,8 +71,8 @@ function productionRouter(context) {
 
   router.post('/login', loginIpLimit, loginAccountLimit, asyncRoute(async (req, res) => {
     const data = input(req)
-    const captchaError = await captcha.consume(core.redis, data.imageId, data.imageCode)
-    if (captchaError) throw new ApiError(400, captchaError, 'BAD_CAPTCHA')
+    const captchaCheck = await captcha.consume(core.redis, data.imageId, data.imageCode)
+    if (!captchaCheck.ok) throw new ApiError(400, captchaCheck.message, captchaCheck.code)
     const session = await auth.loginUser(req, res, data, false)
     res.json({ success: true, msg: '登录成功', obj: publicUser(session) })
   }))
@@ -568,8 +568,8 @@ function productionRouter(context) {
   router.post('/admin/login', loginIpLimit, loginAccountLimit, asyncRoute(async (req, res) => {
     const data = input(req)
     // 图形验证码：超管是全站最高价值目标，前置阻力不能比商户端还弱
-    const captchaError = await captcha.consume(core.redis, data.imageId, data.imageCode)
-    if (captchaError) throw new ApiError(400, captchaError, 'BAD_CAPTCHA')
+    const captchaCheck = await captcha.consume(core.redis, data.imageId, data.imageCode)
+    if (!captchaCheck.ok) throw new ApiError(400, captchaCheck.message, captchaCheck.code)
 
     const admin = await auth.verifyAdminCredentials(req, data)
 

@@ -29,7 +29,7 @@ class RedisVerificationStore {
     if (!redis) throw new TypeError('Redis client is required')
     const opts = options || {}
     this.redis = redis
-    this.captchaTtlMs = positiveInteger(opts.captchaTtlMs, 5 * 60_000)
+    this.captchaTtlMs = positiveInteger(opts.captchaTtlMs, 10 * 60_000)
     this.emailTtlMs = positiveInteger(opts.emailTtlMs, 10 * 60_000)
     this.resendTtlMs = positiveInteger(opts.resendTtlMs, 60_000)
   }

@@ -69,8 +69,33 @@ export default {
         if (resp && resp.data) {
           this.codeImg = resp.data.image
           this.form.imageId = resp.data.imageId
+          // 图片换了，之前抄的那个码就作废了。不清掉的话，下一次提交是
+          // 「新 imageId + 旧 code」，必然被判错，而用户看不出为什么。
+          this.form.imageCode = ''
         }
       })
+    },
+    // 图形验证码过期/错误时换一张。图片与 imageId 必须同时更新 ——
+    // 只换图不换 id 会让下一次提交必然失败。
+    refreshImageCode(tip) {
+      this.form.imageCode = ''
+      this.getImageCode()
+      if (tip) this.$message.error(tip)
+    },
+    startCountdown() {
+      this.codeCanClick = false
+      this.codeTotalTime = 60
+      this.codeContent = this.codeTotalTime + 's后重新发送'
+      this.timer = setInterval(() => {
+        this.codeTotalTime -= 1
+        this.codeContent = this.codeTotalTime + 's后重新发送'
+        if (this.codeTotalTime < 0) {
+          clearInterval(this.timer)
+          this.codeContent = '获取验证码'
+          this.codeTotalTime = 60
+          this.codeCanClick = true
+        }
+      }, 1000)
     },
     getCode() {
       if (!this.codeCanClick) return
@@ -78,26 +103,39 @@ export default {
         this.$message.error('请输入邮箱地址')
         return
       }
-      this.postRequest('/user/emailCode', { email: this.form.email, scene: 'register' }).then(resp => {
+      if (!this.form.imageCode) {
+        this.$message.error('请输入图形验证码')
+        return
+      }
+      // imageId 与 imageCode 必须一起提交。少了它们，后端拿不到用户抄的图形码，
+      // 会把这次请求判成「图形验证码已过期」，用户永远收不到邮箱验证码。
+      this.postRequest('/user/emailCode', {
+        email: this.form.email,
+        scene: 'register',
+        imageId: this.form.imageId,
+        imageCode: this.form.imageCode
+      }, { silent: true }).then(resp => {
         if (!resp || !resp.data) return
         if (resp.data.success === false) {
           this.$message.error(resp.data.msg)
           return
         }
         this.$message.success(resp.data.msg)
-        this.codeCanClick = false
-        this.codeTotalTime = 60
-        this.codeContent = this.codeTotalTime + 's后重新发送'
-        this.timer = setInterval(() => {
-          this.codeTotalTime -= 1
-          this.codeContent = this.codeTotalTime + 's后重新发送'
-          if (this.codeTotalTime < 0) {
-            clearInterval(this.timer)
-            this.codeContent = '获取验证码'
-            this.codeTotalTime = 60
-            this.codeCanClick = true
-          }
-        }, 1000)
+        this.startCountdown()
+      }).catch(error => {
+        // 400 会被全局拦截器 reject，失败一律走这里（已用 silent 关掉全局提示，
+        // 避免和下面的提示叠成两条）。
+        const data = (error && error.response && error.response.data) || {}
+        if (data.code === 'CAPTCHA_EXPIRED') {
+          this.refreshImageCode('图形验证码已过期，已为您刷新，请重新输入')
+          return
+        }
+        if (data.code === 'CAPTCHA_INVALID') {
+          // 码错也要换一张：校验是一次性的，那张图已经不能再用了
+          this.refreshImageCode('图形验证码错误，已为您刷新，请重新输入')
+          return
+        }
+        this.$message.error(data.msg || '获取验证码失败，请稍后重试')
       })
     },
     submit() {

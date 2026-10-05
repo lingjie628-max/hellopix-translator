@@ -174,11 +174,17 @@ class AccountService {
 
   // -------------------------------------------------------------------------
 
-  /** 图形验证码校验。失败直接抛 400，文案与登录页保持一致。 */
+  /**
+   * 图形验证码校验。失败直接抛 400。
+   *
+   * 错误码透传 lib/captcha 给的值（CAPTCHA_EXPIRED / CAPTCHA_INVALID），
+   * 前端据此决定「自动换一张图」还是「提示重填」—— 以前统一叫
+   * CAPTCHA_FAILED，前端除了弹一句话什么也做不了。
+   */
   async consumeCaptcha(data) {
     const captcha = require('../lib/captcha')
-    const err = await captcha.consume(this.redis, data.imageId, data.imageCode)
-    if (err) throw new ApiError(400, err, 'CAPTCHA_FAILED')
+    const check = await captcha.consume(this.redis, data.imageId, data.imageCode)
+    if (!check.ok) throw new ApiError(400, check.message, check.code)
   }
 
   codeMessage(check) {

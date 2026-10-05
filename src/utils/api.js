@@ -41,12 +41,17 @@ axios.interceptors.response.use(
     // （后端会提示"请刷新页面后重试"）。此前 403 一律显示"权限不足，请联系管理员"，
     // 把后者真正有用的指引吞掉了 —— 用户以为是权限问题，其实刷新页面就好。
     const serverMsg = error.response && error.response.data && error.response.data.msg
+    // 请求可以带 `silent: true` 关掉这里的自动提示，由调用方自己处理错误。
+    // 用于需要按错误码做不同动作的场景（如注册页收到 CAPTCHA_EXPIRED 要
+    // 自动换一张验证码图），否则会和调用方自己弹的提示叠成两条。
+    const silent = !!(error.config && error.config.silent)
+    const notify = message => { if (!silent) Message.error({ message }) }
     if (status === 429) {
-      Message.error({ message: serverMsg || '请求过于频繁，请稍后再试' })
+      notify(serverMsg || '请求过于频繁，请稍后再试')
     } else if (status === 504 || status === 404) {
-      Message.error({ message: serverMsg || '服务器连接失败' })
+      notify(serverMsg || '服务器连接失败')
     } else if (status === 403) {
-      Message.error({ message: serverMsg || '权限不足，请联系管理员' })
+      notify(serverMsg || '权限不足，请联系管理员')
     } else if (status === 401) {
       // 401 有两种完全不同的含义，不能一视同仁：
       //   1) 登录接口返回 401 = 账号或密码错误（后端文案就是"超管账号或密码错误"）；
@@ -56,11 +61,11 @@ axios.interceptors.response.use(
       const url = String((error.config && error.config.url) || '')
       const isLoginAttempt = /\/(?:admin\/)?login(\/totp)?$/.test(url)
       if (isLoginAttempt) {
-        Message.error({ message: serverMsg || '账号或密码错误' })
+        notify(serverMsg || '账号或密码错误')
         return Promise.reject(error)
       }
       const onAdmin = router.currentRoute.path.indexOf('/admin') === 0
-      Message.error({ message: serverMsg || '登录已过期，请重新登录' })
+      notify(serverMsg || '登录已过期，请重新登录')
       if (onAdmin) {
         store.commit('adminLogout')
         router.replace('/admin/login')
@@ -69,18 +74,18 @@ axios.interceptors.response.use(
         router.replace('/login')
       }
     } else if (error.response && error.response.data && error.response.data.msg) {
-      Message.error({ message: error.response.data.msg })
+      notify(error.response.data.msg)
     } else if (error.message) {
-      Message.error({ message: error.message })
+      notify(error.message)
     } else {
-      Message.error({ message: '未知错误' })
+      notify('未知错误')
     }
     return Promise.reject(error)
   }
 )
 
-export const postRequest = (url, params) => {
-  return axios({
+export const postRequest = (url, params, config) => {
+  return axios(Object.assign({
     method: 'post',
     url,
     data: params,
@@ -88,11 +93,11 @@ export const postRequest = (url, params) => {
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded'
     }
-  })
+  }, config || {}))
 }
 
-export const putRequest = (url, params) => {
-  return axios({
+export const putRequest = (url, params, config) => {
+  return axios(Object.assign({
     method: 'put',
     url,
     data: params,
@@ -100,21 +105,21 @@ export const putRequest = (url, params) => {
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded'
     }
-  })
+  }, config || {}))
 }
 
-export const getRequest = (url, params) => {
-  return axios({
+export const getRequest = (url, params, config) => {
+  return axios(Object.assign({
     method: 'get',
     url,
     params
-  })
+  }, config || {}))
 }
 
-export const deleteRequest = (url, params) => {
-  return axios({
+export const deleteRequest = (url, params, config) => {
+  return axios(Object.assign({
     method: 'delete',
     url,
     params
-  })
+  }, config || {}))
 }

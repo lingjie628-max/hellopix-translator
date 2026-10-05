@@ -349,14 +349,51 @@ class ProductionRepository {
   }
 
   /**
+   * 用户名占用检查。
+   *
+   * **必须同时查 users 与 merchant_identities。** 登录走 accountByUsername，
+   * 它按 merchant_identities.username 解析账号；而 users.username 也会被
+   * 其它路径直接引用。只查一张表就会放过重名 —— 重名的两个账号里只有一个
+   * 能登得进去，另一个永远报"用户不存在"，极难排查。
+   *
+   * 两张表都各有一条 lower(username) 的唯一索引兜底，所以这里不是唯一防线；
+   * 它的价值在于**给出人话错误**（"该账号已被注册"），而不是让用户看到
+   * 一句数据库约束冲突。
+   */
+  async userByUsername(username, client) {
+    const r = await this.query(
+      `SELECT id, username, email, status FROM users WHERE lower(username) = lower($1) LIMIT 1`,
+      [username], client
+    )
+    if (r.rows[0]) return mapRow(r.rows[0])
+    const identity = await this.query(
+      `SELECT account_type, account_id, username, email FROM merchant_identities
+        WHERE lower(username) = lower($1) LIMIT 1`,
+      [username], client
+    )
+    return identity.rows[0] ? mapRow(identity.rows[0]) : null
+  }
+
+  /**
    * 创建商户主账号。
    *
-   * **必须同时写 merchant_identities** —— 登录是靠那张表按用户名查的
-   * （见 accountByUsername）。只写 users 的话账号建出来了却登不进去，
-   * 而且报错是"用户不存在"，极难排查。
+   * **不要在这里写 merchant_identities。** users 表上有触发器
+   * `users_identity_sync`（migration 001_initial_schema），它在 INSERT / UPDATE /
+   * DELETE 之后自动维护身份表：
    *
-   * 两张表放同一个事务里：身份表写失败而 users 写成功，
-   * 就会留下一个永远无法登录、又占着用户名/邮箱的僵尸账号。
+   *     INSERT INTO merchant_identities (account_type, account_id, username, email)
+   *     VALUES (CASE WHEN TG_TABLE_NAME='users' THEN 'user' ELSE 'sub' END,
+   *             NEW.id, NEW.username, NEW.email)
+   *     ON CONFLICT (account_type, account_id) DO UPDATE SET ...
+   *
+   * 之前这里又手动插入了一次，于是每次注册都在同一个事务里把身份行写两遍：
+   *
+   *   · 写 'main' → 撞 merchant_identities_account_type_check（只允许 user/sub）→ 500
+   *   · 改成 'user' → 撞主键 (account_type, account_id)（触发器已经插过了）→ 23505
+   *
+   * 两种写法都失败，也就是说**注册从来没能成功过**。身份同步的唯一归属方
+   * 是触发器，这里只写 users 就够了，用户名/邮箱会由它带到身份表。
+   * 整个过程仍在同一个事务里，不会留下"用户建好却登不进去"的僵尸账号。
    */
   async createUser(payload, client) {
     return this.transaction(async tx => {
@@ -370,13 +407,7 @@ class ProductionRepository {
         [payload.username, hash, payload.nickname || payload.username,
          payload.email, Math.max(0, Math.floor(Number(payload.charBalance) || 0))], c
       )
-      const user = r.rows[0]
-      await this.query(
-        `INSERT INTO merchant_identities (account_type, account_id, username, email)
-         VALUES ('main', $1, $2, $3)`,
-        [user.id, payload.username, payload.email], c
-      )
-      return user
+      return r.rows[0]
     })
   }
 
