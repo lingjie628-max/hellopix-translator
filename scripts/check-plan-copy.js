@@ -37,6 +37,7 @@
  */
 
 const { pool } = require('../server/db/postgres')
+const catalog = require('../server/lib/client-catalog')
 
 /** 与 Landing.vue 的 cardHighlights() 保持一致：纯额度项不算渠道。 */
 const QUOTA_ITEM = /^[\d.,]+\s*万?\s*(翻译)?字符$/
@@ -54,13 +55,22 @@ const SPLIT = /[、,，/／·]+/
  * 而 `client_releases` 里 15 条记录只有 Windows 与 macOS —— 手机版被当作权益
  * 卖给客户，却没有任何东西在它后面（迁移 035）。
  *
- * 映射依据：`standalone` = 独立桌面应用（windows/macos 安装包），
- * `mobile` = 手机应用（android/ios）。`clients.counter`（柜台版）不在其列 ——
- * 它没有对应的发布渠道，映射未知，不敢靠猜断言。
+ * 映射依据：
+ *   · `standalone` = **每平台单应用壳**（`client-catalog` 的 `STANDALONE_APPS`），
+ *     只有 `client_releases.release_group='standalone'` 的在架记录才算数；
+ *   · `mobile` = 手机应用（android/ios）。
+ *   `clients.counter`（柜台版）不在其列 —— 它没有对应的发布渠道，映射未知，
+ *   不敢靠猜断言。
+ *
+ * ⚠️ standalone 这条曾经写成 `/windows|macos/` —— 把**主客户端安装包**当成了
+ * 独立应用的凭证（主客户端走的是 windows / macos 分组）。于是"套餐承诺独立应用版、
+ * 而 client_releases 里一条 standalone 记录都没有"这个状态**长期通过了校验**：
+ * 守卫对最该拦的那类事故是瞎的（迁移 036 摘掉该承诺之前一直如此）。
+ * 现改为按 `release_group` 判定。
  */
 const CLIENT_CLAIMS = [
-  ['standalone', '独立应用版', /windows|macos|darwin|win/i],
-  ['mobile', '手机版', /android|ios|harmony/i]
+  ['standalone', '独立应用版', row => catalog.groupId(row.release_group) === 'standalone'],
+  ['mobile', '手机版', row => /android|ios|harmony/i.test(String(row.os || ''))]
 ]
 
 function normalize(text) {
@@ -98,8 +108,9 @@ async function main() {
   }
 
   // 在架的客户端安装包：用来核对"套餐承诺了某个端，是否真有对应的东西在架"。
+  // release_group 是判定 standalone 的唯一依据（见 CLIENT_CLAIMS）。
   const releases = (await pool.query(
-    'SELECT os FROM client_releases WHERE enabled=true'
+    'SELECT os, release_group FROM client_releases WHERE enabled=true'
   )).rows
 
   const packages = (await pool.query(
@@ -150,7 +161,7 @@ async function main() {
     // 客户端权益：承诺了某个端，必须真有对应的在架安装包。
     for (const [flag, label, match] of CLIENT_CLAIMS) {
       if (!pkg.clients || !pkg.clients[flag]) continue
-      if (releases.some(r => match.test(String(r.os || '')))) {
+      if (releases.some(row => match(row))) {
         console.log(`    ✓ 权益「${label}」有对应的在架安装包`)
       } else {
         violations.push({

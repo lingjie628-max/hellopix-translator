@@ -70,14 +70,26 @@ test('★ 没有下载地址的入口不显示（生产环境 android/ios 就是
   assert.equal(footerDownloadVisible('macos', live), true, 'macOS 有地址却不显示')
 })
 
-test('app 与 standalone 不按 URL 判断显隐（它们走别的取值路径）', () => {
-  // app → checkUpdate()；standalone → standaloneApps()，空列表时会弹提示。
-  // 这两个的下发字段本来就是空的，按 URL 判断会让可用按钮凭空消失。
-  const empty = {}
-  assert.equal(footerDownloadVisible('app', empty), true,
+test('app 恒由 checkUpdate 决定显隐；standalone 按是否存在在架独立应用显隐', () => {
+  // app → checkUpdate()，不读 downloads.app。
+  assert.equal(footerDownloadVisible('app', {}), true,
     'app 入口依赖 checkUpdate，不能因为没有 downloads.app 就隐藏')
-  assert.equal(footerDownloadVisible('standalone', empty), true,
-    'standalone 入口空列表时会弹「独立应用尚未上架」，不能直接隐藏')
+
+  // standalone → standaloneApps。**没有在架独立应用时必须隐藏** —— 否则就是
+  // 迁移 036 要摘掉的那种"有权益、没东西"：按钮在，点下去只弹「独立应用尚未上架」。
+  assert.equal(footerDownloadVisible('standalone', {}), false,
+    '没有在架独立应用时 standalone 入口仍然显示 —— 又是有权益没东西')
+  assert.equal(footerDownloadVisible('standalone', { standaloneApps: [] }), false,
+    '空的 standaloneApps 列表不应让入口显示')
+  assert.equal(footerDownloadVisible('standalone', { standaloneApps: [{ url: '' }] }), false,
+    '空地址的独立应用不算"可下载"')
+
+  // 有真实在架记录时必须留着，否则会误伤恢复后的正常功能。
+  assert.equal(
+    footerDownloadVisible('standalone', { standaloneApps: [{ app: 'telegram-z', url: 'https://x/y.exe' }] }),
+    true,
+    '登记了在架独立应用却不显示 —— 恢复路径被挡住了'
+  )
 })
 
 test('数据异常时按"不显示"处理，不能抛错', () => {

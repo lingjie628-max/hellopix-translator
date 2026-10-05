@@ -243,9 +243,17 @@ function applySupport(info) {
  * "点击是否真的会失效"这种语义。
  */
 function footerDownloadVisible(key, downloads) {
-  // app 走 checkUpdate、standalone 走 standaloneApps（空列表时会弹提示），
-  // 两者都不依赖 downloads[key]，因此不能按 URL 判断显隐。
-  if (key === 'app' || key === 'standalone') return true
+  // app 走 checkUpdate()，不依赖 downloads.app，因此不能按 URL 判断。
+  if (key === 'app') return true
+  // standalone 走 standaloneApps：**只有真有在架独立应用时才显示**。
+  // 曾经写死返回 true，于是"套餐承诺了独立应用版、实际一条 standalone 发布记录
+  // 都没有"时按钮照样出现 —— 用户点下去只得到「独立应用尚未上架」。那正是迁移
+  // 036 要摘掉的那类"有权益、没东西"。改成按数据显隐之后，将来登记了发布记录
+  // 就会自动重新出现，不必再发一次客户端。
+  if (key === 'standalone') {
+    const apps = (downloads || {}).standaloneApps
+    return Array.isArray(apps) && apps.some(item => item && item.url)
+  }
   return Boolean(String((downloads || {})[key] || ''))
 }
 
@@ -260,14 +268,17 @@ function footerDownloadVisible(key, downloads) {
  * 于是用户点下去**毫无反应**：`runFooterAction` 对空 URL 直接 `return`，
  * 既不打开链接也不报错，看起来就是"软件坏了"。这与迁移 035 的结论也直接冲突 ——
  * 035 刚把「手机版」这个兑现不了的权益承诺从套餐文案里摘掉，客户端底部却还在
- * 暗示有两个手机版可以下载。
+ * 暗示有两个手机版可以下载。（「独立应用版」是同一种病，见迁移 036。）
  *
- * 两点讲究：
+ * 三点讲究：
  *
- *   1. 用**排除法**而不是白名单：除了 app / standalone 这两个特例，其余一律
- *      "没地址就不显示"。这样以后新增任何下载入口都自动安全，不会又冒出一个
- *      死按钮 —— 白名单会让新入口默认可见。
- *   2. 是**显隐**而不是删按钮：哪天移动端真上架、后台配了发布记录，
+ *   1. 用**排除法**而不是白名单：除了 app 这一个特例（它走 checkUpdate），其余
+ *      一律"没东西可下就不显示"。这样以后新增任何下载入口都自动安全，不会又冒
+ *      出一个死按钮 —— 白名单会让新入口默认可见。
+ *   2. standalone **也**按数据显隐（见 footerDownloadVisible）：它曾经是第二个
+ *      特例、恒显。恒显的代价是"有权益、没东西"时按钮还在，点下去只得到
+ *      「独立应用尚未上架」—— 与迁移 036 摘「独立应用版」的理由直接冲突。
+ *   3. 是**显隐**而不是删按钮：哪天移动端 / 独立应用真上架、后台配了发布记录，
  *      按钮自动出现，不需要再改客户端代码、也就不必再发一次版。
  */
 function syncFooterDownloads(downloads) {
