@@ -167,7 +167,17 @@ class CoreService {
       originalMilli: originalMilli.toString(),
       paidMilli: paidMilli.toString(),
       discountMilli: discountMilli.toString(),
-      subQuotaAdded: qty,
+      // 本套餐包含的子账号额度。
+      //
+      // 这里原来叫 `subQuotaAdded`，值是**购买月数** —— 旧设计是"每买一组加 1 个
+      // 子账号名额"。那个规则从未在生产落地（`users.sub_quota` 恒为 0），
+      // 也已改为"按套餐档位定额度"（见 `packages.sub_quota`）。名字里的
+      // "Added" 现在只会误导人，所以正名成 `subQuota`。
+      //
+      // `subQuotaAdded` 保留为同值别名：字段已在 `/user/quote` 的响应契约里，
+      // 直接删掉会让还在读它的老客户端拿到 undefined。等确认无调用方后再摘。
+      subQuota: number(pack.subQuota),
+      subQuotaAdded: number(pack.subQuota),
       chars: number(pack.includedChars) * qty
     }
   }
@@ -221,10 +231,31 @@ class CoreService {
     if (!data.username) throw new ApiError(400, '请填写登录账号', 'USERNAME_REQUIRED')
     const passwordHash = await this.auth.hash(data.password)
     await this.repo.transaction(async client => {
-      const parent = await this.repo.query('SELECT sub_quota FROM users WHERE id=$1 FOR UPDATE', [session.parent.id], client)
-      const count = await this.repo.query('SELECT count(*)::int AS count FROM sub_accounts WHERE parent_id=$1', [session.parent.id], client)
-      if (!parent.rows[0] || count.rows[0].count >= number(parent.rows[0].sub_quota)) {
-        throw new ApiError(409, '子账号名额已满', 'SUB_QUOTA_FULL')
+      const parent = await this.repo.query(
+        'SELECT sub_quota, enterprise FROM users WHERE id=$1 FOR UPDATE', [session.parent.id], client)
+      if (!parent.rows[0]) throw new ApiError(404, '商户不存在', 'USER_NOT_FOUND')
+      const quota = number(parent.rows[0].sub_quota)
+      /**
+       * 企业账号不限子账号数。
+       *
+       * 后台界面一直写着「企业开子账号不限数量」，但这里原先只看 `sub_quota` ——
+       * 而套餐单据上根本没有子账号额度这个概念（`users.sub_quota` 默认 0），
+       * 于是**每个商户的名额都是 0，一个子账号都开不出来**，文案与代码完全不符。
+       * 现在按企业标志真正放行。
+       *
+       * 额度判定放在锁住 `users` 行之后：名额是"行上的计数"，不加锁则并发
+       * 双击「添加」能同时通过 `count >= quota` 检查，一次性开出两个。
+       */
+      if (!parent.rows[0].enterprise) {
+        const count = await this.repo.query(
+          'SELECT count(*)::int AS count FROM sub_accounts WHERE parent_id=$1', [session.parent.id], client)
+        if (count.rows[0].count >= quota) {
+          throw new ApiError(409,
+            quota > 0
+              ? `子账号名额已满（本套餐 ${quota} 个）。购买更高档套餐或联系客服提升额度`
+              : '当前套餐不含子账号额度，购买套餐后即可添加',
+            'SUB_QUOTA_FULL')
+        }
       }
       await this.repo.query(
         `INSERT INTO sub_accounts(parent_id,username,password_hash,nickname,email,status,active_engine_id)

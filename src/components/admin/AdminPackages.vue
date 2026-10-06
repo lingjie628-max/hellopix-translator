@@ -10,6 +10,9 @@
       <el-table-column label="字符" width="100">
         <template slot-scope="scope">{{ (scope.row.chars || 0) / 10000 }} 万</template>
       </el-table-column>
+      <el-table-column label="子账号" width="80">
+        <template slot-scope="scope">{{ Number(scope.row.subQuota || 0) }} 个</template>
+      </el-table-column>
       <el-table-column label="客户端权益" width="180">
         <template slot-scope="scope">
           <el-tag v-if="scope.row.clients && scope.row.clients.standalone" size="mini">独立应用</el-tag>
@@ -40,6 +43,13 @@
           <span class="unit-tip">{{ currencyName }}（{{ currencySymbol }}）· 币种在「系统设置 → 价格货币」切换</span>
         </el-form-item>
         <el-form-item label="字符数"><el-input-number v-model="form.chars" :min="0" :step="150000"></el-input-number></el-form-item>
+        <el-form-item label="子账号额度">
+          <el-input-number v-model="form.subQuota" :min="0" :step="1"></el-input-number>
+          <span class="unit-tip">
+            该档套餐可开的子账号数。买这一档充值到账时会写进商户的额度；
+            企业账号不受此限制。
+          </span>
+        </el-form-item>
         <el-form-item label="客户端">
           <el-checkbox :value="!!(form.clients && form.clients.standalone)" @change="val => setClient('standalone', val)">独立应用版</el-checkbox>
           <el-checkbox :value="!!(form.clients && form.clients.mobile)" @change="val => setClient('mobile', val)">手机版</el-checkbox>

@@ -11,6 +11,7 @@ const { encryptSecret, credentialsKeyReady, KEY_ENV } = require('../lib/credenti
 const { providers, channelStatus } = require('../services/translation-provider')
 const { AdminTotpService } = require('../services/admin-totp-service')
 const { RechargeAmountService } = require('../services/recharge-amount-service')
+const { RechargeEntitlement } = require('../services/recharge-entitlement')
 const { STATUS: RECHARGE_STATUS, assertTransition, effectiveStatus, effectiveStatusSql } = require('../services/recharge-state')
 const { parseMilli, formatMilli } = require('../lib/money')
 const { validTronAddress, normalizeTronAddress } = require('../lib/tron-address')
@@ -60,6 +61,9 @@ function productionRouter(context) {
   const adminTotp = new AdminTotpService(repo, core.redis)
   // 充值金额预约：随机尾数分配 + 24 小时复用保护（RC-02）
   const rechargeAmount = new RechargeAmountService()
+  // 套餐权益发放。手工确认与链上自动入账必须走**同一份**逻辑 ——
+  // 否则会出现"自动入账发了套餐、手工确认没发"，同一张订单两种结果。
+  const rechargeEntitlement = new RechargeEntitlement(repo)
   // 第二步的限流按来源 IP：票据本身还有尝试次数上限，两层叠加
   const adminTotpLimit = limit('admin-totp-ip', 20, 15 * 60_000)
   // 动态码/密钥相关操作只可能在已登录会话里发生，给个宽松上限防脚本刷
@@ -876,15 +880,26 @@ function productionRouter(context) {
       )
       // 订单进终态 → 金额进入 24 小时保护期，防止迟到款错配到新订单
       await rechargeAmount.extendProtection(client, found.rows[0].amount_reservation_id, new Date())
+      // 套餐权益落地。**手工确认与链上自动入账必须发同样的东西**：
+      // 只加字符不发套餐的话，商户端首页「套餐」空白、通道权益为空、
+      // 子账号额度还是 0 —— 表现就是"充了钱但什么都没生效"。
+      // 非套餐订单（纯字符充值 / 后台赠送）在这里是 no-op。
+      const entitlement = await rechargeEntitlement.grantFromOrder(client, order, { at: new Date() })
       await repo.audit(client, req.pixAdmin, '确认收款',
-        `${order.orderNumber} +${order.chars} 字符${txId ? ' tx:' + txId : ''}`, req.ip,
-        { type: 'user', id: order.userId })
-      return { order, alreadyPaid: false }
+        `${order.orderNumber} +${order.chars} 字符${txId ? ' tx:' + txId : ''}`
+        + (entitlement.granted
+          ? `；套餐「${entitlement.packageTitle}」×${entitlement.months} 个月已发放，子账号额度 ${entitlement.subQuota}`
+          : ''),
+        req.ip, { type: 'user', id: order.userId })
+      return { order, alreadyPaid: false, entitlement }
     })
 
+    const grantedText = result.entitlement && result.entitlement.granted
+      ? `，套餐已发放（子账号额度 ${result.entitlement.subQuota} 个）`
+      : ''
     ok(res, result.alreadyPaid
       ? `订单 ${result.order.orderNumber} 此前已确认，未重复加字符`
-      : `已确认收款，${result.order.chars} 字符已到账`)
+      : `已确认收款，${result.order.chars} 字符已到账${grantedText}`)
   }))
 
   router.post('/admin/translate/grant', asyncRoute(async (req, res) => {
@@ -985,6 +1000,12 @@ function productionRouter(context) {
     const gift = data.charBalance === undefined || data.charBalance === ''
       ? number(settings['registration.trial_chars'])
       : number(data.charBalance)
+    // 子账号额度：没显式填就按套餐自带的给。
+    // 不这么做的话新商户额度恒为 0（`sub_quota` 建表默认值），
+    // 一进来就开不了子账号 —— 与套餐里带的额度直接矛盾。
+    const subQuotaForNew = data.subQuota === undefined || data.subQuota === ''
+      ? Math.max(0, Math.floor(Number(pack.subQuota) || 0))
+      : number(data.subQuota)
       // 新商户的默认翻译通道：后台设置的默认值 → 套餐内第一个「已接通且启用」的 → 空。
       // 原先写死 'youdao'，一旦该通道没接通，该商户从第一天起翻译就必然失败。
       let defaultEngine = String(settings['translation.active_engine'] || '').trim()
@@ -999,17 +1020,22 @@ function productionRouter(context) {
       const newVersion = data.catalogVersion === undefined || data.catalogVersion === ''
         ? (Number(pack.catalogVersion) || null)
         : number(data.catalogVersion)
+      // 16 个列 ↔ 16 个值，必须严格对齐。
+      // 这里曾经写成 `$7,$8,...,$16`（17 个值），而 `$16` 连绑定参数都没有 ——
+      // 后果是**新建商户整条路径直接 500**（`INSERT has more expressions than
+      // target columns`）。生产上 `新建商户` 审计只有 1 条、且是 2026-09-25
+      // 那次改动之前的，正是这个多出来的占位符造成的。
       const created = await repo.query(
         `INSERT INTO users(username,password_hash,nickname,status,package_id,port_limit,expires_at,
          char_balance,auto_reply,phone,remarks,active_engine_id,enterprise,email,sub_quota,
          package_catalog_version)
          VALUES($1,$2,$3,1,$4,$5,COALESCE($6::timestamptz,NOW()+interval '30 days'),
-          $7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id,username`,
+          $7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id,username`,
         [String(data.username).trim(), await auth.hash(data.password), data.nickname || data.username,
           pack.id, number(data.port, number(pack.portLimit)), data.expireTime || null, gift,
           Boolean(number(data.autoReply)), data.phone || null, data.remarks || '',
           defaultEngine || null, Boolean(number(data.enterprise)),
-          data.email ? String(data.email).toLowerCase() : null, number(data.subQuota),
+          data.email ? String(data.email).toLowerCase() : null, subQuotaForNew,
           newVersion], client
       )
       if (gift) {
@@ -1460,6 +1486,9 @@ function productionRouter(context) {
     const price = Math.max(0, Number(data.price) || 0)
     const chars = Math.max(0, Math.floor(Number(data.chars || data.includedChars) || 0))
     const portLimit = Math.max(0, Math.floor(Number(data.port || data.portLimit) || 0))
+    // 套餐自带的子账号额度。企业账号不受它限制，但对个人账号它是
+    // `users.sub_quota` 的发放来源（结算买套餐、新建商户两处都取它）。
+    const subQuota = Math.max(0, Math.floor(Number(data.subQuota) || 0))
     const fields = {
       title,
       subtitle: String(data.subtitle || '').slice(0, 300),
@@ -1467,6 +1496,7 @@ function productionRouter(context) {
       portUnlimited: data.portUnlimited === undefined ? true : Boolean(Number(data.portUnlimited)),
       chars,
       price,
+      subQuota,
       clients: parseJson(data.clients, {}, 'object'),
       features: parseJson(data.features, {}, 'object'),
       sortOrder: Math.max(0, Math.floor(Number(data.sortOrder) || 0))
@@ -1477,20 +1507,21 @@ function productionRouter(context) {
       if (packageId) {
         const updated = await repo.query(
           `UPDATE packages SET title=$2,subtitle=$3,port_limit=$4,port_unlimited=$5,included_chars=$6,
-                  price=$7,clients=$8::jsonb,features=$9::jsonb,sort_order=$10,updated_at=NOW()
+                  price=$7,clients=$8::jsonb,features=$9::jsonb,sort_order=$10,sub_quota=$11,
+                  updated_at=NOW()
            WHERE id=$1 RETURNING id`,
           [packageId, fields.title, fields.subtitle, fields.portLimit, fields.portUnlimited,
             fields.chars, fields.price, JSON.stringify(fields.clients), JSON.stringify(fields.features),
-            fields.sortOrder], client
+            fields.sortOrder, fields.subQuota], client
         )
         if (!updated.rows[0]) throw new ApiError(404, '套餐不存在', 'PACKAGE_NOT_FOUND')
       } else {
         const inserted = await repo.query(
-          `INSERT INTO packages(code,title,subtitle,port_limit,port_unlimited,included_chars,price,clients,features,sort_order)
-           VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10) RETURNING id`,
+          `INSERT INTO packages(code,title,subtitle,port_limit,port_unlimited,included_chars,price,clients,features,sort_order,sub_quota)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11) RETURNING id`,
           [code, fields.title, fields.subtitle, fields.portLimit, fields.portUnlimited,
             fields.chars, fields.price, JSON.stringify(fields.clients), JSON.stringify(fields.features),
-            fields.sortOrder], client
+            fields.sortOrder, fields.subQuota], client
         )
         packageId = inserted.rows[0].id
       }

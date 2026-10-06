@@ -41,6 +41,7 @@
 const { ApiError } = require('../lib/http')
 const { mapRow } = require('../repositories/production-repository')
 const { RechargeAmountService } = require('./recharge-amount-service')
+const { RechargeEntitlement } = require('./recharge-entitlement')
 const { STATUS: RECHARGE_STATUS, statusText, assertTransition } = require('./recharge-state')
 const { checkTransferEligibility } = require('./tron/transfer')
 const { formatMilli } = require('../lib/money')
@@ -89,6 +90,13 @@ class RechargeSettlementService {
     const opts = options || {}
     this.repo = repo
     this.amountService = opts.amountService || new RechargeAmountService()
+    /**
+     * 套餐权益发放。字符与套餐是**两件事**：字符走 `adjustChars`，
+     * 套餐（package_id / 到期时间 / 通道权益 / 子账号额度）走这里。
+     * 早期只发字符不发套餐，导致"付了钱、订单已支付，但商户端没有套餐、
+     * 也开不了子账号"。
+     */
+    this.entitlement = opts.entitlement || new RechargeEntitlement(repo)
     /**
      * 自动结算总闸。默认 **关闭**。
      * 关闭时走 Shadow：照常匹配、照常记录，但不动任何余额。
@@ -484,16 +492,24 @@ class RechargeSettlementService {
     // 订单进终态 → 金额进 24 小时保护期
     await this.amountService.extendProtection(
       client, reservation && reservation.id ? reservation.id : locked.amountReservationId, new Date())
+    // 套餐权益落地。
+    // 只发字符不发套餐的话，商户端首页「套餐」是空的、通道权益是空的、
+    // 子账号额度是 0 —— 也就是"充了钱但什么都没生效"。
+    // 非套餐订单（纯字符充值 / 手工补单）在这里是 no-op，不会误改商户套餐。
+    const entitlement = await this.entitlement.grantFromOrder(client, locked, { at: new Date() })
     // 系统动作：admin_id 为 NULL，actor 记为 system
     await this.repo.audit(client, null, '链上自动入账',
-      `${locked.orderNumber} +${chars} 字符 tx:${transfer.txId}`, null,
+      `${locked.orderNumber} +${chars} 字符 tx:${transfer.txId}`
+      + (entitlement.granted ? `；套餐「${entitlement.packageTitle}」×${entitlement.months} 个月已发放` : ''),
+      null,
       { type: 'user', id: locked.userId })
 
     return {
       alreadyPaid: false,
       orderNumber: locked.orderNumber,
       chars,
-      balanceAfter: Number(updated.charBalance)
+      balanceAfter: Number(updated.charBalance),
+      entitlement
     }
   }
 

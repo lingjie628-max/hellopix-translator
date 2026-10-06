@@ -64,8 +64,14 @@
           </el-select>
         </el-form-item>
         <el-form-item label="企业账号">
-          <el-switch v-model="form.enterprise" :active-value="1" :inactive-value="0"></el-switch>
-          <span class="trial-tip" style="margin-left:8px">企业可无限开子账号，子账号聊天号不限</span>
+          <el-switch v-model="form.enterprise" :active-value="1" :inactive-value="0" @change="onEnterprise"></el-switch>
+          <span class="trial-tip" style="margin-left:8px">{{ form.enterprise ? '企业开子账号不限数量' : '按套餐额度开子账号' }}</span>
+        </el-form-item>
+        <el-form-item label="子账号额度">
+          <el-input-number v-model="form.subQuota" :min="0" :step="1" :disabled="!!form.enterprise"></el-input-number>
+          <span class="trial-tip" style="margin-left:8px">
+            {{ form.enterprise ? '企业账号不受此额度限制' : '套餐已带默认额度，此处可单独调整' }}
+          </span>
         </el-form-item>
         <el-form-item label="到期时间">
           <el-date-picker v-model="form.expireTime" type="datetime" value-format="yyyy-MM-dd HH:mm:ss" style="width:100%"></el-date-picker>
@@ -74,8 +80,17 @@
           <el-input v-model="form.phone"></el-input>
         </el-form-item>
         <el-form-item label="字符余额">
-          <el-input-number v-model="form.charBalance" :min="0" :step="1000"></el-input-number>
+          <!--
+            编辑态必须只读。
+            余额只能经「字符调整 / 回收字符」走 char_ledger 变更；服务端
+            `/admin/users/save` 里有一条守卫：只要请求带了 charBalance 就 400
+            （USE_CHARACTER_GRANT）。而本弹窗原先把余额渲染成可编辑输入框、
+            并把它原样回传，导致**每一次「编辑商户」都被这条守卫挡下** ——
+            表现就是"能建号、改不了套餐"。这里不只读，save() 里也剔除了该字段。
+          -->
+          <el-input-number v-model="form.charBalance" :min="0" :step="1000" :disabled="!!form.id"></el-input-number>
           <div v-if="!form.id" class="trial-tip">新商户默认送试用 {{ trialChars }} 字符，可改</div>
+          <div v-else class="trial-tip">仅展示。余额调整请用列表里的「回收字符」或后台赠送</div>
         </el-form-item>
         <el-form-item label="自动回复">
           <el-switch v-model="form.autoReply" :active-value="1" :inactive-value="0"></el-switch>
@@ -219,10 +234,35 @@ export default {
     },
     onPack(id) {
       const pack = this.packs.find(p => p.id === id)
-      if (pack) this.form.port = pack.port
+      if (!pack) return
+      this.form.port = pack.port
+      // 换套餐时把该套餐自带的子账号额度带出来，省得超管还要去翻套餐配置。
+      // 企业账号不受额度限制，不去覆盖它的值。
+      if (!this.form.enterprise) this.form.subQuota = Number(pack.subQuota || 0)
+    },
+    onEnterprise(value) {
+      // 升企业：额度框会被置灰，值保持不动（降回来时还是它）。
+      // 降为个人：按当前套餐把额度恢复成默认，否则会沿用"无限"时的残留值。
+      if (Number(value) === 1) return
+      const pack = this.packs.find(p => p.id === this.form.versionId)
+      if (pack) this.form.subQuota = Number(pack.subQuota || 0)
     },
     openEdit(row) {
-      this.form = row ? Object.assign({}, row, { password: '' }) : { versionId: 1, port: 0, status: 1, charBalance: this.trialChars, autoReply: 0, enterprise: 0 }
+      if (row) {
+        this.form = Object.assign({}, row, { password: '' })
+      } else {
+        // 新建：默认取第一个套餐自带的端口与子账号额度，省一步手填
+        const first = this.packs[0] || {}
+        this.form = {
+          versionId: first.id || 1,
+          port: Number(first.port || 0),
+          status: 1,
+          charBalance: this.trialChars,
+          autoReply: 0,
+          enterprise: 0,
+          subQuota: Number(first.subQuota || 0)
+        }
+      }
       this.visible = true
     },
     openSubs(row) {
@@ -252,7 +292,14 @@ export default {
       })
     },
     save() {
-      this.postRequest('/admin/users/save', this.form).then(resp => {
+      // 编辑时**绝不能**回传 charBalance。
+      // 服务端 `/admin/users/save` 有一条守卫：请求带 charBalance 就 400
+      // （USE_CHARACTER_GRANT），因为余额只能经 char_ledger 变更。
+      // 原先本方法直接提交整个 form，而 form 里始终有 charBalance ——
+      // 于是「编辑商户」必然失败，表现就是"能建号、改不了套餐"。
+      const payload = Object.assign({}, this.form)
+      if (payload.id) delete payload.charBalance
+      this.postRequest('/admin/users/save', payload).then(resp => {
         this.$message({ type: resp.data.success, message: resp.data.msg })
         if (resp.data.success !== 'error') {
           this.visible = false

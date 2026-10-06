@@ -9,7 +9,19 @@
       <el-button :disabled="!selected.length" @click="batch(0)">关闭所选</el-button>
       <el-button type="primary" style="float:right" @click="openEdit()">+ 添加</el-button>
     </div>
-    <p class="quota">子账号名额 {{ info.subCount || 0 }}/{{ info.subQuota || 0 }}。购买字符即可成为企业用户，每组增加 1 个子账户。</p>
+    <!--
+      名额文案必须与真实规则一致。
+      原文案是「购买字符即可成为企业用户，每组增加 1 个子账户」—— 那是旧设计
+      （按购买次数累加名额），从未在生产落地，商户端因此一直显示 0/0 且一个都开不出来。
+      现在规则是「套餐自带的额度」（`packages.sub_quota`，结算时写进 `users.sub_quota`），
+      所以文案按套餐说；企业账号由客服开通，不限额。
+    -->
+    <p class="quota">
+      子账号名额 {{ info.subCount || 0 }}/{{ info.subQuota || 0 }}。
+      <template v-if="info.enterprise">企业账号不限额。</template>
+      <template v-else-if="info.subQuota > 0">额度随套餐赠送，升级套餐可提升。</template>
+      <template v-else>当前套餐不含子账号额度，购买套餐后即可添加。</template>
+    </p>
 
     <el-table :data="rows" v-loading="loading" @selection-change="onSelect">
       <el-table-column type="selection" width="48"></el-table-column>
