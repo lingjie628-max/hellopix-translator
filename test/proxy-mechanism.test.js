@@ -30,7 +30,8 @@ const http = require('node:http')
 const net = require('node:net')
 const test = require('node:test')
 
-const { proxyRulesOf, applySessionProxy } = require('../desktop/proxy-settings')
+const { proxyRulesOf, proxyAuthOf, applySessionProxy } = require('../desktop/proxy-settings')
+const { createSocksRelay } = require('../desktop/socks-relay')
 
 // ─────────────────────────────────────────────────────────── 真实目标站
 
@@ -314,9 +315,8 @@ async function fetchDirect(host, port, path) {
   return bodyOf(await all)
 }
 
-/** 走 HTTP 代理（把产品生成的规则串解析出来再连）。 */
-async function fetchViaHttpProxy(rules, host, port, path) {
-  const p = parseProxyRules(rules)
+/** 向 HTTP 代理发一次请求，返回原始响应文本。`creds` 决定是否带 Proxy-Authorization。 */
+async function httpProxyRaw(p, host, port, path, creds) {
   const socket = net.connect(p.port, p.host)
   const all = readAll(socket)
   await new Promise((resolve, reject) => {
@@ -328,11 +328,28 @@ async function fetchViaHttpProxy(rules, host, port, path) {
     'Host: ' + host + ':' + port,
     'Connection: close'
   ]
-  if (p.user || p.pass) {
-    lines.push('Proxy-Authorization: Basic ' + Buffer.from(p.user + ':' + p.pass).toString('base64'))
+  if (creds && (creds.user || creds.pass)) {
+    lines.push('Proxy-Authorization: Basic ' + Buffer.from(creds.user + ':' + creds.pass).toString('base64'))
   }
   socket.write(lines.join('\r\n') + '\r\n\r\n')
-  return bodyOf(await all)
+  return all
+}
+
+/**
+ * 模拟 Chromium 走 HTTP 代理的完整流程：
+ *   规则串只有 host:port（**不含凭据**）→ 代理回 407 挑战 → 用 `proxyAuthOf()`
+ *   交回的凭据重试。这就是 P0 的机制：凭据来自认证通道，不来自规则串。
+ */
+async function fetchViaHttpProxy(rules, host, port, path, creds) {
+  const p = parseProxyRules(rules)
+  assert.equal(p.user, '', '规则串里不应再出现账号：' + rules)
+  assert.equal(p.pass, '', '规则串里不应再出现密码：' + rules)
+  if (creds) {
+    const challenge = await httpProxyRaw(p, host, port, path, null)
+    assert.ok(challenge.includes('407'), '带认证的代理在没有凭据时必须回 407 挑战')
+    return bodyOf(await httpProxyRaw(p, host, port, path, creds))
+  }
+  return bodyOf(await httpProxyRaw(p, host, port, path, null))
 }
 
 /** 走 SOCKS5 代理（真实握手 + 真实可选认证）。 */
@@ -411,32 +428,33 @@ test('【A 加代理 → 出口变化】产品生成的 http 规则真的能连�
   }
 })
 
-test('【账密】http 代理的账密被真实校验：对则通过、错则 407', async () => {
+test('【P0】http 代理账密走 login 通道：规则串不含凭据，凭据由 proxyAuthOf 提供', async () => {
   const origin = await startOrigin()
   const proxy = await startHttpProxy('A', { user: 'pix-user', pass: 'p@ss:word' })
   try {
-    const ok = proxyRulesOf({
+    const settings = {
       proxyType: 'http',
       proxyHost: '127.0.0.1',
       proxyPort: String(proxy.port),
       proxyUser: 'pix-user',
       proxyPass: 'p@ss:word'
-    })
-    // 密码里的 @ 和 : 必须被 URL 编码，否则规则串会被解析错位
-    assert.equal(ok, 'http://pix-user:p%40ss%3Aword@127.0.0.1:' + proxy.port)
-    const resp = await fetchViaHttpProxy(ok, '127.0.0.1', origin.port, '/')
-    assert.equal(resp.via, 'A')
-    assert.equal(proxy.state.authed, 1, '代理应收到并接受认证')
+    }
+    const rules = proxyRulesOf(settings)
+    // 规则串只有地址：凭据一旦拼进去，Chromium 会直接报 ERR_NO_SUPPORTED_PROXIES
+    assert.equal(rules, 'http://127.0.0.1:' + proxy.port)
+    const creds = proxyAuthOf(settings)
+    assert.deepEqual(creds, { scheme: 'http', host: '127.0.0.1', port: String(proxy.port), user: 'pix-user', pass: 'p@ss:word' })
 
-    const wrong = proxyRulesOf({
-      proxyType: 'http',
-      proxyHost: '127.0.0.1',
-      proxyPort: String(proxy.port),
-      proxyUser: 'pix-user',
-      proxyPass: 'nope'
-    })
-    const denied = await fetchViaHttpProxy(wrong, '127.0.0.1', origin.port, '/')
-    assert.ok(String(denied.raw || '').includes('407') || proxy.state.rejected >= 1, '错误账密必须被代理拒绝')
+    const resp = await fetchViaHttpProxy(rules, '127.0.0.1', origin.port, '/', creds)
+    assert.equal(resp.via, 'A')
+    assert.equal(proxy.state.authed, 1, '代理应收到并接受 login 交回的凭据')
+    assert.equal(proxy.state.rejected, 1, '第一次不带凭据必须被 407 拒绝（证明凭据确实来自认证通道）')
+
+    // 错密码：重试也会被拒，绝不能蒙混通过
+    const wrong = Object.assign({}, settings, { proxyPass: 'nope' })
+    const denied = await fetchViaHttpProxy(proxyRulesOf(wrong), '127.0.0.1', origin.port, '/', proxyAuthOf(wrong))
+    assert.ok(String(denied.raw || '').includes('407') || proxy.state.rejected >= 2, '错误账密必须被代理拒绝')
+    assert.equal(proxy.state.authed, 1, '错误账密不应被接受')
   } finally {
     await origin.close()
     await proxy.close()
@@ -458,35 +476,53 @@ test('【SOCKS5】产品生成的 socks5 规则能走真实 SOCKS5 隧道', asyn
   }
 })
 
-test('【SOCKS5 账密】真实用户名/密码子协商，错密码会被拒', async () => {
+test('【P0】带认证的 SOCKS5 走本地中继：Chromium 侧无凭据，中继侧完成 RFC1929', async () => {
   const origin = await startOrigin()
   const proxy = await startSocks5Proxy('S', { user: 'u1', pass: 'p1' })
+  const settings = {
+    proxyType: 'socks5',
+    proxyHost: '127.0.0.1',
+    proxyPort: String(proxy.port),
+    proxyUser: 'u1',
+    proxyPass: 'p1'
+  }
+  const relay = createSocksRelay({ host: '127.0.0.1', port: proxy.port, user: 'u1', pass: 'p1' })
   try {
-    const ok = proxyRulesOf({
-      proxyType: 'socks5',
-      proxyHost: '127.0.0.1',
-      proxyPort: String(proxy.port),
-      proxyUser: 'u1',
-      proxyPass: 'p1'
-    })
-    const resp = await fetchViaSocks5(ok, '127.0.0.1', origin.port, '/')
-    assert.equal(resp.ok, true)
-    assert.equal(proxy.state.authed, 1)
+    // 没有中继地址时不产出规则串（产品会先起中继，绝不静默直连）
+    assert.equal(proxyRulesOf(settings), '')
+    const info = await relay.start()
+    const rules = proxyRulesOf(settings, { relayEndpoint: '127.0.0.1:' + info.port })
+    assert.equal(rules, 'socks5://127.0.0.1:' + info.port)
+    assert.ok(!rules.includes('u1') && !rules.includes('p1'), 'Chromium 看到的规则里不能有凭据')
 
-    const bad = proxyRulesOf({
-      proxyType: 'socks5',
-      proxyHost: '127.0.0.1',
-      proxyPort: String(proxy.port),
-      proxyUser: 'u1',
-      proxyPass: 'wrong'
-    })
-    await assert.rejects(
-      () => fetchViaSocks5(bad, '127.0.0.1', origin.port, '/'),
-      /认证失败/,
-      '错误密码必须被 SOCKS5 代理拒绝'
-    )
-    assert.equal(proxy.state.rejected, 1)
+    // 客户端（= Chromium）对中继说的是一段**无认证**的 SOCKS5；
+    // 用户名/密码子协商发生在「中继 → 上游」那一段，由中继完成。
+    const resp = await fetchViaSocks5(rules, '127.0.0.1', origin.port, '/')
+    assert.equal(resp.ok, true)
+    assert.equal(proxy.state.authed, 1, '中继必须完成上游的 RFC1929 认证')
+    assert.equal(proxy.state.hits, 1, 'SOCKS5 代理应承载 1 次 CONNECT')
   } finally {
+    await relay.close()
+    await origin.close()
+    await proxy.close()
+  }
+})
+
+test('【P0】中继密码错误：连接必须失败，绝不降级放行', async () => {
+  const origin = await startOrigin()
+  const proxy = await startSocks5Proxy('S', { user: 'u1', pass: 'p1' })
+  const badRelay = createSocksRelay({ host: '127.0.0.1', port: proxy.port, user: 'u1', pass: 'wrong' })
+  try {
+    const info = await badRelay.start()
+    await assert.rejects(
+      () => fetchViaSocks5('socks5://127.0.0.1:' + info.port, '127.0.0.1', origin.port, '/'),
+      /提前关闭|CONNECT 未成功|认证失败/,
+      '错误密码必须失败，绝不能静默降级成无认证隧道'
+    )
+    assert.ok(proxy.state.rejected >= 1, '上游必须记录到一次认证拒绝')
+    assert.equal(proxy.state.hits, 0, '认证失败时不该建立任何 CONNECT 隧道')
+  } finally {
+    await badRelay.close()
     await origin.close()
     await proxy.close()
   }
@@ -589,14 +625,16 @@ test('【重启】从落盘 rows 逐条重建规则，每条仍走自己的代�
   }
 })
 
-test('【整行粘贴】主机:端口:账号:密码 必须生成可用规则（曾拼出坏规则）', async () => {
+test('【P0】整行粘贴 主机:端口:账号:密码 —— 解析正确，且凭据不进规则串', async () => {
   const origin = await startOrigin()
   const proxy = await startHttpProxy('A', { user: 'u1', pass: 'p1' })
   try {
-    const rules = proxyRulesOf({ proxyType: 'http', proxyHost: '127.0.0.1:' + proxy.port + ':u1:p1' })
-    // 旧实现会拼成 http://u1:p1@127.0.0.1:<port>:u1:p1:<port> —— 解析直接失败
-    assert.equal(rules, 'http://u1:p1@127.0.0.1:' + proxy.port)
-    const resp = await fetchViaHttpProxy(rules, '127.0.0.1', origin.port, '/')
+    const settings = { proxyType: 'http', proxyHost: '127.0.0.1:' + proxy.port + ':u1:p1' }
+    // 旧实现会把整串当主机名，拼成 http://...:u1:p1:<port> 这种坏规则
+    const rules = proxyRulesOf(settings)
+    assert.equal(rules, 'http://127.0.0.1:' + proxy.port)
+    assert.deepEqual(proxyAuthOf(settings), { scheme: 'http', host: '127.0.0.1', port: String(proxy.port), user: 'u1', pass: 'p1' })
+    const resp = await fetchViaHttpProxy(rules, '127.0.0.1', origin.port, '/', proxyAuthOf(settings))
     assert.equal(resp.via, 'A', '整行粘贴后应能真的连出去')
     assert.equal(proxy.state.authed, 1)
   } finally {

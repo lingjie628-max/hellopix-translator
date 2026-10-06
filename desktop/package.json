@@ -42,6 +42,8 @@
       "security-policy.js",
       "proxy-presets.js",
       "proxy-settings.js",
+      "socks-relay.js",
+      "probe-page.js",
       "instance-slot.js",
       "background-mode.js",
       "log-file.js",

@@ -19,10 +19,17 @@ const {
   sanitizeProxyPart,
   parseProxyHostLine,
   proxyRulesOf,
+  proxyTargetOf,
+  proxyAuthOf,
   proxySettingsOf,
   proxyFieldsChanged,
   applyTabProxy
 } = proxySettings
+// 带认证的 SOCKS5 只能走本地中继（Chromium 不会为 SOCKS5 触发 login 事件，
+// 详见 socks-relay.js 顶部注释）。它是纯 Node 模块，产品与测试共用同一份。
+const { createSocksRelay } = require('./socks-relay')
+// 读远程页面文本走隔离世界（不是 page world）—— 见 probe-page.js 顶部注释。
+const { readPageText } = require('./probe-page')
 const instanceSlot = require('./instance-slot')
 const backgroundMode = require('./background-mode')
 const {
@@ -1058,6 +1065,7 @@ function detachView(view) {
 
 function destroyTab(tab) {
   stopSshTunnel(tab)
+  releaseSocksRelay(tab)
   detachView(tab.view)
   try {
     tab.view.webContents.destroy()
@@ -1203,7 +1211,7 @@ async function updateTabSettings(id, patch) {
   // 修法：复用同一个 applyTabProxy（不另写一套），并只 reload 这条线路。
   const proxyChanged = proxyFieldsChanged(before, tab.settings)
   if (proxyChanged) {
-    await applyTabProxy(tab, { restartSshTunnel: startSshTunnel })
+    await applyTabProxy(tab, tabProxyDeps())
     reloadTabContents(tab)
   }
   return { success: true, proxyChanged: proxyChanged }
@@ -1311,6 +1319,74 @@ function startSshTunnel(tab) {
   return new Promise(resolve => setTimeout(resolve, 700))
 }
 
+// ── 带认证 SOCKS5 的本地中继生命周期 ──────────────────────────────────
+// 一条线路一个中继实例、一个随机端口，绝不复用给第二条线路（复用即串凭据）。
+// key 覆盖 host/port/账密：任何一项变了都重建，避免"改了密码还在用旧隧道"。
+const socksRelays = new Map()   // tab.id -> { relay, key, endpoint }
+
+function relayKeyOf(target) {
+  return [target.host, target.port, target.user, target.pass].join('\u0001')
+}
+
+async function releaseSocksRelay(tab) {
+  if (!tab) return
+  const cur = socksRelays.get(tab.id)
+  if (!cur) return
+  socksRelays.delete(tab.id)
+  try { await cur.relay.close() } catch (e) {}
+}
+
+async function ensureSocksRelay(tab, target) {
+  const key = relayKeyOf(target)
+  const cur = socksRelays.get(tab.id)
+  if (cur && cur.key === key) return { endpoint: cur.endpoint }
+  await releaseSocksRelay(tab)
+  const relay = createSocksRelay({
+    host: target.host,
+    port: target.port,
+    user: target.user,
+    pass: target.pass,
+    onError: () => {}
+  })
+  const info = await relay.start()
+  const endpoint = '127.0.0.1:' + info.port
+  socksRelays.set(tab.id, { relay: relay, key: key, endpoint: endpoint })
+  return { endpoint: endpoint }
+}
+
+// applyTabProxy 的依赖集合。新建 / 重启恢复 / 改代理三条路径共用，避免只在一处接线。
+function tabProxyDeps() {
+  return {
+    restartSshTunnel: startSshTunnel,
+    ensureSocksRelay: ensureSocksRelay,
+    releaseSocksRelay: releaseSocksRelay
+  }
+}
+
+// ── 代理认证凭据的投递 ──────────────────────────────────────────────
+// HTTP/HTTPS 代理的 Basic 认证由 Chromium 触发 app.on('login') 问我们要账密。
+// 凭据**只按触发挑战的那个 webContents** 查（= 那条线路的 partition），
+// 因此线路 A 的账密不可能被线路 B 用上。
+// 探测节点（detectProxyNode）没有线路，走这张临时表。
+const proxyAuthByWebContents = new Map()   // webContents.id -> { host, port, user, pass }
+
+function tabOfWebContents(wc) {
+  if (!wc) return null
+  return tabs.find(t => t.view && t.view.webContents === wc) || null
+}
+
+app.on('login', (event, webContents, details, authInfo, callback) => {
+  // 只接管**代理**认证。网站自己的 HTTP Basic Auth（isProxy !== true）一律放行，
+  // 否则会拿代理账密去回答站点登录框 —— 那是凭据泄漏，比连不上严重得多。
+  if (!authInfo || authInfo.isProxy !== true) return
+  const pending = webContents ? proxyAuthByWebContents.get(webContents.id) : null
+  const tab = tabOfWebContents(webContents)
+  const creds = pending || (tab ? proxyAuthOf(tab.settings) : null)
+  if (!creds || !creds.user) return
+  event.preventDefault()
+  callback(creds.user, creds.pass)
+})
+
 function sessionGetText(ses, url) {
   return new Promise((resolve, reject) => {
     const req = net.request({ method: 'GET', url: url, session: ses, redirect: 'follow' })
@@ -1411,48 +1487,116 @@ function noteProxyIp(ip) {
   return prev.at
 }
 
+// 探测节点用的一次性隐藏窗口：需要真实的 webContents 才能拿到 login 事件
+// 交回代理账密（`net.request` 发出的请求没有 webContents，代理认证拿不到凭据）。
+const probeWindows = new Set()
+const PROBE_TIMEOUT_MS = 15000
+
+function probeTextWithProxy(ses, url, creds) {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    let timer = null
+    const win = new BrowserWindow({
+      show: false,
+      width: 380,
+      height: 260,
+      webPreferences: {
+        session: ses,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        backgroundThrottling: false
+      }
+    })
+    probeWindows.add(win)
+    const wc = win.webContents
+    // 只登记到这一个 webContents 上，探测结束即删 —— 不会污染任何线路的凭据查找。
+    if (creds && creds.user) proxyAuthByWebContents.set(wc.id, creds)
+
+    const cleanup = () => {
+      if (timer) clearTimeout(timer)
+      timer = null
+      try { proxyAuthByWebContents.delete(wc.id) } catch (e) {}
+      probeWindows.delete(win)
+      try { if (!wc.isDestroyed()) wc.destroy() } catch (e) {}
+      try { if (!win.isDestroyed()) win.destroy() } catch (e) {}
+    }
+    const done = (fn, arg) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      fn(arg)
+    }
+
+    timer = setTimeout(() => done(reject, new Error('连接超时')), PROBE_TIMEOUT_MS)
+    wc.on('did-finish-load', () => {
+      // 隔离世界读取，绝不在远程页面的 page world 里执行脚本（安全测试的硬要求）
+      readPageText(wc)
+        .then(text => done(resolve, String(text || '')))
+        .catch(err => done(reject, err))
+    })
+    wc.on('did-fail-load', (_e, code, desc) => {
+      if (code === -3) return   // ERR_ABORTED：重定向/被新导航取代，不是失败
+      done(reject, new Error(desc || ('load error ' + code)))
+    })
+    try { wc.loadURL(url) } catch (e) { done(reject, e) }
+  })
+}
+
 async function detectProxyNode(payload) {
   const settings = payload || {}
-  const rules = proxyRulesOf(settings)
-  if (!rules) return { success: false, msg: '请先填写代理主机和端口' }
+  const target = proxyTargetOf(settings)
+  if (target.direct || !target.host) return { success: false, msg: '请先填写代理主机和端口' }
+  const creds = proxyAuthOf(settings)
   const ses = session.fromPartition('temp:pix-proxy-detect')
+  let relay = null
   try {
-    await ses.setProxy({ proxyRules: rules, proxyBypassRules: '<local>' })
-  } catch (e) {
-    try { await ses.setProxy({ mode: 'direct' }) } catch (ignore) {}
-    return { success: false, msg: '代理规则无效' }
-  }
-  const v4 = settings.proxyIpVer !== 'ipv6'
-  const urls = v4
-    ? ['https://api.ipify.org?format=json', 'https://ipv4.icanhazip.com']
-    : ['https://api64.ipify.org?format=json', 'https://api6.ipify.org?format=json']
-  let ip = ''
-  let lastErr = ''
-  for (let i = 0; i < urls.length; i++) {
-    try {
-      const text = (await sessionGetText(ses, urls[i])).trim()
-      const json = parseJsonSafe(text)
-      ip = String((json && json.ip) || text).replace(/[^\w.:]/g, '')
-      if (ip) break
-    } catch (e) {
-      lastErr = e && e.message ? e.message : '连接失败'
+    // 带认证的 SOCKS5：临时起一个只服务本次探测的中继，规则里填回环地址。
+    let relayEndpoint = ''
+    if (target.scheme === 'socks5' && target.hasAuth) {
+      relay = createSocksRelay({ host: target.host, port: target.port, user: target.user, pass: target.pass, onError: () => {} })
+      const info = await relay.start()
+      relayEndpoint = '127.0.0.1:' + info.port
     }
-  }
-  if (!ip) {
+    const rules = proxyRulesOf(settings, { relayEndpoint: relayEndpoint })
+    if (!rules) return { success: false, msg: '请先填写代理主机和端口' }
+    try {
+      await ses.setProxy({ proxyRules: rules, proxyBypassRules: '<local>' })
+    } catch (e) {
+      return { success: false, msg: '代理规则无效' }
+    }
+    const v4 = settings.proxyIpVer !== 'ipv6'
+    const urls = v4
+      ? ['https://api.ipify.org?format=json', 'https://ipv4.icanhazip.com']
+      : ['https://api64.ipify.org?format=json', 'https://api6.ipify.org?format=json']
+    let ip = ''
+    let lastErr = ''
+    for (let i = 0; i < urls.length; i++) {
+      try {
+        const text = (await probeTextWithProxy(ses, urls[i], creds)).trim()
+        const json = parseJsonSafe(text)
+        ip = String((json && json.ip) || text).replace(/[^\w.:]/g, '')
+        if (ip) break
+      } catch (e) {
+        lastErr = e && e.message ? e.message : '连接失败'
+      }
+    }
+    if (!ip) {
+      return { success: false, msg: lastErr ? ('节点连不上：' + lastErr) : '节点连不上，请检查主机、端口和账密' }
+    }
+    const geo = await lookupIpGeo(ip, settings.proxyChannel || 'dbip')
+    geo.ip = geo.ip || ip
+    const usedAt = noteProxyIp(ip)
+    return {
+      success: true,
+      ip: ip,
+      geo: geo,
+      history: usedAt ? { at: usedAt } : null
+    }
+  } finally {
     try { await ses.clearStorageData() } catch (ignore) {}
     try { await ses.setProxy({ mode: 'direct' }) } catch (ignore) {}
-    return { success: false, msg: lastErr ? ('节点连不上：' + lastErr) : '节点连不上，请检查主机、端口和账密' }
-  }
-  const geo = await lookupIpGeo(ip, settings.proxyChannel || 'dbip')
-  geo.ip = geo.ip || ip
-  const usedAt = noteProxyIp(ip)
-  try { await ses.clearStorageData() } catch (ignore) {}
-  try { await ses.setProxy({ mode: 'direct' }) } catch (ignore) {}
-  return {
-    success: true,
-    ip: ip,
-    geo: geo,
-    history: usedAt ? { at: usedAt } : null
+    if (relay) { try { await relay.close() } catch (ignore) {} }
   }
 }
 
@@ -1463,7 +1607,7 @@ function startTabLoad(tab) {
   if (!tab || !tab.view || !tab.view.webContents || tab.view.webContents.isDestroyed()) return
   // 新建线路 / 重启恢复走这里；修改已存在线路的代理走 updateTabSettings。
   // 两条路径都必须经过 applyTabProxy，否则又会退回"改了不生效"的老缺陷。
-  applyTabProxy(tab, { restartSshTunnel: startSshTunnel }).finally(() => {
+  applyTabProxy(tab, tabProxyDeps()).finally(() => {
     if (!tab.view || !tab.view.webContents || tab.view.webContents.isDestroyed()) return
     tab.view.webContents.loadURL(tab.url)
   })
@@ -2336,6 +2480,11 @@ app.on('before-quit', () => {
   // 而那些操作若被 close 拦截当成"隐藏"，退出流程就会被自己吃掉。
   isQuitting = true
   saveOpenApps()
+  // 关掉所有本地中继：它们是本进程内的监听端口，进程结束前清干净。
+  try {
+    socksRelays.forEach(item => { try { item.relay.close() } catch (e) {} })
+    socksRelays.clear()
+  } catch (e) {}
   // 归还槽位，让下一个窗口能拿回同一个分区（登录态得以保留）。
   // 崩溃时不会执行到这里，由 acquireSlot 的陈旧锁接管逻辑兜底。
   try { instanceSlot.releaseSlot(instanceSlotHandle) } catch (e) {}

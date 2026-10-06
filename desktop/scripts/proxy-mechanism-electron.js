@@ -7,8 +7,19 @@
  *   npm run verify:proxy
  *   （等价于 node_modules/.bin/electron scripts/proxy-mechanism-electron.js）
  *
- * 接真实公网代理做最后验收：
- *   PIX_PROXY_RULES='http://user:pass@1.2.3.4:8080' npm run verify:proxy
+ * 接真实公网代理做最后验收（⑦-⑧ 步，含认证）：
+ *   PIX_PROXY_LINE='host:port:user:pass' PIX_PROXY_TYPE=socks5 npm run verify:proxy
+ *   PIX_PROXY_LINE='host:port:user:pass' PIX_PROXY_TYPE=http   npm run verify:proxy
+ *   （PIX_PROXY_LINE 也接受 'user:pass@host:port'，与产品里「整行粘贴」同源）
+ *
+ * ## 认证是怎么被验证的（P0 的核心）
+ *
+ * 凭据**绝不进 proxyRules**（Chromium 会报 ERR_NO_SUPPORTED_PROXIES）。本脚本按
+ * 产品同款机制驱动真 Chromium：
+ *   · HTTP/HTTPS：规则只写 host:port，凭据通过 `app.on('login')`（isProxy）回填；
+ *   · SOCKS5：用产品自己的 `createSocksRelay()` 起本地中继，规则指向 127.0.0.1，
+ *     认证发生在「中继 → 上游」那一段。
+ * 因此 ⑧ 步能证明"带账号密码的代理真的能出网"，而不是"规则串看起来对"。
  *
  * ## ⚠️ 如果 macOS 弹出「"Electron" 意外退出」
  *
@@ -47,6 +58,8 @@
  *   ⑤ A 删除代理      → A 恢复直连
  *   ⑥ 重启（按落盘逐条恢复）→ A/B 设置仍正确、不串线
  *   ⑦ safeStorage 真实加密：proxyPass 不明文落盘
+ *   ⑧ 真实公网代理（设了 PIX_PROXY_LINE 才跑）：直连 IP → 代理 IP（A≠B）→
+ *      双线路隔离 → 删除代理恢复直连；带认证时走 login / 本地中继
  *
  * 本脚本用**产品自己的函数**（desktop/proxy-settings.js 的 applyTabProxy /
  * proxyRulesOf / proxyFieldsChanged），不另写一套逻辑。
@@ -57,13 +70,35 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 
-const { app, session, safeStorage } = require('electron')
+const { app, session, safeStorage, BrowserWindow } = require('electron')
 const {
   applyTabProxy,
   proxyRulesOf,
+  proxyTargetOf,
+  proxyAuthOf,
   proxyFieldsChanged,
   proxySettingsOf
 } = require('../proxy-settings')
+const { createSocksRelay } = require('../socks-relay')
+// 与产品同一个读取实现：验收跑的就是 main.js 的路径
+const { readPageText } = require('../probe-page')
+
+// 与 main.js 同款的代理认证投递：只认 isProxy，凭据按 webContents 精确匹配。
+// （产品里由 main.js 负责；这里是验收脚本，需要自己装一份同样的处理器。）
+const proxyAuthByWebContents = new Map()
+let loginEvents = 0
+app.on('login', (event, webContents, details, authInfo, callback) => {
+  if (!authInfo || authInfo.isProxy !== true) return
+  loginEvents++
+  const creds = webContents ? proxyAuthByWebContents.get(webContents.id) : null
+  if (!creds || !creds.user) return
+  event.preventDefault()
+  callback(creds.user, creds.pass)
+})
+
+// 验收会反复创建隐藏窗口探测出口 IP。Electron 默认在「所有窗口都关闭」时退出，
+// 于是第一个探测窗口销毁就会把整个脚本带走（表现为只跑到一半、exit=0）。
+app.on('window-all-closed', () => {})
 
 // 必须在 app ready 之前挂上：把假域名指到本机，绕开 <local> 的 bypass
 const FAKE_HOST = 'pix-origin.test'
@@ -92,11 +127,22 @@ function startOrigin() {
   return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port })))
 }
 
-// ─────────────────────────────────────────────── 真实 HTTP 代理（会标记出口）
+// ─────────────────────────────────────────────── 真实 HTTP 代理（会标记出口；可选 Basic 认证）
 
-function startHttpProxy(name) {
-  const state = { hits: 0 }
+function startHttpProxy(name, creds) {
+  const state = { hits: 0, authed: 0, rejected: 0 }
   const server = http.createServer((req, res) => {
+    if (creds) {
+      const raw = String(req.headers['proxy-authorization'] || '')
+      const expect = 'Basic ' + Buffer.from(creds.user + ':' + creds.pass).toString('base64')
+      if (raw !== expect) {
+        state.rejected++
+        res.writeHead(407, { 'proxy-authenticate': 'Basic realm="pix"', 'content-length': 0 })
+        res.end()
+        return
+      }
+      state.authed++
+    }
     if (!/^https?:\/\//i.test(req.url || '')) {
       res.writeHead(400)
       res.end('expect absolute-URI')
@@ -136,6 +182,84 @@ async function probe(ses, originPort) {
   const url = 'http://' + FAKE_HOST + ':' + originPort + '/probe'
   const res = await ses.fetch(url, { cache: 'no-store' })
   return JSON.parse(await res.text())
+}
+
+// ─────────────────────────────────────────────── 真实公网出口 IP
+
+/**
+ * 把环境变量解析成产品的代理 settings。
+ * `PIX_PROXY_LINE` 接受 'host:port:user:pass' 或 'user:pass@host:port'，
+ * 直接交给产品同款解析（整行粘贴在真实使用中很常见）。
+ */
+function settingsFromEnv() {
+  const line = String(process.env.PIX_PROXY_LINE || '').trim()
+  if (!line) return null
+  const type = String(process.env.PIX_PROXY_TYPE || 'socks5').trim().toLowerCase()
+  const normalized = type === 'http' ? 'http' : type === 'https' ? 'https' : 'socks5'
+  return {
+    proxyType: normalized,
+    proxyScheme: normalized,
+    // 整行塞进 proxyHost：parseProxyHostLine 会把 host/port/账密拆开
+    proxyHost: line,
+    proxyPort: '',
+    proxyUser: '',
+    proxyPass: ''
+  }
+}
+
+/** 走当前 session 的代理设置取公网出口 IP。 */
+async function fetchIpDirect(ses) {
+  try {
+    const res = await ses.fetch('https://api.ipify.org?format=json', { cache: 'no-store' })
+    const data = JSON.parse(await res.text())
+    return String((data && data.ip) || '').replace(/[^\w.:]/g, '')
+  } catch (e) {
+    return ''
+  }
+}
+
+/**
+ * 用一次性隐藏窗口请求 URL 并取回 JSON。
+ *
+ * 必须是真实 webContents：`login` 事件只有带 webContents 时我们才能精确投递凭据
+ * （`ses.fetch` 发出的请求没有 webContents，HTTP 代理的账密就没法交回 Chromium）。
+ */
+function probeJsonViaWindow(ses, url, creds) {
+  return new Promise(resolve => {
+    const win = new BrowserWindow({
+      show: false,
+      width: 380,
+      height: 260,
+      webPreferences: { session: ses, contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false }
+    })
+    const wc = win.webContents
+    if (creds && creds.user) proxyAuthByWebContents.set(wc.id, creds)
+    let done = false
+    const finish = value => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      try { proxyAuthByWebContents.delete(wc.id) } catch (e) {}
+      try { if (!wc.isDestroyed()) wc.destroy() } catch (e) {}
+      try { if (!win.isDestroyed()) win.destroy() } catch (e) {}
+      resolve(value)
+    }
+    const timer = setTimeout(() => finish(null), 20000)
+    wc.on('did-finish-load', () => {
+      // 与产品同款：隔离世界读文本
+      readPageText(wc)
+        .then(text => { try { finish(JSON.parse(text)) } catch (e) { finish(null) } })
+        .catch(() => finish(null))
+    })
+    wc.on('did-fail-load', (_e, code) => { if (code !== -3) finish(null) })
+    try { wc.loadURL(url) } catch (e) { finish(null) }
+  })
+}
+
+/** 走 HTTP 代理（带认证时经 login 回填）取公网出口 IP。 */
+async function fetchIpViaWindow(ses, creds) {
+  const data = await probeJsonViaWindow(ses, 'https://api.ipify.org?format=json', creds)
+  return String((data && data.ip) || '').replace(/[^\w.:]/g, '')
 }
 
 // ─────────────────────────────────────────────── 主流程
@@ -232,19 +356,77 @@ app.whenReady().then(async () => {
     fs.unlinkSync(tmp)
   }
 
-  // ⑧ 可选：真实公网代理验收（用户提供代理后再跑）
-  const rules = String(process.env.PIX_PROXY_RULES || '').trim()
-  if (rules) {
+  // ⑨ 真 Chromium + 真实 HTTP Basic 认证代理：凭据只能由 login 事件回填
+  // （用户给的公网端点是 SOCKS5-only，验证不了 HTTP 认证通道；这里补上真实验证）
+  const authProxy = await startHttpProxy('AUTH', { user: 'pix-user', pass: 'p@ss:word' })
+  {
+    const authSettings = {
+      proxyType: 'http', proxyScheme: 'http', proxyHost: '127.0.0.1', proxyPort: String(authProxy.port),
+      proxyUser: 'pix-user', proxyPass: 'p@ss:word'
+    }
+    const authRules = proxyRulesOf(authSettings)
+    record('⑨ HTTP 规则串只有地址、不含凭据',
+      authRules === 'http://127.0.0.1:' + authProxy.port && !authRules.includes('pix-user') && !authRules.includes('p@ss'),
+      { rules: authRules })
+
+    const sesAuth = session.fromPartition('persist:pix-mech-auth')
+    await sesAuth.setProxy({ proxyRules: authRules, proxyBypassRules: '<local>' })
+    const via = await probeJsonViaWindow(sesAuth, 'http://' + FAKE_HOST + ':' + origin.port + '/auth', proxyAuthOf(authSettings))
+    record('⑨ 真 Chromium 经 login 回填凭据后真的从代理出网', !!via && via.via === 'AUTH', { via: via && via.via })
+    record('⑨ login 事件被真实触发（isProxy）', loginEvents >= 1, { loginEvents: loginEvents })
+    record('⑨ 代理收到且仅接受 1 次带凭据请求', authProxy.state.authed === 1 && authProxy.state.rejected >= 1,
+      { authed: authProxy.state.authed, rejected: authProxy.state.rejected })
+
+    const sesAuthBad = session.fromPartition('persist:pix-mech-authbad')
+    await sesAuthBad.setProxy({ proxyRules: authRules, proxyBypassRules: '<local>' })
+    const badVia = await probeJsonViaWindow(sesAuthBad, 'http://' + FAKE_HOST + ':' + origin.port + '/auth', { user: 'pix-user', pass: 'wrong' })
+    record('⑨ 错密码绝不放行（不静默直连、不蒙混）', !badVia || badVia.via !== 'AUTH', { via: badVia && badVia.via })
+  }
+
+  // ⑧ 真实公网代理验收（含账号密码；用户提供代理后再跑）
+  const envSettings = settingsFromEnv()
+  if (envSettings) {
     const sesPub = session.fromPartition('persist:pix-mech-pub')
-    const directIp = await (await sesPub.fetch('https://api.ipify.org?format=json', { cache: 'no-store' })).json()
-    await sesPub.setProxy({ proxyRules: rules, proxyBypassRules: '<local>' })
-    const proxiedIp = await (await sesPub.fetch('https://api.ipify.org?format=json', { cache: 'no-store' })).json()
-    record('⑧ 真实公网代理：出口 IP 与直连不同', directIp.ip !== proxiedIp.ip, { direct: directIp.ip, proxied: proxiedIp.ip })
     await sesPub.setProxy({ mode: 'direct' })
-    const backIp = await (await sesPub.fetch('https://api.ipify.org?format=json', { cache: 'no-store' })).json()
-    record('⑧ 删除代理后出口 IP 回到直连', backIp.ip === directIp.ip, { back: backIp.ip })
+    const directIp = await fetchIpDirect(sesPub)
+    record('⑧ 直连出口 IP 可用', !!directIp, { direct: directIp })
+
+    const target = proxyTargetOf(envSettings)
+    const creds = proxyAuthOf(envSettings)
+    // 凭据绝不能出现在 Chromium 看到的规则串里
+    const leaked = [target.user, target.pass].filter(Boolean).some(v => v.length > 2)
+
+    let relay = null
+    let relayEndpoint = ''
+    if (target.scheme === 'socks5' && target.hasAuth) {
+      relay = createSocksRelay({ host: target.host, port: target.port, user: target.user, pass: target.pass, onError: () => {} })
+      const info = await relay.start()
+      relayEndpoint = '127.0.0.1:' + info.port
+    }
+    const rules = proxyRulesOf(envSettings, { relayEndpoint: relayEndpoint })
+    record('⑧ 规则串只含地址、不含凭据', !!rules && !(leaked && (rules.includes(target.user) || rules.includes(target.pass))),
+      { scheme: target.scheme, auth: target.hasAuth, relay: !!relay, ruleHasCreds: !!(rules.includes(target.user) || rules.includes(target.pass)) })
+
+    await sesPub.setProxy({ proxyRules: rules, proxyBypassRules: '<local>' })
+    // HTTP 带认证 → 走 login（隐藏窗口）；SOCKS5 带认证 → 走中继，Chromium 侧无认证
+    const proxiedIp = creds ? await fetchIpViaWindow(sesPub, creds) : await fetchIpDirect(sesPub)
+    record('⑧ 代理出口 IP 与直连不同', !!proxiedIp && proxiedIp !== directIp, { direct: directIp, proxied: proxiedIp })
+    record('⑧ 代理出口 IP 可用', !!proxiedIp, { proxied: proxiedIp })
+
+    // 双线路隔离：A（代理）与 B（直连）同时在线，互不污染
+    const sesIso = session.fromPartition('persist:pix-mech-iso')
+    await sesIso.setProxy({ mode: 'direct' })
+    const isoIp = await fetchIpDirect(sesIso)
+    record('⑧ 双线路隔离：B 仍是直连出口、与 A 不同', isoIp === directIp && isoIp !== proxiedIp, { a: proxiedIp, b: isoIp })
+
+    // 删除代理 → 恢复直连
+    await sesPub.setProxy({ mode: 'direct' })
+    const backIp = await fetchIpDirect(sesPub)
+    record('⑧ 删除代理后出口 IP 回到直连', backIp === directIp, { back: backIp })
+
+    if (relay) await relay.close()
   } else {
-    console.log('  SKIP  ⑧ 真实公网代理验收（未设 PIX_PROXY_RULES）')
+    console.log('  SKIP  ⑧ 真实公网代理验收（未设 PIX_PROXY_LINE）')
   }
 
   const failed = results.filter(r => !r.ok)
@@ -253,6 +435,7 @@ app.whenReady().then(async () => {
   origin.server.close()
   proxyA.server.close()
   proxyB.server.close()
+  authProxy.server.close()
   try { require('node:fs').rmSync(SANDBOX_DIR, { recursive: true, force: true }) } catch (e) {}
   app.exit(failed.length ? 1 : 0)
 }).catch(error => {

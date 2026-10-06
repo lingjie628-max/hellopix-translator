@@ -34,6 +34,8 @@ const test = require('node:test')
 const {
   PROXY_FIELDS,
   proxyRulesOf,
+  proxyTargetOf,
+  proxyAuthOf,
   proxySettingsOf,
   proxyFieldsChanged,
   applySessionProxy,
@@ -98,21 +100,50 @@ test('proxyRulesOf：socks5 / http 生成对应 scheme，直连返回空串', ()
   assert.equal(proxyRulesOf({ proxyType: 'http', proxyHost: '10.0.0.9', proxyPort: '3128' }), 'http://10.0.0.9:3128')
 })
 
-test('proxyRulesOf：账号密码做 URL 编码，不裸拼进规则串', () => {
-  const rules = proxyRulesOf({
+test('【P0】账密绝不进规则串：带认证的 socks5 规则里不能出现凭据', () => {
+  // Chromium 的 proxyRules 字符串不接受内嵌凭据：`socks5://u:p@host:port`
+  // 实测报 net::ERR_NO_SUPPORTED_PROXIES（这是 P0 的根因）。
+  // 凭据必须走认证通道：HTTP 走 app.on('login')，SOCKS5 走本地中继。
+  const target = proxyTargetOf({
     proxyType: 'socks5',
     proxyHost: '127.0.0.1',
     proxyPort: '1080',
     proxyUser: 'user@corp',
     proxyPass: 'p@ss:word'
   })
-  // 裸拼会得到 socks5://user@corp:p@ss:word@127.0.0.1:1080，被 Electron 解析错。
-  assert.equal(rules, 'socks5://user%40corp:p%40ss%3Aword@127.0.0.1:1080')
+  assert.deepEqual(
+    { scheme: target.scheme, host: target.host, port: target.port, user: target.user, pass: target.pass, hasAuth: target.hasAuth },
+    { scheme: 'socks5', host: '127.0.0.1', port: '1080', user: 'user@corp', pass: 'p@ss:word', hasAuth: true }
+  )
+  // 没有中继地址时不产出规则串（applyTabProxy 会先起中继，绝不静默直连）
+  assert.equal(proxyRulesOf({
+    proxyType: 'socks5', proxyHost: '127.0.0.1', proxyPort: '1080', proxyUser: 'u', proxyPass: 'p'
+  }), '')
+  // 有中继地址时，Chromium 连的是本地中继，规则串仍然不含凭据
+  assert.equal(proxyRulesOf({
+    proxyType: 'socks5', proxyHost: '127.0.0.1', proxyPort: '1080', proxyUser: 'u', proxyPass: 'p'
+  }, { relayEndpoint: '127.0.0.1:41234' }), 'socks5://127.0.0.1:41234')
+})
+
+test('【P0】http/https 的账密同样不进规则串，只通过 login 事件回填', () => {
+  const settings = { proxyType: 'http', proxyHost: 'gate.example', proxyPort: '8080', proxyUser: 'u1', proxyPass: 'p@ss' }
+  assert.equal(proxyRulesOf(settings), 'http://gate.example:8080')
+  assert.ok(!proxyRulesOf(settings).includes('u1'), '规则串不得出现账号')
+  assert.ok(!proxyRulesOf(settings).includes('p@ss'), '规则串不得出现密码')
+  assert.deepEqual(proxyAuthOf(settings), { scheme: 'http', host: 'gate.example', port: '8080', user: 'u1', pass: 'p@ss' })
+})
+
+test('【P0】proxyAuthOf：无代理 / 无账密一律 null（绝不凭空造出凭据）', () => {
+  assert.equal(proxyAuthOf({ proxyType: 'none' }), null)
+  assert.equal(proxyAuthOf({ proxyType: 'http', proxyHost: 'h', proxyPort: '1' }), null)
+  assert.equal(proxyAuthOf({ proxyType: 'socks5', proxyHost: 'h', proxyPort: '1', proxyUser: '', proxyPass: '' }), null)
 })
 
 test('proxyRulesOf：整行粘贴（主机:端口:账号:密码）也能解析', () => {
-  const rules = proxyRulesOf({ proxyType: 'http', proxyHost: '1.2.3.4:8080:u1:p1' })
-  assert.equal(rules, 'http://u1:p1@1.2.3.4:8080')
+  // 整行粘贴时账密被解析出来，但同样只进认证通道，不进规则串。
+  const settings = { proxyType: 'http', proxyHost: '1.2.3.4:8080:u1:p1' }
+  assert.equal(proxyRulesOf(settings), 'http://1.2.3.4:8080')
+  assert.deepEqual(proxyAuthOf(settings), { scheme: 'http', host: '1.2.3.4', port: '8080', user: 'u1', pass: 'p1' })
 })
 
 // ───────────────────────────────────────── 第 3 项：删除代理 = direct
@@ -179,6 +210,60 @@ test('【1】ssh 类型：先起隧道再写 session（顺序不能反）', asyn
   })
   assert.deepEqual(order, ['tunnel', 'setProxy'], '隧道没起来就写 session 会连到一个不存在的本地端口')
   assert.equal(ses.rules(), 'socks5://127.0.0.1:1080')
+})
+
+// ───────────────────────────────────────── P0：带认证 SOCKS5 走本地中继
+
+test('【P0】带认证的 SOCKS5：先起中继，规则串指向本地中继', async () => {
+  const ses = fakeSession()
+  const tab = tabOf(ses, {
+    proxyType: 'socks5', proxyHost: '203.0.113.9', proxyPort: '1080', proxyUser: 'u1', proxyPass: 'p1'
+  })
+  const asked = []
+  await applyTabProxy(tab, {
+    ensureSocksRelay(t, target) {
+      asked.push(target)
+      return Promise.resolve({ endpoint: '127.0.0.1:41234' })
+    }
+  })
+  assert.deepEqual(asked, [{ host: '203.0.113.9', port: '1080', user: 'u1', pass: 'p1' }], '中继必须拿到这条线路自己的账密')
+  assert.equal(ses.rules(), 'socks5://127.0.0.1:41234')
+  const rules = String(ses.rules())
+  assert.ok(!rules.includes('u1') && !rules.includes('p1') && !rules.includes('@'), '规则串里绝不能出现凭据')
+})
+
+test('【P0】带认证的 SOCKS5 而没有中继依赖时：抛错，绝不静默退回直连', async () => {
+  const ses = fakeSession()
+  const tab = tabOf(ses, { proxyType: 'socks5', proxyHost: 'h', proxyPort: '1080', proxyUser: 'u', proxyPass: 'p' })
+  await assert.rejects(() => applyTabProxy(tab, {}), /本地中继/)
+  assert.equal(ses.calls.length, 0, '没有中继就不该往 session 写任何规则（写 direct 等于静默换出口）')
+})
+
+test('【P0】从带认证 SOCKS5 切走：先释放旧中继，再写新规则', async () => {
+  const order = []
+  const ses = fakeSession()
+  ses.setProxy = function (arg) { order.push('setProxy'); this.calls.push(arg); return Promise.resolve() }
+  const tab = tabOf(ses, { proxyType: 'socks5', proxyHost: 'h', proxyPort: '1080', proxyUser: 'u', proxyPass: 'p' })
+  await applyTabProxy(tab, {
+    ensureSocksRelay: () => { order.push('ensure'); return Promise.resolve({ endpoint: '127.0.0.1:1' }) },
+    releaseSocksRelay: () => { order.push('release') }
+  })
+  tab.settings = { proxyType: 'none' }
+  await applyTabProxy(tab, {
+    ensureSocksRelay: () => { order.push('ensure') },
+    releaseSocksRelay: () => { order.push('release') }
+  })
+  assert.deepEqual(order, ['ensure', 'setProxy', 'release', 'setProxy'], '切走必须先关掉旧中继，再写新规则')
+  assert.equal(ses.isDirect(), true)
+})
+
+test('【P0】无认证 SOCKS5 不需要中继：直接用上游地址（不白起一个本地端口）', async () => {
+  const ses = fakeSession()
+  let relayAsked = 0
+  const tab = tabOf(ses, { proxyType: 'socks5', proxyHost: '198.51.100.7', proxyPort: '1080' })
+  await applyTabProxy(tab, { ensureSocksRelay: () => { relayAsked++; return Promise.resolve({ endpoint: '127.0.0.1:1' }) } })
+  assert.equal(relayAsked, 0)
+  assert.equal(ses.rules(), 'socks5://198.51.100.7:1080')
 })
 
 // ───────────────────────────────────────── 第 2 项：已有线路改代理立刻生效
@@ -289,6 +374,37 @@ test('main.js 里不再保留第二份代理实现', () => {
   assert.ok(!/function proxyRulesOf\s*\(/.test(mainSrc), 'proxyRulesOf 只应存在于 proxy-settings.js')
   assert.ok(!/function proxyPresetOf\s*\(/.test(mainSrc), 'proxyPresetOf 只应存在于 proxy-settings.js')
   assert.ok(mainSrc.includes("require('./proxy-settings')"), 'main.js 应引用共享模块')
+})
+
+// ───────────────────────────────────────── P0：认证接线（只认代理、按线路匹配）
+
+test('【P0】login 处理只认 isProxy，且按触发挑战的 webContents 精确取凭据', () => {
+  const idx = mainSrc.indexOf("app.on('login'")
+  assert.ok(idx > 0, 'main.js 必须监听 login 事件来处理 HTTP/HTTPS 代理认证')
+  const body = mainSrc.slice(idx, idx + 1200)
+  assert.ok(body.includes('authInfo.isProxy !== true'), '必须先判断 isProxy：网站自己的 Basic Auth 一律放行，绝不用代理账密去应答')
+  assert.ok(body.includes('event.preventDefault()'), '确认是代理认证后才回填凭据')
+  assert.ok(body.includes('proxyAuthOf'), '凭据必须来自当前线路的 settings')
+  assert.ok(body.includes('tabOfWebContents') && body.includes('proxyAuthByWebContents'), '凭据必须按 webContents 精确匹配（= 按 partition 隔离，A 的账密不可能给 B 用）')
+})
+
+test('【P0】main.js 给两条应用路径都注入了中继依赖（不搞第二套接线）', () => {
+  const deps = fnBody(mainSrc, 'tabProxyDeps')
+  assert.ok(deps.includes('ensureSocksRelay') && deps.includes('releaseSocksRelay'), 'tabProxyDeps 必须提供中继的建/拆')
+  assert.ok(fnBody(mainSrc, 'startTabLoad').includes('tabProxyDeps'), '新建 / 重启恢复路径要用同一套依赖')
+  assert.ok(fnBody(mainSrc, 'updateTabSettings').includes('tabProxyDeps'), '改代理路径要用同一套依赖')
+})
+
+test('【P0】关闭线路 / 退出应用都要释放中继（不留无主监听端口）', () => {
+  assert.ok(fnBody(mainSrc, 'destroyTab').includes('releaseSocksRelay'), '关闭线路必须释放它自己的中继')
+  const quit = mainSrc.slice(mainSrc.indexOf("app.on('before-quit'"))
+  assert.ok(quit.slice(0, 900).includes('socksRelays'), '退出时必须统一关闭所有中继')
+})
+
+test('【P0】中继是纯 Node 模块，产品与测试共用同一份实现', () => {
+  const src = fs.readFileSync(path.join(root, 'desktop', 'socks-relay.js'), 'utf8')
+  assert.ok(!/require\(['"]electron['"]\)/.test(src), 'socks-relay.js 一旦依赖 electron 就测不了')
+  assert.ok(mainSrc.includes("require('./socks-relay')"), 'main.js 必须复用这份中继')
 })
 
 test('proxy-settings.js 不 require electron（否则测试又加载不了）', () => {

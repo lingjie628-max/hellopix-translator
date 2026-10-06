@@ -89,26 +89,52 @@ function parseProxyHostLine(raw) {
   return { host: text }
 }
 
+/** 解析 "host:port"（ssh 隧道本地监听用）。 */
+function splitHostPort(raw) {
+  const text = String(raw || '').trim()
+  const idx = text.lastIndexOf(':')
+  if (idx <= 0) return { host: text, port: '' }
+  return { host: text.slice(0, idx), port: text.slice(idx + 1) }
+}
+
 /**
- * 把一条线路的 settings 编译成 Electron 的 proxyRules 字符串。
- * 返回 '' 表示**直连**（由调用方转成 `{ mode: 'direct' }`）。
+ * 把一条线路的 settings 解析成**代理目标**。
+ *
+ * 返回 `{ direct: true }` 表示直连；否则给出 `scheme / host / port / user / pass / hasAuth`。
+ *
+ * 为什么把账密单独解析出来：Chromium 的 `proxyRules` 字符串**不接受内嵌凭据**
+ * （`socks5://user:pass@host:port` 实测报 `net::ERR_NO_SUPPORTED_PROXIES`）。
+ * 所以规则串与凭据必须分开传递 —— 规则走 `proxyRulesOf`，
+ * HTTP/HTTPS 的凭据走 `app.on('login')`，SOCKS5 的凭据走本地中继。
  */
-function proxyRulesOf(settings) {
-  const type = String((settings && settings.proxyType) || 'none')
-  if (!type || type === 'none') return ''
+function proxyTargetOf(settings) {
+  const s = settings || {}
+  const type = String(s.proxyType || 'none')
+  if (!type || type === 'none') return { direct: true }
   const preset = proxyPresetOf(type)
-  if (preset.kind === 'direct') return ''
-  if (type === 'ssh' && settings.proxyLocal) return 'socks5://' + settings.proxyLocal
-  let host = sanitizeProxyPart(settings.proxyHost, 180)
-  let port = sanitizeProxyPart(settings.proxyPort, 8)
-  let user = String((settings && settings.proxyUser) || '').trim()
-  let pass = String((settings && settings.proxyPass) || '').trim()
-  const parsed = parseProxyHostLine(settings.proxyHost || settings.proxyNode || '')
+  if (preset.kind === 'direct') return { direct: true }
+  // ssh 隧道：隧道进程已在本地监听一个无认证 socks5，直接用它的地址。
+  if (type === 'ssh' && s.proxyLocal) {
+    const local = splitHostPort(s.proxyLocal)
+    return {
+      direct: false,
+      scheme: 'socks5',
+      host: sanitizeProxyPart(local.host, 180),
+      port: sanitizeProxyPart(local.port, 8),
+      user: '',
+      pass: '',
+      hasAuth: false,
+      viaTunnel: true
+    }
+  }
+  let host = sanitizeProxyPart(s.proxyHost, 180)
+  let port = sanitizeProxyPart(s.proxyPort, 8)
+  let user = String(s.proxyUser || '').trim()
+  let pass = String(s.proxyPass || '').trim()
+  const parsed = parseProxyHostLine(s.proxyHost || s.proxyNode || '')
   // 用户常把代理后台给的一整行「主机:端口:账号:密码」直接粘进"代理主机"。
   // 这种时候 proxyHost 里带着冒号，**不能整串当主机名** ——
-  // 否则会拼出 socks5://u:p@1.2.3.4:8080:u:p:8080 这种坏规则
-  // （Electron 解析失败 → 表现为"填了代理反而更连不上"）。
-  // 只在整串确实解析出端口/账密时才拆开，正常主机名不受影响。
+  // 否则端口/账密会被解析错位（填了代理反而更连不上）。
   if (parsed.host && (parsed.port || parsed.user || parsed.pass)) {
     host = sanitizeProxyPart(parsed.host, 180)
     if (parsed.port) port = sanitizeProxyPart(parsed.port, 8)
@@ -119,20 +145,61 @@ function proxyRulesOf(settings) {
   if (!port && parsed.port) port = sanitizeProxyPart(parsed.port, 8)
   if (!user && parsed.user) user = String(parsed.user).trim()
   if (!pass && parsed.pass) pass = String(parsed.pass).trim()
-  if (settings.proxyNode && !host) {
-    const node = parseProxyHostLine(settings.proxyNode)
+  if (s.proxyNode && !host) {
+    const node = parseProxyHostLine(s.proxyNode)
     host = sanitizeProxyPart(node.host, 180)
     port = port || sanitizeProxyPart(node.port, 8)
     user = user || String(node.user || '').trim()
     pass = pass || String(node.pass || '').trim()
   }
-  if (!host) return ''
-  const scheme = String((settings && settings.proxyScheme) || preset.scheme || 'socks5').toLowerCase()
-  const proto = scheme === 'https' ? 'https' : scheme === 'http' ? 'http' : 'socks5'
-  const auth = user || pass
-    ? encodeURIComponent(user) + ':' + encodeURIComponent(pass) + '@'
-    : ''
-  return proto + '://' + auth + host + (port ? ':' + port : '')
+  if (!host) return { direct: true }
+  const scheme = String(s.proxyScheme || preset.scheme || 'socks5').toLowerCase()
+  const normalized = scheme === 'https' ? 'https' : scheme === 'http' ? 'http' : 'socks5'
+  return {
+    direct: false,
+    scheme: normalized,
+    host: host,
+    port: port,
+    user: user,
+    pass: pass,
+    hasAuth: !!(user || pass)
+  }
+}
+
+/**
+ * 这条线路是否有需要交给「认证环节」的账密。
+ *
+ * · HTTP/HTTPS：交给 `app.on('login')`（`authInfo.isProxy === true` 时）。
+ * · SOCKS5：交给本地中继（Chromium 的 socks5 认证不触发 login 事件）。
+ * 没有账密返回 null。
+ */
+function proxyAuthOf(settings) {
+  const target = proxyTargetOf(settings)
+  if (target.direct || !target.hasAuth) return null
+  return { scheme: target.scheme, host: target.host, port: target.port, user: target.user, pass: target.pass }
+}
+
+/**
+ * 把一条线路的 settings 编译成 Electron 的 proxyRules 字符串 —— **不含任何凭据**。
+ * 返回 '' 表示**直连**（由调用方转成 `{ mode: 'direct' }`）。
+ *
+ * · HTTP/HTTPS：`http(s)://host:port`，Basic 凭据由 `app.on('login')` 补上。
+ * · SOCKS5 无认证：`socks5://host:port`。
+ * · SOCKS5 带认证：Chromium 无法为 socks5 提供凭据，必须由一个**本地中继**承接 ——
+ *   调用方先起中继、把中继地址通过 `options.relayEndpoint`（形如 `127.0.0.1:12345`）传入，
+ *   这里生成 `socks5://127.0.0.1:12345`（Chromium 连中继，中继再带凭据连上游）。
+ *   没有传中继地址时返回 '' —— 但这**不是**"直连"，调用方（applyTabProxy）必须先起中继，
+ *   否则等于静默换了出口。
+ */
+function proxyRulesOf(settings, options) {
+  const target = proxyTargetOf(settings)
+  if (target.direct || !target.host) return ''
+  if (target.scheme === 'socks5' && target.hasAuth) {
+    const endpoint = options && options.relayEndpoint
+    if (!endpoint) return ''
+    return 'socks5://' + endpoint
+  }
+  return target.scheme + '://' + target.host + (target.port ? ':' + target.port : '')
 }
 
 /** 只挑出代理字段（回给渲染层用，避免把整个 settings 抖出去）。 */
@@ -171,12 +238,14 @@ function sessionOf(tab) {
  * 有代理 → `proxyRules`；没有 → `mode: 'direct'`（**必须显式走 direct**，
  * 否则"删除代理"只会留着上一次的规则，线路继续走旧代理）。
  *
+ * `options.relayEndpoint`：带认证 SOCKS5 的本地中继地址（见 proxyRulesOf）。
+ *
  * 失败一律吞掉：代理填错不该让整个客户端崩，用户会表现为"上不了网"，
  * 再回去改设置即可。这也是原先就有的行为，保持不动。
  */
-function applySessionProxy(ses, settings) {
+function applySessionProxy(ses, settings, options) {
   if (!ses || typeof ses.setProxy !== 'function') return Promise.resolve()
-  const rules = proxyRulesOf(settings)
+  const rules = proxyRulesOf(settings, options)
   const next = rules
     ? ses.setProxy({ proxyRules: rules, proxyBypassRules: '<local>' })
     : ses.setProxy({ mode: 'direct' })
@@ -187,8 +256,15 @@ function applySessionProxy(ses, settings) {
  * 对一条线路应用它自己的代理 —— **新建、重启恢复、改代理都走这里**。
  *
  * deps:
- *   restartSshTunnel(tab)  仅 ssh 类型需要；由 main.js 注入（它要 spawn ssh）
- *   applySessionProxy      可选，注入测试替身；默认用上面的真实实现
+ *   restartSshTunnel(tab)   仅 ssh 类型需要；由 main.js 注入（它要 spawn ssh）
+ *   ensureSocksRelay(tab, target)  仅"带认证的 SOCKS5"需要；返回 { endpoint: '127.0.0.1:port' }
+ *   releaseSocksRelay(tab)         线路不再需要中继时调用（改成直连/别的代理）
+ *   applySessionProxy              可选，注入测试替身；默认用上面的真实实现
+ *
+ * 顺序很重要：
+ *   · ssh：**先起隧道再写 session**（隧道没起来就写 session 会连到不存在的本地端口）；
+ *   · socks5+认证：**先起中继再写 session**（规则里要填中继地址）。
+ * 因此目标（target）在 pre 步骤之后才解析 —— ssh 隧道会把 proxyLocal 写回 settings。
  *
  * 返回 Promise，调用方据此决定"应用完成后再 reload"——顺序反了会
  * 出现"页面已重新加载，但走的是旧代理"。
@@ -199,12 +275,38 @@ function applyTabProxy(tab, deps) {
   const apply = typeof options.applySessionProxy === 'function'
     ? options.applySessionProxy
     : applySessionProxy
-  const restart = options.restartSshTunnel
   const isSsh = String(settings.proxyType || '') === 'ssh'
-  const ready = isSsh && typeof restart === 'function'
-    ? Promise.resolve(restart(tab))
+  const pre = isSsh && typeof options.restartSshTunnel === 'function'
+    ? Promise.resolve(options.restartSshTunnel(tab))
     : Promise.resolve()
-  return ready.then(() => apply(sessionOf(tab), settings))
+
+  return pre.then(() => {
+    const target = proxyTargetOf(settings)
+    const needsRelay = !target.direct && target.scheme === 'socks5' && target.hasAuth
+
+    if (needsRelay) {
+      if (typeof options.ensureSocksRelay !== 'function') {
+        // 带认证的 socks5 没有中继就走不了。**绝不退回直连** —— 那是静默换出口。
+        throw new Error('带认证的 SOCKS5 需要本地中继，但未注入 ensureSocksRelay')
+      }
+      return Promise.resolve(options.ensureSocksRelay(tab, {
+        host: target.host,
+        port: target.port,
+        user: target.user,
+        pass: target.pass
+      })).then(relay => {
+        const endpoint = relay && relay.endpoint
+        if (!endpoint) throw new Error('本地 SOCKS5 中继未能启动')
+        return apply(sessionOf(tab), settings, { relayEndpoint: endpoint })
+      })
+    }
+
+    // 不再需要中继（改成直连/其它代理）：先把旧中继关掉，再写 session。
+    const release = typeof options.releaseSocksRelay === 'function'
+      ? Promise.resolve(options.releaseSocksRelay(tab))
+      : Promise.resolve()
+    return release.then(() => apply(sessionOf(tab), settings, {}))
+  })
 }
 
 module.exports = {
@@ -212,6 +314,9 @@ module.exports = {
   proxyPresetOf,
   sanitizeProxyPart,
   parseProxyHostLine,
+  splitHostPort,
+  proxyTargetOf,
+  proxyAuthOf,
   proxyRulesOf,
   proxySettingsOf,
   proxyFieldsChanged,
