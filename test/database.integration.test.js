@@ -243,7 +243,10 @@ test('PostgreSQL and Redis preserve billing under concurrency', {
     //
     // 这是"不擅自改变已售权益"的执行点：老客户钉在购买时的版本，
     // 我们之后往活表里加/删通道都不会回溯改到他头上。
-    await pool.query("UPDATE engines SET wired=true WHERE id IN ('qwen','google')")
+    //
+    // V1.0.x（迁移 039）把开放通道收窄到 {gpt, deepseek}，三档一律升到 v3。
+    // 注意 core.engines 的列表只按 retired_at 过滤，与 wired/enabled 无关 ——
+    // 所以这里不需要为了拿列表去动 wired。
     const channelsAt = async version => {
       await pool.query('UPDATE users SET package_catalog_version=$2 WHERE id=$1', [userId, version])
       const scoped = await repo.sessionAccount(`main:${userId}`)
@@ -251,21 +254,23 @@ test('PostgreSQL and Redis preserve billing under concurrency', {
     }
     const v1 = await channelsAt(1)
     const v2 = await channelsAt(2)
-    assert.deepEqual(v1, ['deepseek', 'google'],
-      'v1 是改动前的快照：含当时配过的 gemini / niutrans（已下架、对商户不可见），也不含任何新通道')
-    // advanced 档的 v2 权益是 7 个通道，claude 只在 pro 档 —— 所以这里挑 advanced v2
-    // 确实包含的两个新通道来验证版本差异。
-    assert.ok(v2.includes('qwen') && v2.includes('doubao'), 'v2 才含本次新增的通道')
-    assert.ok(!v2.includes('niutrans'), '已下架通道对商户不可见（但对账仍查得到）')
+    const v3 = await channelsAt(3)
+    assert.deepEqual(v1, ['deepseek'],
+      'v1 是改动前的快照：含 gemini / google / niutrans，但都已下架，对商户只剩 deepseek 可见')
+    assert.deepEqual(v2, ['deepseek', 'gpt'],
+      'v2 含 qwen / doubao 等新通道，但 039 已把它们全部下架，只剩 deepseek 与 gpt')
+    assert.deepEqual(v3, ['deepseek', 'gpt'],
+      'v3 就是 V1.0.x 的开放集合：仅 DeepSeek 与 GPT')
+    assert.ok(!v2.includes('niutrans') && !v3.includes('qwen'),
+      '已下架通道对商户不可见（但对账仍查得到）')
 
     // 下架的通道在库里、在历史套餐快照里都还在 —— 这是"当初卖过什么"的证据
     const retiredRow = await pool.query(
-      "SELECT enabled,wired,retired_at IS NOT NULL AS retired FROM engines WHERE id='niutrans'")
+      "SELECT enabled,wired,retired_at IS NOT NULL AS retired FROM engines WHERE id='qwen'")
     assert.equal(retiredRow.rows[0].retired, true, '下架是软删除：行必须还在')
     assert.equal(retiredRow.rows[0].enabled, false)
 
     await pool.query("UPDATE users SET package_catalog_version=NULL WHERE id=$1", [userId])
-    await pool.query("UPDATE engines SET wired=false WHERE id IN ('qwen','google')")
 
     const transfers = await Promise.allSettled([
       core.transferChars(session, {
@@ -290,27 +295,26 @@ test('PostgreSQL and Redis preserve billing under concurrency', {
 
     // --- 自由切换 + 余额共享 + 套餐准入 ---------------------------------------
     //
-    // 套餐规则是本次换线的核心约定，三条一起验：
-    //   1. 同一个商户可以在套餐内任意通道之间自由切换（切到 doubao 一样能翻）；
+    // V1.0.x 只开放 DeepSeek 与 GPT（迁移 039），三条一起验：
+    //   1. 同一个商户可以在这两个通道之间自由切换；
     //   2. 扣费与通道**无关** —— 同一段原文走哪个通道都扣同样多字符，
     //      没有渠道倍率、也不因为某个通道上游更贵就多扣；
-    //   3. 套餐外的通道一律拒绝（kimi 只属于专业版），而且**不会静默换一个**便宜通道。
-    await pool.query("UPDATE engines SET wired=true WHERE id='doubao'")
-    const viaDoubao = await core.translate(session, {
-      text: 'switch', from: 'en', to: 'zh', engine: 'doubao'
+    //   3. 已下架的通道一律拒绝，而且**不会静默换一个**可用通道。
+    await pool.query("UPDATE engines SET wired=true WHERE id='gpt'")
+    const viaGpt = await core.translate(session, {
+      text: 'switch', from: 'en', to: 'zh', engine: 'gpt'
     }, `switch_a_${suffix}`)
     const viaDeepseek = await core.translate(session, {
       text: 'switch', from: 'en', to: 'zh', engine: 'deepseek'
     }, `switch_b_${suffix}`)
-    assert.equal(viaDoubao.engine, 'doubao', '用哪个通道翻译，响应里就得是哪个通道')
-    assert.equal(viaDoubao.chars, viaDeepseek.chars,
+    assert.equal(viaGpt.engine, 'gpt', '用哪个通道翻译，响应里就得是哪个通道')
+    assert.equal(viaGpt.chars, viaDeepseek.chars,
       '100 原文 = 100 扣费，与通道无关；这里多一分钱都是渠道倍率漏进来了')
-    assert.equal(viaDeepseek.remain, viaDoubao.remain - viaDoubao.chars,
+    assert.equal(viaDeepseek.remain, viaGpt.remain - viaGpt.chars,
       '两个通道共享同一份套餐余额，扣的是一本账')
 
-    // kimi 在高级版权益之外（只属于专业版）。显式点名它必须报「套餐未包含」，
-    // 绝不能"顺手"换成一个便宜通道 —— 那就是静默切换供应商。
-    await pool.query("UPDATE engines SET wired=true WHERE id='kimi'")
+    // kimi 不在 V1.0.x 的开放集合里（只有 DeepSeek / GPT）。显式点名它必须报
+    // 「套餐未包含」，绝不能"顺手"换成一个可用通道 —— 那就是静默切换供应商。
     await assert.rejects(
       core.translate(session, {
         text: 'switch', from: 'en', to: 'zh', engine: 'kimi'
@@ -322,7 +326,7 @@ test('PostgreSQL and Redis preserve billing under concurrency', {
       'SELECT char_balance FROM users WHERE id=$1', [userId]
     )).rows[0].char_balance), viaDeepseek.remain,
     '被拒绝的请求不能扣客户一个字符')
-    await pool.query("UPDATE engines SET wired=false WHERE id IN ('doubao','kimi')")
+    await pool.query("UPDATE engines SET wired=false WHERE id='gpt'")
 
     await repo.transaction(async client => {
       await repo.adjustChars(client, 'main', userId, -10)

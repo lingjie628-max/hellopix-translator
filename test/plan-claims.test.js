@@ -86,3 +86,46 @@ test('开发用 mock 不再带着这条承诺（避免被当成种子样本抄�
   assert.doesNotMatch(src, /'独立应用版'/, 'mock 里还有「独立应用版」')
   assert.doesNotMatch(src, /standalone:\s*1/, 'mock 里还有 standalone: 1')
 })
+
+// ---------------------------------------------------------------------------
+// 迁移 040：宣传卖点里的通道必须真的在权益里
+//
+// 与 034 同类：卖点与权益对不上，客户为某个宣传名买套餐，一翻译必撞
+// 「当前套餐未包含此通道」。039 把开放通道收窄到 {DeepSeek, GPT} 之后，
+// 三档原本宣传的通道全部下架，040 负责把文案对齐。
+// ---------------------------------------------------------------------------
+
+const MIGRATION_040 = 'migrations/040_plan_highlights_deepseek_gpt_only.js'
+
+test('迁移 040 存在，且把三档宣传卖点对齐到只剩 DeepSeek + GPT', () => {
+  const files = fs.readdirSync(path.join(root, 'migrations')).filter(f => f.endsWith('.js'))
+  assert.ok(files.includes('040_plan_highlights_deepseek_gpt_only.js'),
+    '找不到迁移 040 —— 套餐卡片会继续宣传已下架的通道')
+
+  const m = require('../migrations/040_plan_highlights_deepseek_gpt_only')
+  assert.equal(m.alignedHighlights, '["150万字符","DeepSeek、GPT"]')
+
+  // 三个在售套餐都要覆盖到，漏一个就仍有一条过时的卖点。
+  const src = read(MIGRATION_040)
+  for (const id of [1, 2, 3]) {
+    assert.match(src, new RegExp(`WHERE id = ${id}`), `套餐 ${id} 的宣传文案没有被对齐`)
+  }
+
+  // 对齐后的文案里不得再出现任何已下架的通道名。
+  for (const name of ['通义千问', '豆包', 'GLM', 'MiniMax', 'Mistral', 'Claude', '谷歌', 'Grok', 'Kimi']) {
+    assert.ok(!m.alignedHighlights.includes(name), `对齐后的文案里还残留「${name}」`)
+  }
+})
+
+test('迁移 040 的 down 能还原改动前的文案（可回滚）', () => {
+  const m = require('../migrations/040_plan_highlights_deepseek_gpt_only')
+  const src = read(MIGRATION_040)
+  const down = src.slice(src.indexOf('exports.down'))
+  assert.ok(down.length > 0, '没有 exports.down —— 无法回滚')
+  // down 还的是「当时的确切值」，不是一份手写的近似清单。
+  assert.deepEqual(m.previousHighlights, {
+    1: '["150万字符","DeepSeek、GPT、通义千问"]',
+    2: '["150万字符","豆包、GLM、MiniMax、Mistral","+基础版各翻译通道"]',
+    3: '["150万字符","Claude、谷歌翻译、Grok、Kimi","+高级版各翻译通道"]'
+  })
+})
