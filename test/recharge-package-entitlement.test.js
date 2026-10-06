@@ -216,7 +216,7 @@ test('套餐随结算发放 / 编辑商户 / 子账号额度', { skip: !database
   const userRow = async id =>
     (await pool.query(
       `SELECT package_id, package_catalog_version, sub_quota, port_limit, char_balance,
-              enterprise, expires_at, active_engine_id
+              enterprise, auto_reply, expires_at, active_engine_id
          FROM users WHERE id=$1`, [id])).rows[0]
 
   const expiresAt = async id =>
@@ -301,7 +301,64 @@ test('套餐随结算发放 / 编辑商户 / 子账号额度', { skip: !database
     assert.equal(String(row.package_id), String(pack.id))
   })
 
-  // ================================================ ② 套餐随结算发放
+  // ================================================ ③ 布尔开关必须真的生效
+
+  /**
+   * 这三条守的是「开关看着是关的 → 点开 → 保存 → 还是关的」那一类缺陷。
+   *
+   * 契约的关键在于**请求体里到底是什么**：弹窗用 `Object.assign` 把列表行
+   * 原样灌进表单，而列表接口给的是 Postgres 布尔。`encodeForm` 对布尔做
+   * `encodeURIComponent(true)`，线上真实载荷就是字符串 `"true"`
+   * （`test/encode-form.test.js` 已经把这条序列化行为钉住了）。
+   * 所以这里必须用 `'true'` 复现，用 JS 的 `true` 测不出问题。
+   */
+  await t.test('编辑商户：请求体里的 "true" 不得把企业账号静默撤销', async () => {
+    const pack = await makePackage({ tag: 'b2', subQuota: 2, chars: 1000, price: 35, portLimit: 0, catalogVersion: 7 })
+    const user = await makeUser({ enterprise: true })
+
+    const res = await post('/admin/users/save', {
+      id: user.id, versionId: pack.id, enterprise: 'true', autoReply: 'false'
+    })
+    assert.equal(res.status, 200, `HTTP ${res.status} ${res.text.slice(0, 200)}`)
+
+    assert.equal((await userRow(user.id)).enterprise, true,
+      '企业账号被静默撤销了。开关显示为「关」时保存，请求体里带的是字符串 "true"，'
+      + '服务端用 Boolean(number("true")) 判成 false —— 界面看不出任何异常，'
+      + '但商户的企业权益（不限量子账号）当场没了')
+  })
+
+  await t.test('编辑商户：要能真正把企业账号降为个人', async () => {
+    const pack = await makePackage({ tag: 'b3', subQuota: 2, chars: 1000, price: 35, portLimit: 0, catalogVersion: 7 })
+    const user = await makeUser({ enterprise: true })
+
+    const res = await post('/admin/users/save', {
+      id: user.id, versionId: pack.id, enterprise: 'false'
+    })
+    assert.equal(res.status, 200, `HTTP ${res.status} ${res.text.slice(0, 200)}`)
+    assert.equal((await userRow(user.id)).enterprise, false,
+      '反过来也要能关掉：降级同样要生效，否则这个开关怎么点都没反应')
+  })
+
+  await t.test('编辑商户：自动回复开关必须真的写进库', async () => {
+    const pack = await makePackage({ tag: 'b4', subQuota: 2, chars: 1000, price: 35, portLimit: 0, catalogVersion: 7 })
+    const user = await makeUser()
+
+    const res = await post('/admin/users/save', {
+      id: user.id, versionId: pack.id, autoReply: 'true'
+    })
+    assert.equal(res.status, 200, `HTTP ${res.status} ${res.text.slice(0, 200)}`)
+    assert.equal((await userRow(user.id)).auto_reply, true,
+      '编辑态的 UPDATE 里根本没有 auto_reply 这一列 —— 这个开关在编辑时是个哑巴，'
+      + '勾了等于没勾（新建时却会写，两边行为不一致）')
+
+    const off = await post('/admin/users/save', {
+      id: user.id, versionId: pack.id, autoReply: 'false'
+    })
+    assert.equal(off.status, 200)
+    assert.equal((await userRow(user.id)).auto_reply, false, '关掉也要生效')
+  })
+
+  // ================================================ ④ 结算发放套餐
 
   await t.test('手工确认收款：套餐、到期时间、额度、权益版本一起落地', async () => {
     const pack = await makePackage({ tag: 'g1', subQuota: 5, chars: 2000, price: 65, portLimit: 0, catalogVersion: 9 })

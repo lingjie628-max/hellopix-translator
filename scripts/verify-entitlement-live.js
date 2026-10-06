@@ -223,6 +223,32 @@ async function main() {
     check('带 charBalance 的编辑仍被 USE_CHARACTER_GRANT 拦下',
       guarded.status === 400 && guarded.json && guarded.json.code === 'USE_CHARACTER_GRANT',
       `HTTP ${guarded.status} code=${guarded.json && guarded.json.code}`)
+
+    // =============================================== ④ 两个开关必须真的生效
+    console.log('\n④ 企业账号 / 自动回复开关必须真的存进库')
+    const switchRow = async () => (await probe.query(
+      'SELECT enterprise, auto_reply FROM users WHERE id=$1', [userId])).rows[0]
+
+    // 线上真实载荷是**字符串** "true"/"false"（encodeForm 对 JS 布尔做
+    // encodeURIComponent）。用字符串复现才能验出"打开却存成关闭"那个缺陷 ——
+    // 传 JS 的 true 是测不出来的。
+    const asOn = await post('/admin/users/save',
+      { id: userId, versionId: current, enterprise: 'true', autoReply: 'true' })
+    check('置为「开」返回 200', asOn.status === 200,
+      `HTTP ${asOn.status} ${String(asOn.text).slice(0, 160)}`)
+    const onRow = await switchRow()
+    check('企业账号真的变成「开」', onRow.enterprise === true,
+      `库里是 ${onRow.enterprise}（若是 false，就是"打开却存成关闭"）`)
+    check('自动回复真的变成「开」', onRow.auto_reply === true,
+      `库里是 ${onRow.auto_reply}（编辑态原先根本没写这一列）`)
+
+    const asOff = await post('/admin/users/save',
+      { id: userId, versionId: current, enterprise: 'false', autoReply: 'false' })
+    check('置为「关」返回 200', asOff.status === 200,
+      `HTTP ${asOff.status} ${String(asOff.text).slice(0, 160)}`)
+    const offRow = await switchRow()
+    check('企业账号真的变成「关」', offRow.enterprise === false,
+      `库里是 ${offRow.enterprise}（关不掉说明这个开关是假的）`)
   } finally {
     server.close()
     // 拔插头：所有探针写入到此为止
@@ -232,7 +258,7 @@ async function main() {
 
   // ---- 泄漏检查：另开连接复核，必须与开局一模一样 ----
   const after = await snapshot()
-  console.log('\n④ 事务收尾：生产数据必须与开局完全一致')
+  console.log('\n⑤ 事务收尾：生产数据必须与开局完全一致')
   check(`user ${userId} 各字段未被改动`,
     JSON.stringify(after.user) === JSON.stringify(before.user),
     JSON.stringify(after.user) === JSON.stringify(before.user) ? '' : `\n      开: ${JSON.stringify(before.user)}\n      终: ${JSON.stringify(after.user)}`)

@@ -15,6 +15,42 @@ function number(value, fallback) {
   return Number.isFinite(parsed) ? parsed : (fallback || 0)
 }
 
+/** 开关的"开"与"关"两种写法。都做大小写折叠后再比。 */
+const ACTIVE = ['1', 'true', 'yes', 'on']
+const INACTIVE = ['0', 'false', 'no', 'off']
+
+/**
+ * 三态布尔解析 —— 专治表单提交的开关。
+ *
+ * ## 为什么不能写成 `Boolean(number(value))`
+ *
+ * 浏览器的请求体是 `application/x-www-form-urlencoded`，`encodeForm` 对 JS
+ * 布尔做的是 `encodeURIComponent(true)` → 字符串 **`"true"`**；而
+ * `Number("true")` 是 `NaN`，于是 `Boolean(NaN)` = **false**。
+ * 结果是一个"打开"的开关到了服务端变成"关闭"，且**不报任何错**。
+ *
+ * 生产上的实际后果：超管在「编辑商户」里看到企业账号开关显示为「关」
+ * （那是前端绑定问题），点一下变「开」后保存 —— 只要那次请求带的是字符串
+ * `"true"`，商户的企业权益就被静默撤销，不限量子账号当场失效。
+ *
+ * ## 三种返回
+ *
+ *   `true`  —— 明确表示开
+ *   `false` —— 明确表示关
+ *   `null`  —— 没传 / 空串 / 认不出来的值，调用方应**保持原值**（配合 COALESCE）
+ *
+ * 认不出来一律返回 `null` 而不是猜一个：猜错就是静默改掉别人的开关，
+ * 比"不动"危险得多。
+ */
+function bool(value) {
+  if (value === undefined || value === null || value === '') return null
+  if (typeof value === 'boolean') return value
+  const text = String(value).trim().toLowerCase()
+  if (ACTIVE.includes(text)) return true
+  if (INACTIVE.includes(text)) return false
+  return null
+}
+
 function setting(settings, key, fallback) {
   return settings[key] === undefined || settings[key] === null ? fallback : settings[key]
 }
@@ -1019,4 +1055,4 @@ class CoreService {
   }
 }
 
-module.exports = { CoreService, number, setting, requestDigest }
+module.exports = { CoreService, number, bool, setting, requestDigest }

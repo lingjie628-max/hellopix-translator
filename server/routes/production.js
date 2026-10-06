@@ -4,7 +4,7 @@ const express = require('express')
 const crypto = require('crypto')
 const { asyncRoute, input, pagination, page, ok, stub, ApiError } = require('../lib/http')
 const { mapRow, mapRows } = require('../repositories/production-repository')
-const { number } = require('../services/core-service')
+const { number, bool } = require('../services/core-service')
 const { redisRateLimit } = require('../redis-security')
 const captcha = require('../lib/captcha')
 const { encryptSecret, credentialsKeyReady, KEY_ENV } = require('../lib/credentials')
@@ -758,10 +758,14 @@ function productionRouter(context) {
   }))
   router.post('/admin/users/enterprise', asyncRoute(async (req, res) => {
     const data = input(req)
-    const result = await repo.query('UPDATE users SET enterprise=$2,updated_at=NOW() WHERE id=$1 RETURNING username', [data.id, Boolean(number(data.enterprise))])
+    // 解析一次、用到底。原先 SQL 与审计/提示各自算一遍 `number(...)`，
+    // 遇到字符串 "true" 时 SQL 判成 false、而这里同样是 false，
+    // 于是"已降为个人账号"的提示与库里的实际值可能对不上 —— 必须先定值再写。
+    const enterprise = bool(data.enterprise) === true
+    const result = await repo.query('UPDATE users SET enterprise=$2,updated_at=NOW() WHERE id=$1 RETURNING username', [data.id, enterprise])
     if (!result.rows[0]) throw new ApiError(404, '商户不存在', 'USER_NOT_FOUND')
-    await repo.audit(null, req.pixAdmin, number(data.enterprise) ? '升级企业账号' : '降为个人账号', result.rows[0].username, req.ip, { type: 'user', id: data.id })
-    ok(res, number(data.enterprise) ? '已升级为企业账号' : '已降为个人账号')
+    await repo.audit(null, req.pixAdmin, enterprise ? '升级企业账号' : '降为个人账号', result.rows[0].username, req.ip, { type: 'user', id: data.id })
+    ok(res, enterprise ? '已升级为企业账号' : '已降为个人账号')
   }))
   router.post('/admin/users/unbind', asyncRoute(async (req, res) => {
     const data = input(req)
@@ -976,16 +980,23 @@ function productionRouter(context) {
         `UPDATE users SET nickname=COALESCE($2,nickname),status=COALESCE($3,status),
          package_id=$4,port_limit=COALESCE($5,port_limit),expires_at=COALESCE($6::timestamptz,expires_at),
          password_hash=COALESCE($7,password_hash),phone=COALESCE($8,phone),remarks=COALESCE($9,remarks),
-         enterprise=COALESCE($10,enterprise),sub_quota=COALESCE($11,sub_quota),
+         enterprise=COALESCE($10,enterprise),auto_reply=COALESCE($13,auto_reply),
+         sub_quota=COALESCE($11,sub_quota),
          package_catalog_version=COALESCE($12,package_catalog_version),
          updated_at=NOW() WHERE id=$1 RETURNING username,status,package_catalog_version`,
         [data.id, data.nickname || null, data.status === undefined ? null : number(data.status),
           pack.id, data.port === undefined ? null : number(data.port),
           data.expireTime || null, passwordHash, data.phone === undefined ? null : (data.phone || null),
           data.remarks === undefined ? null : data.remarks,
-          data.enterprise === undefined || data.enterprise === '' ? null : Boolean(number(data.enterprise)),
+          // 开关一律走 bool()，不能写 Boolean(number(...))：
+          // 请求体里是字符串 "true"，Number("true") 是 NaN，会被判成 false ——
+          // 于是"打开"的开关保存后反而被关掉，且毫无报错（线上踩过）
+          bool(data.enterprise),
           data.subQuota === undefined || data.subQuota === '' ? null : number(data.subQuota),
-          catalogVersion]
+          catalogVersion,
+          // 自动回复原来**根本没写**：编辑态点了等于没点（新建时却会写）。
+          // 补上这一列，让两边的行为一致。
+          bool(data.autoReply)]
       )
       if (!result.rows[0]) throw new ApiError(404, '用户不存在', 'USER_NOT_FOUND')
       if (passwordHash || number(result.rows[0].status) !== 1) await auth.revokeUser('main', data.id)
@@ -1033,8 +1044,10 @@ function productionRouter(context) {
           $7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id,username`,
         [String(data.username).trim(), await auth.hash(data.password), data.nickname || data.username,
           pack.id, number(data.port, number(pack.portLimit)), data.expireTime || null, gift,
-          Boolean(number(data.autoReply)), data.phone || null, data.remarks || '',
-          defaultEngine || null, Boolean(number(data.enterprise)),
+          // 这三列都是 NOT NULL 的布尔列，bool() 可能返回 null（没传），
+          // 所以必须 `=== true` 兜成布尔再进 SQL
+          bool(data.autoReply) === true, data.phone || null, data.remarks || '',
+          defaultEngine || null, bool(data.enterprise) === true,
           data.email ? String(data.email).toLowerCase() : null, subQuotaForNew,
           newVersion], client
       )

@@ -86,3 +86,66 @@ test('换套餐时带出该套餐的子账号额度', () => {
     '换套餐时要同步把该套餐的 sub_quota 带进表单，'
     + '否则超管改档位后额度仍停在旧档的值')
 })
+
+/**
+ * 下面两条守的是「开关看着是关的 → 点开 → 保存 → 还是关的」那一类缺陷。
+ *
+ * 前半是 Vue 的绑定问题（显示不出来），后半是服务端的解析问题（存不对），
+ * 两者必须一起修：只修前端则数据仍可能被静默改掉，只修服务端则开关仍旧
+ * 显示为关、超管依然以为没保存成功（生产上连点过三次保存）。
+ */
+test('编辑态：布尔列必须归一成 0/1，否则开关永远显示为「关」', () => {
+  const at = source.indexOf('openEdit(row) {')
+  assert.ok(at > 0, '找不到 openEdit()')
+  const block = source.slice(at, source.indexOf('\n    },', at))
+
+  assert.match(block, /enterprise:\s*Number\(row\.enterprise\)\s*\?\s*1\s*:\s*0/,
+    'openEdit 必须把 row.enterprise 归一成 1/0。列表接口回的是 Postgres 布尔 true，'
+    + '而开关声明的是 :active-value="1" —— true !== 1，开关就永远渲染成「关」，'
+    + '哪怕库里明明是开的（生产上就是这么被误判成"没保存成功"的）')
+  assert.match(block, /autoReply:\s*Number\(row\.autoReply\)\s*\?\s*1\s*:\s*0/,
+    '自动回复同理：不归一的话这个开关同样永远显示为「关」')
+})
+
+test('服务端 bool()：必须认得表单发来的 "true"/"false"，且认不出来时不动原值', () => {
+  const { bool } = require('../server/services/core-service')
+
+  // 真实载荷：encodeForm 对 JS 布尔做 encodeURIComponent(true) === 'true'，
+  // 所以线上过来的就是这两个字符串。用 Boolean(number(...)) 会把 "true" 判成 false，
+  // 于是一个"打开"的开关存进库变成"关闭" —— 而且全程不报错。
+  assert.equal(bool('true'), true, '字符串 "true" 必须判成开')
+  assert.equal(bool('false'), false, '字符串 "false" 必须判成关')
+  assert.equal(bool('1'), true)
+  assert.equal(bool('0'), false)
+  assert.equal(bool(true), true, '布尔原样透传')
+  assert.equal(bool(false), false)
+
+  // 没传 / 空串 → null，调用方靠 COALESCE 保持原值
+  assert.equal(bool(undefined), null, '没传必须是 null，否则会把开关当成"关"')
+  assert.equal(bool(''), null, '空串同理：界面没碰这个字段，就不该动它')
+
+  // 认不出来一律 null（保持原值），**不能**猜成 false ——
+  // 猜错就是静默改掉别人的开关，比"不动"危险得多
+  assert.equal(bool('maybe'), null, '无法识别的值必须保持原值，不能猜成关闭')
+  assert.equal(bool('  TRUE  '), true, '两端空白与大小写要能容忍')
+})
+
+test('编辑商户的 UPDATE 必须写 enterprise 与 auto_reply，且不得再用 Boolean(number(...))', () => {
+  const routes = fs.readFileSync(
+    path.join(__dirname, '..', 'server/routes/production.js'), 'utf8')
+  const at = routes.indexOf('UPDATE users SET nickname=COALESCE')
+  assert.ok(at > 0, '找不到「编辑商户」的 UPDATE 语句')
+  const block = routes.slice(at, routes.indexOf('WHERE id=$1', at))
+
+  assert.match(block, /enterprise=COALESCE/, 'enterprise 必须在编辑态可改')
+  // 这条守的是"哑巴开关"：编辑态原来根本没写 auto_reply，新建时却会写，
+  // 于是同一个开关在新建页好使、在编辑页点了没反应
+  assert.match(block, /auto_reply=COALESCE/,
+    '编辑商户的 UPDATE 里必须有 auto_reply —— 原先漏了这一列，'
+    + '自动回复开关在编辑弹窗里点了等于没点（新建页却有效，两边行为不一致）')
+
+  // 开关一律走 bool()；Boolean(number("true")) 会把"开"判成"关"
+  assert.ok(!/Boolean\(number\(data\.(?:enterprise|autoReply)\)\)/.test(block),
+    '布尔开关不能用 Boolean(number(...)) 解析：请求体里是字符串 "true"，'
+    + 'Number("true") 是 NaN，会被判成 false —— 打开开关保存反而把它关掉')
+})

@@ -249,7 +249,23 @@ export default {
     },
     openEdit(row) {
       if (row) {
-        this.form = Object.assign({}, row, { password: '' })
+        /**
+         * 布尔列必须归一成 0/1。
+         *
+         * 列表接口回的是 Postgres 布尔（`true`/`false`），而下面两个开关用的是
+         * `:active-value="1"`。`true !== 1`，所以**开关永远渲染成「关」** ——
+         * 哪怕库里明明是开的。表现就是"打开→保存→再打开还是关的"，
+         * 让人以为没保存成功（实际上早就存进去了，生产上连点了三次）。
+         *
+         * 顺带也避免把布尔 `true` 原样提交：`encodeForm` 会把它序列化成字符串
+         * `"true"`，服务端 `Number("true")` 是 NaN，会被判成 false —— 那就会
+         * **真的**把企业账号关掉。
+         */
+        this.form = Object.assign({}, row, {
+          password: '',
+          enterprise: Number(row.enterprise) ? 1 : 0,
+          autoReply: Number(row.autoReply) ? 1 : 0
+        })
       } else {
         // 新建：默认取第一个套餐自带的端口与子账号额度，省一步手填
         const first = this.packs[0] || {}
