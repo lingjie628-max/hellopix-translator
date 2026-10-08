@@ -1,0 +1,79 @@
+================================================================
+ 0.1.12 取证 · label=before
+ 时间 : 2026-10-07 14:25:30 -0400
+ 主机 : 零界’s MacBook Air
+ 系统 : 15.7.9 / arm64
+================================================================
+
+---- 1. 已安装版本（先确认装的是 0.1.12，不是 0.1.11）----
+  /Applications/Hello Pix.app
+    版本: 0.1.11
+
+---- 2. 进程（看开了几个副本 + 运行时版本）----
+  （没有在跑）
+
+---- 3. open-apps.json：磁盘上的真实设置 ----
+  ⚠️ 判读重点：每个实例的 settings.groupMode 必须是 auto / manual / inherit 之一。
+     界面显示「自动」而这里是 "manual" = 设置根本没写进去（本次要杜绝的假成功）。
+    账号 pix: nextTab=1 activeId= 实例数=0
+    账号 demo: nextTab=3 activeId=telegram-z-1 实例数=2
+      - id=telegram-z-1 platform=telegram-z groupMode='manual' engine='baidu' showTransBar=True recv/send=zh/en
+      - id=deepseek-2 platform=deepseek groupMode='manual' engine='youdao' showTransBar=True recv/send=zh/en
+    账号 0018: nextTab=1 activeId= 实例数=0
+    账号 ceshi: nextTab=1 activeId= 实例数=0
+    账号 ahao: nextTab=3 activeId=whatsapp-green-2 实例数=2
+      - id=whatsapp-green-1 platform=whatsapp-green groupMode='manual' engine='gpt' showTransBar=True recv/send=zh/en
+        proxyPass=[redacted]
+      - id=whatsapp-green-2 platform=whatsapp-green groupMode='manual' engine='gpt' showTransBar=True recv/send=zh/en
+        proxyPass=[redacted]
+
+---- 4. auth.json（只报用户名，绝不打印口令）----
+    username   = ahao
+    remember   = True
+    autoLogin  = True
+    passwordEnc= 有（内容不打印）
+
+---- 5. 多开槽位（两个实例应各有独立分区目录）----
+  pix-0018-telegram-z-1
+  pix-0018-telegram-z-2
+  pix-ahao-whatsapp-green-1
+  pix-ahao-whatsapp-green-2
+  pix-demo-deepseek-1
+  pix-demo-telegram-z-1
+  pix-hi-1
+  pix-hw-bot-1
+  pix-instagram-1
+  pix-line-1
+  pix-messenger-1
+  pix-pix-line-1
+  pix-pix-messenger-1
+  pix-pix-telegram-z-1
+  pix-pix-telegram-z-2
+  pix-pix-whatsapp-biz-1
+  pix-pix-whatsapp-green-1
+  pix-telegram-1
+  pix-telegram-z-1
+  pix-tiktok-1
+  pix-whatsapp-1
+  pix-whatsapp-2
+  pix-whatsapp-3
+  pix-whatsapp-green-1
+  pix-whatsapp-green-2
+  pix-x-1
+
+---- 6. 客户端日志：实际发出去的翻译请求 ----
+  判读重点：
+    · trigger=auto_receive  —— 群聊自动翻译真的触发了（0.1.11 这里永远是 '-'）
+    · engine=gpt / deepseek —— 实际用的通道，必须与界面显示的一致
+    · source_text 里不能有时间戳 / 已读 / UI 文案
+  （before：只记行数，不贴内容）
+  今日日志行数:       10
+  日志文件列表:
+    hello-pix-2026-10-04.log
+    hello-pix-2026-10-06.log
+    hello-pix-2026-10-07.log
+
+---- 7. 网络出口（代理验收用）----
+  本机直连出口: 取不到
+
+=================== 采集结束 label=before ===================

@@ -32,9 +32,19 @@ desktop/release/
 desktop/release-win/
 desktop/dists/
 安装包/
-# 验收包目录里的安装包同理：只留说明、校验和与采集脚本入库，
-# 80MB+ 的 exe 交给服务器 downloads/ 分发
-RC03-Windows验收包/*.exe
+
+# 验收产物目录（0.1.10 起的每一轮验收包）：只留说明、校验和与采集脚本入库，
+# exe / dmg / zip / blockmap 交给服务器 downloads/ 分发。
+#
+# 为什么必须排除：这些二进制单个 80~110MB，历轮累计已达 1.4GB。一旦入库，
+# git 历史里**删不掉** —— 仓库会从 37MB 涨到 1.4GB+，且每次 clone 都要拖这些字节。
+# 发布候选的唯一权威副本是 /opt/hello-pix/downloads/ + 各包的 SHA256SUMS.txt。
+# 模式写成 `*验收包/*.ext`（不以 / 开头、含斜杠 = 锚定本 .gitignore 所在层级），
+# 这样 0.1.10-Windows验收包/ 与 0.1.15-验收包/ 两种命名都能覆盖。
+*验收包/*.exe
+*验收包/*.dmg
+*验收包/*.zip
+*验收包/*.blockmap
 
 # 独立客户端构建（tdesktop 源码树与产物，体积过大）
 standalone/build/
