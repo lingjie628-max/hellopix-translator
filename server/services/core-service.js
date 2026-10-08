@@ -20,6 +20,15 @@ const ACTIVE = ['1', 'true', 'yes', 'on']
 const INACTIVE = ['0', 'false', 'no', 'off']
 
 /**
+ * 翻译调用来源的白名单，落库到 `translate_logs.trigger`。
+ *
+ * 计费用：出异常字符消耗时要能回答"这次是用户点的，还是客户端扫描时自动翻的"。
+ * 客户端可控，所以只认这几个值，其余一律记成 `''`（未声明）。
+ * 与迁移 042 里的 CHECK 约束必须保持一致。
+ */
+const TRIGGER_VALUES = ['manual_click', 'auto_receive', 'manual_send', 'retranslate']
+
+/**
  * 三态布尔解析 —— 专治表单提交的开关。
  *
  * ## 为什么不能写成 `Boolean(number(value))`
@@ -342,7 +351,15 @@ class CoreService {
    */
   /**
    * 该套餐是否允许商户自己指定通道。
-   * 基础版刻意关闭：客户不必做他们判断不了的选择，成本也锁死在便宜通道上。
+   *
+   * 当前三档套餐**全部放开**（migration 043）。原先只有基础版锁死，
+   * 结果是商户买了含两个通道的套餐却一个都选不了，界面还只能显示账号里的旧值 ——
+   * 而真实调用走的是权益内第一个可用通道，**界面与真实调用不一致**。
+   * 成本控制交给"套餐包含哪些通道"，不靠锁死其中某一个。
+   *
+   * 判定看的是**商户套餐**（`session.parent`），主账号与子账号一视同仁 ——
+   * 不存在"主账号能选、子账号只能固定一个"这种规则。
+   *
    * 字段缺失时按"允许"处理，避免存量数据被误伤。
    */
   canSwitchEngine(session) {
@@ -470,6 +487,12 @@ class CoreService {
     if (!/^(?:auto|[a-z]{2,3}(?:-[a-z0-9]{2,8})?)$/i.test(from) || !/^[a-z]{2,3}(?:-[a-z0-9]{2,8})?$/i.test(to)) {
       throw new ApiError(400, '语言参数无效', 'BAD_LANGUAGE')
     }
+    // 调用来源，写进 translate_logs 供计费审计。
+    // 客户端可控输入，所以**白名单收口**：不认识的值一律记成空串（"未声明"），
+    // 绝不让任意字符串进库。列上另有 CHECK 约束兜底。
+    const trigger = TRIGGER_VALUES.includes(String(data.trigger || '').trim())
+      ? String(data.trigger).trim()
+      : ''
     // 套餐通道表只查一次：resolveEngineId 需要它来判断"套餐里有但没接通"，下面
     // 的 engine 查找也需要它 —— 翻译是热路径，不能为了这层判断多打一次库。
     // 走 packageChannels（按权益版本解析）而不是 packageEngines（活表）：
@@ -617,11 +640,11 @@ class CoreService {
           )
           const logged = await this.repo.query(
             `INSERT INTO translate_logs(user_id,sub_account_id,engine_id,reservation_id,
-             source_language,target_language,chars,cost_amount,sell_amount,source_hash,snippet,cached,duration_ms)
-             VALUES($1,$2,$3,$4,$5,$6,$7,$8,0,$9,$10,$11,$12) RETURNING id`,
+             source_language,target_language,chars,cost_amount,sell_amount,source_hash,snippet,cached,duration_ms,trigger)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,0,$9,$10,$11,$12,$13) RETURNING id`,
             [session.parent.id, session.kind === 'sub' ? session.account.id : null, engineId, reservation.id,
               response.from, to, chars, number(engine.costPerMillion) * chars / 1000000, sourceHash,
-              text.slice(0, 300), Boolean(result.cached), durationMs], client
+              text.slice(0, 300), Boolean(result.cached), durationMs, trigger], client
           )
           translateLogId = logged.rows[0] && number(logged.rows[0].id) || null
         }
@@ -1055,4 +1078,4 @@ class CoreService {
   }
 }
 
-module.exports = { CoreService, number, bool, setting, requestDigest }
+module.exports = { CoreService, number, bool, setting, requestDigest, TRIGGER_VALUES }

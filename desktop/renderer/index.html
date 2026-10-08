@@ -121,7 +121,7 @@
           <div class="trans-cell" style="--d:54ms;--d-rev:96ms"><label class="pix-switch"><input id="barRecvOn" type="checkbox" checked><span>接收翻译</span></label></div>
           <div class="trans-cell" style="--d:70ms;--d-rev:80ms"><span class="trans-label">消息语种</span><select id="barRecvFrom"></select></div>
           <div class="trans-cell" style="--d:86ms;--d-rev:64ms"><span class="trans-label">接收语种</span><select id="barRecvTo"></select></div>
-          <div class="trans-cell" style="--d:102ms;--d-rev:48ms"><span class="trans-label">群组翻译</span><select id="barGroupMode"><option value="manual">手动</option><option value="auto">自动</option></select></div>
+          <div class="trans-cell" style="--d:102ms;--d-rev:48ms"><span class="trans-label">群组翻译</span><select id="barGroupMode"><option value="inherit">跟随账号</option><option value="manual">手动</option><option value="auto">自动</option></select></div>
 
           <div class="trans-cell" style="--d:108ms;--d-rev:42ms"><span class="trans-label">字体大小</span><select id="barFontSize"></select></div>
           <div class="trans-cell" style="--d:124ms;--d-rev:26ms"><span class="trans-label">字体颜色</span><input id="barFontColor" type="color" value="#22c55e" title="译文颜色"></div>
@@ -267,6 +267,7 @@
             </label>
             <label class="cell">群组翻译模式
               <select id="addGroupMode">
+                <option value="inherit">跟随账号</option>
                 <option value="manual">手动</option>
                 <option value="auto">自动</option>
               </select>

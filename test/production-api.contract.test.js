@@ -432,3 +432,48 @@ test('生产库里未接通的通道确实被标成不可选用', async () => {
   assert.deepEqual(view.rows.filter(row => row.allowed).map(row => row.id), ['google'])
   assert.equal(view.rows.filter(row => row.comingSoon).length, 5)
 })
+
+// ---------------------------------------------------------------------------
+// 「主账号能选两个、子账号只能固定一个」是**明确禁止**的产品行为
+//
+// 真机验收时子账号的通道下拉锁死，很容易被读成"新子账号被降级对待"。
+// 实际判定看的是**商户套餐**（`session.parent.packageAllowEngineSwitch`），
+// `session.kind` 根本不参与 —— 所以主账号与子账号的能力必须**逐项相同**。
+// 下面几条把"不得按 kind 分层"钉死，防止以后有人"顺手"给子账号单独加限制。
+// ---------------------------------------------------------------------------
+
+test('切换能力只由套餐决定：主账号与子账号必须完全一致', async () => {
+  const core = coreWithEngines(ENGINE_ROWS)
+  const parent = { packageId: 2, packageAllowEngineSwitch: true, packageTitle: '高级版' }
+  const account = { activeEngineId: 'niutrans', charBalance: 0 }
+  const main = await core.engines({ kind: 'main', account, parent })
+  const sub = await core.engines({ kind: 'sub', account, parent })
+
+  assert.equal(sub.canSwitch, main.canSwitch, '子账号不得比主账号多一层限制')
+  assert.equal(sub.canSwitch, true)
+  assert.equal(sub.activeEngine, main.activeEngine, '同一套餐下两者当前通道必须相同')
+  assert.deepEqual(sub.rows.map(row => row.id), main.rows.map(row => row.id),
+    '子账号可选通道集合必须与主账号一致，不得少给')
+})
+
+test('子账号显式切换通道时服务端采纳（kind 不参与判定）', async () => {
+  const core = coreWithEngines(ENGINE_ROWS)
+  const session = {
+    kind: 'sub',
+    account: { activeEngineId: 'baidu' },
+    parent: { packageId: 2, packageAllowEngineSwitch: true }
+  }
+  assert.equal(await core.resolveEngineId(session, 'niutrans'), 'niutrans',
+    '子账号选了就必须走它 —— 这是「选 GPT / 切 DeepSeek」验收成立的前提')
+})
+
+test('迁移 043：被 015 锁死的 basic 档必须放开通道切换', () => {
+  const dir = path.join(root, 'migrations')
+  const file = fs.readdirSync(dir).find(name => name.startsWith('043_'))
+  assert.ok(file, '找不到迁移 043（放开通道切换）')
+  const source = fs.readFileSync(path.join(dir, file), 'utf8')
+  // 015 把 basic 锁死；043 不显式放开的话，商户买了含两个通道的套餐
+  // 仍然一个都选不了，界面还会显示与实际调用不一致的通道。
+  assert.match(source, /allow_engine_switch = true/, '043 必须真的把开关打开')
+  assert.match(source, /code = 'basic'/, '043 要针对被 015 锁死的 basic 档')
+})

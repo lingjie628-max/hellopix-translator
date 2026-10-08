@@ -791,6 +791,18 @@ button {
   line-height: 1.2;
   font-size: var(--fs-meta);
 }
+/* 翻译组件未启动：这个窗口的翻译整体失效，必须一眼可见 */
+.tab.bridge-down {
+  box-shadow: inset 0 0 0 1px rgb(220 38 38 / 0.85);
+}
+.tab.bridge-down .tab-warn {
+  position: absolute;
+  bottom: 1px;
+  left: 3px;
+  font-size: 11px;
+  line-height: 1;
+  color: #f87171;
+}
 .tab-name-input {
   width: 60px;
   height: 18px;

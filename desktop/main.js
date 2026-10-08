@@ -11,6 +11,8 @@ const { spawn } = require('child_process')
 const fallbackPlatforms = require('./platforms')
 const builtinLines = require('./lines')
 const proxyPresets = require('./proxy-presets')
+const proxyIsolation = require('./proxy-isolation')
+const { stripProxyFields } = proxyIsolation
 // 代理的构建与应用抽到独立模块：产品、单元测试、机制测试共用**同一份实现**。
 // 这几个函数原先内联在 main.js 里，而 main.js 一 require 就会加载 electron，
 // 普通 Node 加载不了 —— 于是最需要回归保护的代理逻辑一个测试都没有。
@@ -40,6 +42,9 @@ const {
   isAllowedExternalUrl
 } = require('./security-policy')
 const logFile = require('./log-file')
+// 翻译桥警告条：preload 死了以后，唯一还能把警告画到用户眼前的手段
+// （隔离世界注入，见该文件顶部注释）。
+const bridgeWarning = require('./bridge-warning')
 
 const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 const TABS_HEIGHT = 72
@@ -258,17 +263,44 @@ function makePartition(platformId, index) {
     + platformId + '-' + index
 }
 
+/**
+ * 本实例从磁盘恢复出来、现由它管理的实例 id。
+ *
+ * ## 为什么需要它 —— 「我刚设的自动又变回手动了」
+ *
+ * `open-apps.json` 是按 **Pix 账号** 存的（`byUser[用户名]`），而 `auth.json`
+ * 在 userData 顶层、**不按多开槽位隔离** —— 同一个账号开两个副本时，
+ * 两边各有一份 `tabs` 内存态。老实现是整段覆盖：
+ *
+ *     all.byUser[user] = { ..., tabs: tabs.map(...) }   // 只用我的内存
+ *
+ * 于是副本 B 只要触发一次保存（切个 tab、改个别的设置），就会用它内存里的
+ * **旧** `tabs` 把副本 A 刚改好的设置整段写回去。真机表现就是
+ * "设置保存了却没生效"，而且**没有任何报错**。
+ *
+ * ## 合并口径
+ *
+ *   · 内存里的 tab                → 写入 / 更新
+ *   · 恢复过、但现在不在内存里      → 删掉（这个副本确实关了它）
+ *   · 磁盘上、本实例从没见过        → **原样保留**（属于另一个副本）
+ *
+ * 只在**确实创建出 tab** 之后才登记：`restoreOneApp()` 可能因为平台下线、
+ * homeUrl 非法等原因提前 return，那种 id 不能算"本实例管理"，否则会在保存时
+ * 把它从磁盘上删掉 —— 那是数据丢失，比覆盖更糟。
+ */
+const seededTabIds = new Set()
+
 function saveOpenApps() {
   const user = currentPixUser()
   if (!user) return
   const all = readJson(openAppsFile(), {})
   if (!all.byUser || typeof all.byUser !== 'object') all.byUser = {}
-  all.byUser[user] = {
-    nextTab: nextTab,
-    usedCount: usedCount,
-    activeId: activeId,
-    showHome: showHome,
-    tabs: tabs.map(t => ({
+  const previous = all.byUser[user] || {}
+  const previousTabs = Array.isArray(previous.tabs) ? previous.tabs : []
+
+  const live = new Map()
+  tabs.forEach(t => {
+    live.set(String(t.id), {
       id: t.id,
       platform: t.platform,
       name: t.name,
@@ -278,7 +310,29 @@ function saveOpenApps() {
       partition: t.partition,
       url: t.url || '',
       settings: sealSettings(t.settings)
-    }))
+    })
+  })
+
+  const merged = previousTabs.filter(row => {
+    const id = String((row && row.id) || '')
+    // 本实例没见过的（属于别的副本）原样保留；本实例已知但已关闭的丢掉。
+    return id && !seededTabIds.has(id) && !live.has(id)
+  })
+  for (const row of live.values()) merged.push(row)
+
+  // nextTab / usedCount 取**单调**合并：两个副本各自自增，直接覆盖会让
+  // 后写的那个把计数器倒退回去，进而生成重复的 tab id 与分区名。
+  const mergedUsed = Object.assign({}, previous.usedCount || {})
+  Object.keys(usedCount || {}).forEach(key => {
+    mergedUsed[key] = Math.max(Number(mergedUsed[key]) || 0, Number(usedCount[key]) || 0)
+  })
+
+  all.byUser[user] = {
+    nextTab: Math.max(nextTab, Number(previous.nextTab) || 0),
+    usedCount: mergedUsed,
+    activeId: activeId,
+    showHome: showHome,
+    tabs: merged
   }
   writeJson(openAppsFile(), all)
 }
@@ -363,6 +417,8 @@ function restoreOpenApps(username) {
   data.tabs.forEach(row => {
     try { restoreOneApp(row) } catch (e) {}
   })
+  // 只有**真的建出 tab** 的才算本实例管理（见 seededTabIds 的说明）。
+  tabs.forEach(t => seededTabIds.add(String(t.id)))
   if (data.activeId && tabs.find(t => t.id === data.activeId)) activeId = data.activeId
   else if (tabs.length) activeId = tabs[0].id
   showHome = data.showHome !== false
@@ -731,11 +787,50 @@ function settingOn(settings, key) {
   return s.enableTranslate !== false
 }
 
+/**
+ * 群组翻译的**三态**。同一个概念有两个开关，必须说清谁说了算：
+ *
+ *   · 账号级「群聊自动翻译」—— 服务端 `users / sub_accounts.trans_group`，
+ *     在「全局设置」里，登录后随 profile 下发；
+ *   · 实例级「群组翻译」—— 顶部翻译栏那个下拉，存在 `tab.settings.groupMode`。
+ *
+ * 老实现只有两态（`auto` / `manual`），且让实例级**无条件覆盖**账号级
+ * （`hasTab ? s.groupMode === 'auto' : g.transGroup`），而新建实例又被硬编码成
+ * `manual` —— 于是"账号里/界面上开了自动、这个实例却永远不自动"，且毫无提示。
+ * 真机上就表现为「群组翻译 = 自动，消息却一直不翻」，很容易被误判成
+ * "自动翻译坏了"。
+ *
+ *   'inherit'  跟随账号级（**新建实例的默认**）
+ *   'auto'     本实例强制自动
+ *   'manual'   本实例强制手动
+ *
+ * ⚠️ **存量实例一律按 `manual` 处理（字段缺失也当 `manual`）**，绝不自动改成
+ * `inherit`：账号级 `trans_group` 的库默认是 `true`（migration 003），
+ * 把"没有显式选择"解释成"跟随账号"就等于给所有存量实例**打开自动扣费**。
+ * 拿别人的钱做默认值是不可接受的 —— 所以只有**新建**实例才拿到 `inherit`。
+ */
+const GROUP_MODES = ['inherit', 'auto', 'manual']
+
+function groupModeOf(settings) {
+  const mode = settings && settings.groupMode
+  return GROUP_MODES.indexOf(mode) >= 0 ? mode : 'manual'
+}
+
+/** 实例级 + 账号级 → 这个实例最终要不要自动翻群聊。 */
+function resolveGroupEnabled(settings, accountPrefs) {
+  const mode = groupModeOf(settings)
+  if (mode === 'auto') return true
+  if (mode === 'manual') return false
+  // 'inherit'：交给账号级。账号级也拿不到就按"不自动"，宁可不翻也不误扣。
+  return !!(accountPrefs && accountPrefs.transGroup)
+}
+
 function normalizeTabSettings(settings) {
   const s = Object.assign({}, settings || {})
   if (s.showTransBar === undefined) s.showTransBar = true
   if (s.enableSendTranslate === undefined) s.enableSendTranslate = s.enableTranslate !== false
   if (s.enableRecvTranslate === undefined) s.enableRecvTranslate = s.enableTranslate !== false
+  s.groupMode = groupModeOf(s)
   return s
 }
 
@@ -752,7 +847,7 @@ function tabTransPayload(tab) {
     server: s.server || '',
     // 不再写死通道名：留空时由渲染进程从后台下发的通道列表里选
     engine: s.engine || (profile && profile.activeEngine) || '',
-    groupMode: s.groupMode === 'auto' ? 'auto' : 'manual',
+    groupMode: groupModeOf(s),
     includeZh: !!(s.includeZh && s.includeZh !== '0'),
     fontSize: Number(s.fontSize) || 15,
     fontColor: s.fontColor || '#22c55e',
@@ -776,6 +871,9 @@ function tabPayload() {
       showTabName: !t.settings || t.settings.showTabName !== false,
       alignRight: !!(t.settings && t.settings.alignRight),
       alwaysStatusBar: !!(t.settings && t.settings.alwaysStatusBar),
+      // 翻译桥没起来 = 这个窗口的翻译整体失效。侧边栏必须打标记，
+      // 不能让它看起来和正常窗口一样（0.1.12 就是这样静默坑人的）。
+      bridgeDown: bridgeHealth.get(t.id) ? bridgeHealth.get(t.id).ok === false : false,
       trans: tabTransPayload(t)
     }))
   }
@@ -1064,6 +1162,11 @@ function detachView(view) {
 }
 
 function destroyTab(tab) {
+  if (tab.bridgeTimer) {
+    clearTimeout(tab.bridgeTimer)
+    tab.bridgeTimer = null
+  }
+  bridgeHealth.delete(tab.id)
   stopSshTunnel(tab)
   releaseSocksRelay(tab)
   detachView(tab.view)
@@ -1156,7 +1259,7 @@ function tabPrefs(tab) {
   return {
     transRecv: hasTab ? settingOn(s, 'enableRecvTranslate') : g.transRecv,
     transSend: hasTab ? settingOn(s, 'enableSendTranslate') : g.transSend,
-    transGroup: hasTab ? s.groupMode === 'auto' : g.transGroup,
+    transGroup: hasTab ? resolveGroupEnabled(s, g) : g.transGroup,
     langMine: pickLang(s.recvTo, g.langMine || 'zh'),
     langOther: s.recvFrom || g.langOther || 'auto',
     sendFrom: s.sendFrom || 'auto',
@@ -1166,7 +1269,12 @@ function tabPrefs(tab) {
       : g.includeZh,
     fontSize: Number(s.fontSize) || 15,
     fontColor: s.fontColor || '#22c55e',
-    antiRevoke: !!s.antiRevoke
+    antiRevoke: !!s.antiRevoke,
+    // 取证用：真机 trace 必须能回答"哪个窗口、哪个 partition、哪条通道"。
+    // 少了这三项，一条 MANUAL_TRANSLATE_CLICK 没法定位到具体实例。
+    tabId: (tab && tab.id) || '',
+    partition: (tab && tab.partition) || '',
+    engine: s.engine || g.engine || ''
   }
 }
 
@@ -1217,6 +1325,22 @@ async function updateTabSettings(id, patch) {
   return { success: true, proxyChanged: proxyChanged }
 }
 
+/**
+ * 发送中占位符。
+ *
+ * 这些字符串是客户端**自己的状态**，不是用户内容。它们必须留在输入框里、
+ * 绝不能被送到翻译接口，更不能被当成用户消息发出去 —— 线上真的发出去过
+ * 「哈喽你好[正在翻译中...]」。渲染进程已经有一道闸，这里是不信任渲染进程的
+ * 第二道：主进程这一层再拦一次，留一个和渲染层无关的兜底。
+ */
+const CLIENT_BUSY_MARKS = ['[正在翻译中...]', '|翻译中...', '[翻译中...]', '翻译中...']
+
+function stripBusyMarks(text) {
+  let s = String(text == null ? '' : text)
+  for (const mark of CLIENT_BUSY_MARKS) s = s.split(mark).join('')
+  return s.replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n').trim()
+}
+
 function stripEmoji(text) {
   return String(text || '')
     .replace(/\p{Extended_Pictographic}/gu, '')
@@ -1253,12 +1377,100 @@ function putTransCached(from, to, engine, text, translation) {
 
 // 为翻译请求生成服务端幂等键：同设备 + 同参数 + 同文本永远是同一个键，
 // 服务端据此做幂等去重（重复渲染/重试不会二次扣费）；正式后端缺此键会直接 400。
-function transRequestId(text, from, to, engine) {
-  const fingerprint = crypto.createHash('sha256')
-    .update([String(engine || ''), String(from || ''), String(to || ''), String(text || '')].join('\u0001'))
+/**
+ * 翻译请求的幂等键（Idempotency-Key）。
+ *
+ * ## 为什么要按**账号**入键
+ *
+ * 服务端把「账号 + 通道 + 语向 + 正文」一起算成 `requestHash` 来判定"这是不是同
+ * 一次翻译"（`requestDigest`，含 `subAccountId`）。而客户端原来的指纹里**没有账号**
+ * —— 同一台机器上先用主账号、再切子账号翻同一句话，会拿同一个 key 打过去，
+ * 服务端看到 `requestHash` 变了，回 `409 IDEMPOTENCY_KEY_REUSED`。
+ * 这条文本就**永久翻不出来**，且和用户操作毫无关系。
+ *
+ * ## 为什么需要"重试换代"
+ *
+ * 服务端一旦为某个 key 建过预留，这个 key 就**用死了**：预留被退款 / 超时 / 终结
+ * 之后，同 key 再发一律 `409 REQUEST_FINALIZED`（"该请求已结束，不能重试"）。
+ * 而旧实现的内容指纹是**纯函数**，同一个 key 会被无限复用 —— 只要失败过一次
+ * （厂商 5xx、网络抖动），这条文本以后永远只能拿到 409。
+ *
+ * 但也不能简单地"每次尝试都换新号"：那样服务端就失去了按内容去重的能力，
+ * 一次"服务端已成功、客户端读丢响应"的网络抖动会让用户**被扣两次费**。
+ *
+ * 所以最终口径是：
+ *   · 键 = 账号 + 内容指纹 + **尝试代数**；
+ *   · 代数**只在**服务端明确回"这个号已经用死了"时才 +1（见 DEAD_REQUEST_CODES），
+ *     其余失败（余额不足 / 通道未接通 / 网络错误）保持原号；
+ *   · 于是"服务端已成功但响应读丢"这种最危险的情况仍然命中同一个号，
+ *     服务端直接返回已存的译文，**不会重复扣费**。
+ */
+const transAttempt = new Map()
+// 指纹 → 代数的表无限增长会漏内存；翻译是热路径，元素很小，给个上限整体清空即可
+// （清空只会让少数几条文本退回第 0 代，不会算错账）。
+const TRANS_ATTEMPT_MAX = 4096
+
+/**
+ * 服务端明确表示"这个 Idempotency-Key 已经用死了，换一个再来"的错误码。
+ *
+ * 前三个是"预留已终结/已过期/被别的请求体占用"；最后一个
+ * `ENGINE_SWITCH_REQUIRES_NEW_REQUEST` 是服务端**故意**要求客户端换号重发的
+ * （换通道重译要重新计费），必须一起换，否则换通道后这条文本也翻不出来。
+ */
+const DEAD_REQUEST_CODES = [
+  'REQUEST_FINALIZED',
+  'RESERVATION_EXPIRED',
+  'IDEMPOTENCY_KEY_REUSED',
+  'ENGINE_SWITCH_REQUIRES_NEW_REQUEST'
+]
+
+function transFingerprint(text, from, to, engine) {
+  return crypto.createHash('sha256')
+    .update([currentPixUser(), String(engine || ''), String(from || ''), String(to || ''), String(text || '')]
+      .join('\u0001'))
     .digest('hex')
     .slice(0, 40)
-  return `desktop:${deviceId()}:${fingerprint}`
+}
+
+function transRequestId(text, from, to, engine) {
+  const fingerprint = transFingerprint(text, from, to, engine)
+  const generation = transAttempt.get(fingerprint) || 0
+  return `desktop:${deviceId()}:${fingerprint}:${generation}`
+}
+
+/** 换一代：让下一次重试拿到全新的 Idempotency-Key。 */
+function bumpTransAttempt(text, from, to, engine) {
+  const fingerprint = transFingerprint(text, from, to, engine)
+  if (transAttempt.size > TRANS_ATTEMPT_MAX) transAttempt.clear()
+  transAttempt.set(fingerprint, (transAttempt.get(fingerprint) || 0) + 1)
+}
+
+function isDeadRequest(data) {
+  return !!(data && data.success === false && DEAD_REQUEST_CODES.indexOf(String(data.code || '')) >= 0)
+}
+
+/**
+ * 发一次 /translate/run；命中"号用死了"就**原地换号重发一次**。
+ *
+ * 为什么要在原地重发、而不是把错误抛给用户让他手动再点一次：
+ * 这类失败与"翻译服务坏了"完全无关（上一轮的预留被退款而已），
+ * 把它显示成"翻译失败，请稍后重试"是在骗用户 —— 重试永远还是同一个号。
+ * 只重发**一次**：连换两个号都不行，说明不是号的问题，那就如实上报。
+ */
+async function requestTranslate(text, from, to, engine, trigger) {
+  const body = () => ({
+    text: text, from: from, to: to, engine: engine, trigger: trigger,
+    requestId: transRequestId(text, from, to, engine)
+  })
+  let data = await api('/translate/run', { method: 'POST', form: body() })
+  if (!isDeadRequest(data)) return data
+  // 换号重发一次。注意 `body()` 是在**换号之后**才求值的，
+  // 否则 requestId 还是旧的，重发等于白发一次。
+  bumpTransAttempt(text, from, to, engine)
+  data = await api('/translate/run', { method: 'POST', form: body() })
+  // 连换两个号都还是"号用死了"：说明不是号的问题，下一轮别再无谓地原地打转。
+  if (isDeadRequest(data)) bumpTransAttempt(text, from, to, engine)
+  return data
 }
 
 function pushGuestPrefs() {
@@ -1276,6 +1488,81 @@ function pushPrefsToGuest(view) {
   if (!tab || !trustedTabSender(view.webContents)) return
   const prefs = tabPrefs(tab)
   view.webContents.send('translate:prefs', prefs)
+}
+
+// ---------------------------------------------------------------------------
+// 翻译桥健康看门狗 —— preload 装载失败必须"留痕 + 让用户看见"
+// ---------------------------------------------------------------------------
+// 0.1.12 那次 P0 能把客户坑到底，是因为 preload（guest-inject.js）在**装载阶段**
+// 抛错之后一点痕迹都没有：keydown / click / 扫描监听器全都没挂上，但界面照常可用。
+// 用户按回车，中文原文直通 WhatsApp；客户端日志里连一行都没有，事后只能靠复述。
+//
+// 这里补两张网：
+//   ① 立即网：`preload-error` / guest 控制台报错 → 写进客户端日志
+//   ② 兜底网：装载后 N 秒内没等到 guest 的第一次 prefs 询问 → 判定桥未启动，
+//      写 error 并通知渲染层显示常驻警告条。
+//
+// 判"活"的依据是 guest 主动调用 `translate:guestPrefs` —— 那一步只有 preload
+// 真的执行到了才会发生，比任何字符串特征都可靠。
+const BRIDGE_PROBE_MS = 8000
+const bridgeHealth = new Map() // tabId -> { ok: boolean, reason: string }
+
+function bridgeReport(tabId, ok, reason) {
+  if (!tabId) return
+  const prev = bridgeHealth.get(tabId)
+  if (prev && prev.ok === ok && prev.reason === (reason || '')) return
+  bridgeHealth.set(tabId, { ok: !!ok, reason: reason || '' })
+  const tab = tabs.find(t => t.id === tabId)
+  const name = (tab && tab.name) || tabId
+  if (clientLog) {
+    if (ok) clientLog.info('preload', '实例 ' + tabId + ' 翻译桥已就绪')
+    else {
+      clientLog.error('preload', '实例 ' + tabId + '（' + name + '）的翻译桥**未启动**：' +
+        (reason || '原因未知') + ' —— 发送翻译与接收翻译都不会生效，' +
+        '用户输入不会被拦截，按回车就会把原文直接发出去')
+    }
+  }
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('translate:bridgeDown', { id: tabId, name: name, ok: !!ok, reason: reason || '' })
+    sendTabs()
+  }
+  if (!ok && tab) showGuestBridgeWarning(tab, reason)
+}
+
+/**
+ * 在 guest 页面里画出警告条（走隔离世界，见 desktop/bridge-warning.js）。
+ *
+ * 为什么不能只靠渲染层弹提示：主界面是用 WebContentsView **盖**在窗口上的原生
+ * 视图，渲染层 DOM 会被它挡住。而这次 preload 已经死了，也不能靠它注入。
+ * 警告必须出现在**用户正在打字的那个位置**，否则等于没提示。
+ */
+function showGuestBridgeWarning(tab, reason) {
+  const wc = tab && tab.view && tab.view.webContents
+  if (!wc || wc.isDestroyed()) return
+  const job = bridgeWarning.showBridgeWarning(wc, { name: tab.name, reason: reason })
+  if (job && typeof job.catch === 'function') job.catch(() => {})
+}
+
+/**
+ * 装载后守一段时间：guest 如果活着，`translate:guestPrefs` 会在这之前到达。
+ * 到点还没到 → 桥没起来。定时器 unref，不阻止进程退出。
+ */
+function watchdogBridge(tab) {
+  if (!tab || !tab.id) return
+  // 装载期就已经报错了：立刻上报，不用等满 8 秒。
+  const wc = tab.view && tab.view.webContents
+  if (wc && wc.__pixPreloadError) {
+    bridgeReport(tab.id, false, wc.__pixPreloadError)
+    return
+  }
+  tab.bridgeTimer = setTimeout(() => {
+    tab.bridgeTimer = null
+    const st = bridgeHealth.get(tab.id)
+    if (st && st.ok === true) return
+    if (!tabs.includes(tab)) return
+    bridgeReport(tab.id, false, '预加载脚本装载后 ' + Math.round(BRIDGE_PROBE_MS / 1000) + ' 秒内没有与主进程通信（很可能装载就报错了）')
+  }, BRIDGE_PROBE_MS)
+  if (tab.bridgeTimer.unref) tab.bridgeTimer.unref()
 }
 
 // 代理规则的构建（proxyPresetOf / sanitizeProxyPart / parseProxyHostLine /
@@ -1642,6 +1929,38 @@ function createWebView(partition, settings, item, homeUrl, tabInfo) {
   view.webContents.on('will-navigate', guardNavigation)
   view.webContents.on('will-redirect', guardNavigation)
   view.webContents.on('did-finish-load', () => pushPrefsToGuest(view))
+  // preload 装载失败必须留痕：光靠控制台，线上看不到（0.1.12 就是这么漏出去的）。
+  // 此刻 tab 可能还没进 tabs（按 id 找不到），所以先挂在 view 上，由
+  // watchdogBridge() 按 tab 归属上报。
+  view.webContents.on('preload-error', (_event, preloadPath, error) => {
+    const file = path.basename(String(preloadPath || 'preload'))
+    const reason = file + ' 装载失败：' + ((error && error.message) || String(error || '未知错误'))
+    view.__pixPreloadError = reason
+    if (clientLog) clientLog.error('preload', reason)
+  })
+  // guest 页面的报错也收进日志：拦截器内部的异常以前只进 webContents 控制台。
+  if (clientLog) {
+    view.webContents.on('console-message', (...args) => {
+      let level, message, source, line
+      if (args.length === 1 && args[0] && typeof args[0] === 'object') {
+        level = args[0].level; message = args[0].message; source = args[0].sourceId; line = args[0].lineNumber
+      } else {
+        level = args[1]; message = args[2]; line = args[3]; source = args[4]
+      }
+      const text = String(message == null ? '' : message)
+      // ★ 发送状态机 trace 与发送结果日志**必须**无条件落盘。
+      //   它们走的是 console.info（level 0/1），而下面那条过滤只放行 warning/error ——
+      //   不特判的话，真机上一次 trace 都采不到，"抓真实事件顺序"就成了空话。
+      //   （这正是 0.1.12 那类事故的成因之一：观测面缺失，事后只能靠用户复述。）
+      if (text.indexOf('[PIX_TRACE]') !== -1 || text.indexOf('[Hello Pix]') !== -1) {
+        clientLog.info('guest-trace', text + ' @' + (source || '') + ':' + line)
+        return
+      }
+      if (level === 2 || level === 3 || level === 'warning' || level === 'error') {
+        clientLog.warn('guest', text + ' @' + (source || '') + ':' + line)
+      }
+    })
+  }
   return view
 }
 
@@ -1685,6 +2004,8 @@ function openPlatform(payload) {
   tab.loading = true
   bindTabLoading(tab)
   tabs.push(tab)
+  // 只有在 preload 真的跑起来之后，guest 才会来问 prefs；到点没来就是桥没起来。
+  watchdogBridge(tab)
   startTabLoad(tab)
   activeId = id
   showHome = false
@@ -2129,14 +2450,22 @@ ipcMain.handle('app:preset', (_event, id) => {
   const key = String(id || '')
   const row = all[key]
   if (!row) return { success: true, data: null }
-  return { success: true, data: Object.assign({}, row, { settings: unsealSettings(row.settings) }) }
+  // 先摘代理字段再解密：模板里本来就不该有代理，摘在前面连 proxyPass 都不会被解密。
+  // 这一步同时**自愈**旧版本已经写进磁盘的带代理模板 —— 用户不用清配置。
+  const settings = unsealSettings(stripProxyFields(row.settings))
+  return { success: true, data: Object.assign({}, row, { settings: settings }) }
 })
 ipcMain.handle('app:savePreset', (event, payload) => {
   if (!isMainSender(event)) return rejectUntrustedSender()
   const id = String((payload && payload.platformId) || '')
   if (!id) return { success: false }
   const all = readJson(userFile('app-presets.json'), {})
-  all[id] = { name: (payload && payload.name) || '', settings: sealSettings((payload && payload.settings) || {}) }
+  // 模板只存"可以跨实例继承的普通偏好"（字体、语言、通道…）。
+  // 代理是实例级敏感配置，**不进模板** —— 否则新建实例会继承上一个实例的代理。
+  all[id] = {
+    name: (payload && payload.name) || '',
+    settings: sealSettings(stripProxyFields((payload && payload.settings) || {}))
+  }
   writeJson(userFile('app-presets.json'), all)
   return { success: true }
 })
@@ -2234,7 +2563,10 @@ ipcMain.handle('app:rename', (_event, payload) => {
   tab.title = next
   const all = readJson(userFile('app-presets.json'), {})
   const prev = all[tab.platform] || {}
-  all[tab.platform] = { name: next, settings: sealSettings(prev.settings || tab.settings || {}) }
+  // 兜底值以前是 `tab.settings`，那会把这条线路**正在用的代理**写进模板，
+  // 于是"改个名字"就成了一次静默的代理泄漏：下一个新建实例会继承它。
+  // 模板永远不含代理，所以两个来源都要先摘干净。
+  all[tab.platform] = { name: next, settings: sealSettings(stripProxyFields(prev.settings || tab.settings || {})) }
   writeJson(userFile('app-presets.json'), all)
   sendTabs()
   saveOpenApps()
@@ -2389,8 +2721,19 @@ ipcMain.handle('customer:reminders', async () => {
   }
 })
 
-ipcMain.handle('translate:engines', async () => {
-  try {
+// 渲染层加载时主动查一次：警告条不能只在"刚变成坏"的那一刻出现 ——
+// 渲染层重载、切标签、重启后都要能恢复显示。
+ipcMain.handle('translate:bridgeStatus', event => {
+  if (!isMainSender(event)) return rejectUntrustedSender()
+  const rows = []
+  tabs.forEach(tab => {
+    const st = bridgeHealth.get(tab.id)
+    if (st && st.ok === false) rows.push({ id: tab.id, name: tab.name, reason: st.reason })
+  })
+  return { success: true, rows: rows }
+})
+
+ipcMain.handle('translate:engines', async () => {  try {
     return await api('/translate/engines')
   } catch (e) {
     return { success: false, rows: [] }
@@ -2416,7 +2759,10 @@ ipcMain.handle('translate:savePrefs', async (_event, payload) => {
 })
 ipcMain.handle('translate:guestPrefs', event => {
   const tab = trustedTabSender(event.sender)
-  return tab ? tabPrefs(tab) : rejectUntrustedSender()
+  if (!tab) return rejectUntrustedSender()
+  // guest 能问到 prefs，说明 preload 真的执行到了 —— 这是"桥活着"最可靠的证据。
+  bridgeReport(tab.id, true, '')
+  return tabPrefs(tab)
 })
 ipcMain.handle('translate:run', async (event, payload) => {
   const tab = trustedTabSender(event.sender)
@@ -2424,8 +2770,9 @@ ipcMain.handle('translate:run', async (event, payload) => {
   const p = payload || {}
   const raw = String(p.text || '').trim()
   if (raw.length > 5000) return { success: false, msg: '单次翻译最多 5000 个字符' }
-  const text = stripEmoji(raw)
-  if (!text) return { success: true, translation: '', skipped: 'emoji' }
+  // 占位符绝不能进翻译接口：它是我们自己的状态，翻出来只会污染译文。
+  const text = stripEmoji(stripBusyMarks(raw))
+  if (!text) return { success: true, translation: '', skipped: 'busy' }
   const s = (tab && tab.settings) || {}
   const incoming = !!p.incoming
   const to = incoming
@@ -2433,10 +2780,23 @@ ipcMain.handle('translate:run', async (event, payload) => {
     : pickLang(s.sendTo, 'en')
   const from = incoming ? (s.recvFrom || 'auto') : (s.sendFrom || 'auto')
   const engine = s.engine || (profile && profile.activeEngine) || ''
+  // 调用来源，一路带到服务端落进 translate_logs.trigger。
+  // 出异常字符消耗时，靠它区分"用户点了译"和"扫描时自动翻"。
+  const trigger = String(p.trigger || '').trim()
+  // 真机取证用：把**实际送给上游**的 source_text 记进客户端日志。
+  // 排查"译文里混进 UI 文案"这类问题时，没有这一行只能靠猜。
+  if (clientLog) {
+    clientLog.info('translate', 'source_text=' + JSON.stringify(text) +
+      ' · from=' + from + ' to=' + to + ' engine=' + engine + ' dir=' + (incoming ? 'in' : 'out') +
+      ' trigger=' + (trigger || '-'))
+  }
   const hit = getTransCached(from, to, engine, text)
   if (hit) return { success: true, translation: hit, cached: true }
   try {
-    const data = await api('/translate/run', { method: 'POST', form: { text: text, from: from, to: to, engine: engine, requestId: transRequestId(text, from, to, engine) } })
+    // requestTranslate 内部处理"上一轮的请求号已终结"：换号重发一次再返回。
+    // 这条路径不吞错 —— 服务端的 {success:false, code, msg} 原样上抛给渲染层，
+    // 由 guest-inject 的 notifyTranslateIssue() 显示成人话（余额不足 / 通道未包含）。
+    const data = await requestTranslate(text, from, to, engine, trigger)
     const out = String((data && (data.translation || data.text)) || '').trim()
     if (data && data.success && out) {
       putTransCached(from, to, engine, text, out)
@@ -2444,7 +2804,7 @@ ipcMain.handle('translate:run', async (event, payload) => {
     }
     return data
   } catch (e) {
-    return { success: false, msg: e.message || '翻译失败' }
+    return { success: false, code: 'TRANSLATE_FAILED', msg: e.message || '翻译失败' }
   }
 })
 ipcMain.handle('app:overlay', (event, on) => {

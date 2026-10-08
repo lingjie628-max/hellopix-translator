@@ -47,6 +47,11 @@ contextBridge.exposeInMainWorld('pix', {
   version: () => ipcRenderer.invoke('app:version'),
   checkUpdate: () => ipcRenderer.invoke('app:checkUpdate'),
   translateEngines: () => ipcRenderer.invoke('translate:engines'),
+  // 翻译桥健康：preload 装载失败时，界面必须显示常驻警告，不能让用户以为翻译开着
+  bridgeStatus: () => ipcRenderer.invoke('translate:bridgeStatus'),
+  onBridgeDown: (cb) => {
+    ipcRenderer.on('translate:bridgeDown', (_event, data) => cb(data))
+  },
   customerReminders: () => ipcRenderer.invoke('customer:reminders'),
   saveTranslatePrefs: (payload) => ipcRenderer.invoke('translate:savePrefs', payload),
   setOverlay: (on) => ipcRenderer.invoke('app:overlay', on),

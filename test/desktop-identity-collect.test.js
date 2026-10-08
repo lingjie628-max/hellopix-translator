@@ -25,16 +25,43 @@ const SRC = fs.readFileSync(path.join(__dirname, '..', 'desktop', 'guest-inject.
  * 取两个函数而不是一个：`currentPeer` 现在按平台分发
  * （telegramPeer → whatsappPeer），只加载它会因为 telegramPeer 未定义而抛错。
  */
+/**
+ * 身份解析相关的函数源码。
+ *
+ * `whatsappPeer` 依赖 `conversationScope`，一起加载 —— 否则会在沙箱里
+ * ReferenceError，测不到真正跑的那段代码。
+ */
+const PEER_FNS = ['telegramPeer', 'whatsappPeer', 'currentPeer', 'conversationScope']
+
+/**
+ * 假 document。
+ *
+ * **必须提供 `#main`**：身份与客户解析只认当前会话。
+ * raws 传 null 表示"页面上没有 #main"，此时一律返回 null，
+ * 绝不退回整个 document —— 那样会把左侧会话列表里的私聊当成当前客户
+ * （0.1.11 真机 P0：群聊自动翻译因此永不生效）。
+ */
+function fakeDocument(raws) {
+  const rows = raws === null
+    ? null
+    : (Array.isArray(raws) ? raws : [raws]).map(raw => ({ getAttribute: () => raw }))
+  const scope = rows === null ? null : { querySelectorAll: () => rows }
+  return {
+    querySelector: name => (name === '#main' ? scope : null),
+    querySelectorAll: () => []
+  }
+}
+
 function loadPeerFns() {
-  const srcs = ['telegramPeer', 'whatsappPeer', 'currentPeer'].map(name => {
+  const srcs = PEER_FNS.map(name => {
     const m = SRC.match(new RegExp('function ' + name + '\\(\\)\\s*\\{[\\s\\S]*?\\n  \\}'))
     assert.ok(m, `在 guest-inject.js 里找不到 ${name} —— 函数被改名或删掉了？`)
     return m[0]
   })
-  const sandbox = { location: { hash: '' }, document: { querySelectorAll: () => [] } }
+  const sandbox = { location: { hash: '' }, document: fakeDocument(null) }
   vm.createContext(sandbox)
   vm.runInContext(srcs.join('\n') + '\nthis.__f = currentPeer', sandbox)
-  return hash => { sandbox.location.hash = hash; sandbox.document = { querySelectorAll: () => [] }; return sandbox.__f() }
+  return hash => { sandbox.location.hash = hash; sandbox.document = fakeDocument(null); return sandbox.__f() }
 }
 
 function loadCurrentPeer() { return loadPeerFns() }
@@ -92,13 +119,16 @@ test('撞单横幅先做 warn（不阻止操作）且跨商户不渲染同事信
 })
 
 test('WhatsApp 的 chatId 能解析出手机号，且**群聊必须排除**', () => {
-  const m = SRC.match(/function whatsappPeer\(\)\s*\{[\s\S]*?\n  \}/)
-  assert.ok(m, '找不到 whatsappPeer')
-  const sandbox = { document: { querySelectorAll: () => [] } }
+  const srcs = ['whatsappPeer', 'conversationScope'].map(name => {
+    const m = SRC.match(new RegExp('function ' + name + '\\(\\)\\s*\\{[\\s\\S]*?\\n  \\}'))
+    assert.ok(m, '找不到 ' + name)
+    return m[0]
+  })
+  const sandbox = { document: fakeDocument(null) }
   vm.createContext(sandbox)
-  vm.runInContext(m[0] + '\nthis.__f = whatsappPeer', sandbox)
+  vm.runInContext(srcs.join('\n') + '\nthis.__f = whatsappPeer', sandbox)
   const parse = raw => {
-    sandbox.document = { querySelectorAll: () => (raw === null ? [] : [{ getAttribute: () => raw }]) }
+    sandbox.document = fakeDocument(raw)
     return sandbox.__f()
   }
 
@@ -118,6 +148,27 @@ test('WhatsApp 的 chatId 能解析出手机号，且**群聊必须排除**', ()
   assert.equal(parse('false_abc@c.us_XYZ'), null, '非数字 chatId 应跳过')
   assert.equal(parse('garbage'), null)
   assert.equal(parse(null), null)
+})
+
+test('没有 #main（拿不到当前会话）时绝不猜客户身份', () => {
+  // 左侧会话列表的行也带 [data-id]；退回整个 document 就会把
+  // "列表里第一个私聊"当成当前客户 —— 归属错人比漏采集严重得多。
+  const srcs = ['whatsappPeer', 'conversationScope'].map(name => {
+    const m = SRC.match(new RegExp('function ' + name + '\\(\\)\\s*\\{[\\s\\S]*?\\n  \\}')
+    )
+    assert.ok(m, '找不到 ' + name)
+    return m[0]
+  })
+  const sandbox = {
+    document: {
+      // 有左侧列表的 data-id，但**没有 #main**
+      querySelector: () => null,
+      querySelectorAll: () => [{ getAttribute: () => 'false_8613800138000@c.us_3EB0' }]
+    }
+  }
+  vm.createContext(sandbox)
+  vm.runInContext(srcs.join('\n') + '\nthis.__f = whatsappPeer', sandbox)
+  assert.equal(sandbox.__f(), null, '没有 #main 时必须返回 null，不得退回 document')
 })
 
 test('拿不到 peer 时不生成 body 之外的任何身份猜测', () => {

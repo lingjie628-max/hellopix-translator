@@ -46,14 +46,23 @@ test('归档发生在翻译开关判断之前（不翻译的消息也要留档�
   const scan = guest.slice(scanAt, guest.indexOf('function schedule()', scanAt))
 
   const reportAt = scan.indexOf('reportMessage(')
-  const recvPrefAt = scan.indexOf('prefs.transRecv')
-  const groupPrefAt = scan.indexOf('prefs.transGroup')
-
   assert.ok(reportAt > 0, 'scan() 里没有调用 reportMessage')
-  assert.ok(recvPrefAt > reportAt,
-    'reportMessage 必须在 prefs.transRecv 判断之前 —— 否则关掉接收翻译就不再归档')
-  assert.ok(groupPrefAt < reportAt || groupPrefAt === -1,
-    'transGroup 只用于决定是否翻译，不应拦住归档')
+
+  // 归档必须**无条件**发生：翻译相关的一切判断都不许出现在它前面。
+  // 曾经的写法是 `if (!prefs.transRecv) continue` 挂在归档之前，关掉接收翻译
+  // 就不再留档；现在翻译判断全部收进 MessageParser.messageAction()，
+  // 归档更彻底地独立于翻译开关。
+  const prefHits = ['prefs.transRecv', 'prefs.transGroup']
+    .map(name => scan.indexOf(name))
+    .filter(at => at >= 0)
+  const firstPrefAt = prefHits.length ? Math.min.apply(null, prefHits) : Infinity
+  assert.ok(firstPrefAt > reportAt,
+    '翻译开关的判断出现在归档之前，关掉翻译就不再留档了')
+
+  // 判断统一走集中决策（正是它读 prefs），且排在归档之后
+  const actionAt = scan.indexOf('MessageParser.messageAction(')
+  assert.ok(actionAt > reportAt,
+    '集中决策必须排在归档之后，否则不翻译的消息就不留档了')
 })
 
 test('归档不吞异常（翻译主流程不能被归档拖垮）', () => {

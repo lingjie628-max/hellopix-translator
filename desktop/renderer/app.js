@@ -719,6 +719,32 @@ function langOptionHtml(rows) {
     .join('')
 }
 
+/**
+ * 界面应当显示的翻译通道。
+ *
+ * 套餐不允许切换时，服务端会用「套餐内第一个已接通且启用的通道」，
+ * 账号里存的那点选择一律被忽略 —— 此时必须显示服务端的解析结果，
+ * 否则用户看到的通道与实际调用/计费的不是同一个（真机表现：
+ * 显示 GPT、实际走 DeepSeek）。
+ */
+function engineToShow(stored) {
+  return authoritativeEngine || String(stored || '')
+}
+
+/**
+ * 三态群组翻译映射到下拉框取值：'inherit' | 'auto' | 'manual'。
+ *
+ * 注意 `inherit` **必须显式存过**才认。历史实例的 settings 里压根没有
+ * `groupMode` 这个键（老版本写死 manual 语义），如果这里回落到 `inherit`，
+ * 用户一打开设置面板、一保存，就会把这个实例从"手动"悄悄变成"跟随账号自动"，
+ * 账号级开着自动的话就是**预期外的自动扣费**。所以缺省值只认 'manual'。
+ */
+function groupModeUiValue(mode) {
+  if (mode === 'inherit') return 'inherit'
+  if (mode === 'auto') return 'auto'
+  return 'manual'
+}
+
 function defaultAppSettings() {
   return {
     enableTranslate: true,
@@ -732,8 +758,10 @@ function defaultAppSettings() {
     recvFrom: 'auto',
     recvTo: 'zh',
     server: selectedId === 'auto' ? (fastest && fastest.id) || '' : selectedId,
-    engine: (current && current.activeEngine) || (engineRows[0] && engineRows[0].id) || '',
-    groupMode: 'manual',
+    engine: engineToShow((current && current.activeEngine) || (engineRows[0] && engineRows[0].id)),
+    // 新建实例默认「跟随账号」：实例级不表态，交给账号级的 transGroup 决定。
+    // 老实现写死 'manual'，导致账号级开了自动、新实例一建出来就静默压成手动。
+    groupMode: 'inherit',
     includeZh: false,
     fontSize: 15,
     fontColor: '#22c55e',
@@ -809,7 +837,7 @@ function fillAddForm(item, preset) {
     return '<option value="' + esc(l.id) + '">' + esc(l.name) + '</option>'
   }).join('')
   if (settings.server) addServer.value = settings.server
-  addGroupMode.value = settings.groupMode === 'auto' ? 'auto' : 'manual'
+  addGroupMode.value = groupModeUiValue(settings.groupMode)
   addIncludeZh.value = (settings.includeZh === true || settings.includeZh === 1 || settings.includeZh === 'true') ? 'true' : 'false'
   addFontSize.innerHTML = [
     [11, '小号字体'],
@@ -834,19 +862,27 @@ function fillAddForm(item, preset) {
   addNoAutoLoad.checked = !!settings.disableAutoLoad
   addTabUnread.checked = settings.tabUnread !== false
   addGlobalUnread.checked = settings.globalUnread !== false
-  addProxyType.value = settings.proxyType || 'none'
-  addProxyHost.value = settings.proxyHost || settings.proxyNode || ''
-  addProxyPort.value = settings.proxyPort || ''
-  addProxyScheme.value = settings.proxyScheme || 'socks5'
-  addProxyUser.value = settings.proxyUser || ''
-  addProxyPass.value = settings.proxyPass || ''
-  addProxyChannel.value = settings.proxyChannel || 'dbip'
-  addProxyIpVer.value = settings.proxyIpVer || 'ipv4'
-  addProxyRefresh.value = settings.proxyRefresh || ''
-  addProxyUdp.checked = !!settings.proxyUdp
-  geoManual = !!(settings.proxyGeo && settings.proxyGeo.manual)
-  fillGeoForm(settings.proxyGeo || null)
-  if (settings.proxyNode && !settings.proxyHost) applyProxyPaste(settings.proxyNode)
+  // ── 代理：新建实例一律从**直连**开始 ────────────────────────────────
+  // 代理是实例级敏感配置，绝不能从任何继承来源带进来。以前这里读的是
+  // `settings.proxyType` / `settings.proxyHost` …，而 `settings` 是
+  // `Object.assign(defaultAppSettings(), preset.settings)` —— 预设来自
+  // `app-presets.json`，于是"上一次给某个实例配过的代理"会被填进这个表单，
+  // 新建的实例就带着上一个实例的代理出生了。
+  // 现在代理字段只认 `defaultAppSettings()` 里的直连初值：用户真要用代理，
+  // 在这个表单里自己填 —— 那才是一次明确的意图表达。
+  const direct = defaultAppSettings()
+  addProxyType.value = direct.proxyType
+  addProxyHost.value = direct.proxyHost
+  addProxyPort.value = direct.proxyPort
+  addProxyScheme.value = direct.proxyScheme
+  addProxyUser.value = direct.proxyUser
+  addProxyPass.value = direct.proxyPass
+  addProxyChannel.value = direct.proxyChannel
+  addProxyIpVer.value = direct.proxyIpVer
+  addProxyRefresh.value = direct.proxyRefresh
+  addProxyUdp.checked = !!direct.proxyUdp
+  geoManual = false
+  fillGeoForm(null)
   syncProxyFields(true)
   paintAddVersion(item)
 }
@@ -1256,8 +1292,12 @@ async function openAddApp(item) {
     if (rows.length) {
       addEngine.innerHTML = rows.map(e => '<option value="' + esc(e.id) + '">' + esc(e.name) + '</option>').join('')
     }
-    const engine = (current && current.activeEngine) || ''
+    // 套餐锁定时，服务端会用「套餐内第一个已接通通道」；这里若显示账号里存的旧值，
+    // 就会建出一个"界面写 GPT、实际走 DeepSeek"的实例（与侧边栏/设置面板同一口径）。
+    const engine = engineToShow((current && current.activeEngine) || '')
     if (engine) addEngine.value = engine
+    addEngine.disabled = !canSwitchEngine
+    addEngine.title = canSwitchEngine ? '' : '当前套餐的翻译通道由系统指定'
   } catch (e) {}
   const latest = platformCache.find(row => row.id === item.id)
   if (latest) paintAddVersion(latest)
@@ -1443,6 +1483,11 @@ let transBarTabId = ''
 let engineRows = []
 // 套餐是否允许商户自己换通道（基础版为 false）。服务端另有强制，这里只负责不误导用户
 let canSwitchEngine = true
+// 服务端解析出的「实际会用的通道」。套餐不允许切换时，账号里存的选择会被
+// 服务端**忽略**（见 core-service.resolveEngineId / 契约用例
+// 「界面显示的当前通道必须与实际使用的一致」），界面若还显示账号里的旧值
+// 就等于在骗人：用户看到 GPT，实际扣费走的是 DeepSeek。
+let authoritativeEngine = ''
 
 function barLangOptions() {
   return langOptionHtml()
@@ -1528,20 +1573,27 @@ function paintTransBar(state, home, rows) {
   ensureTransBarOptions()
   transBarSilent = true
   transBarTabId = tab.id
-  barSendOn.checked = trans.enableSend !== false
-  barRecvOn.checked = trans.enableRecv !== false
-  barSendFrom.value = trans.sendFrom || 'auto'
-  barSendTo.value = trans.sendTo || 'en'
-  barRecvFrom.value = trans.recvFrom || 'auto'
-  barRecvTo.value = trans.recvTo || 'zh'
-  barGroupMode.value = trans.groupMode === 'auto' ? 'auto' : 'manual'
-  barFontSize.value = String(trans.fontSize || 15)
-  if (trans.server) barServer.value = trans.server
-  barFontColor.value = trans.fontColor || '#22c55e'
-  barIncludeZh.checked = !!trans.includeZh
-  if (trans.engine) barEngine.value = trans.engine
-  barQuickReply.checked = !!trans.quickReply
-  transBarSilent = false
+  // try/finally：`transBarSilent` 是"回填中，别把这次赋值当成用户改动"的闸门。
+  // 老实现是裸的 `= true ... = false`，只要中间任何一行抛异常（缺 DOM、值非法），
+  // 闸门就永远停在 true —— 之后用户在翻译条上改的任何设置都会被 saveTransBar
+  // 静默丢弃，而且不报错。真机表现就是"改了没保存"。
+  try {
+    barSendOn.checked = trans.enableSend !== false
+    barRecvOn.checked = trans.enableRecv !== false
+    barSendFrom.value = trans.sendFrom || 'auto'
+    barSendTo.value = trans.sendTo || 'en'
+    barRecvFrom.value = trans.recvFrom || 'auto'
+    barRecvTo.value = trans.recvTo || 'zh'
+    barGroupMode.value = groupModeUiValue(trans.groupMode)
+    barFontSize.value = String(trans.fontSize || 15)
+    if (trans.server) barServer.value = trans.server
+    barFontColor.value = trans.fontColor || '#22c55e'
+    barIncludeZh.checked = !!trans.includeZh
+    if (trans.engine) barEngine.value = engineToShow(trans.engine)
+    barQuickReply.checked = !!trans.quickReply
+  } finally {
+    transBarSilent = false
+  }
 }
 
 function readTransBarSettings() {
@@ -1688,9 +1740,16 @@ function startTabRename(tab, el) {
 function makeTabEl(tab, active) {
   const el = document.createElement('div')
   el.className = 'tab' + (active ? ' active' : '')
+  // 翻译桥没起来 = 这个窗口的翻译整体失效。侧边栏必须一眼能看出来 ——
+  // 让它长得和正常窗口一样，正是 0.1.12 能把用户坑到底的原因。
+  if (tab.bridgeDown) {
+    el.classList.add('bridge-down')
+    el.title = '翻译组件未启动：此窗口的发送/接收翻译都不会生效，请重启 Hello Pix'
+  }
   const name = tabLabel(tab)
   el.innerHTML = iconTag(tab.platform, 'tab-icon', tab.icon) +
     (name ? '<span class="tab-name" title="' + esc(name) + '">' + esc(name) + '</span>' : '') +
+    (tab.bridgeDown ? '<span class="tab-warn" title="翻译组件未启动">⚠</span>' : '') +
     '<span class="x" title="关闭">×</span>'
   el.onclick = () => window.pix.switchTab(tab.id)
   el.oncontextmenu = event => showPixContextMenu(event, tab)
@@ -1773,8 +1832,11 @@ async function enterShell(data) {
     const resp = await window.pix.translateEngines()
     engineRows = ((resp && resp.rows) || []).filter(e => e.allowed !== false)
     canSwitchEngine = !(resp && resp.canSwitch === false)
+    // 套餐锁定时，服务端解析出的通道才是真实会用的那个；显示必须跟着它走。
+    authoritativeEngine = canSwitchEngine ? '' : String((resp && resp.activeEngine) || '')
   } catch (e) {
     engineRows = []
+    authoritativeEngine = ''
   }
   renderTabs(await window.pix.tabs())
   if (refreshTimer) clearInterval(refreshTimer)
@@ -2146,7 +2208,7 @@ function applyTransPrefs(data) {
   includeZh.checked = !!Number(data.includeZh)
   if (data.langMine) langMine.value = data.langMine
   if (data.langOther) langOther.value = data.langOther
-  if (data.activeEngine) transEngine.value = data.activeEngine
+  if (data.activeEngine) transEngine.value = engineToShow(data.activeEngine)
 }
 
 async function openTransPanel() {
@@ -2333,6 +2395,9 @@ if (transBarToggle) {
 function backToLogin(msg) {
   if (refreshTimer) clearInterval(refreshTimer)
   current = null
+  authoritativeEngine = ''
+  engineRows = []
+  canSwitchEngine = true
   preferAuto = true
   selectedId = 'auto'
   fastest = null
@@ -2360,6 +2425,11 @@ logoutBtn.onclick = async () => {
 }
 
 window.pix.onTabs(renderTabs)
+// 翻译桥坏掉（或恢复）时主进程会推一条：立刻刷新侧边栏标记。
+// 不能只在打开窗口时检查一次 —— 装包重载后桥可能才坏。
+if (window.pix.onBridgeDown) {
+  window.pix.onBridgeDown(() => { window.pix.tabs().then(renderTabs).catch(() => {}) })
+}
 window.pix.onPlatforms((data) => {
   fillAppLists((data && data.rows) || [])
 })

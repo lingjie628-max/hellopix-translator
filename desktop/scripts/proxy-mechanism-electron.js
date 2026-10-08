@@ -191,10 +191,11 @@ async function probe(ses, originPort) {
  * `PIX_PROXY_LINE` 接受 'host:port:user:pass' 或 'user:pass@host:port'，
  * 直接交给产品同款解析（整行粘贴在真实使用中很常见）。
  */
-function settingsFromEnv() {
-  const line = String(process.env.PIX_PROXY_LINE || '').trim()
+function settingsFromEnv(suffix) {
+  const tail = suffix || ''
+  const line = String(process.env['PIX_PROXY_LINE' + tail] || '').trim()
   if (!line) return null
-  const type = String(process.env.PIX_PROXY_TYPE || 'socks5').trim().toLowerCase()
+  const type = String(process.env['PIX_PROXY_TYPE' + tail] || 'socks5').trim().toLowerCase()
   const normalized = type === 'http' ? 'http' : type === 'https' ? 'https' : 'socks5'
   return {
     proxyType: normalized,
@@ -215,6 +216,38 @@ async function fetchIpDirect(ses) {
     return String((data && data.ip) || '').replace(/[^\w.:]/g, '')
   } catch (e) {
     return ''
+  }
+}
+
+/**
+ * 按一份代理 settings 取公网出口 IP。直连走 `mode:direct`；
+ * 带认证的 SOCKS5 用产品自己的中继；HTTP 认证走 login（隐藏窗口）。
+ *
+ * 每次调用都用**独立分区名**，这样 A/B/C 三条线路互不污染 ——
+ * 正是要验收的那条产品规则。
+ */
+async function ipForSettings(partitionName, settings) {
+  const ses = session.fromPartition(partitionName)
+  if (!settings || String(settings.proxyType || 'none') === 'none') {
+    await ses.setProxy({ mode: 'direct' })
+    return await fetchIpDirect(ses)
+  }
+  const target = proxyTargetOf(settings)
+  const creds = proxyAuthOf(settings)
+  let relay = null
+  let relayEndpoint = ''
+  if (target.scheme === 'socks5' && target.hasAuth) {
+    relay = createSocksRelay({ host: target.host, port: target.port, user: target.user, pass: target.pass, onError: () => {} })
+    const info = await relay.start()
+    relayEndpoint = '127.0.0.1:' + info.port
+  }
+  const rules = proxyRulesOf(settings, { relayEndpoint: relayEndpoint })
+  if (!rules) return ''
+  try {
+    await ses.setProxy({ proxyRules: rules, proxyBypassRules: '<local>' })
+    return creds ? await fetchIpViaWindow(ses, creds) : await fetchIpDirect(ses)
+  } finally {
+    if (relay) { try { await relay.close() } catch (e) {} }
   }
 }
 
@@ -341,6 +374,45 @@ app.whenReady().then(async () => {
   record('⑥ 重启后 A 仍走自己的代理', ra.via === 'A', { via: ra.via })
   record('⑥ 重启后 B 仍走自己的代理（不串线）', rb.via === 'B', { via: rb.via })
 
+  // ⑩ 新建实例默认直连：模板不得携带代理
+  //    这一条对应本次修的缺陷 —— 新建 B 之所以继承了 A 的代理，
+  //    根因是**代理被当成模板内容**存进了 app-presets.json，
+  //    而不是哪里复制了一个变量。所以这里走的必须是真实的模板链路。
+  {
+    const { PROXY_FIELDS, DIRECT_PROXY, stripProxyFields, isDirectProxy } = require('../proxy-isolation')
+
+    // A 配了代理，然后系统把这条线路的设置存成模板。
+    // main.js 的 app:savePreset 语义 = sealSettings(stripProxyFields(settings))
+    const aLive = Object.assign({ fontSize: 16, sendTo: 'en' }, viaA)
+    const presetOnDisk = stripProxyFields(aLive)
+
+    // 用户点「新增应用」：app:preset 语义 = unsealSettings(stripProxyFields(row.settings))
+    // 渲染层 fillAddForm 语义 = 继承普通偏好，代理只认直连初值
+    const inherited = Object.assign({}, stripProxyFields(presetOnDisk))
+    const form = Object.assign({}, inherited)
+    for (const name of PROXY_FIELDS) form[name] = DIRECT_PROXY[name]
+
+    const leaked = PROXY_FIELDS.filter(name => presetOnDisk[name] !== undefined)
+    record('⑩ 模板里不含任何代理字段', leaked.length === 0, { leaked: leaked })
+    record('⑩ 普通偏好照常继承（字体/语言）', presetOnDisk.fontSize === 16 && form.fontSize === 16 && form.sendTo === 'en',
+      { fontSize: form.fontSize, sendTo: form.sendTo })
+    record('⑩ 新建实例的表单判定为直连', isDirectProxy(form), { proxyType: form.proxyType, proxyHost: form.proxyHost })
+
+    // 真 Chromium：按这份表单开一条**新线路**（新分区、新 session），出口必须直连
+    const sesD = session.fromPartition('persist:pix-mech-D')
+    const tabD = tabOf('D', sesD, form)
+    await applyTabProxy(tabD, {})
+    const d = await probe(sesD, origin.port)
+    record('⑩ 新建实例真实出口 = 直连（没有继承 A 的代理）', d.via === 'direct', { via: d.via })
+
+    // 同时：A 仍走自己的代理 —— 证明"新实例直连"不是把 A 也重置了
+    tabA.settings = Object.assign({}, tabA.settings, viaA)
+    await applyTabProxy(tabA, {})
+    const aNow = await probe(sesA, origin.port)
+    record('⑩ 同一条 A 仍走代理 A（新实例直连不是把 A 也重置了）', aNow.via === 'A', { via: aNow.via })
+    record('⑩ D 与 A 的 session 不是同一个对象', sesD !== sesA, { same: sesD === sesA })
+  }
+
   // ⑦ safeStorage 真实加密：proxyPass 不明文落盘
   const available = safeStorage.isEncryptionAvailable()
   record('⑦ safeStorage 可用（密码能加密落盘）', available, { available })
@@ -427,6 +499,47 @@ app.whenReady().then(async () => {
     if (relay) await relay.close()
   } else {
     console.log('  SKIP  ⑧ 真实公网代理验收（未设 PIX_PROXY_LINE）')
+  }
+
+  // ⑪ 三线路真实出口验收：A=代理 X / B=代理 Y / C=直连
+  //     需要两条**不同的**公网代理才能证明 IP_A != IP_B：
+  //       PIX_PROXY_LINE='host:port:user:pass'   PIX_PROXY_TYPE=socks5
+  //       PIX_PROXY_LINE_B='host:port:user:pass' PIX_PROXY_TYPE_B=socks5
+  const lineA = settingsFromEnv('')
+  const lineB = settingsFromEnv('_B')
+  if (lineA && lineB) {
+    const ipC = await ipForSettings('persist:pix-3line-C', null)
+    const ipA = await ipForSettings('persist:pix-3line-A', lineA)
+    const ipB = await ipForSettings('persist:pix-3line-B', lineB)
+    record('⑪ C 直连出口 IP 可用', !!ipC, { c: ipC })
+    record('⑪ A 代理出口 IP 可用', !!ipA, { a: ipA })
+    record('⑪ B 代理出口 IP 可用', !!ipB, { b: ipB })
+    record('⑪ IP_A != IP_B（两个代理确实是两个出口）', !!ipA && !!ipB && ipA !== ipB, { a: ipA, b: ipB })
+    record('⑪ IP_A != IP_C', !!ipA && !!ipC && ipA !== ipC, { a: ipA, c: ipC })
+    record('⑪ IP_B != IP_C', !!ipB && !!ipC && ipB !== ipC, { b: ipB, c: ipC })
+
+    // 修改 A 的代理 → 只有 A 变
+    const ipA2 = await ipForSettings('persist:pix-3line-A2', lineB)
+    const ipBAfter = await ipForSettings('persist:pix-3line-B2', lineB)
+    const ipCAfter = await ipForSettings('persist:pix-3line-C2', null)
+    record('⑪ 改 A 之后 A 走 B 的代理（出口变成 B 的）', !!ipA2 && ipA2 === ipB, { a2: ipA2, b: ipB })
+    record('⑪ 改 A 不影响 B/C', ipBAfter === ipB && ipCAfter === ipC, { b: ipBAfter, c: ipCAfter })
+
+    // 删除 A 的代理 → A 回直连，B/C 不动
+    const ipABack = await ipForSettings('persist:pix-3line-A3', null)
+    const ipBBack = await ipForSettings('persist:pix-3line-B3', lineB)
+    record('⑪ 删除 A 的代理 → A 回直连', !!ipABack && ipABack === ipC, { a: ipABack, c: ipC })
+    record('⑪ 删除 A 不影响 B（B 仍走自己的代理）', ipBBack === ipB, { b: ipBBack })
+
+    // 重启：逐条从自己的配置恢复，C 仍直连
+    const ipARestart = await ipForSettings('persist:pix-3line-A4', lineA)
+    const ipBRestart = await ipForSettings('persist:pix-3line-B4', lineB)
+    const ipCRestart = await ipForSettings('persist:pix-3line-C4', null)
+    record('⑪ 重启后 A 恢复自己的代理', ipARestart === ipA, { a: ipARestart })
+    record('⑪ 重启后 B 恢复自己的代理', ipBRestart === ipB, { b: ipBRestart })
+    record('⑪ 重启后 C 仍是直连', ipCRestart === ipC, { c: ipCRestart })
+  } else {
+    console.log('  SKIP  ⑪ 三线路真实出口验收（需要同时设 PIX_PROXY_LINE 与 PIX_PROXY_LINE_B 两条不同代理）')
   }
 
   const failed = results.filter(r => !r.ok)
