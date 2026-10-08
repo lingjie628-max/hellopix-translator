@@ -275,11 +275,13 @@ test('验收 5：连续点不同 3 条 → 正好 3 次请求、各自计费', (
 })
 
 test('验收 6：重复点已翻译过的同一条 → 不再产生请求', () => {
-  // guest-inject 的 addClick 在 host 已有 .pix-trans 时直接 return，
-  // scan 里 chip 分支也以 .pix-trans 存在为前提 —— 双层保证不会重复扣费。
+  // 三层保证，缺一不可：
+  //   ① addClick 在 host 已有 .pix-trans/.pix-click 时直接 return；
+  //   ② scan 的 chip 分支以"没有 .pix-trans"为前提；
+  //   ③ chip 自身 busy/done 态拒绝重复点击（本轮新增，见 runManualTranslate）。
   assert.match(guest, /function addClick\(host, incoming, root\) \{\s*\n\s*if \(host\.querySelector\(':scope > \.pix-trans, :scope > \.pix-click'\)\) return/,
     'addClick 没有"已翻译就不再挂按钮"的守卫')
-  assert.match(guest, /action === 'chip'\) \{\s*\n\s*if \(!host\.querySelector\(':scope > \.pix-trans'\)\) addClick/,
+  assert.match(guest, /action === 'chip'\) \{\s*\n\s*.*!host\.querySelector\(':scope > \.pix-trans'\)\) addClick/,
     'scan 的 chip 分支没有跳过已翻译的消息')
   // 同一正文的重复请求还会被客户端缓存挡掉，连网络都不会走。
   // 缓存/去重逻辑住在 translateTextDetailed()（translateText 只是它的字符串外壳）。

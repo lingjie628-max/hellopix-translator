@@ -19,9 +19,25 @@ const path = require('node:path')
 const TRACE_RE = /\[PIX_TRACE\]\s+(\w+)\s*(\{.*\})?\s*$/
 
 /** 点译（manual_click）的期望顺序。 */
-const MANUAL_ORDER = ['MANUAL_TRANSLATE_CLICK', 'MANUAL_PARSED', 'MANUAL_REQUEST', 'MANUAL_RESPONSE', 'MANUAL_RENDERED']
+const MANUAL_ORDER = ['MANUAL_TRANSLATE_CLICK', 'SOURCE_EXTRACTED', 'TRANSLATE_STARTED', 'TRANSLATE_SUCCEEDED', 'TARGET_RELOCATED', 'TRANSLATION_RENDERED']
 /** 发送翻译（manual_send）的期望顺序。 */
-const SEND_ORDER = ['SEND_CAPTURED', 'NATIVE_SEND_BLOCKED', 'SOURCE_SNAPSHOTTED', 'TRANSLATE_STARTED', 'TRANSLATE_SUCCEEDED', 'INPUT_REPLACED', 'PROGRAMMATIC_SEND_BEGIN', 'PROGRAMMATIC_SEND_DONE']
+const SEND_ORDER = ['SEND_CAPTURED', 'NATIVE_SEND_BLOCKED', 'SOURCE_SNAPSHOTTED', 'TRANSLATE_STARTED', 'TRANSLATE_SUCCEEDED', 'INPUT_REPLACED', 'FINAL_TEXT_VALIDATED', 'PROGRAMMATIC_SEND_BEGIN', 'PROGRAMMATIC_SEND_DONE']
+
+/**
+ * 事件名归一化。
+ *
+ * 本轮按收口规范把接收链的 trace 改名（MANUAL_PARSED → SOURCE_EXTRACTED 等）。
+ * 但用户手上可能还留着**旧版本客户端**导出的 rc 取证文件，分诊脚本必须同时
+ * 认得两套名字 —— 否则拿旧日志来跑会误报"缺少事件"。这里统一归一到新名。
+ */
+const EVENT_ALIAS = {
+  MANUAL_PARSED: 'SOURCE_EXTRACTED',
+  MANUAL_REQUEST: 'TRANSLATE_STARTED',
+  MANUAL_RESPONSE: 'TRANSLATE_SUCCEEDED',
+  MANUAL_RENDERED: 'TRANSLATION_RENDERED',
+  MANUAL_RENDER_MISSED: 'TRANSLATION_RENDER_TARGET_MISSING',
+  MANUAL_FAILED: 'TRANSLATE_FAILED'
+}
 
 function defaultLogPath () {
   const roots = [
@@ -59,7 +75,7 @@ function parseTrace (text) {
     if (!m) continue
     let payload = {}
     if (m[2]) { try { payload = JSON.parse(m[2]) } catch (e) { payload = { _raw: m[2] } } }
-    out.push({ at: line.slice(0, 23).trim(), event: m[1], payload })
+    out.push({ at: line.slice(0, 23).trim(), event: EVENT_ALIAS[m[1]] || m[1], payload })
   }
   return out
 }
@@ -77,8 +93,19 @@ function group (events) {
 
 function chainOf (list) {
   const names = list.map(e => e.event)
-  if (names.some(n => n.startsWith('MANUAL_') || n === 'MESSAGE_TEXT_EXTRACTION_FAILED')) return 'manual_click'
-  if (names.some(n => n.startsWith('SEND_') || n === 'TRANSLATE_STARTED' || n === 'PROGRAMMATIC_SEND_BEGIN')) return 'manual_send'
+  // 优先用显式 chain 字段：本轮起两条链共享的事件（TRANSLATE_STARTED 等）
+  // 都带 chain，避免"发送链的 TRANSLATE_STARTED 被当成点译"这种分诊误判。
+  const explicit = list.map(e => e.payload && e.payload.chain).find(Boolean)
+  if (explicit === 'receive') return 'manual_click'
+  if (explicit === 'send') return 'manual_send'
+  // 兼容旧版本客户端导出的日志（无 chain 字段）。
+  if (names.some(n => n.startsWith('MANUAL_') ||
+      n === 'SOURCE_EXTRACTED' || n === 'TARGET_RELOCATED' ||
+      n === 'TRANSLATION_RENDERED' || n === 'TRANSLATION_RENDER_TARGET_MISSING' ||
+      n === 'MESSAGE_TEXT_EXTRACTION_FAILED')) return 'manual_click'
+  if (names.some(n => n.startsWith('SEND_') || n === 'SOURCE_SNAPSHOTTED' ||
+      n === 'INPUT_REPLACED' || n === 'FINAL_TEXT_VALIDATED' ||
+      n === 'PROGRAMMATIC_SEND_BEGIN' || n === 'PROGRAMMATIC_SEND_DONE')) return 'manual_send'
   return null
 }
 
@@ -90,13 +117,18 @@ function judgeManual (list) {
   const names = list.map(e => e.event)
   const has = n => names.includes(n)
   const get = n => list.find(e => e.event === n)
-  const resp = get('MANUAL_RESPONSE')
 
   if (!has('MANUAL_TRANSLATE_CLICK')) {
     return { verdict: '✖ 点击事件没到', reason: 'chip 上没有产生点击事件：listener 丢了 / 被覆盖层挡住（pointer-events）/ WhatsApp 重绘把 chip 换掉了', code: '' }
   }
   if (has('MANUAL_CLIENT_EXCEPTION')) {
-    return { verdict: '✖ 客户端异常', reason: '点译流程自己抛错', code: (get('MANUAL_CLIENT_EXCEPTION').payload || {}).error || '' }
+    return { verdict: '✖ 客户端异常', reason: '点译流程自己抛错（本轮已保证即使抛错也会离开「翻译中…」并给出提示）', code: (get('MANUAL_CLIENT_EXCEPTION').payload || {}).error || '' }
+  }
+  if (has('MANUAL_CLICK_IGNORED')) {
+    return { verdict: 'ℹ 重复点击已忽略', reason: 'chip 处于 busy/done，重复点击被闸门挡下 —— 这是**防重复扣费**的正确行为', code: 'MANUAL_CLICK_IGNORED' }
+  }
+  if (has('MANUAL_CHAIN_FORCED_RESOLVE')) {
+    return { verdict: '⚠ 收口兜底触发', reason: '内部没有显式离开 busy，由 finally 强制收口。链路仍然收尾，但应查明是哪一步漏了显式状态', code: 'MANUAL_CHAIN_FORCED_RESOLVE' }
   }
   const click = get('MANUAL_TRANSLATE_CLICK').payload || {}
   if (click.rowFound === false) {
@@ -105,23 +137,25 @@ function judgeManual (list) {
   if (has('MESSAGE_TEXT_EXTRACTION_FAILED')) {
     return { verdict: '✖ 正文提取失败', reason: '严格 parser 没找到 .selectable-text：chip 能显示但点击时取不到正文（老实现的静默 return）', code: 'MESSAGE_TEXT_EXTRACTION_FAILED' }
   }
-  if (!has('MANUAL_REQUEST')) {
+  if (!has('TRANSLATE_STARTED')) {
     return { verdict: '✖ 没发起翻译请求', reason: '点击与解析之间断了，没有走到 /translate/run', code: '' }
   }
-  if (!has('MANUAL_RESPONSE')) {
+  if (has('TRANSLATE_FAILED')) {
+    const p = get('TRANSLATE_FAILED').payload || {}
+    return { verdict: '✖ 翻译失败', reason: '真实错误码见右列，客户端已原样回报（不再吞）', code: p.code || 'UNKNOWN' }
+  }
+  if (!has('TRANSLATE_SUCCEEDED')) {
     return { verdict: '✖ 请求发出后没有响应', reason: '/translate/run 挂住了（网络 / 主进程没回）—— 这是客户端还是服务端要再看服务端日志', code: '' }
   }
-  if (resp.payload && resp.payload.ok === false) {
-    return { verdict: '✖ 服务端拒绝', reason: '真实错误码见右列，客户端已原样回报（不再吞）', code: resp.payload.code || 'UNKNOWN' }
+  if (has('TRANSLATION_RENDER_TARGET_MISSING')) {
+    return { verdict: '✖ 译文生成了但没渲染', reason: '翻译成功后按 key 找不到气泡（或宿主不是消息气泡）—— 本轮起**宁可不显示也不画到聊天根节点**', code: 'TRANSLATION_RENDER_TARGET_MISSING' }
   }
-  if (has('MANUAL_RENDER_MISSED')) {
-    return { verdict: '✖ 译文生成了但没渲染', reason: '翻译成功后按 key 找不到气泡 —— 异步期间 DOM 变了，老实现就是这里把译文插进 detach 节点', code: 'MANUAL_RENDER_MISSED' }
-  }
-  if (has('MANUAL_FAILED')) {
-    return { verdict: '✖ 翻译失败', reason: '失败已如实记录（不再静默）', code: (get('MANUAL_FAILED').payload || {}).code || '' }
-  }
-  if (has('MANUAL_RENDERED')) {
-    return { verdict: '✔ 成功', reason: '点击 → 解析 → 请求 → 响应 → 渲染 全链路走通', code: '' }
+  if (has('TRANSLATION_RENDERED')) {
+    const p = get('TRANSLATION_RENDERED').payload || {}
+    if (p.drew === false) {
+      return { verdict: '⚠ 渲染被判为无需显示', reason: '译文与原文一致 / 被判定为图标噪音 —— 按钮保留为失败态，不会「点一下按钮没了」', code: '' }
+    }
+    return { verdict: '✔ 成功', reason: '点击 → 提取 → 请求 → 响应 → 重定位 → 渲染 全链路走通', code: '' }
   }
   return { verdict: '✖ 未完成', reason: '事件序列停在 ' + names[names.length - 1] + '，缺失：' + MANUAL_ORDER.filter(n => !names.includes(n)).join(' / '), code: '' }
 }
@@ -185,7 +219,7 @@ function main () {
       console.log('   原因      ' + v.reason)
       if (v.code) console.log('   错误码    ' + v.code)
       console.log('   事件      ' + it.list.map(e => e.event).join(' → '))
-      const parsed = it.list.find(e => e.event === 'MANUAL_PARSED')
+      const parsed = it.list.find(e => e.event === 'SOURCE_EXTRACTED')
       if (parsed) console.log('   正文      sourceTextLen=' + parsed.payload.sourceTextLen + '  translatable=' + parsed.payload.translatable)
     }
     console.log('\n  ' + label + '：' + ok + ' / ' + items.length + ' 次成功\n')

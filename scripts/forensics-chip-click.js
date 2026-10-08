@@ -207,7 +207,7 @@ async function main () {
   {
     const traceNames = (guestSrc.match(/trace\('([A-Z_]+)'/g) || [])
       .map(s => s.replace(/trace\('/, '').replace(/'$/, ''))
-    const needed = ['MANUAL_TRANSLATE_CLICK', 'MANUAL_PARSED', 'MANUAL_REQUEST', 'MANUAL_RESPONSE', 'MANUAL_RENDERED']
+    const needed = ['MANUAL_TRANSLATE_CLICK', 'SOURCE_EXTRACTED', 'TRANSLATE_STARTED', 'TRANSLATE_SUCCEEDED', 'TARGET_RELOCATED', 'TRANSLATION_RENDERED']
     const missing = needed.filter(n => !traceNames.includes(n))
     check('D · 点译链路必须有结构化 trace（每一步都能事后定性）',
       missing.length === 0,

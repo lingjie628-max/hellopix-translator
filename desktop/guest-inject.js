@@ -1282,6 +1282,34 @@ const pixBridge = {
     host.querySelectorAll(':scope > .pix-trans, :scope > .pix-click').forEach(el => el.remove())
   }
 
+  /** 只清译文框，**保留「译」按钮** —— 没有可画的译文时不该把按钮一起删掉。 */
+  function clearTransBox(host) {
+    host.querySelectorAll(':scope > .pix-trans').forEach(el => el.remove())
+  }
+
+  /**
+   * 这个 DOM 节点是不是一个**真正的消息气泡宿主**。
+   *
+   * 为什么必须有这一道：译文渲染错位置（append 到聊天区域底部 / 消息气泡之外）
+   * 在 Windows 与 Mac 真机都复现过。根因是 `hostOf()` 在结构不匹配时会**层层兜底
+   * 到 node 本身**，而调用方拿到任何非空节点都会往里 append。
+   * 真机上只要有一层匹配错，译文就跑到会话根节点里去了。
+   *
+   * 规矩：**认不出宿主就不画**（宁可不显示），绝不往聊天根/底部兜底。
+   */
+  const HOST_FORBIDDEN_IDS = ['main', 'msg-list', 'app', 'pane-side']
+  function isMessageHost(el) {
+    if (!el || el.nodeType !== 1) return false
+    if (HOST_FORBIDDEN_IDS.indexOf(el.id) >= 0) return false
+    const doc = typeof document === 'undefined' ? null : document
+    if (doc && el === doc.body) return false
+    // 必须在会话区 #main 内 —— 左侧会话列表里的节点不是消息气泡。
+    const main = doc && doc.getElementById('main')
+    if (main && !main.contains(el)) return false
+    // 真正的消息气泡一定挂在带 data-id 的消息行内（WhatsApp 的结构性证据）。
+    return !!el.closest('[data-id]')
+  }
+
   // ==== TRANSLATE FAILURE NOTICE BEGIN ====
   /**
    * 翻译失败必须让用户**看见**。
@@ -1484,13 +1512,38 @@ const pixBridge = {
         const again = MessageParser.maskUrls(stripEmoji(now))
         if (!again.masked || !MessageParser.hasTranslatableText(again.masked)) {
           // 内容已经变得不需要翻译了：不再自动发，交给用户自己按发送。
+          showSendFailureNotice(box, raw, masked, {
+            title: '重试失败',
+            hint: '当前内容已不需要翻译，请直接按发送'
+          })
           return
         }
+        // ★ 点下去必须**立刻有反馈** ★
+        // 老实现点完什么都不显示（deliverSend 内部分支有时连浮层都还没画），
+        // 用户看到的就是"重试翻译没有反应"，然后反复点 —— 真机就是这么报的。
+        showSendFailureNotice(box, raw, masked, {
+          title: '正在重试…',
+          hint: '正在重新翻译，请稍候',
+          actions: false,
+          sticky: true
+        })
         // 重试同样走兜底：再抛错也不能把原文放出去，只能回到"未发送 + 提示"。
         try {
           const retryJob = deliverSend(box, now, again)
-          if (retryJob && typeof retryJob.catch === 'function') {
-            retryJob.catch(function (err) { onInterceptCrash(null, box, err) })
+          if (retryJob && typeof retryJob.then === 'function') {
+            retryJob.then(function (ok) {
+              if (ok) {
+                // 重试成功：把「正在重试…」这块状态条收掉。
+                hideSendFailureNotice()
+                return
+              }
+              // 失败时 deliverSend 已弹过默认提示；这里把标题改成明确的「重试失败」，
+              // 让用户知道"这一下又没成"，而不是对着同一个提示发懵。
+              showSendFailureNotice(box, raw, masked, {
+                title: '重试失败',
+                hint: SEND_FAIL_HINT
+              })
+            }, function (err) { onInterceptCrash(null, box, err) })
           }
         } catch (err) {
           onInterceptCrash(null, box, err)
@@ -1523,9 +1576,12 @@ const pixBridge = {
       acts.appendChild(sendRaw)
       wrap.appendChild(title)
       wrap.appendChild(hint)
-      wrap.appendChild(acts)
+      // `actions:false` = 只报状态的瞬态提示（如「正在重试…」），不给按钮。
+      // 给了按钮反而会让人以为可以再点一次。
+      if (ov.actions !== false) wrap.appendChild(acts)
       doc.body.appendChild(wrap)
-      setTimeout(hideSendFailureNotice, SEND_FAIL_AUTO_HIDE_MS)
+      // `sticky:true` = 由调用方自己收口，不自动消失（重试进行中不能被定时器撤掉）。
+      if (!ov.sticky) setTimeout(hideSendFailureNotice, SEND_FAIL_AUTO_HIDE_MS)
     } catch (e) {}
   }
   // ==== SEND FAILURE NOTICE END ====
@@ -1573,16 +1629,23 @@ const pixBridge = {
     return (res && res.out) || ''
   }
 
+  /**
+   * 把译文画进消息宿主。**返回是否真的画出了译文**。
+   *
+   * 返回值是必须的：调用方要据此决定「译」按钮是变成「已翻译」还是「翻译失败」。
+   * 老实现无返回值，且**先无条件删掉「译」按钮**再判断画不画 ——
+   * 于是"译文和原文一样 / 结果是图标噪音"这类情况会让用户看到
+   * 「点一下，按钮没了，什么也没发生」，与 0.1.14 报的 A1 症状完全一致。
+   */
   function paint(host, translated, original) {
-    const click = host.querySelector(':scope > .pix-click')
-    if (click) click.remove()
+    if (!isMessageHost(host)) return false
     const before = String(original == null ? '' : original)
     // 译文和原文一致就不画：多一个和原文一模一样的框只会让人以为翻译坏了。
     // 另外译文本身是 UI 噪音（图标类名之类）时也一律不画。
     if (!translated || MessageParser.isIconNoise(translated) ||
       translated.replace(/\s+/g, '') === before.replace(/\s+/g, '')) {
-      clearExtras(host)
-      return
+      clearTransBox(host)      // 只清译文框，**保留按钮**
+      return false
     }
     let box = host.querySelector(':scope > .pix-trans')
     if (!box) {
@@ -1593,6 +1656,10 @@ const pixBridge = {
       else host.appendChild(box)
     }
     box.textContent = translated
+    // ★ 只有真的画出了译文，才把「译」按钮移除 ★
+    const click = host.querySelector(':scope > .pix-click')
+    if (click) click.remove()
+    return true
   }
 
   // ==== MANUAL CHIP BEGIN ====
@@ -1640,11 +1707,27 @@ const pixBridge = {
   }
 
   /** 把 chip 的可见状态改掉 —— 成功/失败都必须看得出来，绝不允许"什么都没发生"。 */
+  function chipStateOf(chip) {
+    return (chip && chip.getAttribute('data-pix-state')) || 'idle'
+  }
+
   function setChipState(chip, state) {
     if (!chip) return
-    if (state === 'busy') chip.textContent = '翻译中…'
-    else if (state === 'fail') chip.textContent = '翻译失败 · 点击重试'
-    else chip.textContent = '译'
+    if (state === 'busy') {
+      chip.textContent = '翻译中…'
+      // busy 期间不可再点：防"看到没反应就连点"造成的重复请求 / 重复扣费。
+      chip.style.pointerEvents = 'none'
+    } else if (state === 'done') {
+      // 已经拿到译文：保留按钮（不删除），再点**不产生新请求、不再扣费**。
+      chip.textContent = '已翻译'
+      chip.style.pointerEvents = 'none'
+    } else if (state === 'fail') {
+      chip.textContent = '翻译失败 · 点击重试'
+      chip.style.pointerEvents = 'auto'
+    } else {
+      chip.textContent = '译'
+      chip.style.pointerEvents = 'auto'
+    }
     chip.setAttribute('data-pix-state', state || 'idle')
   }
 
@@ -1662,8 +1745,43 @@ const pixBridge = {
   async function runManualTranslate(chip) {
     const key = chipKey(chip)
     const incoming = chip.getAttribute('data-pix-incoming') === '1'
+    // ★ 重复点击闸（#6）★ 必须在任何 await 之前，且只认 chip 自己的状态：
+    //   - busy  → 上一次请求还在飞，直接忽略（不再发请求、不再扣费）
+    //   - done  → 已经有译文了，直接忽略（用户想重译必须用显式的「重新翻译」）
+    //   老实现没有这一闸，用户看到"翻译中…"不消失就会连点，于是同一条消息
+    //   可能并发多个请求 —— 重复扣费的风险就出在这里。
+    const st = chipStateOf(chip)
+    if (st === 'busy' || st === 'done') {
+      trace('MANUAL_CLICK_IGNORED', { state: st, messageId: key.value || '-' })
+      return
+    }
     // 一次点击 = 一个 actionId，后面每一步 trace 都带它。
     sendActionId = newSendActionId()
+    // ★ 收口保证（#5）★ 从这里开始无论怎么退出（成功/失败/抛错/目标丢失），
+    //   都必须把 chip 从 busy 里带出来。老实现整段是 async 却在调用处用
+    //   try/catch 包着 —— async 抛错不会同步抛出，于是任何 await 之后的异常
+    //   都变成 unhandled rejection，chip 永远停在「翻译中…」（真机就是这么卡住的）。
+    let leftBusy = false
+    const leaveBusy = (next) => { leftBusy = true; setChipState(chipIn(key, chip), next) }
+    try {
+      return await manualTranslateInner(chip, key, incoming, leaveBusy)
+    } catch (err) {
+      // 任何一步抛错都不许静默：留痕 + 可见失败 + 可重试。
+      trace('MANUAL_CLIENT_EXCEPTION', { error: (err && err.message) || String(err) })
+      leaveBusy('fail')
+      notifyTranslateIssue({ code: 'MANUAL_FAILED', msg: '翻译请求异常，请重试' })
+      return
+    } finally {
+      // 兜底：内部若因为任何原因没显式收口，这里强制离开 busy。
+      // 「永久停在翻译中…」是本轮明令禁止的状态。
+      if (!leftBusy && chipStateOf(chipIn(key, chip)) === 'busy') {
+        trace('MANUAL_CHAIN_FORCED_RESOLVE', { messageId: key.value || '-' })
+        setChipState(chipIn(key, chip), 'fail')
+      }
+    }
+  }
+
+  async function manualTranslateInner(chip, key, incoming, leaveBusy) {
     let row = findRowByKey(key)
     trace('MANUAL_TRANSLATE_CLICK', {
       action: 'manual_click',
@@ -1679,7 +1797,7 @@ const pixBridge = {
     // ---- 第一步：定位气泡 ----
     if (!row) {
       trace('MANUAL_ROW_LOST', { messageId: key.value || '-' })
-      setChipState(chip, 'fail')
+      leaveBusy('fail')
       notifyTranslateIssue({ code: 'MANUAL_ROW_LOST', msg: '这条消息已不在当前视图，请滚到它再点一次' })
       return
     }
@@ -1687,7 +1805,8 @@ const pixBridge = {
     // ---- 第二步：提取正文 ----
     const parsed = parseScope(null, row)
     const sourceText = String((parsed && parsed.sourceText) || '')
-    trace('MANUAL_PARSED', {
+    trace('SOURCE_EXTRACTED', {
+      chain: 'receive',
       messageId: key.value || '-',
       sourceTextLen: sourceText.length,
       translatable: !!(parsed && parsed.translatable)
@@ -1695,7 +1814,7 @@ const pixBridge = {
     if (!sourceText || !parsed.translatable) {
       // 静默是禁止的：必须留下 trace + 给用户看得见的反馈。
       trace('MESSAGE_TEXT_EXTRACTION_FAILED', { messageId: key.value || '-', sourceTextLen: sourceText.length })
-      setChipState(chip, 'fail')
+      leaveBusy('fail')
       notifyTranslateIssue({
         code: 'MESSAGE_TEXT_EXTRACTION_FAILED',
         msg: '这条消息的正文读不出来，未翻译。请刷新页面后重试'
@@ -1705,7 +1824,8 @@ const pixBridge = {
 
     // ---- 第三步：请求翻译 ----
     setChipState(chip, 'busy')
-    trace('MANUAL_REQUEST', {
+    trace('TRANSLATE_STARTED', {
+      chain: 'receive',
       action: 'manual_click',
       trigger: TRIGGER_MANUAL,
       incoming: incoming,
@@ -1718,18 +1838,23 @@ const pixBridge = {
     } catch (err) {
       res = { ok: false, code: 'CLIENT_EXCEPTION', out: '', err: (err && err.message) || '' }
     }
-    trace('MANUAL_RESPONSE', {
-      ok: !!(res && res.ok),
-      code: (res && res.code) || '',
-      cached: !!(res && res.cached),
-      error: (res && res.err) || ''
-    })
+    if (res && res.ok) {
+      trace('TRANSLATE_SUCCEEDED', {
+        chain: 'receive',
+        chars: String(res.out || '').length,
+        cached: !!res.cached
+      })
+    } else {
+      trace('TRANSLATE_FAILED', {
+        chain: 'receive',
+        code: (res && res.code) || 'UNKNOWN',
+        error: (res && res.err) || ''
+      })
+    }
 
     // ---- 失败：必须留在界面上（不许恢复成"什么都没发生"） ----
     if (!res || !res.ok || !res.out) {
-      const c = chipIn(key, chip)
-      setChipState(c, 'fail')
-      trace('MANUAL_FAILED', { code: (res && res.code) || 'UNKNOWN' })
+      leaveBusy('fail')
       return
     }
 
@@ -1737,13 +1862,30 @@ const pixBridge = {
     const translated = MessageParser.restoreUrls(res.out, parsed.urls)
     const curRow = findRowByKey(key)
     if (!curRow) {
-      trace('MANUAL_RENDER_MISSED', { messageId: key.value || '-' })
+      trace('TRANSLATION_RENDER_TARGET_MISSING', { messageId: key.value || '-' })
+      leaveBusy('fail')
       notifyTranslateIssue({ code: 'MANUAL_RENDER_MISSED', msg: '译文已生成，但这条消息已滚出视图，滚回去即可看到' })
       return
     }
     const host = hostOf(curRow)
-    paint(host, translated, displayText(parsed, ''))
-    trace('MANUAL_RENDERED', { messageId: key.value || '-', chars: translated.length })
+    // ★ 硬约束（#4）★ 找不到宿主就**绝不绘制**。老实现一旦 host 取到聊天根节点，
+    //   译文就会被 append 到聊天区域底部（真机复现过）。宁可不显示。
+    if (!host || !isMessageHost(host)) {
+      trace('TRANSLATION_RENDER_TARGET_MISSING', { messageId: key.value || '-', reason: 'host_unresolved' })
+      leaveBusy('fail')
+      notifyTranslateIssue({ code: 'MANUAL_RENDER_MISSED', msg: '没能定位到这条消息的气泡，未显示译文' })
+      return
+    }
+    trace('TARGET_RELOCATED', { messageId: key.value || '-', byKey: key.attr || '-' })
+    const drew = paint(host, translated, displayText(parsed, ''))
+    trace('TRANSLATION_RENDERED', {
+      chain: 'receive',
+      messageId: key.value || '-',
+      chars: translated.length,
+      drew: drew
+    })
+    if (drew) leaveBusy('done')
+    else leaveBusy('fail')
   }
 
   /**
@@ -2104,7 +2246,7 @@ const pixBridge = {
     //   输入框里从头到尾都是用户原文；这段时间由 sendBusy 挡住一切发送。
     showSendBusy()
     sendActionPhase = 'translating'
-    trace('TRANSLATE_STARTED', { trigger: TRIGGER_SEND })
+    trace('TRANSLATE_STARTED', { chain: 'send', trigger: TRIGGER_SEND })
     let out = ''
     try {
       out = await translateText(masked.masked, false, TRIGGER_SEND)
@@ -2121,7 +2263,7 @@ const pixBridge = {
       // 等于把他正在打的内容整段吃掉（真机已复现，属数据丢失）。
       if (composerDraftChanged(box, raw)) trace('DRAFT_PRESERVED', { at: 'translate_failed' })
       else writeComposer(box, raw)
-      trace('TRANSLATE_FAILED', { failClosed: true })
+      trace('TRANSLATE_FAILED', { chain: 'send', failClosed: true })
       showSendFailureNotice(box, raw, masked)
       return false
     }
@@ -2130,7 +2272,7 @@ const pixBridge = {
       : MessageParser.restoreUrls(out, masked.urls)
     hideSendBusy()
     sendActionPhase = 'succeeded'
-    trace('TRANSLATE_SUCCEEDED', { chars: finalText.length })
+    trace('TRANSLATE_SUCCEEDED', { chain: 'send', chars: finalText.length })
     try {
       // 「再次确认当前 sendAction 仍有效」—— 异步等待期间状态可能已经变了
       // （例如用户又按了一次、或失败提示已被处理）。状态不对就不发。
@@ -2155,6 +2297,19 @@ const pixBridge = {
       sendActionPhase = 'replaced'
       trace('INPUT_REPLACED', { chars: finalText.length, draftChars: keepDraft ? draftNow.length : 0 })
       await wait(50)
+      // 发送前最后一次正文校验 —— 独立于 writeAndVerify 的回读，专门对"这一段
+      // 等待期间正文又被改掉/占位符渗入"负责。事件名按收口规范固定为
+      // FINAL_TEXT_VALIDATED，真机取证时可以直接用它作为"这道闸跑过"的证据。
+      const finalGate = sendableBody(box, finalText)
+      trace('FINAL_TEXT_VALIDATED', {
+        ok: finalGate.ok,
+        reason: finalGate.reason || '',
+        chars: String(finalGate.actual || '').length
+      })
+      if (!finalGate.ok) {
+        blockSend(finalGate.reason, box, raw, masked)
+        return false
+      }
       const fired = fireSendVerified(box, finalText)
       if (!fired.ok) {
         blockSend(fired.reason, box, raw, masked)
@@ -2532,8 +2687,8 @@ const pixBridge = {
         const translated = await translateParsed(parsed, true, TRIGGER_AUTO)
         if (translated) paint(host, translated, text)
       } else if (action === 'chip') {
-        if (!host.querySelector(':scope > .pix-trans')) addClick(host, true, root)
-      } else {
+        if (isMessageHost(host) && !host.querySelector(':scope > .pix-trans')) addClick(host, true, root)
+      } else if (isMessageHost(host)) {
         clearExtras(host)
       }
     }

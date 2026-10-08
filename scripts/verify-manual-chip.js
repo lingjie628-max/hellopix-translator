@@ -6,8 +6,8 @@
  * 每次成功的判定（用户要求，缺一不可）：
  *   trigger = manual_click · API 请求 = 1 · 译文显示在**正确那条**消息上
  *   且 trace 顺序完整：
- *     MANUAL_TRANSLATE_CLICK → MANUAL_PARSED → MANUAL_REQUEST
- *     → MANUAL_RESPONSE → MANUAL_RENDERED
+ *     MANUAL_TRANSLATE_CLICK → SOURCE_EXTRACTED → TRANSLATE_STARTED
+ *     → TRANSLATE_SUCCEEDED → TARGET_RELOCATED → TRANSLATION_RENDERED
  *   全部带同一个 sendActionId。
  *
  * 失败判定：任何一步断了，都必须留下 trace + 界面上看得见的反馈 —— 不许静默。
@@ -23,6 +23,22 @@ const root = path.join(__dirname, '..')
 const guestPath = process.argv[2] || path.join(root, 'desktop', 'guest-inject.js')
 const guestSrc = fs.readFileSync(guestPath, 'utf8')
 const sleep = ms => new Promise(r => setTimeout(r, ms))
+
+/**
+ * 轮询等待条件成立。
+ *
+ * 这里必须用轮询而不是固定 sleep：真机与 CI 的机器负载不同，固定等待会造成
+ * "同一份代码有时 17/17、有时 16/17" 的偶发失败 —— 那会让整份取证结果
+ * 失去可信度（分不清是代码坏了还是等太短）。
+ */
+async function until (fn, timeoutMs, label) {
+  const deadline = Date.now() + (timeoutMs == null ? 3000 : timeoutMs)
+  while (Date.now() < deadline) {
+    try { if (fn()) return true } catch (e) {}
+    await sleep(15)
+  }
+  return false
+}
 
 const COMPOSER = '<div id="editable-message-text" contenteditable="true" role="textbox"></div>'
 const GROUP = 'true_1203630199@g.us_'
@@ -118,7 +134,7 @@ function check (name, pass, detail) {
   for (const [k, v] of Object.entries(detail || {})) console.log('   ' + k.padEnd(20) + ' = ' + JSON.stringify(v))
 }
 
-const CHAIN = ['MANUAL_TRANSLATE_CLICK', 'MANUAL_PARSED', 'MANUAL_REQUEST', 'MANUAL_RESPONSE', 'MANUAL_RENDERED']
+const CHAIN = ['MANUAL_TRANSLATE_CLICK', 'SOURCE_EXTRACTED', 'TRANSLATE_STARTED', 'TRANSLATE_SUCCEEDED', 'TARGET_RELOCATED', 'TRANSLATION_RENDERED']
 function chainOk (h) {
   const names = h.trace.map(t => t.event)
   let cursor = -1
@@ -169,7 +185,7 @@ async function main () {
       try {
         h.click(); await sleep(300)
         check('3 · 英文长文本 → 成功', h.calls.length === 1 && !!h.trans(),
-          { 长度: long.length, 'API 请求': h.calls.length, sourceTextLen: h.trace.find(t => t.event === 'MANUAL_PARSED') })
+          { 长度: long.length, 'API 请求': h.calls.length, sourceTextLen: h.trace.find(t => t.event === 'SOURCE_EXTRACTED') })
       } finally { h.close() }
     }
 
@@ -299,7 +315,7 @@ async function main () {
         check('12 · 断线 → chip 显示失败 + 提示（不静默）',
           !!c && c.textContent.indexOf('失败') !== -1,
           { 'chip 文案': c ? c.textContent : null, 提示: h.toast(),
-            'RESPONSE code': (h.trace.find(t => t.event === 'MANUAL_RESPONSE') || {}).payload })
+            'RESPONSE code': (h.trace.find(t => t.event === 'TRANSLATE_FAILED') || {}).payload })
       } finally { h.close() }
     }
 
@@ -342,7 +358,8 @@ async function main () {
         if (oldChip) newRow.appendChild(oldChip)   // 真机形态：按钮还在，但引用已 detach
         await sleep(60)
         h.click()
-        await sleep(400)
+        // 等"真的渲染出来"，而不是赌一个固定时长。
+        await until(() => !!h.trans() && h.calls.length === 1, 3000, '译文渲染')
         check('14 · 消息行被重绘后点译：按 data-id 重新定位 → 仍然成功',
           h.calls.length === 1 && !!h.trans(),
           { 'API 请求': h.calls.length, '译文': h.trans() ? h.trans().textContent : null,
@@ -378,6 +395,78 @@ async function main () {
           { '过程中 chip': mid, '过程中输入框': midComposer,
             'chip 状态': h.chip() && h.chip().getAttribute('data-pix-state'),
             译文: h.trans() ? h.trans().textContent : null })
+      } finally { h.close() }
+    }
+
+    // 17 · 请求在飞的过程中消息行被移除 → 响应回来时无目标可渲染
+    //     这等价于"await 之后失败"：必须离开 busy、给出可见失败，且
+    //     **绝不**把译文 append 到聊天根节点。
+    {
+      const h = await mount({ slowMs: 500 })
+      try {
+        h.click()
+        await sleep(120)                       // 请求还在飞
+        const busyBefore = h.chip() && h.chip().getAttribute('data-pix-state')
+        const chipEl = h.chip()
+        // 模拟 React 在翻译期间把这一行换掉/删掉 → 响应回来时无目标可渲染
+        const r = h.doc.querySelector('[data-id]')
+        if (r && r.parentNode) r.parentNode.removeChild(r)
+        await sleep(900)
+        // chip 会随行一起 detach，所以用引用读它的最终状态
+        const st = chipEl && chipEl.getAttribute('data-pix-state')
+        const names = h.trace.map(t => t.event)
+        const leaked = h.doc.querySelectorAll('#msg-list > .pix-trans, #main > .pix-trans').length
+        check('17 · 响应回来时目标行已消失 → 离开 busy + 明确失败 + 不往根节点绘制',
+          busyBefore === 'busy' && st === 'fail' &&
+          names.indexOf('TRANSLATION_RENDER_TARGET_MISSING') >= 0 && leaked === 0,
+          { '过程中': busyBefore, '结束后': st,
+            '有 TARGET_MISSING': names.indexOf('TRANSLATION_RENDER_TARGET_MISSING') >= 0,
+            '聊天根节点内译文数': leaked })
+      } finally { h.close() }
+    }
+
+    // 18 · busy 期间连点 → 只有 1 次请求（防"看到没反应就连点"造成重复扣费）
+    {
+      const h = await mount({ slowMs: 500 })
+      try {
+        h.click(); h.click(); h.click()
+        await sleep(900)
+        check('18 · busy 期间连点 3 次 → 只产生 1 次请求',
+          h.calls.length === 1 && !!h.trans(),
+          { 'API 请求': h.calls.length, 'chip 状态': h.chip() && h.chip().getAttribute('data-pix-state') })
+      } finally { h.close() }
+    }
+
+    // 19 · 已翻译后再点 → 不产生新请求（done 态拒绝重复扣费）
+    {
+      const h = await mount()
+      try {
+        h.click()
+        await until(() => !!h.trans(), 3000, '首次译文')
+        const before = h.calls.length
+        // 译文渲染后 chip 已被移除（paint 成功），这里直接把 chips 全点一遍
+        h.doc.querySelectorAll('.pix-click').forEach(c =>
+          c.dispatchEvent(new h.win.MouseEvent('click', { bubbles: true, cancelable: true })))
+        await sleep(300)
+        check('19 · 已有译文后再点 → 不产生新请求（不重复扣费）',
+          h.calls.length === before,
+          { '首次请求数': before, '再点后': h.calls.length })
+      } finally { h.close() }
+    }
+
+    // 20 · 宿主不是消息气泡（#main 内但无 data-id）→ 绝不挂按钮、绝不绘制
+    //     真机上译文被 append 到聊天底部就是这个兜底路径造成的。
+    {
+      const badRow = '<div class="message-in" role="row">' +
+        '<div class="copyable-text"><span class="selectable-text">no data-id here</span></div></div>'
+      const h = await mount({ html: page(badRow) })
+      try {
+        await sleep(400)
+        const insideMain = h.doc.querySelectorAll('#msg-list .pix-click').length
+        const transInRoot = h.doc.querySelectorAll('#msg-list > .pix-trans, #main > .pix-trans').length
+        check('20 · 非消息宿主（无 data-id）→ 不挂按钮、不往聊天根节点绘制',
+          insideMain === 0 && transInRoot === 0,
+          { '#msg-list 内按钮数': insideMain, '聊天根节点内译文数': transInRoot })
       } finally { h.close() }
     }
 
