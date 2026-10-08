@@ -1,0 +1,4 @@
+7e21e0f042bc9c8b5b597a529a3c739400edfe53319abee47bf06d7f456c4b19  HelloPix-0.1.16-arm64.dmg
+bab046d7720e728518c5787c41ecc2ae208d3ae8a9790bb2ed4a2fa0d4e87ac8  HelloPix-0.1.16-portable.exe
+9bdac0e1041e8f0c50cbffae108a3d7a25e68dc3611a8df86422e41d18c6eec4  HelloPix-0.1.16-x64.dmg
+b3b82be0a5a8015e3565fa57ab88a167bb34aaa250b5c44a60c5474f79efbaab  HelloPix-Setup-0.1.16.exe
