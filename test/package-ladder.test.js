@@ -161,39 +161,50 @@ test('校验脚本可被 require（纯函数导出，不会直接连库执行）
 })
 
 // ================================================================== 4. 前端展示
-test('三个展示页面共用同一份单位价算法，不各算一份', () => {
-  const sites = [
-    ['src/components/Landing.vue', '官网定价卡'],
-    ['src/components/user/UserRechargePage.vue', '商户充值页'],
-    ['src/components/admin/AdminPackages.vue', '后台套餐表']
-  ]
-  for (const [file, label] of sites) {
+test('后台套餐表保留单位价（内部核对阶梯用，不对外）', () => {
+  const src = read('src/components/admin/AdminPackages.vue')
+  assert.match(src, /formatUnitPrice/, '后台要有单位价 —— 这是发现阶梯断档的手段')
+  assert.match(src, /unitOk/, '后台要能自己暴露非单调（靠人眼看两组数字是发现不了的）')
+  assert.match(src, /unit-bad/, '非单调的那一档要有视觉标记')
+})
+
+test('客户可见页面**不得**出现"每百万字符"的单位价', () => {
+  // 这是产品决定，不只是审美：`$X / 百万字符` 是**批发单价口径**，
+  // 懂行的人拿它除以通道成本（DeepSeek ≈ $0.83/百万字符）就能算出加价倍数 ——
+  // 等于把我们赚多少印在定价页上；也让产品看起来像"一层 API 转售"。
+  for (const file of ['src/components/Landing.vue', 'src/components/user/UserRechargePage.vue']) {
     const src = read(file)
-    assert.match(src, /from '.*utils\/plan-value'/,
-      `${label}（${file}）没有引入 plan-value —— 单位价必须只有一份实现，`
-      + '历史上"三处各算一份价格"出过事故')
-    assert.match(src, /formatUnitPrice/, `${label} 没有展示单位价`)
+    assert.doesNotMatch(src, /formatUnitPrice/,
+      `${file} 还在引用 formatUnitPrice —— 客户可见页不得展示单位价`)
+    assert.doesNotMatch(src, /unitPricePerMillion/,
+      `${file} 还在算单位价 —— 客户可见页不得展示单位价`)
+    // 卡片上也不该出现 "/ 百万字符" 这类字面说明
+    assert.doesNotMatch(src, /百万字符/,
+      `${file} 的文案里出现了"百万字符" —— 那是批发单价的口径`)
   }
 })
 
-test('客户端两处展示都给出「较基础版省 X%」，让升级理由不用心算', () => {
+test('客户可见页面用「字符倍数」替代单位价（保留直观比对，不暴露单价）', () => {
   for (const file of ['src/components/Landing.vue', 'src/components/user/UserRechargePage.vue']) {
     const src = read(file)
-    assert.match(src, /savingVsBase/, `${file} 没有算"较基础版省 X%"`)
-    assert.match(src, /较基础版省/, `${file} 没有把节省比例显示出来`)
+    assert.match(src, /charsMultiple/, `${file} 没有引入倍数算法`)
+    assert.match(src, /multipleOf/, `${file} 没有展示倍数角标`)
+    // 算法仍要收敛到同一份实现，不能各写一份
+    assert.match(src, /from '.*utils\/plan-value'/, `${file} 没有复用 plan-value`)
   }
+})
+
+test('倍数只在整数倍时显示（不许把 5.2 倍说成 5 倍）', () => {
+  const src = read('src/utils/plan-value.js')
+  assert.match(src, /charsMultiple/, '倍数算法应放在 plan-value 这份唯一真源里')
+  // 容差守卫：四舍五入成整数倍但不相等时必须判为"不能显示"
+  assert.match(src, /Math\.abs\(ratio - rounded\) > 1e-9/, '缺少"非整数倍就不显示"的守卫')
 })
 
 test('plan-value 的守卫：缺价格或额度时不得显示 $NaN', () => {
   const src = read('src/utils/plan-value.js')
   assert.match(src, /return null/, '拿不到单位价时必须返回 null，由调用方隐藏')
   assert.match(src, /Number\.isFinite/, '必须防住 NaN / Infinity')
-})
-
-test('后台套餐表把"阶梯断了"的那一档标出来', () => {
-  const src = read('src/components/admin/AdminPackages.vue')
-  assert.match(src, /unitOk/, '后台要能自己暴露非单调（靠人眼看两组数字是发现不了的）')
-  assert.match(src, /unit-bad/, '非单调的那一档要有视觉标记')
 })
 
 // ================================================================== 5. mock 对齐

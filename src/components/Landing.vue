@@ -184,13 +184,16 @@
             <h3>{{ p.title }}</h3>
             <p class="sub">{{ p.subtitle }}</p>
             <div class="amount"><em>{{ currencySymbol }}</em>{{ formatPrice(p.price) }}</div>
-            <p class="quota">含 {{ formatChars(p.includedChars) }}字符</p>
-            <!--
-              单位价 + 「较基础版省 X%」：客户判断"升级值不值"靠的就是这一个数。
-              三张卡片并排时，"$23.33 → $21.67 → $16.67"一眼可读，
-              比只看"$35 / $65 / $125"直观得多（后者还得自己心算除法）。
-            -->
-            <p class="unit" v-if="unitOf(p)">{{ unitOf(p) }}</p>
+            <p class="quota">
+              含 {{ formatChars(p.includedChars) }}字符
+              <!--
+                倍数角标，替代此前那一行批发单价。
+                单价是**批发口径**，写出来等于把加价倍数摊给客户看，
+                也让产品像"一层 API 转售"。改成比"拿到多少"：
+                同样一眼读出阶梯，但不替客户做那一步除法。
+              -->
+              <em class="mult" v-if="multipleOf(p, i)">基础版 {{ multipleOf(p, i) }} 倍</em>
+            </p>
             <span class="save" v-if="saveOf(p, i)">较基础版省 {{ saveOf(p, i) }}%</span>
             <ul>
               <li><i class="el-icon-check"></i>
@@ -290,8 +293,8 @@
 
 <script>
 import ThemeToggle from './ThemeToggle.vue'
-// 单位价与"较基础版省 X%"的算法唯一真源（三个展示页面共用）
-import { formatUnitPrice, savingVsBase } from '../utils/plan-value'
+// 倍数与"较基础版省 X%"的算法唯一真源（官网/商户充值页共用）
+import { charsMultiple, savingVsBase } from '../utils/plan-value'
 
 // 场景与优势是产品定位，属于"我们怎么讲自己"，放前端常量：
 // 不随运营改动，也能避免后台被改坏导致官网没内容。
@@ -434,16 +437,13 @@ export default {
       const n = Number(value || 0)
       return n >= 10000 ? (n / 10000) + ' 万' : String(n)
     },
-    /** 单位价展示串。除放在 plan-value 里，三个页面共用一份，避免各算一份。 */
-    unitOf(pkg) {
-      return formatUnitPrice(pkg.price, pkg.includedChars, this.currencySymbol)
+    /** 相对入门档的字符倍数（仅整数倍显示），与商户充值页共用一份算法 */
+    multipleOf(pkg, index) {
+      const base = (this.packages || [])[0]
+      if (!base || index === 0) return null
+      return charsMultiple(base.includedChars, pkg.includedChars)
     },
-    /**
-     * 「较基础版省 X%」。
-     *
-     * 基准取 `packages[0]` —— 接口按 `sort_order,id` 返回，第 0 张就是入门档。
-     * 入门档自己返回 null（不跟自己比）。
-     */
+    /** 「较基础版省 X%」—— 折扣口径，不涉及单位价 */
     saveOf(pkg, index) {
       const base = (this.packages || [])[0]
       if (!base || index === 0) return null
@@ -666,8 +666,12 @@ export default {
   font-size: 13px; color: var(--w-accent-text, #0958d9);
   margin: 0 0 16px; font-weight: 500;
 }
-/* 单位价：客户比价时真正看的那一行，要比 quota 更醒目一点但不能抢价格的风头 */
-.unit { font-size: 13px; color: var(--w-text-muted, #64748b); margin: -12px 0 6px; }
+/* 倍数角标：让客户一眼读出阶梯，又不暴露批发单价（客户可见页不出现单位价） */
+.mult {
+  font-style: normal; font-weight: 600; font-size: 12px;
+  color: var(--w-accent-text, #0958d9); background: var(--w-accent-soft-bg, #eaf2fe);
+  border-radius: 10px; padding: 1px 8px; margin-left: 6px;
+}
 .save {
   display: inline-block; font-size: 12px; font-weight: 600;
   color: var(--w-success, #16a34a); background: var(--w-success-soft, #e8f7ee);

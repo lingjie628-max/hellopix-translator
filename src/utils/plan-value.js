@@ -60,3 +60,34 @@ export function formatChars(chars) {
   if (n >= 10000 && n % 10000 === 0) return (n / 10000) + '万'
   return String(n)
 }
+
+/**
+ * 相对入门档的字符倍数（只在**真的是整数倍**时返回，否则 null）。
+ *
+ * ## 为什么用它替代"每百万字符单价"
+ *
+ * 卡片上原本显示 `$23.33 / 百万字符`。那是**批发单价的口径**，
+ * 任何懂行的人拿它除以通道成本（DeepSeek 约 $0.83/百万字符）就能算出加价倍数 ——
+ * 等于把"我们赚多少"印在定价页上。而且这种写法会让产品看起来像
+ * "薄薄一层 API 转售"，削弱本身的软件价值。
+ *
+ * 换成"基础版的 2 倍字符"：同样让客户**一眼比出阶梯**（这是最初想要的效果），
+ * 但比较的是**拿到多少**，而不是**每单位多少钱**。信息量不减少
+ * （两个数字本来就都印在卡片上），只是不再替客户做那一步除法。
+ *
+ * ## 为什么必须挡非整数倍
+ *
+ * `7800000 / 1500000 = 5.2`，四舍五入成"5 倍"就是**虚假宣传**。
+ * 宁可什么都不显示（返回 null，调用方 `v-if` 掉），也不要一个不实的倍数。
+ */
+export function charsMultiple(baseChars, chars) {
+  const base = Number(baseChars)
+  const self = Number(chars)
+  if (!Number.isFinite(base) || !Number.isFinite(self) || base <= 0 || self <= 0) return null
+  const ratio = self / base
+  const rounded = Math.round(ratio)
+  if (rounded < 2) return null
+  // 容差极小：只有"确切是 n 倍"才敢这么写
+  if (Math.abs(ratio - rounded) > 1e-9) return null
+  return rounded
+}

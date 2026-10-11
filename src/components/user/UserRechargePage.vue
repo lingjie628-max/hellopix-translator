@@ -7,10 +7,10 @@
           <div class="pay-line">字符数：{{ displayChars(pack) }}</div>
           <div class="pay-line">价格：{{ currencySymbol }} {{ pack.price }}</div>
           <!--
-            单位价 + 「较基础版省 X%」：这是客户判断"升不升级"的依据。
-            三张卡片并排时一眼就能读出阶梯，不用自己心算除法。
+            倍数角标，替代此前那一行批发单价：客户可见页不展示单位价。
+            比较的是"拿到多少"，同样一眼读出阶梯。
           -->
-          <div class="pay-unit" v-if="unitOf(pack)">{{ unitOf(pack) }}</div>
+          <div class="pay-mult" v-if="multipleOf(pack, index)">基础版 {{ multipleOf(pack, index) }} 倍</div>
           <div class="pay-save" v-if="saveOf(pack, index)">较基础版省 {{ saveOf(pack, index) }}%</div>
           <div class="pay-off">购买1组及以上 {{ fold(discount1) }}</div>
           <div class="pay-off">购买10组及以上 {{ fold(discount10) }}</div>
@@ -93,7 +93,7 @@
   </div>
 </template>
 <script>
-import { formatUnitPrice, savingVsBase } from '../../utils/plan-value'
+import { charsMultiple, savingVsBase } from '../../utils/plan-value'
 
 export default {
   data() {
@@ -221,9 +221,11 @@ export default {
       if (n >= 10000 && n % 10000 === 0) return (n / 10000) + '万'
       return String(n)
     },
-    /** 单位价：算法与官网定价卡、后台套餐表共用一份（src/utils/plan-value） */
-    unitOf(pack) {
-      return formatUnitPrice(pack.price, pack.chars, this.currencySymbol)
+    /** 相对入门档的字符倍数（仅整数倍显示），与官网定价卡共用一份算法 */
+    multipleOf(pack, index) {
+      const base = (this.version || [])[0]
+      if (!base || index === 0) return null
+      return charsMultiple(base.chars, pack.chars)
     },
     /** 「较基础版省 X%」：基准是套餐列表第 0 项（入门档），自己跟自己比返回 null */
     saveOf(pack, index) {
@@ -296,7 +298,10 @@ export default {
 .pay-card.active { border-color: var(--w-accent); box-shadow: 0 0 0 1px var(--w-accent) inset; }
 .pay-title { text-align: center; font-weight: 700; margin-bottom: 12px; }
 .pay-line { color: var(--w-text); margin: 6px 0; }
-.pay-unit { color: var(--w-text-muted); font-size: 12px; margin: 2px 0 6px; }
+.pay-mult {
+  display: inline-block; color: var(--w-accent); background: var(--w-accent-soft-bg);
+  border-radius: 10px; padding: 1px 8px; font-size: 12px; font-weight: 600; margin: 2px 0 6px;
+}
 .pay-save { color: var(--w-success); font-size: 12px; font-weight: 600; margin-bottom: 4px; }
 .pay-off { color: var(--w-success); font-size: 13px; margin-top: 4px; }
 .pay-form { background: var(--w-surface); margin-top: 20px; padding: 24px; }
