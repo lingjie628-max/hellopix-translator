@@ -32,7 +32,7 @@ const { validPassword } = require('../lib/password')
 
 function assertPassword(pwd, pwd2) {
   if (!validPassword(pwd)) {
-    throw new ApiError(400, '密码需 10-128 位，且同时包含字母和数字', 'WEAK_PASSWORD')
+    throw new ApiError(400, '密码需 6-128 位', 'WEAK_PASSWORD')
   }
   if (pwd2 !== undefined && String(pwd) !== String(pwd2 || '')) {
     throw new ApiError(400, '两次输入的密码不一致', 'PASSWORD_MISMATCH')

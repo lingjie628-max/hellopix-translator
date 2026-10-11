@@ -756,6 +756,34 @@ function productionRouter(context) {
     await repo.audit(null, req.pixAdmin, number(data.status) === 1 ? '启用商户' : '停用商户', result.rows[0].username, req.ip, { type: 'user', id: data.id })
     ok(res, number(data.status) === 1 ? '已启用' : '已停用')
   }))
+  /**
+   * 重置商户密码 —— 超管专用，不需要原密码。
+   *
+   * 为什么不复用编辑商户的 `/admin/users/save`：那个接口开头就
+   * `repo.package(data.versionId || data.packageId)`，拿不到套餐直接
+   * 404「套餐不存在」。只想改个密码，还得把当前套餐正确传进来，很容易失败；
+   * 而且它一条 UPDATE 会顺带碰 nick/status/套餐/到期等一串字段 —— 改密码是
+   * 安全敏感操作，值得一条**只做一件事**的独立通路。
+   *
+   * 规则：6-128 位、不限字符类型（唯一真源 server/lib/password.js）。
+   */
+  router.post('/admin/users/resetPassword', asyncRoute(async (req, res) => {
+    const data = input(req)
+    const userId = number(data.id || data.userId)
+    if (!userId) throw new ApiError(400, '缺少商户 id', 'USER_ID_REQUIRED')
+    // auth.hash 内部走 validPassword，不合规会抛 WEAK_PASSWORD，文案已放宽到 6 位
+    const passwordHash = await auth.hash(data.password)
+    const result = await repo.query(
+      'UPDATE users SET password_hash=$2,updated_at=NOW() WHERE id=$1 RETURNING username',
+      [userId, passwordHash]
+    )
+    if (!result.rows[0]) throw new ApiError(404, '商户不存在', 'USER_NOT_FOUND')
+    // 改密码后必须踢掉所有旧会话 —— 否则"重置"防不住已经登录的旧会话
+    await auth.revokeUser('main', userId)
+    await repo.audit(null, req.pixAdmin, '重置商户密码', result.rows[0].username, req.ip,
+      { type: 'user', id: userId })
+    ok(res, '密码已重置')
+  }))
   router.post('/admin/users/enterprise', asyncRoute(async (req, res) => {
     const data = input(req)
     // 解析一次、用到底。原先 SQL 与审计/提示各自算一遍 `number(...)`，

@@ -18,7 +18,7 @@ class AuthService {
 
   async hash(value) {
     if (!password.validPassword(value)) {
-      throw new ApiError(400, '密码需为 10-128 位，并同时包含字母和数字', 'WEAK_PASSWORD')
+      throw new ApiError(400, '密码需为 6-128 位', 'WEAK_PASSWORD')
     }
     return this.hashSecret(value)
   }

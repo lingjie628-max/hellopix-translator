@@ -298,7 +298,8 @@ module.exports = function registerMock(app, options) {
   }
 
   function validPassword(password) {
-    return String(password || '').length >= 8
+    // 与 server/lib/password.js 的 validPassword 保持一致：最少 6 位、不限字符类型
+    return String(password || '').length >= 6
   }
 
   let nextOrderId = 3
@@ -812,7 +813,7 @@ module.exports = function registerMock(app, options) {
     const password2 = String(query.passWord1 || query.password2 || '')
     const email = String(query.email || '').trim().toLowerCase()
     if (!username) { res.json({ success: false, msg: '请输入账号' }); return }
-    if (!validPassword(password)) { res.json({ success: false, msg: '密码至少需要 8 位' }); return }
+    if (!validPassword(password)) { res.json({ success: false, msg: '密码至少需要 6 位' }); return }
     if (password !== password2) { res.json({ success: false, msg: '两次密码不一致' }); return }
     if (!validEmail(email)) { res.json({ success: false, msg: '请输入邮箱地址' }); return }
     const captchaErr = verifyCode.checkCaptcha(verifyStore, query.imageId, query.imageCode, true)
@@ -885,7 +886,7 @@ module.exports = function registerMock(app, options) {
     const password = String(query.passWord || query.password || '')
     const password2 = String(query.passWord1 || query.password2 || '')
     if (!validEmail(email)) { res.json({ success: false, msg: '请输入邮箱地址' }); return }
-    if (!validPassword(password)) { res.json({ success: false, msg: '密码至少需要 8 位' }); return }
+    if (!validPassword(password)) { res.json({ success: false, msg: '密码至少需要 6 位' }); return }
     if (password !== password2) { res.json({ success: false, msg: '两次密码不一致' }); return }
     const captchaErr = verifyCode.checkCaptcha(verifyStore, query.imageId, query.imageCode, true)
     if (captchaErr) { res.json({ success: false, msg: captchaErr }); return }
@@ -1513,7 +1514,7 @@ module.exports = function registerMock(app, options) {
       if (query.nickname !== undefined) sub.nickname = query.nickname
       if (query.email !== undefined) sub.email = query.email
       if (query.password) {
-        if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 8 位' }); return }
+        if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 6 位' }); return }
         sub.password = security.hashPassword(query.password)
         security.revokeSubject('user', sub.id)
       }
@@ -1536,7 +1537,7 @@ module.exports = function registerMock(app, options) {
       res.json({ success: 'error', msg: '用户名已被占用' })
       return
     }
-    if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 8 位' }); return }
+    if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 6 位' }); return }
     db.subAccounts.push({
       id: nextSubId++,
       parentId: session.parent.id,
@@ -1591,7 +1592,7 @@ module.exports = function registerMock(app, options) {
       return
     }
     if (!validPassword(query.newPassword)) {
-      res.json({ success: 'error', msg: '新密码至少需要 8 位' })
+      res.json({ success: 'error', msg: '新密码至少需要 6 位' })
       return
     }
     session.account.password = security.hashPassword(query.newPassword)
@@ -1820,7 +1821,7 @@ module.exports = function registerMock(app, options) {
       user.port = Number(query.port || pack.port)
       user.expireTime = query.expireTime || user.expireTime
       if (query.password) {
-        if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 8 位' }); return }
+        if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 6 位' }); return }
         user.password = security.hashPassword(query.password)
         security.revokeSubject('user', user.id)
       }
@@ -1842,7 +1843,7 @@ module.exports = function registerMock(app, options) {
     const gift = query.charBalance !== undefined && query.charBalance !== ''
       ? Number(query.charBalance)
       : trial
-    if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 8 位' }); return }
+    if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 6 位' }); return }
     const created = {
       id: nextUserId++,
       username: query.username,
@@ -1898,6 +1899,19 @@ module.exports = function registerMock(app, options) {
       audit(req, Number(query.status) === 1 ? '启用商户' : '停用商户', user.username)
     }
     okMsg(res, Number(query.status) === 1 ? '已启用' : '已停用')
+  })
+  // 与 server/routes/production.js 的 /admin/users/resetPassword 对齐：
+  // 只改密码、不碰其它字段。规则 6-128 位（见 server/lib/password.js）
+  app.post('/apis/admin/users/resetPassword', (req, res) => {
+    if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
+    const query = q(req)
+    const user = db.users.find(u => String(u.id) === String(query.id || query.userId))
+    if (!user) { res.json({ success: 'error', msg: '商户不存在' }); return }
+    if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 6 位' }); return }
+    user.password = security.hashPassword(query.password)
+    security.revokeSubject('user', user.id)
+    audit(req, '重置商户密码', user.username)
+    okMsg(res, '密码已重置')
   })
   app.post('/apis/admin/users/enterprise', (req, res) => {
     if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
@@ -2396,7 +2410,7 @@ module.exports = function registerMock(app, options) {
       if (!admin) { res.json({ success: 'error', msg: '账号不存在' }); return }
       admin.nickname = query.nickname || admin.nickname
       if (query.password) {
-        if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 8 位' }); return }
+        if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 6 位' }); return }
         admin.password = security.hashPassword(query.password)
         security.revokeSubject('admin', admin.id)
       }
@@ -2408,7 +2422,7 @@ module.exports = function registerMock(app, options) {
       res.json({ success: 'error', msg: '账号已存在' })
       return
     }
-    if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 8 位' }); return }
+    if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 6 位' }); return }
     db.admins.push({
       id: nextAdminId++,
       username: query.username,

@@ -33,9 +33,10 @@
           <el-tag :type="scope.row.status === 1 ? 'success' : 'info'">{{ scope.row.status === 1 ? '启用' : '停用' }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="430">
+      <el-table-column label="操作" width="500">
         <template slot-scope="scope">
           <el-button type="text" @click="openEdit(scope.row)">编辑</el-button>
+          <el-button type="text" @click="openReset(scope.row)">重置密码</el-button>
           <el-button type="text" @click="setEnterprise(scope.row)">{{ scope.row.enterprise ? '降为个人' : '升企业' }}</el-button>
           <el-button type="text" @click="unbind(scope.row)">踢下线</el-button>
           <el-button type="text" @click="toggle(scope.row)">{{ scope.row.status === 1 ? '停用' : '启用' }}</el-button>
@@ -53,7 +54,7 @@
           <el-input v-model="form.username" :disabled="!!form.id"></el-input>
         </el-form-item>
         <el-form-item label="密码">
-          <el-input v-model="form.password" :placeholder="form.id ? '不填则不修改' : '请输入至少 8 位密码'"></el-input>
+          <el-input v-model="form.password" :placeholder="form.id ? '不填则不修改' : '请输入至少 6 位密码'"></el-input>
         </el-form-item>
         <el-form-item label="商户名">
           <el-input v-model="form.nickname"></el-input>
@@ -102,6 +103,23 @@
       <span slot="footer">
         <el-button @click="visible=false">取消</el-button>
         <el-button type="primary" @click="save">保存</el-button>
+      </span>
+    </el-dialog>
+
+    <el-dialog title="重置密码" :visible.sync="resetVisible" width="440px" @closed="clearReset">
+      <p>为 <b>{{ resetRow.username }}</b> 设置新密码（<b>6 位以上</b>，不限字符类型）。</p>
+      <p class="dialog-tip">重置后该商户所有已登录的会话会被踢下线，需用新密码重新登录。</p>
+      <el-form label-width="70px" style="margin-top:10px">
+        <el-form-item label="新密码">
+          <el-input v-model="resetPwd" placeholder="请输入至少 6 位密码"></el-input>
+        </el-form-item>
+        <el-form-item label="确认">
+          <el-input v-model="resetPwd2" placeholder="请再次输入新密码"></el-input>
+        </el-form-item>
+      </el-form>
+      <span slot="footer">
+        <el-button @click="resetVisible=false">取消</el-button>
+        <el-button type="primary" :loading="resetLoading" @click="submitReset">确认重置</el-button>
       </span>
     </el-dialog>
 
@@ -190,7 +208,13 @@ export default {
       delVisible: false,
       delStep: 1,
       delForm: { id: null, username: '', confirm: '', reason: '' },
-      delRemoved: {}
+      delRemoved: {},
+      // 重置密码弹窗
+      resetVisible: false,
+      resetRow: {},
+      resetPwd: '',
+      resetPwd2: '',
+      resetLoading: false
     }
   },
   computed: {
@@ -322,6 +346,40 @@ export default {
           this.load()
         }
       })
+    },
+    openReset(row) {
+      this.resetRow = row
+      this.resetPwd = ''
+      this.resetPwd2 = ''
+      this.resetVisible = true
+    },
+    clearReset() {
+      this.resetPwd = ''
+      this.resetPwd2 = ''
+      this.resetLoading = false
+    },
+    submitReset() {
+      // 前端先挡一道省一次往返；真正的规则以服务端为准（6-128 位，见 lib/password.js）
+      if (!this.resetPwd || String(this.resetPwd).length < 6) {
+        this.$message.error('密码至少需要 6 位')
+        return
+      }
+      if (String(this.resetPwd) !== String(this.resetPwd2)) {
+        this.$message.error('两次输入的密码不一致')
+        return
+      }
+      this.resetLoading = true
+      // 走只做一件事的独立接口：不碰套餐/状态/到期等其它字段
+      this.postRequest('/admin/users/resetPassword', { id: this.resetRow.id, password: this.resetPwd })
+        .then(resp => {
+          this.resetLoading = false
+          this.$message({ type: resp.data.success, message: resp.data.msg })
+          if (resp.data.success !== 'error') {
+            this.resetVisible = false
+            this.load()
+          }
+        })
+        .catch(() => { this.resetLoading = false })
     },
     toggle(row) {
       const status = row.status === 1 ? 0 : 1

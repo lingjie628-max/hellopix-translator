@@ -9,12 +9,12 @@
         <el-form-item prop="userName" :rules="[{ required: true, message: '请输入账号', trigger: 'blur' }]">
           <el-input v-model="form.userName" placeholder="请输入账号" prefix-icon="el-icon-user" clearable></el-input>
         </el-form-item>
-        <el-form-item prop="passWord" :rules="[{ required: true, min: 8, message: '密码至少需要 8 位', trigger: 'blur' }]">
-          <el-input v-model="form.passWord" :type="passwordType" placeholder="请输入至少 8 位密码" prefix-icon="el-icon-lock">
+        <el-form-item prop="passWord" :rules="[{ required: true, min: 6, message: '密码至少需要 6 位', trigger: 'blur' }]">
+          <el-input v-model="form.passWord" :type="passwordType" placeholder="请输入至少 6 位密码" prefix-icon="el-icon-lock">
             <i slot="suffix" :class="passwordType === 'password' ? 'el-icon-view' : 'el-icon-minus'" class="pwd-eye" @click="passwordType = passwordType === 'password' ? 'text' : 'password'"></i>
           </el-input>
         </el-form-item>
-        <el-form-item prop="passWord1" :rules="[{ required: true, min: 8, message: '密码至少需要 8 位', trigger: 'blur' }]">
+        <el-form-item prop="passWord1" :rules="[{ required: true, min: 6, message: '密码至少需要 6 位', trigger: 'blur' }]">
           <el-input v-model="form.passWord1" :type="passwordType" placeholder="请输入密码" prefix-icon="el-icon-lock"></el-input>
         </el-form-item>
         <el-form-item prop="email" :rules="[{ required: true, message: '请输入邮箱', trigger: 'blur' }]">

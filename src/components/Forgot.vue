@@ -14,10 +14,10 @@
             <el-button slot="append" :disabled="!codeCanClick" @click="getCode">{{ codeContent }}</el-button>
           </el-input>
         </el-form-item>
-        <el-form-item prop="passWord" :rules="[{ required: true, min: 8, message: '密码至少需要 8 位', trigger: 'blur' }]">
-          <el-input v-model="form.passWord" type="password" placeholder="请输入至少 8 位新密码" prefix-icon="el-icon-lock"></el-input>
+        <el-form-item prop="passWord" :rules="[{ required: true, min: 6, message: '密码至少需要 6 位', trigger: 'blur' }]">
+          <el-input v-model="form.passWord" type="password" placeholder="请输入至少 6 位新密码" prefix-icon="el-icon-lock"></el-input>
         </el-form-item>
-        <el-form-item prop="passWord1" :rules="[{ required: true, min: 8, message: '密码至少需要 8 位', trigger: 'blur' }]">
+        <el-form-item prop="passWord1" :rules="[{ required: true, min: 6, message: '密码至少需要 6 位', trigger: 'blur' }]">
           <el-input v-model="form.passWord1" type="password" placeholder="请再次输入密码" prefix-icon="el-icon-lock"></el-input>
         </el-form-item>
         <el-form-item prop="imageCode" :rules="[{ required: true, message: '请输入图形验证码', trigger: 'blur' }]">
