@@ -148,19 +148,39 @@ async function runPreload (src, opts) {
   const win = dom.window
   const doc = win.document
   win.Element.prototype.getBoundingClientRect = () => ({ width: 100, height: 20, top: 0, left: 0, right: 100, bottom: 20, x: 0, y: 0 })
-  doc.execCommand = (cmd, ui, value) => {
-    const sel = win.getSelection()
-    let node = sel && sel.anchorNode
-    let el = node && (node.nodeType === 1 ? node : node.parentElement)
-    if (el && el.closest) el = el.closest('[contenteditable="true"]') || el
-    if (el) el.textContent = String(value == null ? '' : value)
-    return true
-  }
+  // ---------------------------------------------------------------------
+  // 托管编辑器模型（0.1.19）
+  //
+  // 真机证据：页面内 `execCommand` / `textContent` 的写入**进不了** WhatsApp 编辑器
+  // 的输入管线（`sawBeforeInput:false`，actual 就是原文）。所以这里：
+  //   · `doc.execCommand` 恒返回 true 但**不生效**（与真机一致）；
+  //   · composer 的 `textContent` 只读写编辑器 model —— 页面内写 DOM 不会有任何效果；
+  //   · 唯一能改变 model 的通道是主进程的**原生输入 IPC**（下面 invoke 里实现）。
+  // ---------------------------------------------------------------------
+  const composerEl = doc.getElementById('editable-message-text')
+  const editor = { model: '' }
+  const nodeTextDesc = Object.getOwnPropertyDescriptor(win.Node.prototype, 'textContent')
+  Object.defineProperty(composerEl, 'textContent', {
+    configurable: true,
+    enumerable: true,
+    get () { return editor.model },
+    set (v) { editor.model = String(v == null ? '' : v); nodeTextDesc.set.call(composerEl, editor.model) }
+  })
+  doc.execCommand = () => true
   const calls = []
   win.require = () => ({    ipcRenderer: {
       invoke: (channel, payload) => {
         if (channel === 'translate:guestPrefs') {
-          return Promise.resolve({ transRecv: true, transSend: true, transGroup: false, langMine: 'auto', langOther: 'auto', sendTo: 'en', includeZh: false, antiRevoke: false })
+          return Promise.resolve({ transRecv: true, transSend: true, transGroup: false, langMine: 'auto', langOther: 'auto', sendTo: 'en', includeZh: false, antiRevoke: false, sendSettleMs: 0 })
+        }
+        // 原生输入通道（生产链唯一的写入方式）。
+        if (channel === 'translate:composerSelectAllDelete') {
+          editor.model = ''
+          return Promise.resolve({ ok: true, focused: true })
+        }
+        if (channel === 'translate:composerInsertText') {
+          editor.model = String((payload && payload.text) || '')
+          return Promise.resolve({ ok: true, chars: editor.model.length })
         }
         if (channel === 'translate:run') {
           calls.push(payload)

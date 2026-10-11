@@ -41,6 +41,32 @@ test('硬规则 6：busy / done 态的 chip 再次点击必须被忽略（防重
   assert.match(body, /leaveBusy\('done'\)/, '成功渲染后没有把 chip 置为 done')
 })
 
+test('失败 chip 必须带真实错误类别（禁止把"连不上服务器"说成"翻译失败"）', () => {
+  const body = section('async function runManualTranslate', '==== MANUAL CHIP END')
+  // chip 文案按错误码分流：网络类失败必须自成一类。
+  assert.match(guest, /const CHIP_FAIL_TEXT = \{/, '缺少 CHIP_FAIL_TEXT 映射')
+  assert.match(guest, /NETWORK_UNREACHABLE: '连不上服务器 · 点击重试'/,
+    '网络不可达必须显示"连不上服务器"，不能退回"翻译失败"')
+  assert.match(guest, /NETWORK_TIMEOUT: '服务器超时 · 点击重试'/, '缺少响应超时文案')
+  assert.match(guest, /const CHIP_FAIL_DEFAULT = '翻译失败 · 点击重试'/, '缺少默认文案（认不出的码用它）')
+  assert.match(guest, /function chipFailText\(code\)/, '缺少 chipFailText 归一函数')
+  // 真实错误码必须传进失败态，否则映射永远用不上。
+  assert.match(body, /leaveBusy\('fail', \(res && res\.code\) \|\| 'UNKNOWN'\)/,
+    '翻译失败时必须把真实错误码传给 chip')
+  assert.match(body, /const leaveBusy = \(next, code\) =>/,
+    'leaveBusy 必须能携带错误码')
+  // setChipState 的失败态要写入真实文案，并把码钉在 chip 上供取证。
+  const setChip = section('function setChipState', 'function chipIn')
+  assert.match(setChip, /chip\.textContent = chipFailText\(code\)/, '失败态没有用错误码文案')
+  assert.match(setChip, /data-pix-fail-code/, '失败态没有把真实错误码钉在 chip 上')
+  // 成功/忙碌两态文案不许被改坏（别的测试也依赖它们）。
+  assert.match(setChip, /chip\.textContent = '翻译中…'/)
+  assert.match(setChip, /chip\.textContent = '已翻译'/)
+  // IPC 层抛错也不能丢掉网络类错误码。
+  assert.match(guest, /NETWORK_UNREACHABLE', 'NETWORK_TIMEOUT', 'SERVER_BAD_RESPONSE'\]\.indexOf\(cls\)/,
+    'translateTextDetailed 的 catch 必须保留网络类错误码')
+})
+
 test('硬规则 4：渲染前必须有 isMessageHost 硬守卫 + TARGET_MISSING 兜底（禁止画到聊天根节点）', () => {
   assert.match(guest, /function isMessageHost\b/, '缺少 isMessageHost')
   assert.match(guest, /HOST_FORBIDDEN_IDS\s*=\s*\[[^\]]*'main'/, 'isMessageHost 没有禁止 #main')
@@ -49,9 +75,35 @@ test('硬规则 4：渲染前必须有 isMessageHost 硬守卫 + TARGET_MISSING 
   assert.match(paint, /if \(!isMessageHost\(host\)\) return false/, 'paint 没有硬拒绝非消息宿主')
   const body = section('async function manualTranslateInner', '/**')
   assert.match(body, /TRANSLATION_RENDER_TARGET_MISSING/, '目标缺失时没有 TARGET_MISSING 事件')
-  // paint 只有在真的画出译文后才移除「译」按钮
-  assert.match(paint, /box\.textContent = translated[\s\S]*querySelector\(':scope > \.pix-click'\)[\s\S]*remove\(\)/,
-    'paint 没有"先画成、再删按钮"的顺序 —— 会让用户看到"点一下按钮没了什么都没发生"')
+  // P0-3 起：译文插在**操作行之后**，入口本身保留在同一个操作行里显示「已翻译」。
+  // 所以 paint 不再删除「译」按钮 —— 状态位置必须始终一致（正文 → 操作行 → 译文）。
+  assert.match(paint, /insertTransBox\(host, box\)/, 'paint 没有把译文插到操作行之后')
+  assert.ok(!/pix-click'\)\s*\n\s*if \(click\) click\.remove\(\)/.test(paint),
+    'paint 不应再删除「译」按钮 —— 入口要留在操作行里显示「已翻译」')
+})
+
+test('P0-3：翻译入口必须在固定的 .pix-trans-action-row 里，且不用绝对定位抢 metadata', () => {
+  // 真机现象：单行/短消息时入口和时间/单勾/双勾挤在右下角、按钮被盖住。
+  // 硬规则：入口住独立操作行；该行是正常文档流的整行块，绝不绝对定位。
+  assert.match(guest, /\.pix-trans-action-row\s*\{[\s\S]*?display:\s*block/,
+    '缺少 .pix-trans-action-row 或它不是块级布局（无法单独成行）')
+  const rowRule = (guest.match(/\.pix-trans-action-row\s*\{[\s\S]*?\}/) || [''])[0]
+  assert.match(rowRule, /flex-basis:\s*100%/, '操作行必须在弹性容器里也占满整行，避免与右对齐的 metadata 同排')
+  assert.match(rowRule, /position:\s*static/, '操作行必须留在正常文档流，不许绝对定位')
+  assert.ok(!/position:\s*absolute/.test(rowRule), '操作行禁止使用绝对定位抢 WhatsApp metadata 区域')
+  const chipRule = (guest.match(/\.pix-click\s*\{[\s\S]*?\}/) || [''])[0]
+  assert.ok(chipRule.length > 0, '找不到 .pix-click 规则')
+  assert.ok(!/position:\s*absolute/.test(chipRule), '.pix-click 禁止绝对定位（right/bottom 抢 metadata）')
+  assert.ok(!/z-index/.test(chipRule), '.pix-click 不许靠 z-index 压 metadata —— 位置问题要由布局解决')
+  assert.match(chipRule, /position:\s*static/, '.pix-click 应留在文档流里（static）')
+  assert.match(chipRule, /pointer-events:\s*auto/, '.pix-click 必须显式打开 pointer-events（否则点不动）')
+  // 所有状态都写进同一个操作行：addClick 必须把 chip 放进 row，而不是直接挂宿主。
+  const add = section('function addClick', 'function visible')
+  assert.match(add, /ensureActionRow\(host, meta\)/, 'addClick 没有把入口放进固定操作行')
+  assert.match(add, /row\.appendChild\(chip\)/, 'addClick 没有把 chip 放进操作行')
+  assert.match(add, /inActionRow:\s*chip\.parentElement === row/, '缺少"入口确实在操作行内"的取证字段')
+  // clearExtras 必须能把操作行一起清掉（换会话/关闭功能时不留残渣）
+  assert.match(guest, /function clearExtras[\s\S]{0,220}?pix-trans-action-row/, 'clearExtras 没有清理操作行')
 })
 
 test('trace 规范名：接收链与发送链都对齐四段式命名', () => {

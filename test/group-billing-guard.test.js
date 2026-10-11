@@ -1,9 +1,27 @@
 'use strict'
 
 /**
- * 群聊计费保护守卫 —— 「手动模式下不得产生任何自动翻译扣费」。
+ * 群聊计费保护守卫 —— 「群聊=手动 时不得产生任何自动翻译扣费」。
  *
- * ## 被修的两个 P0
+ * ## 现在的语义（用户裁定，2026-10-11）
+ *
+ *   | 会话类型 | 自动翻译 |
+ *   |---|---|
+ *   | 私聊 | **始终自动**（与「群聊自动翻译」开关无关） |
+ *   | 群聊 = 手动 | 一条都不自动翻，只给「译」按钮（0 自动扣费） |
+ *   | 群聊 = 自动 | 会话里出现的消息**全部自动翻**，**不再出现「译」按钮** |
+ *
+ * ## 被删掉的第三条闸门（0.1.24 及以前）
+ *
+ * 0.1.24 还有「群聊=自动 且 历史消息 → 只给按钮」，用来防"一进群就翻满屏历史"。
+ * 真机上它把「自动」变成了**半自动**：打开群聊时页面上那批消息永远只有按钮，
+ * 只有之后新到的才自动翻。用户看到的就是"一部分翻译，还有一部分没有翻译"
+ * （真机日志同群同分钟：MANUAL_CHIP_RENDERED × 43 + auto_receive × 26）。
+ *
+ * ⚠️ 别把它加回来。加回来的话这套测试**仍然会全绿**（它当年就是这么活下来的），
+ * 而真机上「自动」又只剩一半。
+ *
+ * ## 被修过的两个 P0（这两条防的是"手动模式还在自动扣费"）
  *
  * 真机证据：顶部设置明确是「群组翻译 = 手动」，进群后消息却自动出现了译文。
  * 用户没点任何东西，`char_balance` 在掉。两个根因：
@@ -17,15 +35,13 @@
  *
  * ## 怎么测
  *
- * 计费闸门是 `MessageParser.messageAction()`（纯逻辑）与
- * `MessageParser.createHistoryGate()`（历史/新消息判定），都内联在
- * guest-inject.js 的 BEGIN/END 块里。这里把那段抽出来跑**真 DOM**，
- * 用真实的 WhatsApp 群聊 DOM 逐条走一遍，统计"翻译 API 被调了几次、
- * 一共多少字符"—— 正好对应用户要求的 10 项验收。
+ * 计费闸门是 `MessageParser.messageAction()`（纯逻辑）与 guest-inject 里的派发
+ * 池（有界并发），都内联在 guest-inject.js 的 BEGIN/END 块以及扫描循环里。
+ * 这里把那段抽出来跑**真 DOM**，用真实的 WhatsApp 群聊 DOM 逐条走一遍，
+ * 统计"翻译 API 被调了几次、一共多少字符"。
  *
  * 另外用源码断言锁住 guest-inject 的接线：`messageAction` 必须是唯一决策点，
- * 且 `auto` 分支必须是唯一会调翻译接口的分支。光测纯函数不够 ——
- * 接线错了照样扣费。
+ * 且 `auto` 分支必须是唯一会调翻译接口的分支。光测纯函数不够 —— 接线错了照样扣费。
  */
 
 const assert = require('node:assert/strict')
@@ -49,6 +65,50 @@ function loadParser() {
 }
 
 const MP = loadParser()
+
+/** 按大括号配对，把 guest-inject.js 里的真实函数整段抽出来。 */
+function grabFn(name) {
+  const start = guest.indexOf('function ' + name + '(')
+  assert.ok(start > 0, '找不到函数 ' + name + '（改名了？）')
+  let depth = 0
+  let started = false
+  for (let i = start; i < guest.length; i++) {
+    const c = guest[i]
+    if (c === '{') { depth++; started = true } else if (c === '}') {
+      depth--
+      if (started && depth === 0) return guest.slice(start, i + 1)
+    }
+  }
+  throw new Error('大括号不平衡: ' + name)
+}
+
+/**
+ * ★把 guest-inject.js 里**真实的** chatKind() 抽出来跑★
+ *
+ * 踩过的坑：这个文件原来的 makeHarness 自己**复刻**了一份
+ * `isGroup = () => 扫 #main 认 @g.us`，注释还写着"与 guest-inject 的
+ * isGroupChat 等价"。可真实的 isGroupChat() 还有另外两条判据
+ * （头部文案 / aria-label 通配 group），复刻版一条都没覆盖 ——
+ * 于是真机上"中文界面会话列表 header 里的「群组」筛选 → 每个私聊都被判成群"
+ * 这个 P0，整套测试**完全看不见**。
+ *
+ * 现在改成从源码里切真函数出来评：判据改一处，测试立刻跟着变。
+ */
+const CHAT_KIND_SRC = grabFn('chatKind')
+
+/** 用真函数判一个 jsdom 文档 —— 返回 { group, evidence }。 */
+function chatKindOf(doc) {
+  return new Function('document', CHAT_KIND_SRC + '\nreturn chatKind()')(doc)
+}
+
+/** jsdom 不实现 innerText（真机 Chromium 有），不补就没法测"头部文案"那条判据。 */
+function withInnerText(dom) {
+  Object.defineProperty(dom.window.HTMLElement.prototype, 'innerText', {
+    configurable: true,
+    get () { return this.textContent }
+  })
+  return dom
+}
 
 // ---------------------------------------------------------------------------
 // 真 DOM：一个 WhatsApp 群聊
@@ -82,57 +142,67 @@ function directRow(body, minutesAgo, id) {
 function dom(rows, header) {
   const html = '<!doctype html><html><body><div id="main">' +
     (header || '<header><h1>Team Group</h1></header>') + rows.join('') + '</div></body></html>'
-  return new JSDOM(html)
+  return withInnerText(new JSDOM(html))
 }
 
 /**
- * 计费安全的消息处理模拟器。
+ * ★真机形状★ 的整页：左侧会话列表（带筛选标签 header）+ 右侧当前会话。
  *
- * 它做两件事，且**只用被测代码**做决定：
- *   - 用 guest-inject 里真实的 `isGroupChat` 判据（等价复刻其选择器逻辑）
- *   - 用 `MP.parseForTranslation` 取正文、`MP.createHistoryGate` 判历史、
- *     `MP.messageAction` 决定动作
+ * 为什么必须建这一层：真机的 P0 就出在"左侧列表的 header 排在 #main 之前"。
+ * 原来的 dom() 只有 #main，等于把出问题的那一半 DOM 直接删掉了 ——
+ * 测试当然全绿，真机照样坏。`lang` 决定筛选标签是「群组」还是「Groups」。
+ */
+function domRealistic(rows, opts) {
+  const o = opts || {}
+  const zh = o.lang !== 'en'
+  const tabs = zh
+    ? '<div role="tablist"><span>全部</span><span>未读</span><span>收藏</span><span>群组</span></div>'
+    : '<div role="tablist"><span>All</span><span>Unread</span><span>Favourites</span><span>Groups</span></div>'
+  // 左侧列表里混着别的群（真实存在）—— 判据绝不能被它带跑。
+  const sidebarItem = '<div data-testid="cell-frame-container"><span>' + (zh ? '某个群' : 'Some Group') + '</span></div>'
+  const sidebar = '<div id="side"><div id="pane-side">' +
+    '<header>' + tabs + '</header>' +
+    '<div data-testid="chat-list">' + sidebarItem + '</div>' +
+    '</div></div>'
+  const mainHeader = o.mainHeader || (zh ? '<header><h1>Alice</h1></header>' : '<header><h1>Alice</h1></header>')
+  const extra = o.extraInsideMain || ''
+  const html = '<!doctype html><html><body>' +
+    sidebar +
+    '<div id="main">' + mainHeader + '<div id="msg-list">' + rows.join('') + '</div>' + extra + '</div>' +
+    '</body></html>'
+  return withInnerText(new JSDOM(html))
+}
+
+/**
+ * 计费安全的消息处理模拟器（0.1.25）。
+ *
+ * 它只用被测代码做决定：
+ *   - 用 guest-inject 里真实的 `chatKind()` 判会话类型
+ *   - 用 `MP.parseForTranslation` 取正文
+ *   - 用 `MP.messageAction` 决定动作（auto / chip / hide）
  * 然后统计 mock 掉的翻译接口被调了几次、扣了多少字符。
+ *
+ * ⚠️ 这里**没有**"历史基线"这一层：那条闸门已被用户裁定删除。
+ * 加回来会让「群聊=自动」重新退化成半自动，而测试仍然全绿。
  */
 function makeHarness(document, opts) {
   const cfg = opts || {}
-  const gate = MP.createHistoryGate({ graceMs: cfg.graceMs })
-  const stats = { calls: 0, chars: 0, payloads: [], actions: {} }
-  // 与 guest-inject 的 isGroupChat 等价：只扫 #main，认 @g.us（不扫左侧列表）
-  const isGroup = () => {
-    const scope = document.querySelector('#main') || document
-    const rows = scope.querySelectorAll('[data-id]')
-    for (let i = 0; i < rows.length && i < 200; i++) {
-      if (String(rows[i].getAttribute('data-id') || '').indexOf('@g.us') >= 0) return true
-    }
-    return false
-  }
+  const stats = { calls: 0, chars: 0, payloads: [], actions: {}, chips: 0 }
+  // 用**真函数**判会话类型（不再自己复刻一份，见 CHAT_KIND_SRC 的注释）。
+  const isGroup = () => chatKindOf(document).group
   return {
     stats: stats,
-    gate: gate,
-    /** 走一遍扫描。fresh = 打开会话的首轮。 */
-    scan: scanOpts => {
-      const o = scanOpts || {}
-      const fresh = gate.begin(o.identity || 'peer-1', o.now || Date.now())
+    /** 走一遍扫描（模拟 scan() 的决策；翻译派发在 guest 里由有界池完成）。 */
+    scan: () => {
       const nodes = document.querySelectorAll(
         '.message-list-item .text-content, .Message .text-content, ' +
         'span.selectable-text.copyable-text, div.message-in span.selectable-text'
       )
-      let saw = 0
       for (const node of nodes) {
         const row = node.closest('[data-id], .message-list-item')
         if (!row) continue
-        saw++
         const parsed = MP.parseForTranslation(row)
         if (!parsed.messageText) continue
-        const group = isGroup()
-        let historic = false
-        if (group) {
-          const id = row.getAttribute('data-id') || ('h:' + parsed.messageText)
-          const when = Date.parse(parseStamp(row) || '') || 0
-          historic = gate.isHistoric(id, when)
-          gate.remember(id)
-        }
         const action = MP.messageAction({
           receiveEnabled: cfg.receiveEnabled !== false,
           translatable: !!parsed.translatable,
@@ -140,55 +210,32 @@ function makeHarness(document, opts) {
           hasChinese: /[\u4e00-\u9fff]/.test(parsed.messageText),
           includeZh: !!cfg.includeZh,
           sameLang: cfg.sameLang === true,
-          group: group,
-          transGroup: !!cfg.transGroup,
-          historic: historic
+          group: isGroup(),
+          transGroup: !!cfg.transGroup
         })
         stats.actions[action] = (stats.actions[action] || 0) + 1
+        if (action === 'chip') stats.chips++
         // 只有 auto 才允许真的调翻译接口并扣字符 —— 与 guest-inject 的接线一致。
         if (action === 'auto') {
           stats.calls++
           stats.chars += parsed.sourceText.length
           stats.payloads.push(parsed.sourceText)
         }
-        // fresh 只是标记首轮；基线由 settle 置位
-        void fresh
       }
-      gate.settle(saw > 0)
       return stats
     }
   }
 }
 
-/**
- * 从消息行里读真实发送时间，与 guest-inject 的 `messageTime()` 同源：
- * 取 `data-pre-plain-text` 属性，再抽方括号里那段。
- *
- * 注意不能写成 `/...\[([^\]]+)\]"/`：真机格式是 `[3:25 PM, 9/25/2026] Alice: `，
- * 方括号后面还有发信人和空格，要求紧跟引号会**匹配不到**，时间戳全变成 0，
- * 于是"历史消息"判定失效 —— 这本身就是一次会误扣费的缺陷。
- * WhatsApp 用的是窄空格 U+202F，得先归一化再交给 Date.parse。
- */
-function parseStamp(row) {
-  if (!row) return ''
-  const holder = row.getAttribute && row.getAttribute('data-pre-plain-text') !== null
-    ? row
-    : row.querySelector('[data-pre-plain-text]')
-  const raw = holder ? String(holder.getAttribute('data-pre-plain-text') || '') : ''
-  const m = /\[([^\]]+)\]/.exec(raw)
-  if (!m) return ''
-  return m[1].replace(/[\u202f\u00a0]/g, ' ')
-}
-
 // ---------------------------------------------------------------------------
-// 用户要求的 10 项验收
+// 用户要求的验收：手动模式（这些是"绝不非预期扣费"的底线，一条都不能松）
 // ---------------------------------------------------------------------------
 
 test('验收 1：群聊 manual + 打开群聊 → 0 次请求 / 0 字符', () => {
   const rows = Array.from({ length: 30 }, (_, i) => groupRow('Hello number ' + i, 600 - i, 'A' + i))
   const d = dom(rows)
   const h = makeHarness(d.window.document, { transGroup: false })
-  h.scan({ identity: 'g1' })
+  h.scan()
   assert.equal(h.stats.calls, 0, '手动模式打开群聊竟然调了翻译接口')
   assert.equal(h.stats.chars, 0)
   assert.equal(h.stats.actions.auto, undefined, '手动模式不该出现 auto 动作')
@@ -198,8 +245,8 @@ test('验收 2：manual + 页面已有 100 条历史 → 0 次请求 / 0 字符'
   const rows = Array.from({ length: 100 }, (_, i) => groupRow('历史消息 ' + i, 5000 - i, 'B' + i))
   const d = dom(rows)
   const h = makeHarness(d.window.document, { transGroup: false, includeZh: true })
-  h.scan({ identity: 'g2' })
-  h.scan({ identity: 'g2' })
+  h.scan()
+  h.scan()
   assert.equal(h.stats.calls, 0)
   assert.equal(h.stats.chars, 0)
 })
@@ -217,23 +264,27 @@ test('验收 2b：**修复前必挂** —— 群聊在 WhatsApp 上必须被判�
   assert.ok(detected, 'fixture 没造出群聊结构')
   // 头部里**没有** Telegram 那套文案 —— 这正是老实现失效的场景
   assert.ok(!/members|位成员|群组/i.test(scope.textContent), '头部不该含 Telegram 文案，否则测不到真缺陷')
-  // 真实现必须靠 @g.us 判出来
-  assert.match(guest, /indexOf\('@g\.us'\) >= 0\) return true/,
-    'isGroupChat 必须用 @g.us 作结构性判据')
-  assert.match(guest, /querySelector\('#main'\) \|\| document/,
-    'isGroupChat 必须只扫 #main，不能把左侧会话列表里别的群算进来')
+  // 直接跑真函数：必须凭 @g.us 判成群
+  const kind = chatKindOf(d.window.document)
+  assert.equal(kind.group, true, '@g.us 在 #main 里 → 必须判成群')
+  assert.equal(kind.evidence.source, 'dataid:g.us', '群聊应凭 @g.us 结构性证据判出')
+  // 源码级：@g.us 判据和 #main 作用域都还在
+  assert.match(guest, /indexOf\('@g\.us'\)\s*>=\s*0\)\s*\{\s*evidence\.sawGUs = true/,
+    'chatKind 必须用 @g.us 作结构性判据')
+  assert.match(guest, /querySelector\('#main'\)/,
+    'chatKind 必须只扫 #main，不能把左侧会话列表里别的群算进来')
 })
 
 test('验收 3：manual + 新收到 10 条 → 全部只给「译」，0 次请求 / 0 字符', () => {
   const d = dom([groupRow('old message', 600, 'D0')])
   // includeZh 打开：中文/英文都算"可翻"，这样才能验证"可翻的消息一律只给按钮"
   const h = makeHarness(d.window.document, { transGroup: false, includeZh: true })
-  h.scan({ identity: 'g3' })
+  h.scan()
   // 新到达 10 条：时间戳是"刚刚"
   const html = d.window.document.querySelector('#main').innerHTML
   d.window.document.querySelector('#main').innerHTML = html +
     Array.from({ length: 10 }, (_, i) => groupRow('brand new ' + i, 0, 'N' + i)).join('')
-  h.scan({ identity: 'g3' })
+  h.scan()
   assert.equal(h.stats.calls, 0, '手动模式下新消息也不许自动翻')
   assert.equal(h.stats.chars, 0)
   assert.equal(h.stats.actions.hide, undefined, '可翻的消息不该被 hide 掉')
@@ -245,7 +296,7 @@ test('验收 4：manual + 点其中 1 条 → 正好 1 次请求，只扣这一�
   const d = dom([groupRow('第一条 alpha', 600, 'E1'), groupRow('第二条 beta', 599, 'E2')])
   const rows = d.window.document.querySelectorAll('#main [data-id]')
   const h = makeHarness(d.window.document, { transGroup: false })
-  h.scan({ identity: 'g4' })
+  h.scan()
   assert.equal(h.stats.calls, 0)
   // 模拟用户点击：只翻译被点的那一条（trigger = manual_click）
   const parsed = MP.parseForTranslation(rows[0])
@@ -262,7 +313,7 @@ test('验收 5：连续点不同 3 条 → 正好 3 次请求、各自计费', (
   const d = dom(rows)
   const nodes = d.window.document.querySelectorAll('#main [data-id]')
   const h = makeHarness(d.window.document, { transGroup: false })
-  h.scan({ identity: 'g5' })
+  h.scan()
   assert.equal(h.stats.calls, 0)
   for (const node of nodes) {
     const parsed = MP.parseForTranslation(node)
@@ -278,9 +329,11 @@ test('验收 6：重复点已翻译过的同一条 → 不再产生请求', () =
   // 三层保证，缺一不可：
   //   ① addClick 在 host 已有 .pix-trans/.pix-click 时直接 return；
   //   ② scan 的 chip 分支以"没有 .pix-trans"为前提；
-  //   ③ chip 自身 busy/done 态拒绝重复点击（本轮新增，见 runManualTranslate）。
-  assert.match(guest, /function addClick\(host, incoming, root\) \{\s*\n\s*if \(host\.querySelector\(':scope > \.pix-trans, :scope > \.pix-click'\)\) return/,
-    'addClick 没有"已翻译就不再挂按钮"的守卫')
+  //   ③ chip 自身 busy/done 态拒绝重复点击（见 runManualTranslate）。
+  assert.match(guest, /function addClick\(host, incoming, root, span\) \{[\s\S]{0,420}?host\.querySelector\('\.pix-click'\)/,
+    'addClick 没有"已经挂过入口就不再挂"的守卫')
+  assert.match(guest, /function addClick\(host, incoming, root, span\) \{[\s\S]{0,160}?isMessageHost\(host\)/,
+    'addClick 必须先验证宿主是真消息气泡，否则按钮会挂到聊天根/列表根上（译文随之漂移）')
   assert.match(guest, /action === 'chip'\) \{\s*\n\s*.*!host\.querySelector\(':scope > \.pix-trans'\)\) addClick/,
     'scan 的 chip 分支没有跳过已翻译的消息')
   // 同一正文的重复请求还会被客户端缓存挡掉，连网络都不会走。
@@ -293,132 +346,156 @@ test('验收 6：重复点已翻译过的同一条 → 不再产生请求', () =
     '缺少进行中去重 —— 快速连点同一条会打出多次请求')
 })
 
-test('验收 7：auto + 新收到消息 → 自动翻译一次', () => {
-  const d = dom([groupRow('旧消息 old', 600, 'G0')])
-  const h = makeHarness(d.window.document, { transGroup: true })
-  h.scan({ identity: 'g7' })   // 首轮：历史，0 次
-  assert.equal(h.stats.calls, 0, '打开会话时不许翻历史')
-  d.window.document.querySelector('#main').innerHTML += groupRow('fresh incoming', 0, 'G1')
-  h.scan({ identity: 'g7' })
-  assert.equal(h.stats.calls, 1, 'auto 模式下新消息该自动翻一次')
-  assert.deepEqual(h.stats.payloads, ['fresh incoming'])
-})
-
-test('验收 8：auto + 打开有 500 条历史的群 → 禁止批量翻译', () => {
-  const rows = Array.from({ length: 500 }, (_, i) => groupRow('backlog ' + i, 20000 - i, 'H' + i))
-  const d = dom(rows)
-  const h = makeHarness(d.window.document, { transGroup: true })
-  h.scan({ identity: 'g8' })
-  assert.equal(h.stats.calls, 0, '打开会话就把 500 条历史全翻了 —— 这是非预期扣费')
-  assert.equal(h.stats.chars, 0)
-})
-
-test('验收 8b：auto + 滚动补加载更早的历史 → 仍不翻译', () => {
-  const d = dom([groupRow('recent', 5, 'I0')])
-  const h = makeHarness(d.window.document, { transGroup: true })
-  h.scan({ identity: 'g8b' })
-  h.scan({ identity: 'g8b' })
-  // 滚动补加载出 20 条很旧的消息。原有那条仍在页面上（真实滚动就是这样），
-  // 所以这里保留它 —— 否则"基线里没有"和"时间戳很旧"两条证据混在一起，
-  // 测不出到底靠哪一条拦住。
-  d.window.document.querySelector('#main').innerHTML =
-    Array.from({ length: 20 }, (_, i) => groupRow('older ' + i, 10000 - i, 'I' + (i + 1))).join('') +
-    groupRow('recent', 5, 'I0')
-  h.scan({ identity: 'g8b' })
-  assert.equal(h.stats.calls, 0, '滚动历史不该触发补翻（逐条时间戳都远早于打开时刻）')
-})
-
-test('验收 9：manual/auto 来回切换 → 设置立即生效，且不触发历史批量翻译', () => {
-  const rows = Array.from({ length: 40 }, (_, i) => groupRow('history ' + i, 3000 - i, 'J' + i))
-  const d = dom(rows)
-  // 先 manual 开一轮
-  const manual = makeHarness(d.window.document, { transGroup: false })
-  manual.scan({ identity: 'g9' })
-  assert.equal(manual.stats.calls, 0)
-  // 切到 auto：页面上那 40 条已经在基线里了 → 仍然 0 次
-  const auto = makeHarness(d.window.document, { transGroup: true, graceMs: 90000 })
-  const sameGate = MP.createHistoryGate({ graceMs: 90000 })
-  // 用同一份基线复用：模拟"切换设置"而不是"重新打开会话"
-  for (const node of d.window.document.querySelectorAll('#main [data-id]')) {
-    sameGate.begin('g9', Date.now())
-    sameGate.remember(node.getAttribute('data-id'))
-  }
-  sameGate.settle(true)
-  sameGate.begin('g9', Date.now())
-  let historicCount = 0
-  for (const node of d.window.document.querySelectorAll('#main [data-id]')) {
-    if (sameGate.isHistoric(node.getAttribute('data-id'), 0)) historicCount++
-  }
-  assert.equal(historicCount, 40, '切换设置后历史消息必须仍被判为历史')
-  void auto
-})
-
 test('验收 10：重启客户端后 manual 设置恢复 → 打开群聊仍 0 自动调用', () => {
-  // 重启后基线是空的（新 gate），但只要 transGroup 仍是 false，就一条都不会翻。
-  // 这里同时覆盖"基线未就绪"这条兜底：即便群判定成功，首轮一律算历史。
+  // 重启后 transGroup 仍是 false，就一条都不会翻 —— 手动模式不依赖任何运行期状态。
   const rows = Array.from({ length: 60 }, (_, i) => groupRow('after restart ' + i, 9000 - i, 'K' + i))
   const d = dom(rows)
   const h = makeHarness(d.window.document, { transGroup: false })
-  h.scan({ identity: 'g10' })
-  h.scan({ identity: 'g10' })
+  h.scan()
+  h.scan()
   assert.equal(h.stats.calls, 0)
   assert.equal(h.stats.chars, 0)
 })
 
 // ---------------------------------------------------------------------------
-// 基线/闸门自身的性质
+// 用户要求的验收：自动模式（0.1.25 新语义 —— 「自动」就该是自动）
 // ---------------------------------------------------------------------------
 
-test('基线未就绪（首轮）一律算历史，绝不放行自动翻译', () => {
-  // graceMs 设 0：这里只验"基线语义"，不混进时间余量那层判断。
-  const gate = MP.createHistoryGate({ graceMs: 0 })
-  assert.equal(gate.begin('chat-a', 1000000), true, '首轮应返回"基线未就绪"')
-  assert.equal(gate.isHistoric('whatever', 0), true, '基线未就绪时必须算历史 —— 打开会话不许翻任何一条')
-  gate.settle(true)
-  // 基线就绪后：拿不到时间戳又没登记过的，按"新消息"放行（时间维度无从判断，
-  // 但首轮登记已经把所有当时在页面上的消息收进基线了）。
-  assert.equal(gate.isHistoric('never-seen-no-time', 0), false)
-  // 早于基线（含余量）的一律算历史
-  assert.equal(gate.isHistoric('older', 500000), true)
-  // 基线之后到达的新消息才允许自动翻
-  assert.equal(gate.isHistoric('brand-new', 1000000), false)
+test('验收 7（新语义）：auto + 打开群聊 → 页面上每条可翻消息立刻自动翻，一条「译」都没有', () => {
+  const d = dom([groupRow('historic message', 600, 'G0')])
+  const h = makeHarness(d.window.document, { transGroup: true })
+  h.scan()
+  assert.equal(h.stats.actions.chip, undefined,
+    '「群聊=自动」下还出现「译」按钮 —— 这正是用户报的"开了自动还要点按钮"')
+  assert.equal(h.stats.calls, 1, '打开会话时已经在页面上的消息也要自动翻（用户裁定）')
+  assert.deepEqual(h.stats.payloads, ['historic message'])
 })
 
-test('换会话必须重建基线（上个会话的登记不能漏到新会话）', () => {
-  const gate = MP.createHistoryGate({ graceMs: 90000 })
-  gate.begin('chat-a', 1000000)
-  gate.remember('msg-1')
-  gate.settle(true)
-  assert.equal(gate.isHistoric('msg-1', 0), true)
-  assert.equal(gate.begin('chat-b', 2000000), true, '换会话应视为新会话首轮')
-  assert.equal(gate.isHistoric('msg-2', 0), true, '新会话首轮一切算历史')
+test('验收 8（新语义）：auto + 打开有 500 条历史的群 → 全部自动翻，且 0 个「译」按钮', () => {
+  const rows = Array.from({ length: 500 }, (_, i) => groupRow('backlog ' + i, 20000 - i, 'H' + i))
+  const d = dom(rows)
+  const h = makeHarness(d.window.document, { transGroup: true })
+  h.scan()
+  assert.equal(h.stats.calls, 500, '「自动」就该把会话里显示的消息全部翻掉（用户 2026-10-11 裁定）')
+  assert.equal(h.stats.actions.chip, undefined, '自动模式下不许再给「译」按钮')
+  // 注意：这 500 次是**决策次数**，不是扣费次数。同一条消息翻多少次都只计一次费，
+  // 见下面「计费上限是没翻过的正文」那条用例。
 })
 
-test('时间戳只到分钟，留了余量，刚到的消息不算历史', () => {
-  const gate = MP.createHistoryGate({ graceMs: 90000 })
-  const now = 1700000000000
-  gate.begin('chat', now)
-  gate.settle(true)
-  // 刚刚到（时间戳被截到分钟，最多早 60 秒）→ 不算历史
-  assert.equal(gate.isHistoric('just-arrived', now - 40000), false)
-  // 明显更早（10 分钟前）→ 历史
-  assert.equal(gate.isHistoric('old', now - 600000), true)
+test('验收 8b（新语义）：auto + 滚动补加载更早的历史 → 同样自动翻，不留「译」', () => {
+  const d = dom([groupRow('recent', 5, 'I0')])
+  const h = makeHarness(d.window.document, { transGroup: true })
+  h.scan()
+  assert.equal(h.stats.calls, 1)
+  // 滚动补加载出 20 条很旧的消息。原有那条仍在页面上（真实滚动就是这样）。
+  d.window.document.querySelector('#main').innerHTML =
+    Array.from({ length: 20 }, (_, i) => groupRow('older ' + i, 10000 - i, 'I' + (i + 1))).join('') +
+    groupRow('recent', 5, 'I0')
+  h.scan()
+  assert.equal(h.stats.actions.chip, undefined, '滚动出来的历史也不该退化成按钮')
+  assert.equal(h.stats.calls, 22, '1（首轮）+ 21（滚动后页面上的全部）')
 })
 
-test('登记表有上限，长开不会无限增长', () => {
-  const gate = MP.createHistoryGate({ graceMs: 0, cap: 10 })
-  gate.begin('chat', 0)
-  gate.settle(true)
-  for (let i = 0; i < 25; i++) gate.remember('id-' + i)
-  assert.ok(gate.snapshot().size <= 10, '登记表超过上限没有清理')
+test('验收 9（新语义）：手动 → 自动 切换后，页面上已有的消息立刻开始自动翻', () => {
+  const rows = Array.from({ length: 40 }, (_, i) => groupRow('history ' + i, 3000 - i, 'J' + i))
+  const d = dom(rows)
+  const manual = makeHarness(d.window.document, { transGroup: false })
+  manual.scan()
+  assert.equal(manual.stats.calls, 0, '手动模式：一条都不许自动翻')
+  assert.equal(manual.stats.actions.chip, 40, '手动模式：每条都给「译」')
+  // 用户把开关切到「自动」——同一次会话、同一批消息，立刻全部转自动
+  const auto = makeHarness(d.window.document, { transGroup: true })
+  auto.scan()
+  assert.equal(auto.stats.actions.chip, undefined, '切成自动后不该还需要用户点「译」')
+  assert.equal(auto.stats.calls, 40, '页面上已有的 40 条要立刻自动翻')
 })
+
+test('★计费上限★「全部自动翻」的成本上限是"没翻过的正文"，不是"翻了多少次"', () => {
+  // 这是允许删掉历史闸门的**前提**，必须锁住：
+  // 客户端 requestId 对同一段正文 + 同一通道是恒定的 → 服务端按 Idempotency-Key
+  // 幂等 → 同一条消息翻多少次都只计一次费。少任何一环，删闸门就变成"重复扣费"。
+  const at = main.indexOf('function transFingerprint')
+  assert.ok(at > 0, '找不到 transFingerprint')
+  const fp = main.slice(at, main.indexOf('function transRequestId', at))
+  assert.ok(/currentPixUser\(\)/.test(fp), '指纹必须含用户身份（不同子账号不能共用预留）')
+  for (const piece of ['engine', 'from', 'to', 'text']) {
+    assert.ok(new RegExp('String\\(' + piece + " \\|\\| ''\\)").test(fp),
+      '指纹少了 ' + piece + ' —— 换通道/换语种会复用旧号，等于白送一次翻译')
+  }
+  const idAt = main.indexOf('function transRequestId')
+  const idFn = main.slice(idAt, idAt + 400)
+  assert.ok(/transAttempt\.get\(fingerprint\) \|\| 0/.test(idFn),
+    'requestId 的"代"必须默认复用（只有显式换号才 +1），否则每次重放都会变成新的计费')
+  assert.ok(!/Date\.now\(\)|Math\.random\(\)/.test(idFn),
+    'requestId 里出现时间/随机数 → 每次重放都是新号 → 幂等失效、重复扣费')
+
+  const server = fs.readFileSync(path.join(root, 'server', 'services', 'core-service.js'), 'utf8')
+  assert.ok(/SELECT \* FROM translation_reservations WHERE user_id=\$1 AND idempotency_key=\$2/.test(server),
+    '服务端必须按 idempotency_key 查已有预留')
+  assert.ok(/if \(existing\) \{[\s\S]{0,900}?return existing/.test(server),
+    '服务端命中已有预留后必须直接复用，不能重新扣字符')
+  // 换通道重译是**新的一次计费**（厂商侧真花钱），这条不能被我顺手改掉。
+  assert.ok(/ENGINE_SWITCH_REQUIRES_NEW_REQUEST/.test(server),
+    '换通道重译必须要求新请求号（否则换通道重译不扣费）')
+})
+
+// ---------------------------------------------------------------------------
+// 私聊：始终自动翻译（与「群聊自动翻译」开关无关）
+// ---------------------------------------------------------------------------
+
+test('私聊恒为自动翻译：不受「群组自动/手动」开关影响', () => {
+  const base = {
+    receiveEnabled: true, translatable: true, emojiOnly: false, hasChinese: false,
+    includeZh: false, sameLang: false, group: false, transGroup: false
+  }
+  assert.equal(MP.messageAction(base), 'auto', '私聊 + 开关=手动 → 仍必须自动翻（私聊始终自动）')
+  assert.equal(MP.messageAction(Object.assign({}, base, { transGroup: true })), 'auto')
+})
+
+test('群聊跟随「自动/手动」开关（用户要的行为）', () => {
+  const base = {
+    receiveEnabled: true, translatable: true, emojiOnly: false, hasChinese: false,
+    includeZh: false, sameLang: false, group: true, transGroup: false
+  }
+  assert.equal(MP.messageAction(base), 'chip', '群聊 + 手动 → 只给按钮，绝不自动扣费')
+  assert.equal(MP.messageAction(Object.assign({}, base, { transGroup: true })), 'auto',
+    '群聊 + 自动 → 自动翻（含打开会话时页面上的那批）')
+})
+
+test('★P0★ 中文界面：私聊不能被左侧列表 header 里的「群组」筛选标签判成群', () => {
+  const d = domRealistic([directRow('Hello there', 1, 'X1')], { lang: 'zh' })
+  const kind = chatKindOf(d.window.document)
+  assert.equal(kind.group, false,
+    '私聊被判成了群 —— 左侧列表 header 的「群组」筛选标签把人骗了（真机 P0）')
+  assert.equal(kind.evidence.source, 'dataid:c.us', '应凭 @c.us 结构性证据判为私聊')
+})
+
+test('★P0★ 英文界面：私聊不能被左侧列表 header 里的「Groups」筛选标签判成群', () => {
+  const d = domRealistic([directRow('Hello there', 1, 'X2')], { lang: 'en' })
+  assert.equal(chatKindOf(d.window.document).group, false, '私聊被判成了群（英文界面同样中招）')
+})
+
+test('★P0★ 私聊 + 中文界面 → 必须走自动翻译（这是用户要的行为）', () => {
+  const d = domRealistic([directRow('Hello there', 1, 'X3')], { lang: 'zh' })
+  const h = makeHarness(d.window.document, { transGroup: false })
+  h.scan()
+  assert.equal(h.stats.actions.auto, 1,
+    '私聊新消息必须自动翻译，实际动作=' + JSON.stringify(h.stats.actions))
+  assert.equal(h.stats.actions.chip, undefined, '私聊不该只给「译」按钮（那样用户就得手动点）')
+})
+
+// ---------------------------------------------------------------------------
+// messageAction 的判定语义
+// ---------------------------------------------------------------------------
 
 test('messageAction 的判定顺序与语义', () => {
-  const base = { receiveEnabled: true, translatable: true, emojiOnly: false, hasChinese: false, includeZh: false, sameLang: false, group: true, transGroup: false, historic: false }
+  const base = {
+    receiveEnabled: true, translatable: true, emojiOnly: false, hasChinese: false,
+    includeZh: false, sameLang: false, group: true, transGroup: false
+  }
   assert.equal(MP.messageAction(base), 'chip', '群聊手动 → 只给按钮')
-  assert.equal(MP.messageAction(Object.assign({}, base, { transGroup: true })), 'auto', '群聊自动 + 新消息 → 自动翻')
-  assert.equal(MP.messageAction(Object.assign({}, base, { transGroup: true, historic: true })), 'chip', '群聊自动 + 历史 → 只给按钮')
-  assert.equal(MP.messageAction(Object.assign({}, base, { group: false })), 'auto', '一对一会话维持原有自动行为')
+  assert.equal(MP.messageAction(Object.assign({}, base, { transGroup: true })), 'auto', '群聊自动 → 自动翻')
+  assert.equal(MP.messageAction(Object.assign({}, base, { group: false })), 'auto', '一对一会话维持自动')
   assert.equal(MP.messageAction(Object.assign({}, base, { receiveEnabled: false })), 'hide')
   assert.equal(MP.messageAction(Object.assign({}, base, { translatable: false })), 'hide', '纯 URL/图片 → 不给按钮')
   assert.equal(MP.messageAction(Object.assign({}, base, { emojiOnly: true })), 'hide')
@@ -427,47 +504,297 @@ test('messageAction 的判定顺序与语义', () => {
   assert.equal(MP.messageAction(Object.assign({}, base, { sameLang: true })), 'hide')
 })
 
-// ---------------------------------------------------------------------------
-// 接线：光测纯函数不够，接错了照样扣费
-// ---------------------------------------------------------------------------
-
-test('scan() 的 auto 分支是唯一会调翻译接口的地方', () => {
-  const scanAt = guest.indexOf('async function scan()')
-  const scan = guest.slice(scanAt, guest.indexOf('function schedule()', scanAt))
-  const translateCalls = [...scan.matchAll(/translateParsed\(/g)]
-  assert.equal(translateCalls.length, 1, 'scan 里只该有一处 translateParsed 调用')
-  // 它必须在 action === 'auto' 分支里
-  const autoAt = scan.indexOf("action === 'auto'")
-  const chipAt = scan.indexOf("action === 'chip'")
-  const callAt = scan.indexOf('translateParsed(')
-  assert.ok(autoAt > 0 && chipAt > 0 && callAt > autoAt && callAt < chipAt,
-    'translateParsed 必须在 auto 分支里，不能落到 chip/hide 分支')
-  assert.match(scan, /translateParsed\(parsed, true, TRIGGER_AUTO\)/, '自动翻译必须打上 auto_receive 标记')
+test('「群聊=自动 但历史消息只给按钮」那条闸门必须真的删干净', () => {
+  // 只从 messageAction 里删掉那一行是不够的：判据、初始化、导出、状态都得一起走。
+  // 留一段不再影响任何决策的"计费闸门"比没有更危险 ——
+  // 下一个人会以为它还在保护什么，从而不敢动真正的决策点。
+  assert.ok(!/\bhistoryGate\b/.test(guest), 'historyGate 还被引用')
+  assert.ok(!/createHistoryGate/.test(guest), 'createHistoryGate 还在（死代码）')
+  assert.ok(!/isHistoric/.test(guest), 'isHistoric 还在（死代码）')
+  assert.ok(!/s\.historic/.test(guest), 'messageAction 还在消费 historic —— 闸门没删干净')
+  const src = grabFn('messageAction')
+  assert.ok(/if \(s\.group && !s\.transGroup\) return 'chip'/.test(src),
+    '群聊手动 → 只给按钮 这条计费闸门必须保留（它才是防非预期扣费的那一条）')
 })
 
-test('决策只由 messageAction 做出，扫描循环里不许再散落判断', () => {
+// ---------------------------------------------------------------------------
+// 接线：光测纯函数不够，接错了照样扣费 / 照样漏翻
+// ---------------------------------------------------------------------------
+
+test('scan() 必须从 chatIdentity() 取身份，且 groupMode 进 CHAT_KIND 指纹', () => {
   const scanAt = guest.indexOf('async function scan()')
   const scan = guest.slice(scanAt, guest.indexOf('function schedule()', scanAt))
-  assert.match(scan, /MessageParser\.messageAction\(/, '没有走集中决策')
-  // 老的散落判断必须消失，否则两条逻辑会漂移
-  assert.ok(!/if \(!prefs\.transRecv\) \{/.test(scan), '老的 transRecv 早退还在，会绕过集中决策')
-  assert.ok(!/if \(isEmojiOnly\(text\)\) \{/.test(scan), '老的 emoji 早退还在')
-  assert.ok(!/const auto = !group/.test(scan), '老的 auto 判定还在（正是被绕过的那个）')
+  assert.match(scan, /const identity = chatIdentity\(\)/, 'scan 没有用 chatIdentity()')
+  assert.match(scan, /if \(identity !== lastScanIdentity\)/, 'scan 没有识别"换会话"')
+  assert.match(scan, /const kind = chatKind\(\)/, 'scan 没有用 chatKind()')
+  assert.match(scan, /trace\('CHAT_KIND'/, '缺少 CHAT_KIND 取证 —— 本次真机排查只能靠猜就是这个原因')
+  assert.match(scan, /group: group,/, 'CHAT_KIND 没记 group 结论')
+  assert.match(scan, /evidence: kind\.evidence\.source/, 'CHAT_KIND 没记判据来源')
+  // ★ 指纹必须含 groupMode ★
+  // 不含的话：用户把「群聊翻译」手动→自动，指纹没变 → 一行 CHAT_KIND 都不再打，
+  // 日志永远停在旧的 manual。2026-10-11 排查就卡在这里（日志说 manual，实际在自动翻）。
+  assert.match(scan, /const kindKey = identity \+ '\|' \+ group \+ '\|' \+ kind\.evidence\.source \+ '\|' \+ groupModeLabel\(\)/,
+    'kindKey 必须含 groupMode，否则模式切换在日志里看不见')
+  assert.match(scan, /tabId: prefs\.tabId \|\| '-',/, 'CHAT_KIND 必须记 tabId（多开时要能分清是哪个窗口）')
+  // 头部证据的"形状"必须留档，才能在不泄露人名的前提下事后确认判据。
+  assert.match(scan, /subtitleShape: kind\.evidence\.subtitleShape/, 'CHAT_KIND 没记副标题形状')
+  assert.match(scan, /memberList: kind\.evidence\.memberList/, 'CHAT_KIND 没记成员名单判据')
 })
 
-test('群聊手动模式下 auto_receive 在客户端就被 SKIP', () => {
-  // trigger 一路带下去：guest → 主进程 → 服务端 translate_logs.trigger
-  assert.match(guest, /trigger: String\(payload && payload\.trigger \|\| ''\)/, 'guest 没把 trigger 传给主进程')
-  assert.match(guest, /const TRIGGER_MANUAL = 'manual_click'/, '缺少手动来源标记')
-  assert.match(guest, /const TRIGGER_AUTO = 'auto_receive'/, '缺少自动来源标记')
-  assert.match(main, /trigger: trigger/, '主进程没把 trigger 发给服务端')
-  assert.match(main, /trigger=' \+ \(trigger \|\| '-'\)/, '主进程日志没记 trigger，事后无法归因')
+test('翻译接口只在派发池里被调用：scan() 自己不许直接发请求', () => {
+  const scanAt = guest.indexOf('async function scan()')
+  const scan = guest.slice(scanAt, guest.indexOf('function schedule()', scanAt))
+  assert.equal([...scan.matchAll(/translateParsed\(/g)].length, 0,
+    'scan() 又变回"扫到一条就 await 一条" —— 打开群聊时会串行翻几十条，用户要盯着"翻一半"看半分钟')
+  assert.match(scan, /autoJobs\.push\(/, 'scan() 必须把待翻消息交给派发池')
+  assert.match(scan, /enqueueAuto\(autoJobs\)/, 'scan() 必须调用 enqueueAuto')
+
+  const pumpAt = guest.indexOf('function autoPump()')
+  assert.ok(pumpAt > 0, '找不到派发池 autoPump()')
+  const pump = guest.slice(pumpAt, guest.indexOf('function enqueueAuto', pumpAt))
+  assert.equal([...pump.matchAll(/translateParsed\(/g)].length, 1, '派发池里只该有一处 translateParsed 调用')
+  assert.match(pump, /translateParsed\(job\.parsed, true, TRIGGER_AUTO\)/, '自动翻译必须打上 auto_receive 标记')
+})
+
+test('自动翻译必须是有界并发，且**新的先翻**', () => {
+  const pumpAt = guest.indexOf('function autoPump()')
+  const pump = guest.slice(pumpAt, guest.indexOf('function enqueueAuto', pumpAt))
+  assert.match(pump, /while \(autoRunning < AUTO_POOL_SIZE && autoQueue\.length\)/,
+    '没有并发上限 —— 几十条一起打上去会占满连接池（拖慢发送）并撞账号级限流')
+  assert.match(guest, /const AUTO_POOL_SIZE = \d+/, '并发上限必须是显式常量，别写成魔法数字')
+  const qAt = guest.indexOf('function enqueueAuto(')
+  const q = guest.slice(qAt, guest.indexOf('async function scan()', qAt))
+  assert.match(q, /for \(let i = jobs\.length - 1; i >= 0; i--\)/,
+    '入队必须从后往前（最新的先翻）—— 打开会话时人在底部，眼前那几条要最先出结果')
+  assert.match(q, /autoFailedAt\.get\(job\.id\)/,
+    '失败消息必须有冷却，否则 scan 每 220ms 一轮会把同一条失败消息反复重发（重试风暴）')
+})
+
+test('自动接手时必须收掉手动留下的「译」按钮', () => {
+  const scanAt = guest.indexOf('async function scan()')
+  const scan = guest.slice(scanAt, guest.indexOf('function schedule()', scanAt))
+  assert.match(scan, /action === 'auto'\) \{[\s\S]{0,240}?removeStaleChip\(host\)/,
+    'auto 分支没有清理残留的「译」——真机上就是"开了自动还挂着按钮"')
+})
+
+test('★不能自激★ paint 内容没变时不许写 DOM', () => {
+  // 我们的扫描挂在 MutationObserver 上，而 `textContent = ...` 本身会产生
+  // childList 变更 → paint → 变更 → schedule → scan → paint → …
+  // 0.1.24 真机日志里同一条消息的渲染 trace 一秒 33 次就是这么来的。
+  // 0.1.25 把「自动」扩到整个会话之后，这个循环会被放大到每一条消息。
+  const paintAt = guest.indexOf('function paint(')
+  const paint = guest.slice(paintAt, guest.indexOf('// ==== MANUAL CHIP BEGIN ====', paintAt))
+  assert.match(paint, /box\.textContent === translated[\s\S]{0,900}?return true/,
+    'paint 缺少"内容没变就不写 DOM"的守卫 —— 会形成 repaint ↔ MutationObserver 自激循环')
+})
+
+// ---------------------------------------------------------------------------
+// ★0.1.23 真机 P0★ 私聊被判成群 → 自动翻译整个失效，只能手动点「译」
+//
+// 真机证据：`trigger=auto_receive` 全天只出现 1 次，其余 180 次全是手动 chip；
+// 用户在私聊里也必须一条条点「译」。
+//
+// 根因：老 isGroupChat() 第一条判据是 `document.querySelector('.ChatInfo, header')`
+// —— 查**整个文档**，而 document order 上排在 #main 之前的是**左侧会话列表**的
+// header。中文界面的会话列表 header 里有「全部 / 未读 / 收藏 / **群组**」筛选标签，
+// 正则命中「群组」→ **每个会话（含私聊）都被判成群** → 私聊自动翻译全部失效。
+// ---------------------------------------------------------------------------
+
+test('两种错的代价不对等：@g.us 与 @c.us 同时出现时必须偏向"群"', () => {
+  // 把群误判成私聊 → 打开群聊自动翻（现在这是用户要的行为），但会话类型错会让
+  // 「群聊=手动」这条唯一的计费闸门失效 —— 所以仍必须偏向"群"。
+  const rows = [groupRow('hi', 1, 'G1') + directRow('yo', 2, 'C1')]
+  const d = domRealistic(rows, { lang: 'zh' })
+  const kind = chatKindOf(d.window.document)
+  assert.equal(kind.group, true, '只要出现 @g.us 就必须判群（宁可少翻，不可误扣）')
+  assert.equal(kind.evidence.source, 'dataid:g.us')
+})
+
+test('#main 内的弱信号（群名含「群组」等）不能盖过 @c.us 硬证据', () => {
+  const rows = [directRow('Hello', 1, 'X4')]
+  const d = domRealistic(rows, {
+    lang: 'en',
+    // 连群名/头部文案和 aria-label 都长得像群 —— 结构性证据仍然优先。
+    mainHeader: '<header><h1>群组 · Alice</h1></header>',
+    extraInsideMain: '<div aria-label="Groups"><span>1 member</span></div>'
+  })
+  assert.equal(chatKindOf(d.window.document).group, false,
+    '有 @c.us 就在 #main 内确定为私聊，弱信号不许翻盘')
+})
+
+test('拿不到 #main 时判"私聊"而不是"群"（自动翻译优先，不拿别的会话猜）', () => {
+  const d = withInnerText(new JSDOM('<!doctype html><html><body><div id="side"></div></body></html>'))
+  const kind = chatKindOf(d.window.document)
+  assert.equal(kind.group, false, '没有会话区时应偏向私聊，绝不能靠文档其它部分猜成"群"')
+  assert.equal(kind.evidence.inMain, false)
 })
 
 test('isGroupChat 用 #main 作用域，不会把左侧列表里别的群算成本会话', () => {
-  const fnAt = guest.indexOf('function isGroupChat()')
+  const fnAt = guest.indexOf('function chatKind()')
   const fn = guest.slice(fnAt, guest.indexOf('function hostOf', fnAt))
-  assert.match(fn, /querySelector\('#main'\) \|\| document/, '没用 #main 限定作用域')
-  assert.ok(!/document\.querySelectorAll\('\[data-id\]'\)/.test(fn),
-    '直接扫全文档的 data-id 会把侧边栏群聊算进来，导致所有会话都被判成群')
+  assert.match(fn, /querySelector\('#main'\)/, '没用 #main 限定作用域 —— 这会取到左侧列表')
+  assert.ok(!/document\.querySelector\('\.ChatInfo, header'\)/.test(fn),
+    '又回到全文档找 .ChatInfo/header 了：中文界面左侧列表 header 里的「群组」筛选标签会让每个私聊都被判成群')
+  assert.ok(!/const scope = document\.querySelector\('#main'\) \|\| document/.test(fn),
+    '不许再退回整份 document —— 拿不到 #main 就必须判"私聊"（自动翻译优先），不能拿别的会话来猜')
+})
+
+// ---------------------------------------------------------------------------
+// ★真 DOM★ 自动接手时「译」按钮的清理（0.1.25 真机缺陷）
+// ---------------------------------------------------------------------------
+
+test('（真 DOM）切到自动后，手动留下的「译」必须被收掉；busy 态不许动', () => {
+  const d = new JSDOM('<!doctype html><html><body><div id="main">' +
+    '<div data-id="A1"><div class="copyable-text"><span class="selectable-text">hello</span></div>' +
+    '<div class="pix-trans-action-row"><span class="pix-click" data-pix-state="idle">译</span></div></div>' +
+    '<div data-id="A2"><div class="copyable-text"><span class="selectable-text">world</span></div>' +
+    '<div class="pix-trans-action-row"><span class="pix-click" data-pix-state="busy">翻译中…</span></div></div>' +
+    '</div></body></html>')
+  const doc = d.window.document
+  const removeStaleChip = new Function('document', 'isMessageHost', 'host',
+    grabFn('removeStaleChip') + '\nreturn removeStaleChip(host)')
+  const idleHost = doc.querySelector('[data-id="A1"]')
+  const busyHost = doc.querySelector('[data-id="A2"]')
+  assert.equal(removeStaleChip(doc, () => true, busyHost), 0,
+    'busy 态被收掉了 —— 会把用户点出来的那次翻译半途掐死')
+  assert.equal(busyHost.querySelector('.pix-click').textContent, '翻译中…')
+  assert.equal(removeStaleChip(doc, () => true, idleHost), 1)
+  assert.equal(idleHost.querySelector('.pix-click'), null, 'idle 的「译」必须被收掉')
+  assert.equal(idleHost.querySelector('.pix-trans-action-row'), null,
+    '空掉的操作行要一起收掉，别留一条空白行把气泡撑高')
+  void doc
+})
+
+// ---------------------------------------------------------------------------
+// ★0.1.24★ 真机 DOM 回归 —— 这一节是"0.1.23 为什么修错"的答案。
+//
+// 0.1.23 的判据是 `main.querySelector('[data-testid*="group" i], [aria-label*="group" i]')`
+// —— 扫**整个 #main**，而 #main 里除了头部还装着**消息**。
+//
+// 真机探针（desktop/scripts/_probe-wa-dom2.js）在用户会话上抓到的实测结构：
+//   · data-id 是**纯消息哈希**（`3EB0F866490405692F3C`），不含 @c.us/@g.us；
+//     `jidHitCount = 0` —— 整个 document 里 @c.us/@g.us 出现 0 次。
+//   · 7 条消息带 WhatsApp **群邀请链接** → 渲染出链接预览卡片，内含
+//     `button[data-testid="group-invite-link-action"]` + `title="Join group"`。
+//   · 于是 `#main` 内 `[data-testid*="group"]` **恒为真** → 私聊被判成群
+//     → 自动翻译被整个关掉（真机现象：`auto_receive` 全天只有 1 次）。
+//
+// 这一节用**真结构**（真 testid、真 data-id 形状）锁死：
+// 消息区的任何 group 字样都不许再影响会话类型判定。
+// ---------------------------------------------------------------------------
+
+/** 真机头部结构（复刻自探针输出；人名一律用占位符，避免把 PII 写进仓库）。 */
+function realHeader (subtitle) {
+  return '<header data-testid="conversation-header"><div>' +
+    '<div aria-label="Avatar" title="Avatar" role="button"><div><img/></div></div>' +
+    '<div role="button" data-testid="conversation-info-header"><div><div>' +
+    '<div data-testid="conversation-info-header-chat-title-name"><div><div>' +
+    '<span data-testid="you-label">You: </span>' +
+    '</div></div></div>' +
+    '<div><span data-testid="conversation-info-header-chat-title">Some Chat</span></div>' +
+    '</div></div>' +
+    '<div data-testid="chat-subtitle"><span data-testid="selectable-text" title="' + subtitle + '">' +
+    subtitle + '</span></div>' +
+    '</div></div>' +
+    '<div><div><span><div><button aria-label="Search">Search</button></div></span></div></div>' +
+    '</header>'
+}
+
+/** 真机消息行（data-id 是纯哈希；含群邀请链接预览卡片）。 */
+function realInviteRow (id) {
+  return '<div class="focusable-list-item" data-id="' + id + '" data-testid="conv-msg-' + id + '">' +
+    '<div data-testid="msg-container"><div class="copyable-text">' +
+    '<span class="selectable-text copyable-text" dir="ltr">Join this group https://chat.whatsapp.com/XXXXXXXX</span>' +
+    '<div data-testid="link-preview-container"><div data-testid="url-element">' +
+    '<div data-testid="link-preview-title"><span title="Join this group">Join this group</span></div>' +
+    '<button data-testid="group-invite-link-action" title="Join group">Join group</button>' +
+    '</div></div>' +
+    '<div data-testid="msg-meta"><span>3:25 PM</span></div>' +
+    '</div></div></div>'
+}
+
+/** 复刻真机整页：侧栏（含 Groups 筛选）+ #main（真头部 + 真消息行）。 */
+function waRealistic (subtitle, rows) {
+  const sidebar = '<div id="side"><div id="pane-side">' +
+    '<header data-testid="chatlist-header"><span>All</span><span>Unread</span><span>Favourites</span><span>Groups</span></header>' +
+    '<div data-testid="filter-button">Groups</div>' +
+    '<div data-testid="chat-list"><div data-testid="cell-frame-container"><span data-testid="cell-frame-title">Some Group</span></div></div>' +
+    '</div></div>'
+  return withInnerText(new JSDOM('<!doctype html><html><body>' + sidebar +
+    '<div id="main">' + realHeader(subtitle) + '<div data-testid="conversation-panel-messages">' +
+    rows.join('') + '</div></div></body></html>'))
+}
+
+test('★P0 真机回归★ 会话里有群邀请链接预览时，私聊绝不能被判成群', () => {
+  const rows = [realInviteRow('3EB0F866490405692F3C'), realInviteRow('3EB0DD27492B60B3EEAEB3')]
+  const d = waRealistic('Message yourself', rows)
+  const kind = chatKindOf(d.window.document)
+  assert.equal(kind.group, false,
+    '私聊里有群邀请链接 → 被 #main 内消息区的 group-invite-link-action 骗判成"群"（真机 P0）')
+  assert.equal(kind.evidence.headerMarker, false,
+    '头部才该被搜 group 字样；消息区的链接预览不算头部证据')
+  assert.equal(kind.evidence.sawCUs, false, '真机 data-id 是纯哈希，本来就不该出现 @c.us')
+  assert.equal(kind.evidence.sawGUs, false, '真机 data-id 是纯哈希，本来就不该出现 @g.us')
+})
+
+test('★P0 真机回归★ 上述私聊必须走自动翻译（用户要的行为），不能被群规则拦掉', () => {
+  const d = waRealistic('Message yourself', [realInviteRow('3EB0F866490405692F3C')])
+  const h = makeHarness(d.window.document, { transGroup: false })
+  h.scan()
+  assert.equal(h.stats.actions.auto, 1,
+    '私聊必须自动翻译，实际动作=' + JSON.stringify(h.stats.actions))
+  assert.equal(h.stats.actions.chip, undefined, '不该退化成手动「译」按钮')
+})
+
+test('消息区的 group 字样（链接预览/按钮/群名）一律不参与判定', () => {
+  const rows = [
+    realInviteRow('3EB0F866490405692F3C'),
+    '<div data-id="3EB0DD27492B60B3EEAEB3"><div data-testid="msg-container">' +
+    '<div class="copyable-text"><span class="selectable-text">Group members list</span></div>' +
+    '<div aria-label="Open group info"><span>1 member</span></div></div></div>'
+  ]
+  const d = waRealistic('online', rows)
+  assert.equal(chatKindOf(d.window.document).group, false,
+    '消息正文/预览里的 group、members 都不能把私聊判成群')
+})
+
+// ⚠ 待真机确认的启发式：这条不是"已验证的真机行为"，而是 0.1.24 新加的判据，
+// 需要真机跑一次群聊才能确认 WhatsApp 群的副标题确实长这样。若真机推翻，改这里而不是改代码绕过。
+test('（待真机确认）群聊正判候选：头部副标题是成员名单（You, Alice, Bob）→ 判群', () => {
+  const d = waRealistic('You, Alice, Bob', [realInviteRow('3EB0F866490405692F3C')])
+  const kind = chatKindOf(d.window.document)
+  assert.equal(kind.group, true, '群聊副标题是逗号分隔的成员名单，应判成群')
+  assert.equal(kind.evidence.memberList, true)
+  assert.equal(kind.evidence.source, 'header-member-list')
+})
+
+test('（待真机确认）群聊正判候选：头部副标题是「N members」→ 判群', () => {
+  const d = waRealistic('12 members', [])
+  const kind = chatKindOf(d.window.document)
+  assert.equal(kind.group, true, '副标题写 N members 应判成群')
+  assert.ok(/members/.test(kind.evidence.subtitleShape) || kind.evidence.memberList || kind.evidence.headerText,
+    '证据要能看出是成员数：' + JSON.stringify(kind.evidence))
+})
+
+test('（待真机确认）私聊正判候选：副标题是在线状态（online / last seen）→ 绝不判群', () => {
+  for (const sub of ['online', 'last seen today at 3:25 PM', 'click here for contact info']) {
+    const d = waRealistic(sub, [realInviteRow('3EB0F866490405692F3C')])
+    assert.equal(chatKindOf(d.window.document).group, false, '私聊在线状态被误判成群：' + sub)
+  }
+})
+
+test('真机 data-id 形状（纯哈希）下，私聊默认就是私聊（不靠 @c.us 兜底）', () => {
+  const d = waRealistic('online', [realInviteRow('3AA9E3543D377EB89684')])
+  const kind = chatKindOf(d.window.document)
+  assert.equal(kind.group, false)
+  assert.equal(kind.evidence.inMain, true, '确实读到了 #main（不是"没读到就默认私聊"）')
+  assert.equal(kind.evidence.source, 'none', '没有头部证据时应明确记为 none，别假装有证据')
+})
+
+test('判定只在头部搜 group 字样（源码锁：不许再出现扫整个 #main 的 group 选择器）', () => {
+  const at = guest.indexOf('function chatKind()')
+  const fn = guest.slice(at, guest.indexOf('function isGroupChat()', at))
+  assert.ok(fn.indexOf('header.querySelectorAll') > 0, '群标记必须限定在 header 内查找')
+  assert.ok(fn.indexOf("main.querySelector('[data-testid*=\"group\" i]") < 0,
+    '又出现了扫整个 #main 的 group 选择器 —— 群邀请链接会再次把私聊判成群')
 })

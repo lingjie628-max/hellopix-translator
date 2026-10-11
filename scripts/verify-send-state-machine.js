@@ -80,12 +80,11 @@ async function mount (o) {
     get () { return editor.model },
     set (v) { editor.model = String(v == null ? '' : v); nodeText.set.call(composer, editor.model) }
   })
-  doc.execCommand = (cmd, ui, value) => {
+  doc.execCommand = () => {
+    // 页面内改 DOM 的写入通道已被移除（0.1.19 根因）：恒返回 true 但**不生效**，
+    // 与真机一致（execCommand 返回 true 而正文原地不动）。
     editor.attempts++
-    editor.writes.push(String(value == null ? '' : value))
-    const accept = opts.editorHonorsWrite ? opts.editorHonorsWrite(editor.attempts) : true
-    if (accept) { editor.accepted++; editor.setModel(String(value == null ? '' : value)) }
-    return true   // 与真机一致：写没写进去都返回 true，失败静默
+    return true
   }
 
   // ---- 采集 trace ----
@@ -113,7 +112,20 @@ async function mount (o) {
   const translateCalls = []
   const ipc = {
     invoke: (channel, payload) => {
-      if (channel === 'translate:guestPrefs') return Promise.resolve(Object.assign({}, PREFS, opts.prefs || {}))
+      if (channel === 'translate:guestPrefs') return Promise.resolve(Object.assign({}, PREFS, { sendSettleMs: 0 }, opts.prefs || {}))
+      // 原生输入通道（0.1.19：唯一的写入方式）。
+      if (channel === 'translate:composerSelectAllDelete') {
+        editor.setModel('')
+        return Promise.resolve({ ok: true, focused: true })
+      }
+      if (channel === 'translate:composerInsertText') {
+        editor.attempts++
+        const value = String((payload && payload.text) || '')
+        editor.writes.push(value)
+        const accept = opts.editorHonorsWrite ? opts.editorHonorsWrite(editor.attempts) : true
+        if (accept) { editor.accepted++; editor.setModel(value) }
+        return Promise.resolve({ ok: true, chars: value.length })
+      }
       if (channel === 'translate:run') {
         translateCalls.push(payload)
         if (opts.fail === 'reject') return Promise.reject(new Error('socket hang up'))

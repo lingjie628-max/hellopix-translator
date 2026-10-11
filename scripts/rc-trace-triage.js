@@ -22,6 +22,26 @@ const TRACE_RE = /\[PIX_TRACE\]\s+(\w+)\s*(\{.*\})?\s*$/
 const MANUAL_ORDER = ['MANUAL_TRANSLATE_CLICK', 'SOURCE_EXTRACTED', 'TRANSLATE_STARTED', 'TRANSLATE_SUCCEEDED', 'TARGET_RELOCATED', 'TRANSLATION_RENDERED']
 /** 发送翻译（manual_send）的期望顺序。 */
 const SEND_ORDER = ['SEND_CAPTURED', 'NATIVE_SEND_BLOCKED', 'SOURCE_SNAPSHOTTED', 'TRANSLATE_STARTED', 'TRANSLATE_SUCCEEDED', 'INPUT_REPLACED', 'FINAL_TEXT_VALIDATED', 'PROGRAMMATIC_SEND_BEGIN', 'PROGRAMMATIC_SEND_DONE']
+/**
+ * 「Chromium 原生输入」链的期望顺序（0.1.19 起，发送翻译的唯一写入口）。
+ *
+ * 真机 0.1.18 把根因钉死在**事件可信性**上：页面内改 DOM（execCommand /
+ * textContent）产生的是 untrusted 事件，WhatsApp/Lexical 在捕获阶段直接过滤掉，
+ * EditorState 从未更新 → 下一次调和把正文盖回原文 → BODY_MISMATCH。
+ *
+ * 0.1.19 改为从 Electron 主进程发 Chromium 原生编辑命令，事件是 trusted 的，
+ * 编辑器必须认。这条顺序一旦完整，就证明写入真的进了编辑器输入管线。
+ * 只要日志里出现过 NATIVE_INPUT_BEGIN，就按这条顺序要求（缺失即断点）。
+ */
+const NATIVE_ORDER = ['NATIVE_INPUT_BEGIN', 'COMPOSER_CLEARED', 'NATIVE_TEXT_INSERTED', 'LEXICAL_SETTLED', 'INPUT_REPLACED', 'FINAL_TEXT_VALIDATED', 'PROGRAMMATIC_SEND_BEGIN', 'PROGRAMMATIC_SEND_DONE']
+/**
+ * 「重试翻译」的期望顺序（0.1.17 起）。
+ *
+ * 真机 P0-1：翻译异常 → 点「重试翻译」→ 最终「重试失败」。所以重试必须能被
+ * 单独分诊：从 RETRY_TRANSLATE_CLICK 一路走到 PROGRAMMATIC_SEND_DONE，
+ * 中间任何一环断掉都能指出是哪一步。
+ */
+const RETRY_ORDER = ['RETRY_TRANSLATE_CLICK', 'RETRY_TRANSLATE_RESULT']
 
 /**
  * 事件名归一化。
@@ -104,7 +124,10 @@ function chainOf (list) {
       n === 'TRANSLATION_RENDERED' || n === 'TRANSLATION_RENDER_TARGET_MISSING' ||
       n === 'MESSAGE_TEXT_EXTRACTION_FAILED')) return 'manual_click'
   if (names.some(n => n.startsWith('SEND_') || n === 'SOURCE_SNAPSHOTTED' ||
-      n === 'INPUT_REPLACED' || n === 'FINAL_TEXT_VALIDATED' ||
+      n === 'INPUT_REPLACED' || n === 'INPUT_REWRITTEN' || n === 'FINAL_TEXT_VALIDATED' ||
+      n === 'RETRY_TRANSLATE_CLICK' || n === 'RETRY_TRANSLATE_RESULT' ||
+      n === 'NATIVE_INPUT_BEGIN' || n === 'COMPOSER_CLEARED' ||
+      n === 'NATIVE_TEXT_INSERTED' || n === 'LEXICAL_SETTLED' ||
       n === 'PROGRAMMATIC_SEND_BEGIN' || n === 'PROGRAMMATIC_SEND_DONE')) return 'manual_send'
   return null
 }
@@ -150,10 +173,17 @@ function judgeManual (list) {
   if (has('TRANSLATION_RENDER_TARGET_MISSING')) {
     return { verdict: '✖ 译文生成了但没渲染', reason: '翻译成功后按 key 找不到气泡（或宿主不是消息气泡）—— 本轮起**宁可不显示也不画到聊天根节点**', code: 'TRANSLATION_RENDER_TARGET_MISSING' }
   }
+  if (has('TRANSLATION_RENDER_UNVERIFIED')) {
+    return { verdict: '✖ 译文没挂进气泡', reason: '绘制后的硬校验没过：译文节点不在原消息行内 —— 已拒绝显示并标失败（不会画到页面底部）', code: 'TRANSLATION_RENDER_UNVERIFIED' }
+  }
   if (has('TRANSLATION_RENDERED')) {
     const p = get('TRANSLATION_RENDERED').payload || {}
     if (p.drew === false) {
       return { verdict: '⚠ 渲染被判为无需显示', reason: '译文与原文一致 / 被判定为图标噪音 —— 按钮保留为失败态，不会「点一下按钮没了」', code: '' }
+    }
+    const reloc = get('TARGET_RELOCATED')
+    if (reloc && reloc.payload && reloc.payload.textMatches === false) {
+      return { verdict: '⚠ 已渲染，但目标正文不一致', reason: '按路径命中的正文与点击时捕获的不完全一致（可能被 WhatsApp 重绘）。译文已落在原消息行内，但值得复核', code: 'TEXT_MISMATCH' }
     }
     return { verdict: '✔ 成功', reason: '点击 → 提取 → 请求 → 响应 → 重定位 → 渲染 全链路走通', code: '' }
   }
@@ -163,11 +193,50 @@ function judgeManual (list) {
 function judgeSend (list) {
   const names = list.map(e => e.event)
   const has = n => names.includes(n)
+  // 「重试翻译」是独立的一次发送动作，必须单独判定 ——
+  // 真机 P0-1 就是死在这条链上，不能被当成普通的 manual_send 混过去。
+  if (has('RETRY_TRANSLATE_CLICK')) {
+    const result = list.find(e => e.event === 'RETRY_TRANSLATE_RESULT')
+    if (!result) {
+      return { verdict: '△ 重试链断在半路', reason: '点了「重试翻译」但缺少 ' + RETRY_ORDER.filter(n => !has(n)).join(' / ') + ' —— 停在 ' + names[names.length - 1] + '，那一步就是断点', code: names[names.length - 1] }
+    }
+    const p = result.payload || {}
+    if (p.ok === true) {
+      return { verdict: '✔ 重试成功', reason: '「重试翻译」→ 重翻 → 原生输入写回 → 正文校验 → 程序化发送 全链路闭环' + (has('NATIVE_INPUT_BEGIN') ? '（走的是 Chromium 原生输入链，0.1.19 起）' : (has('INPUT_REWRITTEN') ? '（含一次"正文被还原后就地重写"自愈，0.1.18 起）' : '')), code: '' }
+    }
+    return { verdict: '⛔ 重试仍然失败', reason: '这一下又没成。真实原因见右列错误码（本轮起不再用统一的「重试失败」掩盖）', code: p.code || 'UNKNOWN' }
+  }
   if (has('SEND_FAIL_CLOSED')) {
     return { verdict: '⛔ fail-closed 拦下（未发出任何内容）', reason: '原因见右列。这是**正确**行为，但要确认用户看到了提示', code: (list.find(e => e.event === 'SEND_FAIL_CLOSED').payload || {}).reason || '' }
   }
   if (has('SEND_BLOCKED_BUSY_MARK') || has('SEND_BLOCKED_BODY_MISMATCH')) {
-    return { verdict: '⛔ 发送前复核发现问题，已拦下', reason: '正文里有占位符或不等于预期 —— 至少没有把脏内容发出去', code: names.find(n => n.startsWith('SEND_BLOCKED')) }
+    // 0.1.18：BODY_MISMATCH 必须带上**差在哪**，否则真机还是只能看到"状态异常"。
+    const detail = list.find(e => e.event === 'SEND_BODY_MISMATCH_DETAIL')
+    let why = '正文里有占位符或不等于预期 —— 至少没有把脏内容发出去'
+    if (detail && detail.payload) {
+      const d = detail.payload
+      why = '回读正文与预期译文（canonical 化之后）仍不一致：首个差异位=' + d.firstDiffCanonical +
+        '，预期 len=' + ((d.expected || {}).len) + ' hash=' + ((d.expected || {}).hash) +
+        '，实际 len=' + ((d.actual || {}).len) + ' hash=' + ((d.actual || {}).hash) +
+        '，写入方式=' + d.writeMethod + '，input 事件=' + d.sawInput +
+        '。canonical 前：预期=' + JSON.stringify(d.expectedCanonical) + ' 实际=' + JSON.stringify(d.actualCanonical)
+    }
+    return { verdict: '⛔ 发送前复核发现问题，已拦下', reason: why, code: names.find(n => n.startsWith('SEND_BLOCKED')) }
+  }
+  // ★ 0.1.19：只要走了原生输入链，就按**原生顺序**判定完整性 ★
+  //   （原生事件是否 trusted、编辑器是否认，是这一轮的唯一命门）
+  if (has('NATIVE_INPUT_BEGIN')) {
+    const missing = NATIVE_ORDER.filter(n => !has(n))
+    if (!missing.length) {
+      const settled = list.find(e => e.event === 'LEXICAL_SETTLED')
+      const sp = (settled && settled.payload) || {}
+      const drift = Array.isArray(sp.driftSamples) ? sp.driftSamples : []
+      if (sp.stable === false || drift.some(s => s && s.equal === false)) {
+        return { verdict: '⛔ 原生写入后正文仍在漂移', reason: 'Lexical 在观察窗内把正文改掉了（漂移采样里出现 equal:false）—— 正是 0.1.18 的病症，本轮应已消失；若复现请立刻回报', code: 'LEXICAL_DRIFT' }
+      }
+      return { verdict: '✔ 成功', reason: '原生输入链完整（BEGIN → 清空 → 插入 → 沉降 → 校验 ok → 发送），编辑器认可、正文无漂移', code: '' }
+    }
+    return { verdict: '△ 原生输入链断在半路', reason: '缺：' + missing.join(' / ') + ' —— 停在 ' + names[names.length - 1] + '，那一步就是断点', code: names[names.length - 1] }
   }
   const order = SEND_ORDER.filter(n => has(n))
   if (order.length === SEND_ORDER.length) {

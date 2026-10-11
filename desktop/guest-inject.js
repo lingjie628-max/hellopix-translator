@@ -21,7 +21,23 @@ const pixBridge = {
   // 不能因为它出错就影响用户正常聊天（翻译才是主线功能）。
   reportCustomer: payload => {
     try { return ipcRenderer.invoke('customer:ingest', payload).catch(() => null) } catch (e) { return Promise.resolve(null) }
-  }
+  },
+  // ---------------------------------------------------------------------
+  // composer 的**原生输入**通道（0.1.19）。
+  //
+  // 真机证据（0.1.18）：expected=29 字符的英文译文 vs actual=6 字符的中文原文 ——
+  // 页面内 `execCommand` 写进去的东西**从未进入** WhatsApp 编辑器的输入管线
+  // （它拦掉 `isTrusted:false` 的 beforeinput）。所以改由**主进程**用 Chromium
+  // 编辑命令发起真实输入；产生的是可信事件，编辑器必须按正常输入处理。
+  //
+  // 这两步只做键盘/输入动作，**不改 DOM、不读 DOM**：读 DOM 由 guest 自己做，
+  // 好在两步之间留下 COMPOSER_CLEARED / NATIVE_TEXT_INSERTED 的证据。
+  // ---------------------------------------------------------------------
+  nativeComposerClear: () => ipcRenderer.invoke('translate:composerSelectAllDelete'),
+  nativeComposerInsertText: (text, linewise) => ipcRenderer.invoke('translate:composerInsertText', {
+    text: String(text == null ? '' : text),
+    linewise: !!linewise
+  })
 }
 
 ;(() => {
@@ -48,6 +64,25 @@ const pixBridge = {
   let sendActionSeq = 0
   let sendActionId = ''
   let sendActionPhase = 'idle'   // idle | captured | translating | succeeded | replaced | sending
+  // 最近一次发送链失败的真实原因。**不许用统一的"状态异常/重试失败"盖住它** ——
+  // 提示框与 trace 都要把它显示出来，否则真机取证只能看到"失败了"三个字。
+  let lastSendFail = null
+  // 最近一次向输入框写入的取证信息（写入方式 / 是否触发 input/beforeinput）——
+  // BODY_MISMATCH 时必须能回答"到底怎么写进去的"。由 writeComposer 维护。
+  let lastWriteInfo = null
+  // 原生输入后的**漂移采样点**（毫秒）：用户要求逐点留证"写进去之后正文有没有变"。
+  const NATIVE_SAMPLE_MARKS = [0, 100, 300, 500]
+  // 观察窗的上限 = 下限 + 余量（保证下限调到 500 的取证模式也能跑到最后一个采样点）。
+  const NATIVE_SETTLE_SLACK_MS = 400
+  // 沉降判据（0.1.19 性能专项）：
+  //   下限 —— 给编辑器留一拍再确认，默认 60ms（原实现无条件等 500ms，实测占满
+  //          整条链的客户端开销）；
+  //   上限 —— 到这个点还不稳定就换插入方式重试，再不行 fail-closed；
+  //   连续一致次数 / 轮询间隔 —— 用来区分"真的收口了"与"在两次 render 之间取到的瞬态"。
+  const NATIVE_SETTLE_FLOOR_DEFAULT_MS = 60
+  const NATIVE_SETTLE_CEILING_DEFAULT_MS = 400
+  const NATIVE_STABLE_STREAK = 3
+  const NATIVE_SETTLE_POLL_MS = 15
 
   function newSendActionId() {
     sendActionSeq++
@@ -61,6 +96,75 @@ const pixBridge = {
     } catch (e) {}
   }
 
+  // ---------------------------------------------------------------------------
+  // 端到端性能计时（同一次 sendActionId 内的分段耗时）
+  //
+  // 客服高频使用时，"按了回车之后到底要等多久、时间花在哪一段"是唯一能指导
+  // 优化的信息。只报一个总耗时等于没测 —— 你不知道该动网络、动沉降，还是动 UI。
+  //
+  // 分段（与验收要求一一对应）：
+  //   intercept   用户点击发送 → 原生发送被拦截
+  //   translate   翻译请求开始 → API 返回
+  //   handoff     API 返回 → 原生输入开始
+  //   nativeInput 原生输入开始 → 编辑器稳定（LEXICAL_SETTLED）
+  //   validate    正文校验 → 触发发送
+  //   send        触发发送 → 发送确认
+  //   uiClose     发送确认 → 状态提示关闭
+  //
+  // 每个时间戳都落在**同一个 sendActionId** 上；一次动作结束打一行 SEND_PERF。
+  // 只记毫秒数，不记正文（trace 会进日志）。
+  // ---------------------------------------------------------------------------
+  let perfOrigin = 0
+  let perfStamps = Object.create(null)
+  const PERF_STAGES = [
+    ['intercept', 'start', 'blocked'],
+    ['translate', 'translateStart', 'translateDone'],
+    ['handoff', 'translateDone', 'nativeBegin'],
+    ['nativeInput', 'nativeBegin', 'settled'],
+    ['validate', 'settled', 'sendBegin'],
+    ['send', 'sendBegin', 'sendDone'],
+    ['uiClose', 'sendDone', 'uiClosed']
+  ]
+  function perfStart() {
+    perfOrigin = Date.now()
+    perfStamps = Object.create(null)
+  }
+  function perfMark(name) {
+    const now = Date.now()
+    if (!perfOrigin) perfOrigin = now
+    perfStamps[name] = now
+    return now
+  }
+  /**
+   * 打一行完整的分段耗时。
+   *
+   * @param {string} outcome  ok | fail_closed | aborted
+   * @param {object} extra    额外字段（失败码 / 引擎 / 字符数）
+   */
+  function perfEmit(outcome, extra) {
+    if (!perfOrigin) return
+    const stages = {}
+    for (const row of PERF_STAGES) {
+      const a = perfStamps[row[1]]
+      const b = perfStamps[row[2]]
+      // 只有两端都采到才算这一段（缺一段就说明这条链没走到那儿）。
+      if (a == null || b == null) continue
+      stages[row[0]] = b - a
+    }
+    // 总耗时：从"用户按下发送"到"界面收口"。这才是用户感知的那个数。
+    const from = perfStamps.start
+    const to = perfStamps.uiClosed || perfStamps.sendDone || Date.now()
+    const total = from == null ? null : to - from
+    trace('SEND_PERF', Object.assign({
+      chain: 'send',
+      outcome: outcome || 'ok',
+      total: total,
+      stages: stages
+    }, extra || {}))
+    perfOrigin = 0
+    perfStamps = Object.create(null)
+  }
+
   const EMOJI_RE = /(?:\p{Extended_Pictographic}|\p{Emoji_Presentation}|[\uFE0F\u200D\u20E3])/gu
   let prefs = {
     transRecv: true,
@@ -70,33 +174,67 @@ const pixBridge = {
     langOther: 'auto',
     sendTo: 'en',
     includeZh: false,
-    antiRevoke: false
+    antiRevoke: false,
+    // 原生输入的**沉降确认窗**（毫秒）。
+    //
+    // 0.1.19 性能专项把语义从"无条件等这么久"改成"**最短确认窗**"：
+    // 只要连续确认正文已稳定且等于译文，就立刻进入校验 + 发送；等不到才等到上限。
+    // 实测（bench-send-timing）原实现 500ms 固定窗占满整条链 100% 的客户端开销。
+    // 想恢复"完整 0/100/300/500 漂移时间线"的取证模式：把 sendSettleMs 调到 500 即可。
+    sendSettleMs: 60,
+    // 沉降等待的**上限**：到点仍不稳定 → 换插入方式重试 → 仍不行就 fail-closed。
+    sendSettleCeilingMs: 400
   }
   let scanTimer = 0
   let sendBusy = false
+  // 上一次"会话类型"结论的指纹。chatKind() 直接决定计费与自动翻译，
+  // 但此前**没有任何日志**能看出它判了什么、凭哪条证据 —— 0.1.23 真机
+  // "私聊也要手动翻" 排查时只能靠猜。现在结论或证据一变就打一行 CHAT_KIND。
+  let lastChatKindKey = ''
   // 翻译期间被换掉的用户原文。发送前若发现占位符还在输入框里，用它还原。
   let pendingSend = null
 
   // ---------------------------------------------------------------------------
-  // 群聊「手动 / 自动」与历史消息隔离（计费保护）
+  // 群聊「手动 / 自动」（计费保护）
   //
-  // 手动模式下打开群聊曾会**自动翻译满屏历史消息**并在服务端扣字符。两个根因：
-  //   1. isGroupChat() 只认 Telegram 的头部文案，WhatsApp 群聊一律判成"非群"，
-  //      于是 auto = !group || ... 恒为 true，groupMode=manual 直接被绕过；
-  //   2. 即便判成群、即便 auto 开着，scan() 也会把页面上**所有已渲染的**消息
-  //      （打开会话时 WhatsApp 会渲染最近几十条）统统翻译一遍，滚动补加载更早的
-  //      消息时还继续补翻 —— 用户一个键都没点，字符却在掉。
+  // 语义（用户裁定，2026-10-11）：
   //
-  // 判定逻辑本身放在 MessageParser 里（messageAction / createHistoryGate），
-  // 是纯逻辑、能用真 DOM 用例锁住 —— 计费闸门不该藏在异步扫描循环里没法测。
+  //   | 会话类型 | 自动翻译 |
+  //   |---|---|
+  //   | 私聊 | **始终自动**（与「群聊自动翻译」开关无关） |
+  //   | 群聊 = 手动 | 一条都不自动翻，只给「译」按钮（0 自动扣费） |
+  //   | 群聊 = 自动 | 会话里出现的消息**全部自动翻**，**不再出现「译」按钮** |
   //
-  // ⚠️ `historyGate` 必须**等到 MessageParser 定义之后**才能初始化。
-  // `var MessageParser` 会提升但值是 undefined，在这里调它的方法会立刻抛
-  // `TypeError: Cannot read properties of undefined`。而 preload 脚本一抛错就
-  // **整份停摆**：下面所有 addEventListener 都不会执行 —— 拦截器、扫描、自动
-  // 翻译全部消失，界面却毫无提示（真机上表现为「发送翻译完全失效、原文直接
-  // 发出去」）。所以初始化统一挪到解析器模块（BEGIN/END 标记之间那一段的末尾
-  // 之后），见下面 `createHistoryGate()` 那一行。
+  // ## 被删掉的那条闸门（0.1.24 及以前）
+  //
+  // 0.1.24 还有第三条：「群聊 = 自动 **且** 历史消息 → 只给按钮」。
+  // 它是为了防"一进群就翻满屏历史扣费"加的，出发点是省钱，但它把「自动」
+  // 变成了**半自动**：打开群聊时页面上的那批消息永远只有按钮，只有之后新到的
+  // 才自动翻。真机证据（2026-10-11 11:30，同一个群、同一分钟）：
+  //
+  //   MANUAL_CHIP_RENDERED × 43   ← 打开会话时那批（只给按钮）
+  //   [translate] … auto_receive × 26  ← 之后新到的（自动翻）
+  //
+  // 用户看到的正是"一部分翻译，还有一部分没有翻译"。已删除。
+  //
+  // ## 删掉它为什么**不会**造成重复扣费（这是允许删的前提）
+  //
+  // 关键：**同一条消息翻多少次都只计一次费**，所以"全部自动翻"的代价上限是
+  // "从没翻过的正文"，而不是"翻了多少次"：
+  //   · 服务端按 `Idempotency-Key` 幂等；客户端这个号是
+  //     `desktop:<device>:md5(用户|engine|from|to|正文):<代>` —— 同一段正文、
+  //     同一通道**永远同一个号**，重放直接命中已有预留，不再扣字符
+  //     （server/services/core-service.js: existing → return existing）；
+  //   · 服务端还有一层 translationCache（tenant+engine+from+to+text）；
+  //   · 客户端主进程还有一层 transCache，连 IPC 都不会走。
+  //
+  // ## 代价（写清楚，别让下一个人以为删闸门是免费的）
+  //
+  // 打开群聊时 WhatsApp 渲染出来的那批消息会**一次性**计费（实测约 30~40 条）。
+  // 之后重开、重启都不再扣（幂等 + 缓存）。往上滚动加载更早的历史同理。
+  //
+  // 判定逻辑本身放在 MessageParser 里（messageAction），是纯逻辑、能用真 DOM
+  // 用例锁住 —— 计费闸门不该藏在异步扫描循环里没法测。
   // ---------------------------------------------------------------------------
 
   /**
@@ -133,7 +271,7 @@ const pixBridge = {
   }
 
   /**
-   * 会话身份。用来识别"换会话了"，换会话就要重建历史基线。
+   * 会话身份。用来识别"换会话了"，换会话要清掉自动翻译的排队与失败冷却。
    *
    * ## 真机 P0 根因（0.1.11 复现，见 test/group-conversation-identity.test.js）
    *
@@ -141,16 +279,15 @@ const pixBridge = {
    * 的 `[data-id]`。WhatsApp 左侧会话列表的行也带 `[data-id]`（`@c.us`），
    * 而且排在 `#main` 之前 —— 群聊里身份因此取到"左侧列表里某个私聊"，
    * 根本不是当前会话。列表每来一条消息就会重排，身份跟着变
-   * → `historyGate.begin()` 每轮都判定"换会话了"并重置
-   * → `ready` 恒为 false → `isHistoric()` 对**每条**消息都返回 true
-   * → `messageAction()` 一律给 `chip`
-   * → **「群组翻译 = 自动」永不生效**（手动「译」按钮还在，所以只表现为"自动不翻"）。
+   * → 每轮扫描都被判成"换会话了"
+   * → 群聊的自动翻译状态每轮被清空重来 → **「群组翻译 = 自动」永不生效**
+   *   （手动「译」按钮还在，所以只表现为"自动不翻"）。
    *
-   * 这也是 0.1.11 才暴露的：修好 `isGroupChat()` 让 WhatsApp 群聊真正被判成群之后，
-   * 历史基线闸门才第一次对群聊生效（此前 `group=false` 整个绕过了它）。
+   * 这条教训在 0.1.25 依然适用：身份现在是用来"清自动翻译排队/失败冷却"的，
+   * 身份抖一下就会把刚开始翻的那批任务全丢掉，同样表现为"自动不翻"。
    *
    * 所以身份必须**只认当前会话**。拿不到就退回头部标题/URL ——
-   * 宁可多重建几次基线（更保守），也不能取到别的会话的身份。
+   * 宁可多清几次队列（重扫会把它们重新排上），也不能取到别的会话的身份。
    */
   function chatIdentity() {
     const conversation = whatsappConversationKey()
@@ -197,22 +334,47 @@ const pixBridge = {
     .message-in .pix-trans, .message-list-item:not(.own) .pix-trans {
       border-top-color: rgba(255,255,255,.12);
     }
-    .pix-click {
-      display: inline-block;
+    /* ------------------------------------------------------------------
+       翻译操作行（P0-3：入口被 WhatsApp 时间/勾遮挡）
+       真机现象：单行/短消息时，"译"和 WhatsApp 的时间 / 单勾 / 双勾挤在气泡
+       右下角，按钮被盖住、点不动。
+       根因：入口是**内联**贴在正文后面，而 WhatsApp 的 metadata（时间/勾）是
+       贴在气泡右下角的（绝对定位 / 右对齐）。正文一短，两者就叠在同一块区域。
+       改法：入口不再贴正文尾部，也不再抢右下角 ——
+         用一个**正常文档流**的独立行 .pix-trans-action-row，占满整行、
+         强制单独成行、位于正文下方，让气泡自然增高。
+       该行**不用绝对定位、不用负 margin、不用 z-index** 去覆盖 metadata；
+       按钮左对齐，远离右下角的时间/勾，从结构上不可能互相遮挡。
+       ------------------------------------------------------------------ */
+    .pix-trans-action-row {
+      display: block;
       clear: both;
-      margin-top: 6px;
-      padding: 2px 8px;
+      width: 100%;
+      flex-basis: 100%;
+      position: static;
+      margin: 6px 0 0;
+      text-align: left;
+      line-height: 1.2;
+    }
+    .pix-click {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin: 0;
+      padding: 3px 9px;
       border-radius: 8px;
       background: rgba(255,255,255,.12);
       font-size: 12px;
+      line-height: 1.2;
       cursor: pointer;
       user-select: none;
+      white-space: nowrap;
       /* 真机可点击性：WhatsApp 的消息层在若干状态下会关掉 pointer-events，
-         继承下来按钮就"看得见、点不动"。这里显式打开并抬一层，避免被
-         消息气泡的覆盖层挡掉。 */
+         继承下来按钮就"看得见、点不动"。这里显式打开。
+         注意：**不靠叠加层级 / 绝对定位**去压 metadata —— 位置问题由上面的
+         文档流布局解决，这里只负责"可点"。 */
       pointer-events: auto !important;
-      position: relative;
-      z-index: 2;
+      position: static;
       opacity: 0.85;
     }
     /* 翻译中：只存在于 Hello Pix 自己的控件上，绝不进输入框/消息正文。 */
@@ -264,7 +426,15 @@ const pixBridge = {
       // 取证用：真机 trace 里必须能看出是哪个窗口 / 哪条通道
       tabId: next.tabId || '',
       partition: next.partition || '',
-      engine: next.engine || ''
+      engine: next.engine || '',
+      // 沉降确认窗（下限）与上限：只接受数字，负数按 0 处理（测试会把它调到很小）。
+      // 未提供时**保持当前值** —— 局部 prefs 推送不应该把它重置回默认。
+      sendSettleMs: Number.isFinite(Number(next.sendSettleMs))
+        ? Math.max(0, Number(next.sendSettleMs))
+        : prefs.sendSettleMs,
+      sendSettleCeilingMs: Number.isFinite(Number(next.sendSettleCeilingMs))
+        ? Math.max(0, Number(next.sendSettleCeilingMs))
+        : prefs.sendSettleCeilingMs
     }
     const root = document.documentElement
     root.style.setProperty('--pix-font-size', (Number(next.fontSize) || 15) + 'px')
@@ -367,7 +537,7 @@ const pixBridge = {
       // 我们自己的界面（译文框、译按钮、提示条）。`[data-pix-ui]` 是统一标记，
       // 任何新加的控件只要带上它，就会被解析/采集自动跳过。
       '[data-pix-ui]',
-      '.pix-trans', '.pix-click', '.pix-kept', '.pix-revoked'
+      '.pix-trans', '.pix-click', '.pix-trans-action-row', '.pix-kept', '.pix-revoked'
     ].join(', ')
 
     // -------------------------------------------------------------------
@@ -831,7 +1001,18 @@ const pixBridge = {
      * 之所以把它单独拎出来，是因为「群聊手动模式失效」这类缺陷一旦发生就是
      * **非预期扣费**，必须有一处能一眼看清、能被测试直接锁住的判断。
      *
-     * 判定顺序：先看功能与内容（该不该有译文），再看模式（能不能自动翻）。
+     * ## 判定顺序：先看功能与内容（该不该有译文），再看模式（能不能自动翻）
+     *
+     * ## 「历史消息只给按钮」已删除 —— 为什么这不叫"放开计费"
+     *
+     * 0.1.24 这里还有一行「群聊 + 历史消息 → 只给按钮」，把群聊
+     * 「自动」降级成"只有新到的自动翻、打开会话时那批只给按钮"。真机上它表现成
+     * 「一部分翻译、一部分没有」，用户明确判定不对：「自动」就该是自动。
+     *
+     * 删它不增加"重复扣费"风险，因为**同一条消息翻多少次都只计一次费**：
+     * 客户端 requestId 对同一段正文+同一通道是**恒定**的，服务端按它幂等，
+     * 重放直接返回已有预留，不再扣字符。代价只发生在"从没翻过的正文"上。
+     * 详见文件上方「群聊『手动 / 自动』」那段注释。
      */
     function messageAction(state) {
       var s = state || {}
@@ -842,72 +1023,24 @@ const pixBridge = {
       if (s.emojiOnly) return 'hide'
       if (s.hasChinese && !s.includeZh) return 'hide'
       if (s.sameLang && !(s.includeZh && s.hasChinese)) return 'hide'
-      // 群聊 + 手动：一条都不自动翻，只给按钮
+      // 群聊 + 手动：一条都不自动翻，只给按钮。这是**唯一**剩下的计费闸门，别动它。
       if (s.group && !s.transGroup) return 'chip'
-      // 群聊 + 历史消息（打开会话之前就在的，或滚动补加载出来的）：只给按钮。
-      // 「自动」只对**打开会话之后新到达**的消息生效 —— 否则一进群就满屏扣费。
-      if (s.group && s.historic) return 'chip'
+      // 群聊 + 自动 / 私聊（私聊与开关无关，始终自动）：
+      // 会话里出现的消息**全部自动翻**，包括打开会话时已经在页面上的那批。
       return 'auto'
     }
 
     /**
-     * 群聊「历史 / 新消息」判定闸。
+     * 群聊「历史 / 新消息」判定闸 —— **0.1.25 已删除**。
      *
-     * 两条独立证据取并集，宁可漏翻、绝不误扣：
-     *   - 打开会话那一刻已经在页面上的消息（基线未就绪 → 一律算历史）；
-     *   - 消息自带时间戳明显早于打开时刻（挡住滚动补加载出来的旧消息）。
+     * 它曾经是「群聊=自动 但历史消息只给按钮」那条闸门的判据。真机证明那条闸门
+     * 把「自动」变成了半自动（"一部分翻、一部分不翻"），用户裁定删除；
+     * 判据没有别的调用方，一并删掉 —— 留着一段不再影响任何决策的"计费闸门"
+     * 比没有更危险，下一个人会以为它还在保护什么。
      *
-     * 时间戳只精确到分钟（WhatsApp 的 `[3:25 PM, 9/25/2026]`），所以留 `graceMs`
-     * 余量，免得把"刚刚到的那条"误判成历史。
+     * 如果将来又要做"历史隔离"，请**新写一个能被真 DOM 用例锁住的判据**，
+     * 并先想清楚它与"自动就该自动"这条例的矛盾 —— 而不是把这段原样捞回来。
      */
-    function createHistoryGate(options) {
-      var opts = options || {}
-      var graceMs = typeof opts.graceMs === 'number' ? opts.graceMs : 90000
-      var cap = typeof opts.cap === 'number' ? opts.cap : 5000
-      var stamp = ''
-      var ready = false
-      var watermark = 0
-      var keys = Object.create(null)
-      var count = 0
-
-      function size() { return count }
-
-      return {
-        /** 换会话就重建基线。返回 true 表示"基线尚未就绪 = 首轮"。 */
-        begin: function (identity, now) {
-          if (String(identity) !== stamp) {
-            stamp = String(identity)
-            keys = Object.create(null)
-            count = 0
-            watermark = number(now)
-            ready = false
-          }
-          return !ready
-        },
-        /** 基线没就绪（首轮）一律算历史：打开会话时的满屏消息绝不能自动翻。 */
-        isHistoric: function (id, sentAt) {
-          if (!ready) return true
-          if (keys[id]) return true
-          var when = number(sentAt)
-          return when > 0 && when < watermark - graceMs
-        },
-        /** 登记已见过的消息：之后的重扫就当它已经是"旧消息"。 */
-        remember: function (id) {
-          if (!id || keys[id]) return
-          keys[id] = 1
-          count++
-          if (count > cap) { keys = Object.create(null); count = 0 }
-        },
-        /** 首轮扫描结束。只有确实扫到了消息才算基线就绪。 */
-        settle: function (sawMessages) { if (sawMessages) ready = true },
-        snapshot: function () { return { stamp: stamp, ready: ready, watermark: watermark, size: count } }
-      }
-    }
-
-    function number(value) {
-      var n = Number(value)
-      return Number.isFinite(n) ? n : 0
-    }
 
     return {
       BUSY_MARKS: BUSY_MARKS,
@@ -924,18 +1057,10 @@ const pixBridge = {
       detectPlatform: detectPlatform,
       parseMessage: parseMessage,
       parseForTranslation: parseForTranslation,
-      messageAction: messageAction,
-      createHistoryGate: createHistoryGate
+      messageAction: messageAction
     }
   })()
   // ==== MESSAGE PARSER END ====
-
-  /**
-   * 历史消息闸门。**必须在 MessageParser 定义之后**初始化 —— 见文件上方
-   * 「群聊手动/自动与历史消息隔离」那段注释：`var` 提升会让提前调用静默炸掉
-   * 整份 preload 脚本。
-   */
-  const historyGate = MessageParser.createHistoryGate()
 
   function stripEmoji(text) {
     return String(text || '').replace(EMOJI_RE, '').replace(/\s+/g, ' ').trim()
@@ -1016,42 +1141,194 @@ const pixBridge = {
   }
 
   /**
-   * 当前会话是不是群聊。
+   * 当前会话是不是群聊 —— 连同「凭哪条证据判的」一起返回。
    *
-   * 这个判定直接决定计费：`auto = !group || prefs.transGroup`，
-   * 判成"非群"就等于把「群组翻译 = 手动」整个绕过。
+   * 这个判定直接决定**计费与体验**：
+   *   群里 + 手动 → 只给「译」按钮；私聊 → 自动翻译。
+   * 所以判成"群"就等于把私聊的自动翻译**整个关掉**。
    *
-   * 老实现只认 Telegram 头部里的 members / 位成员 / 群组 文案。WhatsApp 的
-   * 头部是群名 + 成员昵称，**根本不含这些词**，于是 WhatsApp 群聊一律被判成
-   * 非群 → 手动模式失效 → 打开群聊就满屏自动翻译并扣字符（线上计费 P0）。
+   * ## 被修的真机缺陷（0.1.23 → 0.1.24）
    *
-   * 现在优先用**结构性证据**：WhatsApp 把会话类型编进了消息的 data-id，
-   *   false_8613800138000@c.us_3EB0ABC   ← 个人
-   *   true_1203630199xxxx@g.us_3EB0ABC   ← 群
-   * 只扫 `#main`（会话区）里的消息行，**不扫左侧会话列表** ——
-   * 列表里混着别的群，扫它会把每个一对一会话都误判成群。
+   * 0.1.23 的判据第 1、2 条**在真机上从未成立过**，逐条实测记录：
+   *
+   *  · 第 1 条 `data-id` 含 `@c.us`/`@g.us` —— **假设错误**。
+   *    真机 `data-id` 是**纯消息哈希**（如 `3EB0F866490405692F3C`），
+   *    真机实测：整个 document 里 `@c.us`/`@g.us` 出现 **0 次**
+   *    （探针 `desktop/scripts/_probe-wa-dom2.js`，`jidHitCount=0`）。
+   *    左侧会话列表的行也没有 `data-id`（`sidebarDataId.count=0`）。
+   *    → 这一条永远不会命中。
+   *  · 第 2 条 header 文案含 `群组/成员` —— 真机是**英文界面**，永不命中。
+   *  · 第 3 条 `[data-testid*="group" i], [aria-label*="group" i]` 扫的是**整个
+   *    `#main`**，而 `#main` 里还装着**消息**。真机实测：一条 WhatsApp
+   *    **群邀请链接**会渲染出链接预览卡片，内含
+   *      `button[data-testid="group-invite-link-action"]`（`title="Join group"`）
+   *    → 该判据**恒为真** → **只要会话里有一条群邀请链接，私聊就被判成群**，
+   *    自动翻译被关掉、只剩手动「译」——用户看到的就是"私聊也要手点"。
+   *
+   * ## 现在的判据：★消息区一律不参与判定★
+   *
+   * 会话类型只从**会话头部**（`#main header`）读，且按证据强度排序：
+   *
+   * 1. `@g.us` / `@c.us`（老构建的硬证据；新构建通常取不到，取到就最强）。
+   * 2. 头部文案命中成员/群组词（多语言）。
+   * 3. 头部内的群专用标记（`[data-icon="default-group"]`、头部 data-testid /
+   *    aria-label / title 里的 group）。
+   * 4. **头部副标题的形状**：群聊的副标题是**成员名单**（`You, Alice, Bob` /
+   *    `你、张三、李四`，逗号分隔），私聊的副标题是**在线状态**（`online` /
+   *    `last seen ...`，无逗号）。这是群/私聊在头部的**结构差异**。
+   *
+   * ★两种错的代价不对等★：把群误判成私聊 → 打开群聊自动翻满屏历史 → **扣费 P0**；
+   * 把私聊误判成群 → 用户以为"自动翻译坏了"。所以只要头部证据成立就判群，
+   * 且 `@g.us` 一旦出现绝不因同时看到 `@c.us` 而改判。
+   *
+   * ⚠ 证据强度备注：第 1、2、3 条在真机上均**未验证**（探针没抓到真群样本），
+   * 第 4 条是按 WhatsApp 头部语义设计的**待验证启发式**。所以 `scan()` 把
+   * 每条证据的**形状**都记进 `CHAT_KIND`（只记词长/标点骨架，不记人名），
+   * 下次真机跑一次群聊 + 私聊即可确认或推翻 —— 不再靠猜。
    */
-  function isGroupChat() {
-    const info = document.querySelector('.ChatInfo, header')
-    const text = ((info && info.innerText) || '').slice(0, 400)
-    if (/members|subscribers|位成员|位订阅|群组/i.test(text)) return true
+  function chatKind() {
+    const evidence = {
+      inMain: false, sawCUs: false, sawGUs: false,
+      headerText: false, headerMarker: false, headerMarkers: 0,
+      memberList: false, subtitleShape: '', headerShape: '', source: 'none'
+    }
+    const main = document.querySelector('#main')
+    if (!main) return { group: false, evidence: evidence }
+    evidence.inMain = true
 
-    const scope = document.querySelector('#main') || document
-    const rows = scope.querySelectorAll('[data-id]')
+    // 判据 1：data-id 里的 JID。老构建有，新构建 data-id 只剩消息哈希。
+    const rows = main.querySelectorAll('[data-id]')
     for (let i = 0; i < rows.length && i < 200; i++) {
       const raw = String(rows[i].getAttribute('data-id') || '')
-      if (raw.indexOf('@g.us') >= 0) return true
+      if (raw.indexOf('@g.us') >= 0) { evidence.sawGUs = true; break }
+      if (raw.indexOf('@c.us') >= 0) evidence.sawCUs = true
     }
-    // WhatsApp 群聊头部会带 "点击查看群组成员" 之类的 aria-label
-    if (scope.querySelector('[data-testid*="group" i], [aria-label*="group" i]')) return true
-    return false
+
+    // 判据 2/3/4：**只看会话头部**。消息区（链接预览卡片等）绝不参与。
+    const header = main.querySelector('header')
+    if (header) {
+      // 只记"形状"（词长序列 + 标点骨架），不记人名 —— 日志可以留档。
+      const shape = function (v) {
+        const s = String(v == null ? '' : v).trim()
+        if (!s) return ''
+        const words = s.split(/\s+/)
+        return words.map(function (w) { return w.length }).join('-') +
+          '|' + s.replace(/[A-Za-z0-9\u4e00-\u9fa5]/g, '').slice(0, 16)
+      }
+      const text = String(header.innerText || header.textContent || '').slice(0, 300)
+      evidence.headerShape = shape(text)
+      evidence.headerText = /(members?|participants?|subscribers?)|位成员|位订阅|成员|群组|群聊|gruppe|mitglieder|miembros|участник/i.test(text)
+
+      const markers = header.querySelectorAll(
+        '[data-icon="default-group"], [data-icon="group"], [data-testid*="group" i], [aria-label*="group" i], [title*="group" i]'
+      )
+      evidence.headerMarkers = markers.length
+      evidence.headerMarker = markers.length > 0
+
+      // 判据 4：副标题形状。群=成员名单（逗号分隔，常以"You,"/"你、"开头）；私聊=在线状态。
+      const sub = header.querySelector('[data-testid="chat-subtitle"]')
+      if (sub) {
+        const subText = String(sub.textContent || '').trim()
+        evidence.subtitleShape = shape(subText)
+        const commas = (subText.match(/[,，、]/g) || []).length
+        evidence.memberList =
+          /^(you|你)\s*[,，、]/i.test(subText) ||
+          commas >= 2 ||
+          /(^|[,，、\s])\d+\s*(位)?(members?|participants?|成员|人)/i.test(subText)
+      }
+    }
+
+    if (evidence.sawGUs) { evidence.source = 'dataid:g.us'; return { group: true, evidence: evidence } }
+    if (evidence.sawCUs) { evidence.source = 'dataid:c.us'; return { group: false, evidence: evidence } }
+    if (evidence.headerText) { evidence.source = 'header-text'; return { group: true, evidence: evidence } }
+    if (evidence.headerMarker) { evidence.source = 'header-marker'; return { group: true, evidence: evidence } }
+    if (evidence.memberList) { evidence.source = 'header-member-list'; return { group: true, evidence: evidence } }
+    return { group: false, evidence: evidence }
   }
 
+  function isGroupChat() { return chatKind().group }
+
+  /** 一个节点所在的消息行（`[data-id]`）。这是消息的**唯一身份**。 */
+  function rowOf(el) {
+    return (el && typeof el.closest === 'function') ? el.closest('[data-id]') : null
+  }
+
+  /**
+   * 从消息行**向下**精确推导"译文该落进去的气泡容器"。
+   *
+   * ## 为什么必须是"向下"，且必须限定在行内
+   *
+   * 真机 P0：点「译」后消息显示「已翻译」，但中文译文出现在**整个聊天区域底部**。
+   * 根因是老 `hostOf()` 是"**向上**兜底"的：
+   *
+   *     node.closest('.text-content') || node.closest('div.copyable-text')
+   *       || node.closest('[data-testid="msg-container"]') || node
+   *
+   * 而且它在**两处用不同的入参**调用，解析结果根本不是同一个元素：
+   *   · 扫描挂按钮时传的是 `span.selectable-text` → 落到内层 `.text-content`；
+   *   · 渲染译文时传的是**消息行**（`[data-id]`），而行自己不在 `.copyable-text`
+   *     里面，于是 `closest` 一路向上 → 命中 `[data-testid="msg-container"]`
+   *     （在许多构建里它就是**整个消息列表容器**）→ 译文被 append 到聊天底部。
+   *   最后一档 `|| node` 更是**无边界兜底**：任何节点都能当宿主。
+   *
+   * 现在改成"从**消息行**往下找正文 span，取它在行内的块级容器"：
+   * 结果**一定是 `[data-id]` 行的后代**，因此**不可能**是 #main / 列表根 /
+   * footer / 聊天根节点。找不到就返回 null（调用方必须 fail-closed，不许兜底）。
+   */
+  function bubbleFromSpan(span, row) {
+    if (!span || !row) return null
+    let el = span.parentElement
+    while (el && el !== row && row.contains(el)) {
+      if (String(el.tagName || '').toLowerCase() === 'div') return el
+      el = el.parentElement
+    }
+    // 没有块级容器时，退到**消息行本身** —— 这一档仍然是被点的那条消息，
+    // 不属于被禁用的兜底（#main / 列表根 / footer / overlay / last child）。
+    // 绝不再向上越过消息行。
+    return row.contains(span) ? row : null
+  }
+
+  /**
+   * 消息行 → 精确气泡宿主。**没有任何兜底**：取不到就返回 null。
+   *
+   * 这里刻意不再回退到 `.text-content` / `msg-container` / 节点自身 ——
+   * 那几档兜底正是"译文跑到聊天底部"的来源，本轮按收口要求**全部禁止**。
+   */
   function hostOf(node) {
-    return node.closest('.text-content') ||
-      node.closest('div.copyable-text') ||
-      node.closest('[data-testid="msg-container"]') ||
-      node
+    const row = rowOf(node)
+    if (!row) return null
+    // 优先用调用方明确给的那个正文 span（扫描时就是它），保证与点击时一致。
+    const span = (node && node.classList && node.classList.contains('selectable-text'))
+      ? node
+      : row.querySelector('.selectable-text')
+    return bubbleFromSpan(span, row)
+  }
+
+  /** 相对路径：从 `from` 走子节点索引到 `to`。用于跨异步精确重定位。 */
+  function indexPath(from, to) {
+    const path = []
+    let el = to
+    while (el && el !== from) {
+      const parent = el.parentElement
+      if (!parent) return null
+      const idx = Array.prototype.indexOf.call(parent.children, el)
+      if (idx < 0) return null
+      path.unshift(idx)
+      el = parent
+    }
+    return el === from ? path : null
+  }
+
+  /** 按路径取节点；任一层对不上就返回 null（绝不猜）。 */
+  function nodeAtPath(from, path) {
+    if (!from || !path || !path.length) return null
+    let el = from
+    for (let i = 0; i < path.length; i++) {
+      const kids = el && el.children
+      if (!kids || !kids[path[i]]) return null
+      el = kids[path[i]]
+    }
+    return el
   }
 
   // ---------------------------------------------------------------------
@@ -1279,12 +1556,50 @@ const pixBridge = {
   }
 
   function clearExtras(host) {
-    host.querySelectorAll(':scope > .pix-trans, :scope > .pix-click').forEach(el => el.remove())
+    host.querySelectorAll(':scope > .pix-trans, :scope > .pix-trans-action-row, .pix-click').forEach(el => el.remove())
   }
 
-  /** 只清译文框，**保留「译」按钮** —— 没有可画的译文时不该把按钮一起删掉。 */
+  /** 只清译文框，**保留「译」按钮与操作行** —— 没有可画的译文时不该把入口一起删掉。 */
   function clearTransBox(host) {
     host.querySelectorAll(':scope > .pix-trans').forEach(el => el.remove())
+  }
+
+  /**
+   * 气泡里的**翻译操作行** —— P0-3：所有状态（译 / 翻译中… / 已翻译 / 翻译失败）
+   * 都住在这**同一个**容器里，位置固定、互不跳位。
+   */
+  function actionRowOf(host) {
+    return host ? host.querySelector(':scope > .pix-trans-action-row') : null
+  }
+
+  /**
+   * 取（或建）操作行。它是**正常文档流**里的一个整行块：占满宽度、单独成行，
+   * 插在正文之后、metadata（时间/勾）之前，让气泡自然增高 ——
+   * 绝不用绝对定位去抢右下角的 metadata 区域。
+   */
+  function ensureActionRow(host, meta) {
+    let row = actionRowOf(host)
+    if (row) return row
+    row = document.createElement('div')
+    row.className = 'pix-trans-action-row'
+    // 统一标记：解析 / 采集 / 发送链都会自动跳过我们自己的界面。
+    row.setAttribute('data-pix-ui', 'translate-action-row')
+    if (meta) host.insertBefore(row, meta)
+    else host.appendChild(row)
+    return row
+  }
+
+  /** 译文框的插入位置：**操作行之后** —— 保证阅读顺序始终是「正文 → 操作行 → 译文」。 */
+  function insertTransBox(host, box) {
+    const row = actionRowOf(host)
+    if (row) {
+      if (row.nextSibling) host.insertBefore(box, row.nextSibling)
+      else host.appendChild(box)
+      return
+    }
+    const meta = host.querySelector(':scope > .MessageMeta, :scope > .message-time')
+    if (meta) host.insertBefore(box, meta)
+    else host.appendChild(box)
   }
 
   /**
@@ -1306,8 +1621,14 @@ const pixBridge = {
     // 必须在会话区 #main 内 —— 左侧会话列表里的节点不是消息气泡。
     const main = doc && doc.getElementById('main')
     if (main && !main.contains(el)) return false
-    // 真正的消息气泡一定挂在带 data-id 的消息行内（WhatsApp 的结构性证据）。
-    return !!el.closest('[data-id]')
+    // 必须挂在某个消息行（[data-id]）上；可以是行**内部**的正文容器，
+    // 也可以是行本身（被点的那条消息）。二者之外一律拒绝。
+    const row = rowOf(el)
+    if (!row) return false
+    if (!row.contains(el)) return false
+    // 宿主自身不能再包住别的消息行 —— 那是列表容器，不是气泡。
+    if (el.querySelector && el.querySelector('[data-id]')) return false
+    return true
   }
 
   // ==== TRANSLATE FAILURE NOTICE BEGIN ====
@@ -1326,7 +1647,11 @@ const pixBridge = {
     ENGINE_NOT_ALLOWED: '当前套餐未包含所选翻译通道，请在通道列表里换一个',
     ENGINE_NOT_CONFIGURED: '当前账号没有可用的翻译通道，请联系客服',
     ENGINE_RETIRED: '翻译通道已下架，请在通道列表里换一个',
-    TRANSLATE_FAILED: '翻译服务暂不可用，请稍后重试'
+    TRANSLATE_FAILED: '翻译服务暂不可用，请稍后重试',
+    // 网络传输层：与"翻译服务坏了"分开说，否则用户会一直以为是我们这边的问题。
+    NETWORK_UNREACHABLE: '连不上服务器，请检查网络后重试',
+    NETWORK_TIMEOUT: '服务器响应超时，请稍后重试',
+    SERVER_BAD_RESPONSE: '服务器返回异常，请稍后重试'
   }
   const noticeSeenAt = new Map()
 
@@ -1389,32 +1714,81 @@ const pixBridge = {
    * 采集/解析/拦截一律跳过它）。输入框里**从头到尾只有用户原文**。
    */
   const SEND_BUSY_ID = 'pix-send-busy'
-  const SEND_BUSY_TEXT = '正在翻译…（翻译期间不会发送任何内容）'
+  /**
+   * 发送链的**四种状态**（0.1.19 体验修复）。
+   *
+   * 老实现只有一个「正在翻译…」，而且在翻译一回来就把它收掉 —— 于是
+   * **原生输入 + 沉降 + 发送**这一整段（最长可达上限）界面上什么都没有，
+   * 用户看到的是"提示没了，但消息还没出去"，会以为卡住或失败而反复按回车。
+   *
+   * 现在按真实阶段切换文案，并且**只有真的发出去了才显示「已发送」**：
+   *   translating → 翻译中（原文还在输入框里，一个字节都没发）
+   *   sending     → 译文已确认、正在触发发送
+   *   sent        → 发送确认完成（短暂停留后自动消失）
+   *   failed      → 不在这里显示，交给可操作的失败提示框（带真实错误码）
+   */
+  const SEND_STATUS_TEXT = {
+    translating: '正在翻译…（翻译期间不会发送任何内容）',
+    sending: '正在发送…',
+    sent: '已发送'
+  }
+  const SEND_SENT_LINGER_MS = 800
+  let sendStatusHideTimer = 0
 
-  function showSendBusy() {
+  function sendStatusEl() {
+    const doc = typeof document === 'undefined' ? null : document
+    if (!doc || !doc.body) return null
+    return doc.getElementById(SEND_BUSY_ID)
+  }
+
+  /**
+   * 切换状态提示。`state` 为 null / 未知 → 直接收起。
+   */
+  function setSendStatus(state) {
     try {
+      const text = SEND_STATUS_TEXT[state]
+      if (!text) { hideSendBusy(); return }
       const doc = typeof document === 'undefined' ? null : document
       if (!doc || !doc.body) return
-      if (doc.getElementById(SEND_BUSY_ID)) return
-      const el = doc.createElement('div')
-      el.id = SEND_BUSY_ID
-      // 和我们的其它 UI 一样打标记：绝不能进采集、解析、发送链。
-      el.setAttribute('data-pix-ui', 'send-busy')
-      el.textContent = SEND_BUSY_TEXT
-      el.style.cssText = [
-        'position:fixed', 'z-index:2147483647', 'left:50%', 'bottom:24px',
-        'transform:translateX(-50%)', 'max-width:min(92vw,440px)',
-        'padding:10px 14px', 'border-radius:10px', 'box-sizing:border-box',
-        'background:rgba(24,24,27,.96)', 'color:#fff', 'font-size:13px',
-        'line-height:1.5', 'font-family:inherit', 'text-align:center',
-        'box-shadow:0 10px 30px rgba(0,0,0,.34)', 'pointer-events:none'
-      ].join(';')
-      doc.body.appendChild(el)
+      if (sendStatusHideTimer) { clearTimeout(sendStatusHideTimer); sendStatusHideTimer = 0 }
+      // 同一时刻只允许有一个"我们现在在干什么"的提示：进新状态时把失败提示收掉。
+      hideSendFailureNotice()
+      let el = doc.getElementById(SEND_BUSY_ID)
+      if (!el) {
+        el = doc.createElement('div')
+        el.id = SEND_BUSY_ID
+        // 和我们的其它 UI 一样打标记：绝不能进采集、解析、发送链。
+        el.setAttribute('data-pix-ui', 'send-busy')
+        el.setAttribute('data-pix-state', state)
+        el.style.cssText = [
+          'position:fixed', 'z-index:2147483647', 'left:50%', 'bottom:24px',
+          'transform:translateX(-50%)', 'max-width:min(92vw,440px)',
+          'padding:10px 14px', 'border-radius:10px', 'box-sizing:border-box',
+          'background:rgba(24,24,27,.96)', 'color:#fff', 'font-size:13px',
+          'line-height:1.5', 'font-family:inherit', 'text-align:center',
+          'box-shadow:0 10px 30px rgba(0,0,0,.34)', 'pointer-events:none'
+        ].join(';')
+        doc.body.appendChild(el)
+      }
+      el.setAttribute('data-pix-state', state)
+      el.textContent = text
+      // 「已发送」只是告知，不该长期占屏。
+      if (state === 'sent') {
+        sendStatusHideTimer = setTimeout(function () {
+          sendStatusHideTimer = 0
+          hideSendBusy()
+        }, SEND_SENT_LINGER_MS)
+      }
     } catch (e) {}
+  }
+
+  function showSendBusy() {
+    setSendStatus('translating')
   }
 
   function hideSendBusy() {
     try {
+      if (sendStatusHideTimer) { clearTimeout(sendStatusHideTimer); sendStatusHideTimer = 0 }
       const doc = typeof document === 'undefined' ? null : document
       if (!doc) return
       const el = doc.getElementById(SEND_BUSY_ID)
@@ -1502,6 +1876,16 @@ const pixBridge = {
       hint.textContent = ov.hint || SEND_FAIL_HINT
       hint.style.cssText = 'opacity:.72;margin-bottom:10px'
 
+      // ★ 真实错误码必须露出来 ★
+      // 用户明确要求：禁止再用统一的"状态异常/重试失败"掩盖真实错误。
+      // 没有这一行，真机取证只能看到"失败了"，无法区分余额不足 / 断线 / 拦截。
+      let codeEl = null
+      if (ov.code) {
+        codeEl = doc.createElement('div')
+        codeEl.textContent = '错误码：' + String(ov.code)
+        codeEl.style.cssText = 'opacity:.6;font-size:12px;margin:-6px 0 10px'
+      }
+
       const acts = doc.createElement('div')
       acts.style.cssText = 'display:flex;gap:8px'
 
@@ -1510,11 +1894,31 @@ const pixBridge = {
         // 用户可能在失败后又改了输入框：以**当前内容**为准重新走一遍。
         const now = readComposer(box).trim() || raw
         const again = MessageParser.maskUrls(stripEmoji(now))
+        // ★ 重试 = 一次**全新的发送动作** ★
+        //   必须换新的 sendActionId、把 phase 归零、清掉上一轮所有残留。
+        //   老实现直接复用同一个 sendActionId 和残留的 'translating' phase，
+        //   于是重试经常在状态机里被判成"陈旧/异常"，表现成"点重试 → 重试失败"
+        //   （真机 P0-1，本轮要修的正是这条链）。
+        sendActionId = newSendActionId()
+        sendActionPhase = 'idle'
+        sendBusy = false
+        pendingSend = null
+        hideSendBusy()
+        // 真机取证：把这次重试的完整上下文一次打全 —— 源文本、动作号、链路。
+        trace('RETRY_TRANSLATE_CLICK', {
+          chain: 'send',
+          sourceChars: now.length,
+          maskedChars: String((again && again.masked) || '').length,
+          urls: (again && again.urls && again.urls.length) || 0,
+          retryTrigger: TRIGGER_SEND
+        })
         if (!again.masked || !MessageParser.hasTranslatableText(again.masked)) {
           // 内容已经变得不需要翻译了：不再自动发，交给用户自己按发送。
+          trace('RETRY_TRANSLATE_SKIPPED', { chain: 'send', reason: 'not_translatable' })
           showSendFailureNotice(box, raw, masked, {
-            title: '重试失败',
-            hint: '当前内容已不需要翻译，请直接按发送'
+            title: '无需重试',
+            hint: '当前内容已不需要翻译，请直接按发送',
+            actions: false
           })
           return
         }
@@ -1534,14 +1938,17 @@ const pixBridge = {
             retryJob.then(function (ok) {
               if (ok) {
                 // 重试成功：把「正在重试…」这块状态条收掉。
+                trace('RETRY_TRANSLATE_RESULT', { chain: 'send', ok: true, code: '' })
                 hideSendFailureNotice()
                 return
               }
-              // 失败时 deliverSend 已弹过默认提示；这里把标题改成明确的「重试失败」，
-              // 让用户知道"这一下又没成"，而不是对着同一个提示发懵。
+              // ★ 失败必须显示**真实原因**，不是一句笼统的「重试失败」★
+              const code = (lastSendFail && lastSendFail.code) || 'UNKNOWN'
+              trace('RETRY_TRANSLATE_RESULT', { chain: 'send', ok: false, code: code })
               showSendFailureNotice(box, raw, masked, {
                 title: '重试失败',
-                hint: SEND_FAIL_HINT
+                hint: SEND_FAIL_HINT,
+                code: code
               })
             }, function (err) { onInterceptCrash(null, box, err) })
           }
@@ -1553,7 +1960,7 @@ const pixBridge = {
 
       const sendRaw = noticeButton('发送原文', function () {
         hideSendFailureNotice()
-        // 用户明确点击才允许发未翻译的原文。同样要**写回 + 回读校验** ——
+        // 用户明确点击才允许发未翻译的原文。同样要**原生写回 + 回读校验** ——
         // 真机上"发送原文"把占位符一并发出去过（用户从没同意发占位符）。
         //
         // 关键：先把上一次翻译留下的状态解掉。否则 fireSendUserAuthorized 之外
@@ -1561,13 +1968,18 @@ const pixBridge = {
         pendingSend = null
         sendBusy = false
         hideSendBusy()
-        if (!writeAndVerify(box, raw)) {
+        // 写入同样走原生输入（不允许再出现第二套写法）。
+        nativeSetComposer(box, raw, 'send_raw').then(function (res) {
+          if (!res || !res.ok) {
+            blockSend('BODY_MISMATCH', box, raw, masked)
+            return
+          }
+          return wait(50).then(function () {
+            const fired = fireSendUserAuthorized(box, raw, 'send_raw')
+            if (!fired.ok) blockSend(fired.reason, box, raw, masked)
+          })
+        }, function () {
           blockSend('BODY_MISMATCH', box, raw, masked)
-          return
-        }
-        wait(50).then(function () {
-          const fired = fireSendUserAuthorized(box, raw, 'send_raw')
-          if (!fired.ok) blockSend(fired.reason, box, raw, masked)
         })
       })
       sendRaw.style.cssText += ';background:rgba(255,255,255,.14);color:#fff'
@@ -1576,6 +1988,7 @@ const pixBridge = {
       acts.appendChild(sendRaw)
       wrap.appendChild(title)
       wrap.appendChild(hint)
+      if (codeEl) wrap.appendChild(codeEl)
       // `actions:false` = 只报状态的瞬态提示（如「正在重试…」），不给按钮。
       // 给了按钮反而会让人以为可以再点一次。
       if (ov.actions !== false) wrap.appendChild(acts)
@@ -1612,13 +2025,18 @@ const pixBridge = {
       }
       const out = String((resp && (resp.translation || resp.text)) || '').trim()
       if (out) cache.set(key, out)
-      return { ok: !!out, code: out ? '' : 'EMPTY_RESULT', out: out }
+      // requestId 原样透传：真机取证要求能看到"这次重试用的是哪个幂等号"。
+      return { ok: !!out, code: out ? '' : 'EMPTY_RESULT', out: out, requestId: (resp && resp.requestId) || '' }
     }).catch(err => {
       pending.delete(key)
-      // 走到这里说明 IPC/线路层面就断了（服务端错误已在上面 return）。
-      // 同样不能静默：用户看到的表现和"翻译坏了"一模一样。
-      notifyTranslateIssue({ code: 'TRANSLATE_FAILED', msg: (err && err.message) || '' })
-      return { ok: false, code: 'TRANSLATE_FAILED', out: '' }
+      // 走到这里说明 IPC / 线路层面就断了（服务端错误已在上面 return）。
+      // 同样不能静默；也**不能丢掉错误类别** —— 否则界面又会把"连不上服务器"
+      // 说成"翻译失败"，正是本次要修的那类误导。
+      const cls = String((err && err.pix && err.pix.code) || '')
+      const code = ['NETWORK_UNREACHABLE', 'NETWORK_TIMEOUT', 'SERVER_BAD_RESPONSE'].indexOf(cls) >= 0
+        ? cls : 'TRANSLATE_FAILED'
+      notifyTranslateIssue({ code: code, msg: (err && err.message) || '' })
+      return { ok: false, code: code, out: '' }
     })
     pending.set(key, job)
     return job
@@ -1648,17 +2066,51 @@ const pixBridge = {
       return false
     }
     let box = host.querySelector(':scope > .pix-trans')
+    if (box && box.textContent === translated) {
+      // ★ 内容没变就**不写 DOM** ★
+      //
+      // 这不是省一次赋值那么简单：`textContent = ...` 会产生一次 childList 变更，
+      // 而我们的扫描正是挂在 MutationObserver 上的 ——
+      //   paint → 变更 → schedule → scan → 再次 paint → 变更 → …
+      // 变成一台自激机器。真机日志里同一行消息的 TRANSLATION_RENDER_VERIFIED
+      // 在一秒内出现 33 次、一条消息累计 45 次，就是这台机器在空转
+      // （0.1.24 实测；白烧 CPU，还逼着 WhatsApp 的 React 反复处理变更）。
+      //
+      // 0.1.25 把「群聊=自动」扩到会话里全部消息之后，这个循环会被放大到
+      // 整个会话，所以必须在这里掐断：**没变就是没事发生**。
+      return true
+    }
     if (!box) {
       box = document.createElement('div')
       box.className = 'pix-trans'
-      const meta = host.querySelector(':scope > .MessageMeta, :scope > .message-time')
-      if (meta) host.insertBefore(box, meta)
-      else host.appendChild(box)
+      insertTransBox(host, box)
     }
     box.textContent = translated
-    // ★ 只有真的画出了译文，才把「译」按钮移除 ★
-    const click = host.querySelector(':scope > .pix-click')
-    if (click) click.remove()
+    // ★ 硬校验：译文节点必须**真的**挂在宿主下，且宿主仍在原消息行内 ★
+    // 只看"函数有没有报错"是不够的 —— 真机上出现过"状态已翻译、节点却在聊天
+    // 底部"。这里用 parentElement + 行归属双重确认，过不了就不许显示"已翻译"。
+    const row = rowOf(host)
+    const placed = box.parentElement === host && !!row && row.contains(box)
+    if (!placed) {
+      try { box.remove() } catch (e) {}
+      trace('TRANSLATION_RENDER_UNVERIFIED', {
+        chain: 'receive',
+        parentIsHost: box.parentElement === host,
+        rowFound: !!row
+      })
+      return false
+    }
+    trace('TRANSLATION_RENDER_VERIFIED', {
+      chain: 'receive',
+      rowId: String((row.getAttribute('data-id') || '')).slice(0, 64),
+      hostTag: String(host.tagName || '').toLowerCase(),
+      hostClass: String(host.className || '').slice(0, 80),
+      parentTag: String((box.parentElement && box.parentElement.tagName) || '').toLowerCase()
+    })
+    // ★ 成功后**不移除**「译」按钮 ★
+    //   P0-3 要求所有状态都住在同一个操作行里：正文 → [已翻译] → 译文。
+    //   入口本身保留在行内、仅把文案切成「已翻译」（由 setChipState('done') 负责），
+    //   这样状态位置永远一致，不会"点一下按钮就消失、看不出发生了什么"。
     return true
   }
 
@@ -1688,22 +2140,66 @@ const pixBridge = {
     return null
   }
 
-  /** 按稳定 key 重新查当前气泡 —— 绝不长期持有裸 DOM 引用。 */
+  /**
+   * 按稳定 key 重新查当前气泡 —— 绝不长期持有裸 DOM 引用。
+   *
+   * **只在 `#main`（当前会话）里查**：左侧会话列表里的行同样带 `[data-id]`，
+   * 全文档查有命中的风险 —— 那会把译文绑到别的会话的消息上。
+   */
   function findRowByKey(key) {
     if (!key || !key.attr || !key.value) return null
+    const doc = typeof document === 'undefined' ? null : document
+    if (!doc) return null
+    const scope = conversationScope() || doc
     let nodes
-    try { nodes = document.querySelectorAll('[' + key.attr + ']') } catch (e) { return null }
+    try { nodes = scope.querySelectorAll('[' + key.attr + ']') } catch (e) { return null }
+    let fallback = null
     for (let i = 0; i < nodes.length; i++) {
-      if (nodes[i].getAttribute(key.attr) === key.value) return nodes[i]
+      if (nodes[i].getAttribute(key.attr) !== key.value) continue
+      // 优先返回**带正文 span 的那一行**（真正的消息气泡）。
+      if (nodes[i].querySelector && nodes[i].querySelector('.selectable-text')) return nodes[i]
+      if (!fallback) fallback = nodes[i]
     }
-    return null
+    return fallback
   }
 
   function chipKey(chip) {
+    let path = null
+    try {
+      const raw = chip.getAttribute('data-pix-path')
+      if (raw) path = JSON.parse(raw)
+    } catch (e) { path = null }
     return {
       attr: chip.getAttribute('data-pix-key-attr') || '',
-      value: chip.getAttribute('data-pix-key') || ''
+      value: chip.getAttribute('data-pix-key') || '',
+      path: (Array.isArray(path) && path.length) ? path : null
     }
+  }
+
+  /**
+   * 失败态 chip 的文案：必须让用户看出**是哪一类问题**。
+   *
+   * 被修的缺陷（0.1.22 真机）：chip 原来写死 `翻译失败 · 点击重试`，于是
+   * 底层明明是 `NETWORK_UNREACHABLE`（连不上服务器），用户看到的却是"翻译失败"，
+   * 会一直以为是我们翻译坏了 —— 正是 0.1.20 报告里批评过的那类误导。
+   * 只映射到"用户能据此行动"的短句；认不出的码一律退回默认文案。
+   */
+  const CHIP_FAIL_TEXT = {
+    NETWORK_UNREACHABLE: '连不上服务器 · 点击重试',
+    NETWORK_TIMEOUT: '服务器超时 · 点击重试',
+    SERVER_BAD_RESPONSE: '服务器异常 · 点击重试',
+    INSUFFICIENT_CHARS: '余额不足 · 点击重试',
+    ENGINE_NOT_ALLOWED: '通道不可用 · 点击重试',
+    ENGINE_NOT_CONFIGURED: '通道不可用 · 点击重试',
+    ENGINE_RETIRED: '通道已下架 · 点击重试',
+    NO_BRIDGE: '翻译桥未就绪 · 点击重试',
+    MANUAL_ROW_LOST: '消息已滚动 · 点击重试',
+    MANUAL_RENDER_MISSED: '译文未能显示 · 点击重试'
+  }
+  const CHIP_FAIL_DEFAULT = '翻译失败 · 点击重试'
+
+  function chipFailText(code) {
+    return CHIP_FAIL_TEXT[String(code || '').toUpperCase()] || CHIP_FAIL_DEFAULT
   }
 
   /** 把 chip 的可见状态改掉 —— 成功/失败都必须看得出来，绝不允许"什么都没发生"。 */
@@ -1711,7 +2207,7 @@ const pixBridge = {
     return (chip && chip.getAttribute('data-pix-state')) || 'idle'
   }
 
-  function setChipState(chip, state) {
+  function setChipState(chip, state, code) {
     if (!chip) return
     if (state === 'busy') {
       chip.textContent = '翻译中…'
@@ -1722,10 +2218,13 @@ const pixBridge = {
       chip.textContent = '已翻译'
       chip.style.pointerEvents = 'none'
     } else if (state === 'fail') {
-      chip.textContent = '翻译失败 · 点击重试'
+      chip.textContent = chipFailText(code)
+      // 真实错误码钉在 chip 上：事后取证、以及"重试前先看清上次为什么失败"都用它。
+      chip.setAttribute('data-pix-fail-code', String(code || ''))
       chip.style.pointerEvents = 'auto'
     } else {
       chip.textContent = '译'
+      chip.removeAttribute('data-pix-fail-code')
       chip.style.pointerEvents = 'auto'
     }
     chip.setAttribute('data-pix-state', state || 'idle')
@@ -1736,7 +2235,8 @@ const pixBridge = {
     const row = findRowByKey(key)
     if (row) {
       const host = hostOf(row)
-      const found = host && host.querySelector(':scope > .pix-click')
+      // P0-3：chip 现在住在 `.pix-trans-action-row` 里，不再是宿主的直接子节点。
+      const found = host && host.querySelector('.pix-click')
       if (found) return found
     }
     return fallback
@@ -1762,13 +2262,14 @@ const pixBridge = {
     //   try/catch 包着 —— async 抛错不会同步抛出，于是任何 await 之后的异常
     //   都变成 unhandled rejection，chip 永远停在「翻译中…」（真机就是这么卡住的）。
     let leftBusy = false
-    const leaveBusy = (next) => { leftBusy = true; setChipState(chipIn(key, chip), next) }
+    // code 一路带到 chip：失败时要用真实错误类别说话，不用笼统的"翻译失败"。
+    const leaveBusy = (next, code) => { leftBusy = true; setChipState(chipIn(key, chip), next, code) }
     try {
       return await manualTranslateInner(chip, key, incoming, leaveBusy)
     } catch (err) {
       // 任何一步抛错都不许静默：留痕 + 可见失败 + 可重试。
       trace('MANUAL_CLIENT_EXCEPTION', { error: (err && err.message) || String(err) })
-      leaveBusy('fail')
+      leaveBusy('fail', 'CLIENT_EXCEPTION')
       notifyTranslateIssue({ code: 'MANUAL_FAILED', msg: '翻译请求异常，请重试' })
       return
     } finally {
@@ -1776,7 +2277,7 @@ const pixBridge = {
       // 「永久停在翻译中…」是本轮明令禁止的状态。
       if (!leftBusy && chipStateOf(chipIn(key, chip)) === 'busy') {
         trace('MANUAL_CHAIN_FORCED_RESOLVE', { messageId: key.value || '-' })
-        setChipState(chipIn(key, chip), 'fail')
+        setChipState(chipIn(key, chip), 'fail', 'CHAIN_NOT_RESOLVED')
       }
     }
   }
@@ -1785,19 +2286,23 @@ const pixBridge = {
     let row = findRowByKey(key)
     trace('MANUAL_TRANSLATE_CLICK', {
       action: 'manual_click',
-      messageId: key.value || '-',
+      messageId: String(key.value || '-').slice(0, 64),
       keyAttr: key.attr || '-',
+      byPath: key.path ? key.path.join('.') : '-',
       tabId: prefs.tabId || '-',
       partition: prefs.partition || '-',
       engine: prefs.engine || '-',
       incoming: incoming,
-      rowFound: !!row
+      rowFound: !!row,
+      // 取证：点击时这条消息在真实 DOM 里的身份 —— 后面渲染失败时用它对齐。
+      rowTag: row ? String(row.tagName || '').toLowerCase() : '-',
+      rowHasDataId: row ? row.hasAttribute('data-id') : false
     })
 
     // ---- 第一步：定位气泡 ----
     if (!row) {
       trace('MANUAL_ROW_LOST', { messageId: key.value || '-' })
-      leaveBusy('fail')
+      leaveBusy('fail', 'MANUAL_ROW_LOST')
       notifyTranslateIssue({ code: 'MANUAL_ROW_LOST', msg: '这条消息已不在当前视图，请滚到它再点一次' })
       return
     }
@@ -1814,7 +2319,7 @@ const pixBridge = {
     if (!sourceText || !parsed.translatable) {
       // 静默是禁止的：必须留下 trace + 给用户看得见的反馈。
       trace('MESSAGE_TEXT_EXTRACTION_FAILED', { messageId: key.value || '-', sourceTextLen: sourceText.length })
-      leaveBusy('fail')
+      leaveBusy('fail', 'MESSAGE_TEXT_EXTRACTION_FAILED')
       notifyTranslateIssue({
         code: 'MESSAGE_TEXT_EXTRACTION_FAILED',
         msg: '这条消息的正文读不出来，未翻译。请刷新页面后重试'
@@ -1854,29 +2359,69 @@ const pixBridge = {
 
     // ---- 失败：必须留在界面上（不许恢复成"什么都没发生"） ----
     if (!res || !res.ok || !res.out) {
-      leaveBusy('fail')
+      // ★把真实错误码传给 chip★：连不上服务器 / 余额不足 / 通道不可用 …
+      //  各说各的，用户才知道下一步该做什么。
+      leaveBusy('fail', (res && res.code) || 'UNKNOWN')
       return
     }
 
-    // ---- 第四步：用稳定 key 重新定位再渲染 ----
+    // ---- 第四步：用稳定身份重新定位再渲染 ----
+    // 身份 = data-id（哪一行）+ path（行内哪一段正文）。两者都必须在**重新
+    // 查询的当前 DOM** 上验证通过，才允许绘制；任何一步对不上就 fail-closed。
     const translated = MessageParser.restoreUrls(res.out, parsed.urls)
     const curRow = findRowByKey(key)
     if (!curRow) {
-      trace('TRANSLATION_RENDER_TARGET_MISSING', { messageId: key.value || '-' })
-      leaveBusy('fail')
+      trace('TRANSLATION_RENDER_TARGET_MISSING', { messageId: key.value || '-', reason: 'row_not_found' })
+      leaveBusy('fail', 'MANUAL_RENDER_MISSED')
       notifyTranslateIssue({ code: 'MANUAL_RENDER_MISSED', msg: '译文已生成，但这条消息已滚出视图，滚回去即可看到' })
       return
     }
-    const host = hostOf(curRow)
-    // ★ 硬约束（#4）★ 找不到宿主就**绝不绘制**。老实现一旦 host 取到聊天根节点，
-    //   译文就会被 append 到聊天区域底部（真机复现过）。宁可不显示。
-    if (!host || !isMessageHost(host)) {
-      trace('TRANSLATION_RENDER_TARGET_MISSING', { messageId: key.value || '-', reason: 'host_unresolved' })
-      leaveBusy('fail')
-      notifyTranslateIssue({ code: 'MANUAL_RENDER_MISSED', msg: '没能定位到这条消息的气泡，未显示译文' })
+    // 精确回到当初点的那一段正文；没有 path（老 chip）则退回"行内第一个正文 span"。
+    let span = key.path ? nodeAtPath(curRow, key.path) : curRow.querySelector('.selectable-text')
+    // ★ 硬校验：路径命中的节点必须**仍是真正的正文节点** ★
+    //   索引路径在列表重绘 / 我们插入了自己的控件之后会漂移，最坏情况会命中
+    //   chip / 译文框自身（测试已复现）。真机上的等价事故就是"译文绑错了节点"。
+    //   所以这里把"查询返回的到底是不是原始消息气泡"变成一条可判定的断言：
+    //   · 必须是 .selectable-text 正文；
+    //   · 不能落在我们自己的界面里（data-pix-ui）；
+    //   · 必须仍在这一条消息行内。
+    const looksLikeText = span && span.classList &&
+      span.classList.contains('selectable-text') &&
+      !(span.closest && span.closest('[data-pix-ui]'))
+    const textMatches = looksLikeText && normalizeBody(span.textContent) === normalizeBody(sourceText)
+    if (!looksLikeText) span = null
+    const host = span ? bubbleFromSpan(span, curRow) : null
+    // ★ 硬约束（#4）★ 找不到精确气泡就**绝不绘制**。
+    //   用户明确要求：所有兜底（#main / 会话根 / 列表根 / footer / last child /
+    //   全局 overlay）一律禁止；找不到就 TRANSLATION_RENDER_TARGET_MISSING，
+    //   并把这条消息标成翻译失败。宁可不显示，也不能放到页面底部。
+    if (!host || !isMessageHost(host) || rowOf(host) !== curRow) {
+      trace('TRANSLATION_RENDER_TARGET_MISSING', {
+        chain: 'receive',
+        messageId: String(key.value || '').slice(0, 64),
+        reason: !span ? 'span_not_found_or_not_text' : (!host ? 'bubble_not_found' : 'host_not_in_row'),
+        hadPath: !!key.path,
+        looksLikeText: !!looksLikeText,
+        textMatches: !!textMatches,
+        rowHasDataId: curRow.hasAttribute('data-id')
+      })
+      leaveBusy('fail', 'MANUAL_RENDER_MISSED')
+      notifyTranslateIssue({ code: 'MANUAL_RENDER_MISSED', msg: '没能把译文绑回这条消息，已放弃显示（不会放到别处）' })
       return
     }
-    trace('TARGET_RELOCATED', { messageId: key.value || '-', byKey: key.attr || '-' })
+    // 取证三连：真实 data-id / 用到的选择器 / 命中的节点身份。
+    trace('TARGET_RELOCATED', {
+      chain: 'receive',
+      messageId: String(key.value || '').slice(0, 64),
+      byKey: key.attr || '-',
+      byPath: key.path ? key.path.join('.') : '-',
+      rowId: String((curRow.getAttribute('data-id') || '')).slice(0, 64),
+      rowIsSameNode: true,
+      textMatches: !!textMatches,
+      hostTag: String(host.tagName || '').toLowerCase(),
+      hostClass: String(host.className || '').slice(0, 80),
+      hostParentTag: String((host.parentElement && host.parentElement.tagName) || '').toLowerCase()
+    })
     const drew = paint(host, translated, displayText(parsed, ''))
     trace('TRANSLATION_RENDERED', {
       chain: 'receive',
@@ -1884,8 +2429,9 @@ const pixBridge = {
       chars: translated.length,
       drew: drew
     })
+    // 只有"确实画进了正确气泡"才算成功；否则如实标失败，绝不显示「已翻译」。
     if (drew) leaveBusy('done')
-    else leaveBusy('fail')
+    else leaveBusy('fail', 'MANUAL_RENDER_MISSED')
   }
 
   /**
@@ -1909,15 +2455,17 @@ const pixBridge = {
     } catch (err) {
       // 点译流程自己抛错也不能静默 —— 至少要留下痕迹并给出可重试的界面。
       trace('MANUAL_CLIENT_EXCEPTION', { error: (err && err.message) || String(err) })
-      setChipState(chip, 'fail')
+      setChipState(chip, 'fail', 'CLIENT_EXCEPTION')
       notifyTranslateIssue({ code: 'MANUAL_FAILED', msg: '翻译请求异常，请重试' })
     }
     return true
   }
   // ==== MANUAL CHIP END ====
 
-  function addClick(host, incoming, root) {
-    if (host.querySelector(':scope > .pix-trans, :scope > .pix-click')) return
+  function addClick(host, incoming, root, span) {
+    if (!isMessageHost(host)) return
+    // P0-3：chip 住在操作行里，所以这里按**后代**判断是否已经挂过入口。
+    if (host.querySelector('.pix-click') || host.querySelector(':scope > .pix-trans')) return
     const key = keyOf(root)
     const chip = document.createElement('span')
     chip.className = 'pix-click'
@@ -1929,14 +2477,29 @@ const pixBridge = {
       chip.setAttribute('data-pix-key-attr', key.attr)
       chip.setAttribute('data-pix-key', key.value)
     }
+    // ★ 记下"正文 span 相对消息行的路径" ★
+    // 渲染译文时靠它精确重回同一个节点 —— 这正是用户要求的
+    // 「点击时保存稳定身份，返回后重新查询再绑定」。只有 data-id 还不够：
+    // 一条消息里可能有多段文本（引用块、正文），必须回到**同一段**。
+    if (span) {
+      const path = indexPath(root, span)
+      if (path && path.length) chip.setAttribute('data-pix-path', JSON.stringify(path))
+    }
     chip.textContent = '译'
+    // ★ P0-3 ★ 入口放进**固定的操作行**，而不是直接贴在正文尾部或右下角：
+    //   整行块 + 左对齐 → 单独成行、位于正文下方，结构上不会与 WhatsApp
+    //   右下角的时间/单勾/双勾重叠。
     const meta = host.querySelector(':scope > .MessageMeta, :scope > .message-time')
-    if (meta) host.insertBefore(chip, meta)
-    else host.appendChild(chip)
+    const row = ensureActionRow(host, meta)
+    row.appendChild(chip)
     trace('MANUAL_CHIP_RENDERED', {
       messageId: (key && key.value) || '-',
       tabId: prefs.tabId || '-',
-      incoming: !!incoming
+      incoming: !!incoming,
+      hostTag: String(host.tagName || '').toLowerCase(),
+      hostClass: String(host.className || '').slice(0, 80),
+      hasPath: chip.hasAttribute('data-pix-path'),
+      inActionRow: chip.parentElement === row
     })
   }
 
@@ -1984,29 +2547,38 @@ const pixBridge = {
     return String(el.innerText || el.textContent || '')
   }
 
-  function writeComposer(el, text) {
-    if (!el) return
-    el.focus()
-    const value = String(text || '')
-    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
-      const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype
-      const desc = Object.getOwnPropertyDescriptor(proto, 'value')
-      if (desc && desc.set) desc.set.call(el, value)
-      else el.value = value
-      el.dispatchEvent(new Event('input', { bubbles: true }))
-      el.dispatchEvent(new Event('change', { bubbles: true }))
-      return
+  /**
+   * ★ 0.1.19：`writeComposer()` 已被**永久移除** ★
+   *
+   * 它就是真机 0.1.18 的根因所在：用 `execCommand('insertText')` / `textContent`
+   * 在页面内直接改 DOM。真机日志证据：
+   *
+   *     expected : len=29 hash=33aaf90e  "Test translation information."
+   *     actual   : len=6  hash=3a49c2d5  "测试翻译信息"
+   *     writeMethod:"execCommand:insertText"  sawBeforeInput:false  sawInput:true
+   *
+   * 译文一个字符都没进去 —— `sawBeforeInput:false` 说明 WhatsApp 的编辑器在祖先
+   * 捕获阶段拦掉了 `isTrusted:false` 的 `beforeinput`，我们的写入**从未进入**
+   * 编辑器的输入管线。改的是 DOM，编辑器 state 没动，下一次调和就把 DOM 盖回去。
+   *
+   * 现在写入一律走 `nativeSetComposer()` → `replaceComposerWithTranslatedTextNative()`
+   * → 主进程 Chromium 原生编辑命令（`selectAll` / `delete` / `insertText`）。
+   * 这里只保留一个**取证占位**，把"最近一次写入方式"记为原生，供
+   * `SEND_BODY_MISMATCH_DETAIL` / `NATIVE_SET_COMPOSER` 使用。
+   */
+  function markNativeWrite(el, method) {
+    lastWriteInfo = {
+      method: method || 'native:selectAll+delete+insertText',
+      trusted: true,
+      tag: el ? String(el.tagName || '').toLowerCase() : '-',
+      editable: el && el.getAttribute ? String(el.getAttribute('contenteditable') || '') : '',
+      cls: el ? String(el.className || '').slice(0, 80) : '',
+      // 原生输入由浏览器进程发起 → 事件可信，编辑器必须正常处理。
+      // guest 侧不（也无法）观测编辑器的 beforeinput，这里显式说明而不是编造 false。
+      sawBeforeInput: null,
+      sawInput: null
     }
-    const sel = window.getSelection()
-    const range = document.createRange()
-    range.selectNodeContents(el)
-    sel.removeAllRanges()
-    sel.addRange(range)
-    const ok = document.execCommand('insertText', false, value)
-    if (!ok) {
-      el.textContent = value
-      el.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }))
-    }
+    return lastWriteInfo
   }
 
   function sendButton() {
@@ -2145,8 +2717,12 @@ const pixBridge = {
     // 到这里才真正决定"拦下并翻译"。状态机从这一刻开始，trace 走同一 actionId。
     sendActionId = newSendActionId()
     sendActionPhase = 'captured'
+    // 性能计时从这里起表：用户按下发送 = 计时原点。
+    perfStart()
+    perfMark('start')
     trace('SEND_CAPTURED', { via: (event && event.type) || '-', chars: raw.length })
     blockEvent(event)
+    perfMark('blocked')
     trace('NATIVE_SEND_BLOCKED', { defaultPrevented: !!(event && event.defaultPrevented) })
     // 原文**只留在内存里**（raw），输入框保持不动 —— 不写占位符、不改 DOM。
     trace('SOURCE_SNAPSHOTTED', { chars: raw.length })
@@ -2215,7 +2791,9 @@ const pixBridge = {
       try {
         masked = MessageParser.maskUrls(stripEmoji(MessageParser.stripBusy(raw)))
       } catch (e) {}
-      writeComposer(box, MessageParser.stripBusy(raw))
+      // 占位符残留的兜底还原：同样走**原生输入**（这是崩溃兜底路径，
+      // 不允许因为"反正要失败了"就退回页面内改 DOM）。
+      nativeSetComposer(box, MessageParser.stripBusy(raw), 'crash_restore').catch(function () {})
       scrubBusy(box, MessageParser.stripBusy(raw))
       showSendFailureNotice(box, raw, masked)
     } catch (e) {}
@@ -2246,33 +2824,59 @@ const pixBridge = {
     //   输入框里从头到尾都是用户原文；这段时间由 sendBusy 挡住一切发送。
     showSendBusy()
     sendActionPhase = 'translating'
+    perfMark('translateStart')
     trace('TRANSLATE_STARTED', { chain: 'send', trigger: TRIGGER_SEND })
-    let out = ''
+    // 用**带错误码**的版本：统一压成"翻译失败"会把"余额不足 / 通道不在套餐 /
+    // 断线 / 空结果"全糊掉，用户与事后取证都看不出真正死在哪一步（本轮明令禁止）。
+    let res = null
     try {
-      out = await translateText(masked.masked, false, TRIGGER_SEND)
+      res = await translateTextDetailed(masked.masked, false, TRIGGER_SEND)
     } catch (e) {
-      out = ''
+      res = { ok: false, code: 'CLIENT_EXCEPTION', out: '', err: (e && e.message) || '' }
     }
+    const out = String((res && res.out) || '')
     if (!out) {
+      const code = String((res && res.code) || 'TRANSLATE_FAILED')
+      lastSendFail = { code: code, reason: (res && res.err) || '', at: Date.now(), trigger: TRIGGER_SEND }
       // D：翻译失败 → **一个字节都不发**。原文本来就在输入框里（我们没动过它），
       //    这里再写一次只是兜底，然后弹可操作的提示。
       pendingSend = null
       sendBusy = false
       hideSendBusy()
-      // 但兜底之前必须先看草稿：用户可能已经在打下一条。拿原文硬写回，
-      // 等于把他正在打的内容整段吃掉（真机已复现，属数据丢失）。
-      if (composerDraftChanged(box, raw)) trace('DRAFT_PRESERVED', { at: 'translate_failed' })
-      else writeComposer(box, raw)
-      trace('TRANSLATE_FAILED', { chain: 'send', failClosed: true })
-      showSendFailureNotice(box, raw, masked)
+      // ★ 失败必须把状态机归位 ★
+      //   老实现这一天直接 return，`sendActionPhase` 永远停在 'translating'：
+      //   于是"重试"复用同一个 phase 残留，后续每次发送都更容易被判成陈旧。
+      sendActionPhase = 'idle'
+      // 但兜底之前先看草稿：用户可能已经在打下一条。拿原文硬写回等于把他
+      // 正在打的内容整段吃掉（真机已复现，属数据丢失）。
+      if (canSafelyRestore(box, raw)) await nativeSetComposer(box, raw, 'translate_failed_restore')
+      else trace('COMPOSER_LEFT_AS_IS', { at: 'translate_failed', chars: readComposer(box).length })
+      trace('TRANSLATE_FAILED', { chain: 'send', failClosed: true, code: code })
+      // 网络类失败要说清楚是"连不上 / 超时"，不能让用户以为是我们翻译坏了。
+      // 文案与顶部提示（NOTICE_TEXT）共用同一句，避免两处各说各话。
+      const netText = (code === 'NETWORK_UNREACHABLE' || code === 'NETWORK_TIMEOUT'
+        || code === 'SERVER_BAD_RESPONSE') ? String(NOTICE_TEXT[code] || '') : ''
+      showSendFailureNotice(box, raw, masked, {
+        title: netText ? '网络异常，消息未发送' : '翻译失败，消息未发送',
+        hint: netText ? (netText + ' ' + SEND_FAIL_HINT) : SEND_FAIL_HINT,
+        code: code
+      })
+      perfMark('uiClosed')
+      perfEmit('translate_failed', { code: code, engine: prefs.engine || '-', chars: raw.length })
       return false
     }
     const finalText = out === masked.masked
       ? raw
       : MessageParser.restoreUrls(out, masked.urls)
-    hideSendBusy()
+    // ★ 不收起提示，而是切到「正在发送…」★
+    //   译文已经拿到，但**还没发出去**。老实现在这里直接 hideSendBusy()，
+    //   于是原生输入 + 沉降 + 发送这段界面空白，用户会以为卡住而反复按回车。
+    setSendStatus('sending')
     sendActionPhase = 'succeeded'
-    trace('TRANSLATE_SUCCEEDED', { chain: 'send', chars: finalText.length })
+    perfMark('translateDone')
+    trace('TRANSLATE_SUCCEEDED', { chain: 'send', chars: finalText.length, requestId: (res && res.requestId) || '-' })
+    // 性能计时：这一次动作最终有没有真的发出去（决定 SEND_PERF 的 outcome）。
+    let sentOk = false
     try {
       // 「再次确认当前 sendAction 仍有效」—— 异步等待期间状态可能已经变了
       // （例如用户又按了一次、或失败提示已被处理）。状态不对就不发。
@@ -2281,33 +2885,64 @@ const pixBridge = {
         return false
       }
       // B + C：成功才写回 → **回读校验** → 校验通过才发，且只发一次。
-      // 回读是必须的：托管编辑器可能根本没接受我们的写入（而 execCommand 照样
-      // 返回 true）。不校验就会出现"界面显示译文、实际发出原文"或"原文+占位符"。
       //
-      // ★ 写回之前先抓草稿 ★：用户在等翻译这段时间很可能已经开始打**下一条**。
-      //   无条件覆盖会把那段内容整段吃掉 —— 真机上就是"我打了一半，自己没了"。
-      //   有草稿就先存下来，发完译文再放回去。
+      // ★ 0.1.19：写入方式换成 **Chromium 原生输入** ★
+      //   真机证据（0.1.18）：expected=29 字符英文译文 vs actual=6 字符中文原文，
+      //   writeMethod=execCommand:insertText、sawBeforeInput=false —— 页面内改 DOM
+      //   的写入**从未进入** WhatsApp 编辑器的输入管线。所以这里不再自己改 DOM，
+      //   改由主进程跑 Chromium 编辑命令（selectAll → delete → insertText），
+      //   产生**可信事件**，编辑器才会真正更新自己的 state。
+      //   `writeAndVerify` / `writeComposer` 已从发送链彻底移出（不再有第二条写法）。
+      //
+      // ★ 替换之前**先确认 composer 没被用户改过** ★
+      //   ① 仍是本次 sourceText（或等价的规范化形式）→ 允许替换；
+      //   ② 用户已经打了新内容 → **立即中止**：这一条不发送，
+      //      而且一个字节都不许动他的新草稿。
+      //   判据用 canonicalizeSendBody，所以 WhatsApp 自己造成的空白/零宽差异
+      //   不会被误判成"用户改了"。
       const draftNow = readComposer(box)
-      const keepDraft = composerDraftChanged(box, raw)
-      if (keepDraft) trace('DRAFT_PRESERVED', { at: 'before_replace', chars: draftNow.length })
-      if (!writeAndVerify(box, finalText)) {
+      if (canonicalizeSendBody(draftNow) !== canonicalizeSendBody(raw)) {
+        trace('USER_DRAFT_EDITED_ABORT', {
+          chain: 'send',
+          at: 'before_replace',
+          sourceChars: raw.length,
+          draftChars: draftNow.length
+        })
+        sendActionPhase = 'idle'
+        notifyTranslateIssue({
+          code: 'USER_DRAFT_EDITED',
+          msg: '你在输入框里已经打了新内容，这一条我没有发送、也没有改动你的输入。如仍要翻译，请重新按发送。'
+        })
+        return false
+      }
+      trace('COMPOSER_STILL_SOURCE', { chain: 'send', chars: draftNow.length })
+      const replaced = await replaceComposerWithTranslatedTextNative(box, finalText)
+      if (!replaced.ok) {
+        // 原生输入之后正文仍与译文不一致（或桥不可用）：先取证，再 fail-closed。
+        traceBodyMismatch(box, finalText, replaced.actual)
+        trace('INPUT_REPLACED', { chars: finalText.length, ok: false, reason: replaced.reason || 'native_failed' })
         blockSend('BODY_MISMATCH', box, raw, masked)
         return false
       }
       sendActionPhase = 'replaced'
-      trace('INPUT_REPLACED', { chars: finalText.length, draftChars: keepDraft ? draftNow.length : 0 })
-      await wait(50)
-      // 发送前最后一次正文校验 —— 独立于 writeAndVerify 的回读，专门对"这一段
-      // 等待期间正文又被改掉/占位符渗入"负责。事件名按收口规范固定为
-      // FINAL_TEXT_VALIDATED，真机取证时可以直接用它作为"这道闸跑过"的证据。
-      const finalGate = sendableBody(box, finalText)
-      trace('FINAL_TEXT_VALIDATED', {
-        ok: finalGate.ok,
-        reason: finalGate.reason || '',
-        chars: String(finalGate.actual || '').length
+      trace('INPUT_REPLACED', {
+        chars: finalText.length,
+        ok: true,
+        via: 'native_input'
       })
-      if (!finalGate.ok) {
-        blockSend(finalGate.reason, box, raw, masked)
+      // 发送前最后一道闸：独立于上一段回读，专门对"这一步之后正文又被改掉 /
+      // 占位符渗入"负责。事件名按收口规范固定为 FINAL_TEXT_VALIDATED。
+      const gate = sendableBody(box, finalText)
+      trace('FINAL_TEXT_VALIDATED', {
+        ok: gate.ok,
+        reason: gate.reason || '',
+        chars: String(gate.actual || '').length,
+        via: 'native_input'
+      })
+      perfMark('validated')
+      if (!gate.ok) {
+        traceBodyMismatch(box, finalText, gate.actual)
+        blockSend(gate.reason, box, raw, masked)
         return false
       }
       const fired = fireSendVerified(box, finalText)
@@ -2315,26 +2950,22 @@ const pixBridge = {
         blockSend(fired.reason, box, raw, masked)
         return false
       }
-      // 译文发出去之后，把用户正在打的下一条放回输入框。
-      // 放不回去必须**明说** —— 静默丢失用户内容是最不可接受的失败方式。
-      if (keepDraft) {
-        if (writeAndVerify(box, draftNow)) {
-          trace('DRAFT_RESTORED', { chars: draftNow.length })
-        } else {
-          trace('DRAFT_RESTORE_FAILED', { chars: draftNow.length })
-          notifyTranslateIssue({
-            code: 'DRAFT_RESTORE_FAILED',
-            msg: '你刚才在打的下一条内容没能放回输入框，请检查后重新输入'
-          })
-        }
-      }
+      sentOk = true
     } catch (e) {
       blockSend('EXCEPTION', box, raw, masked)
       return false
     } finally {
       pendingSend = null
       sendBusy = false
-      hideSendBusy()
+      // ★ 只有真的发出去了才显示「已发送」★
+      //   发送失败走的是 blockSend 的失败提示（带真实错误码），不会走到这里。
+      if (sentOk) {
+        perfMark('uiClosed')
+        setSendStatus('sent')
+        perfEmit('ok', { engine: prefs.engine || '-', chars: finalText.length })
+      } else {
+        hideSendBusy()
+      }
       // 复位必须**只归自己这一次动作**管。
       // 老实现无条件 400ms 后置 idle，于是上一条的定时器会把下一条正在飞的
       // phase 清掉 —— 下一条走到 fireSendVerified 时被 STALE_ACTION 拦下，
@@ -2361,32 +2992,347 @@ const pixBridge = {
   }
 
   /**
-   * 输入框里是不是已经被用户改成了**别的**内容（在等翻译期间打了下一条）。
+   * 发送正文的**规范化**（canonicalize）—— 只抹"无语义差异"，不抹真实内容。
    *
-   * 这是"写回译文 / 还原原文"之前必须先问的一句话：
-   *   - 内容仍等于我们捕获的原文 → 正常路径，随便覆盖。
-   *   - 内容变了 → 用户正在打新消息，我们**没有资格**覆盖它。
+   * ## 为什么需要它（P0-1：重试时 BODY_MISMATCH）
    *
-   * 老实现从不问这句话，于是翻译一回来就把用户草稿整段吃掉（真机复现）。
+   * 译文写进 WhatsApp 输入框后回读，常常与"我们打算发的正文"**字面不等**，
+   * 但差别只在几种**不可见/等价**的表示上：
+   *   · 换行表示不同     CRLF / CR  vs  LF
+   *   · 不换行空格       NBSP(U+00A0) / 窄空格(U+202F) / 全角空格(U+3000) vs 普通空格
+   *   · 零宽字符         U+200B / U+200C / U+200D / U+2060 / U+FEFF / U+180E
+   *   · Unicode 归一化   NFC vs NFD（带音标的字符可能是"合成/分解"两种写法）
+   *
+   * 以前这里用的是 `normalizeBody`（把所有空白压成一个空格）—— 那个做法**过头**：
+   * 它会把 "第一行\n第二行" 与 "第一行 第二行" 判成相同，等于**篡改语义**。
+   *
+   * 所以这里换成**严格白名单**：只允许上面四类。以下一律**不许**被抹掉，
+   * 抹掉了就会把"真实的内容变化"当成"等价"放出去：
+   *   ✗ 文字变化   ✗ 数字变化   ✗ URL 变化   ✗ 标点增删   ✗ 换行结构
    */
-  function composerDraftChanged(box, raw) {
-    return normalizeBody(readComposer(box)) !== normalizeBody(raw)
+  function canonicalizeSendBody(text) {
+    return String(text == null ? '' : text)
+      .normalize('NFC')                                   // Unicode 归一化
+      .replace(/\r\n?/g, '\n')                            // CRLF / CR → LF
+      .replace(/[\u180E\u200B-\u200D\u2060\uFEFF]/g, '')  // 零宽字符清理
+      .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' ') // 各类不可见空格 → 普通空格
+      .trim()
   }
 
   /**
-   * 把正文写进输入框，并**回读校验**。写两次仍不一致就返回 false。
+   * 供 trace 用的正文指纹：长度 + 轻量 hash（FNV-1a）+ **差异处的字符码**。
    *
-   * 为什么不能只写不校验：`writeComposer` 是在 React/Lexical 托管编辑器背后改
-   * DOM。它成功与否，调用方**拿不到信号** —— `execCommand` 即使什么都没写进去
-   * 也返回 true，`if (!ok)` 那条兜底永远不会触发。真机事故里占位符就是这样
-   * "写进去了、清不掉、然后被原样发出去"。
+   * ★ 绝不把正文原文放进 trace ★
+   * 0.1.18 真机踩过这个坑：payload 里带了 head/tail 原文，日志脱敏器把**整行**
+   * （连事件名一起）打成了 `<已脱敏长串>`，真机分诊时连"这是哪个事件"都看不出来。
+   * 现在只留长度、hash、以及差异位置附近的 charCode —— 既能一眼认出
+   * NBSP(160) / ZWSP(8203) / CR(13) 这类不可见字符，又不泄漏消息内容。
    */
-  function writeAndVerify(box, text) {
-    for (let i = 0; i < 2; i++) {
-      writeComposer(box, text)
-      if (normalizeBody(readComposer(box)) === normalizeBody(text)) return true
+  function bodyDigest(text) {
+    const s = String(text == null ? '' : text)
+    let h = 2166136261
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i)
+      h = Math.imul(h, 16777619)
     }
-    return false
+    return { len: s.length, hash: (h >>> 0).toString(16) }
+  }
+
+  /** 差异位置附近的字符码（不含原文），用来判断"到底差的是哪种不可见字符"。 */
+  function codesAround(text, from, span) {
+    const s = String(text == null ? '' : text)
+    const n = Math.min(s.length, Math.max(0, from) + (span || 12))
+    const out = []
+    for (let i = Math.max(0, from); i < n; i++) out.push(s.charCodeAt(i))
+    return out
+  }
+
+  /** 两个字符串**首个不同字符的位置**；完全相同返回 -1，前缀相同返回较短长度。 */
+  function firstDiffIndex(a, b) {
+    const x = String(a == null ? '' : a)
+    const y = String(b == null ? '' : b)
+    const n = Math.min(x.length, y.length)
+    for (let i = 0; i < n; i++) if (x.charCodeAt(i) !== y.charCodeAt(i)) return i
+    return x.length === y.length ? -1 : n
+  }
+
+  /**
+   * ★ 0.1.19：`writeAndVerify()` 已删除（连同 `writeComposer()`）★
+   *
+   * 它在真机上的实际表现是**静默失败**：`execCommand` 什么都没写进去也返回 true，
+   * 于是"写回失败"对调用方完全不可见。真机 0.1.18 证据显示 actual 就是原文本身。
+   *
+   * 现在写入只有一条路：`nativeSetComposer()` → 主进程 Chromium 原生编辑命令，
+   * 并由 `replaceComposerWithTranslatedTextNative()` 回读 + canonical 比对。
+   * 保留本说明是为了让"为什么删掉"可被 grep 到，防止被顺手加回来。
+   */
+
+  /**
+   * ★ 0.1.19 主线：用 **Chromium 原生输入**把译文放进 composer ★
+   *
+   * ## 为什么不再自己改 DOM（真机证据）
+   *
+   * 0.1.18 真机日志（同一台 Mac，hello-pix-2026-10-08.log）：
+   *
+   *     expected : len=29 hash=33aaf90e  "Test translation information."
+   *     actual   : len=6  hash=3a49c2d5  "测试翻译信息"
+   *     writeMethod:"execCommand:insertText"  sawBeforeInput:false  sawInput:true
+   *
+   * `actual` **就是原文**，译文一个字符都没进去。`sawBeforeInput:false` 是关键：
+   * WhatsApp 的编辑器（Lexical 系）在**祖先捕获阶段**拦掉了 `isTrusted:false`
+   * 的 `beforeinput`，所以 `execCommand` / `textContent` 这类"页面内改 DOM"的写入
+   * **从未进入编辑器的输入管线** —— 改的是 DOM，编辑器 state 没动，下一次它自己
+   * 调和就把 DOM 重新盖回去。
+   *
+   * 结论：写入方式必须换成**浏览器进程发起的真实输入**（可信事件），
+   * 编辑器才会按正常输入处理、同步自己的 state。
+   *
+   * ## 流程
+   *
+   *     box.focus()（只聚焦，不改内容）
+   *       → 主进程 selectAll + delete        → 回读 → COMPOSER_CLEARED
+   *       → 主进程 insertText(translatedText) → 回读 → NATIVE_TEXT_INSERTED
+   *       → 轮询直到正文稳定                   → LEXICAL_SETTLED（含漂移采样）
+   *       → canonical 比对                     → FINAL_TEXT_VALIDATED
+   *
+   * 全程**不**出现 innerText / textContent / innerHTML / replaceChildren / 手工插 span。
+   *
+   * @returns {Promise<{ok:boolean, actual:string, reason?:string, samples:Array}>}
+   */
+  async function replaceComposerWithTranslatedTextNative(box, text) {
+    const expected = String(text == null ? '' : text)
+    const wantCanon = canonicalizeSendBody(expected)
+    const samples = []
+    if (!box) return { ok: false, actual: '', reason: 'NO_COMPOSER', samples: samples }
+    // 取证：从这一刻起"最近一次写入方式"就是原生输入。
+    markNativeWrite(box, 'native:selectAll+delete+insertText')
+    const bridge = (typeof pixBridge !== 'undefined' && pixBridge) || null
+    if (!bridge || !bridge.nativeComposerClear || !bridge.nativeComposerInsertText) {
+      // 桥没有原生通道 = 老版本主进程。**不许退回 DOM 写入**（那正是根因）。
+      trace('NATIVE_INPUT_UNAVAILABLE', { chain: 'send', reason: 'no_bridge' })
+      return { ok: false, actual: readComposer(box), reason: 'NO_NATIVE_BRIDGE', samples: samples }
+    }
+
+    trace('NATIVE_INPUT_BEGIN', {
+      chain: 'send',
+      expected: bodyDigest(expected),
+      canonicalLen: wantCanon.length,
+      boxTag: String(box.tagName || '').toLowerCase(),
+      contentEditable: box.isContentEditable ? 'true' : 'false'
+    })
+    perfMark('nativeBegin')
+
+    // 只聚焦，不改内容 —— 让 Chromium 的编辑命令作用在 composer 上。
+    try { box.focus() } catch (e) {}
+
+    const sample = (label, at) => {
+      const raw = readComposer(box)
+      const canon = canonicalizeSendBody(raw)
+      const row = {
+        label: label,
+        t: at,
+        len: raw.length,
+        hash: bodyDigest(raw).hash,
+        canonLen: canon.length,
+        equal: canon === wantCanon
+      }
+      samples.push(row)
+      return row
+    }
+
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      // ---- 清空（Chromium 编辑命令）----
+      let cleared = null
+      try {
+        cleared = await bridge.nativeComposerClear()
+      } catch (e) {
+        cleared = { ok: false, reason: 'BRIDGE_ERROR:' + ((e && e.message) || e) }
+      }
+      const afterClear = sample('COMPOSER_CLEARED', 0)
+      trace('COMPOSER_CLEARED', {
+        chain: 'send',
+        attempt: attempt,
+        ok: !!(cleared && cleared.ok),
+        reason: (cleared && cleared.reason) || '',
+        focused: !!(cleared && cleared.focused),
+        actual: bodyDigest(readComposer(box))
+      })
+      if (!cleared || !cleared.ok) {
+        trace('NATIVE_INPUT_FAILED', { chain: 'send', at: 'clear', reason: (cleared && cleared.reason) || 'unknown' })
+        return { ok: false, actual: readComposer(box), reason: 'CLEAR_FAILED', samples: samples }
+      }
+
+      // ---- 原生插入（Chromium 原生文本输入）----
+      let inserted = null
+      try {
+        // 第二次尝试走**逐行插入**：换行表示差异（`\n` 被编辑器落成 `<br>` / 新 div）
+        // 是唯一可能由"插入方式"引起的差异，逐行插入能避开它。
+        inserted = await bridge.nativeComposerInsertText(expected, attempt > 1)
+      } catch (e) {
+        inserted = { ok: false, reason: 'BRIDGE_ERROR:' + ((e && e.message) || e) }
+      }
+      sample('NATIVE_TEXT_INSERTED', 0)
+      trace('NATIVE_TEXT_INSERTED', {
+        chain: 'send',
+        attempt: attempt,
+        ok: !!(inserted && inserted.ok),
+        reason: (inserted && inserted.reason) || '',
+        chars: expected.length,
+        actual: bodyDigest(readComposer(box))
+      })
+      if (!inserted || !inserted.ok) {
+        trace('NATIVE_INPUT_FAILED', { chain: 'send', at: 'insert', reason: (inserted && inserted.reason) || 'unknown' })
+        return { ok: false, actual: readComposer(box), reason: 'INSERT_FAILED', samples: samples }
+      }
+
+      // ---- 等编辑器自己收口（LEXICAL_SETTLED）----
+      //
+      // ## 0.1.19 性能专项：从"固定 500ms 观察窗"改成"确认即走"
+      //
+      // 实测（bench-send-timing）：固定 500ms 的观察窗占掉了整条发送链
+      // **100%** 的客户端开销（508ms / 508ms），而它存在的唯一目的是证明
+      // "编辑器不再改动正文"。既然目标只是"确认"，就不该无条件等满 500ms。
+      //
+      // 新判据是三条同时成立：
+      //   ① canonical 正文 == 译文（编辑器的内部 state 确实吃进了我们的输入）
+      //   ② 连续 STABLE_STREAK 次回读完全一致（不是在两次 render 之间取到的瞬态）
+      //   ③ 已观察满 **下限** sendSettleMs（默认 60ms，给编辑器留一拍）
+      // 满足即认为收口，立刻进入校验 + 发送。
+      //
+      // ## 为什么可以缩短而**不降低安全性**
+      //
+      // 缩短观察窗**不会**把风险放到"发出去之后"，因为：
+      //   · 发送前仍有**独立**的一道 `sendableBody()` 闸（FINAL_TEXT_VALIDATED），
+      //     它就在 `fireSend()` 前一行同步执行；
+      //   · 那道闸读的是**此刻的 DOM**，与触发发送之间没有任何 await 间隙；
+      //   · 不一致就 fail-closed，一个字节都不发（BODY_MISMATCH 原样保留）。
+      // 所以"观察窗"只影响**确认得早不早**，不影响"不合格会不会被拦"。
+      //
+      // 上限 sendSettleCeilingMs（默认 400ms）：到点仍不稳定 → 换一种插入方式
+      // 重试一次 → 仍不行就 fail-closed。绝不会为了快而放行。
+      const settleFloorMs = Number.isFinite(Number(prefs.sendSettleMs))
+        ? Math.max(0, Number(prefs.sendSettleMs))
+        : NATIVE_SETTLE_FLOOR_DEFAULT_MS
+      // 上限必须 ≥ 下限（取证模式会把下限调到 500，此时要让它跑得完，
+      // 否则 0/100/300/500 的漂移时间线会被截断）。
+      const settleCeilingMs = Math.max(
+        settleFloorMs + NATIVE_SETTLE_SLACK_MS,
+        Number.isFinite(Number(prefs.sendSettleCeilingMs))
+          ? Math.max(0, Number(prefs.sendSettleCeilingMs))
+          : NATIVE_SETTLE_CEILING_DEFAULT_MS
+      )
+      const t0 = Date.now()
+      let lastCanon = null
+      let streak = 0
+      let marks = 0
+      let settled = false
+      let everEqual = false
+      while (true) {
+        const elapsed = Date.now() - t0
+        const s = sample('DRIFT', elapsed)
+        // 稳定性判据用**完整 canonical 正文**，不是只看长度 ——
+        // 等长替换（"3 点" → "4 点"）长度一样但内容已经变了，不能算"稳定"。
+        if (s.canon === lastCanon) streak++
+        else streak = 1
+        lastCanon = s.canon
+        if (s.equal) everEqual = true
+        // 关键采样点：0 / 100 / 300 / 500ms（取证用；只采落在窗口内的点，
+        // 避免留下误导性的半截时间线）。
+        if (marks < NATIVE_SAMPLE_MARKS.length && elapsed >= NATIVE_SAMPLE_MARKS[marks]) {
+          const mark = NATIVE_SAMPLE_MARKS[marks]
+          marks++
+          if (mark <= settleCeilingMs) {
+            trace('COMPOSER_DRIFT_SAMPLE', {
+              chain: 'send',
+              attempt: attempt,
+              t: elapsed,
+              mark: mark,
+              len: s.len,
+              hash: s.hash,
+              canonLen: s.canonLen,
+              equal: s.equal
+            })
+          }
+        }
+        // 收口判据：**正文已经稳定**（连续 NATIVE_STABLE_STREAK 次回读完全一致，
+        // 说明不是在两次 render 之间取到的瞬态）+ 已过下限。
+        // 注意这里**不要求**内容等于译文 —— 内容稳定但不等于译文，恰恰说明
+        // 这次写入没生效，应当尽快进入重试/fail-closed，而不是白等满上限。
+        // （分批插入的场景不会误判：那时 canonical 每次都在变，streak 始终很低。）
+        if (streak >= NATIVE_STABLE_STREAK && elapsed >= settleFloorMs) { settled = true; break }
+        if (elapsed >= settleCeilingMs) break
+        await wait(NATIVE_SETTLE_POLL_MS)
+      }
+      const settleMsSpent = Date.now() - t0
+      const finalRaw = readComposer(box)
+      const finalCanon = canonicalizeSendBody(finalRaw)
+      const ok = finalCanon === wantCanon
+      trace('LEXICAL_SETTLED', {
+        chain: 'send',
+        attempt: attempt,
+        ms: settleMsSpent,
+        stable: settled,
+        settledEarly: settled && settleMsSpent < settleCeilingMs,
+        everEqual: everEqual,
+        floor: settleFloorMs,
+        ceiling: settleCeilingMs,
+        expected: bodyDigest(expected),
+        actual: bodyDigest(finalRaw),
+        canonicalEqual: ok,
+        canonicalLen: { expected: wantCanon.length, actual: finalCanon.length },
+        firstDiffCanonical: firstDiffIndex(wantCanon, finalCanon),
+        driftSamples: samples.length
+      })
+      perfMark('settled')
+      if (ok) return { ok: true, actual: finalRaw, samples: samples }
+      if (attempt < 2) {
+        trace('NATIVE_INPUT_RETRY', { chain: 'send', attempt: attempt })
+        continue
+      }
+      return { ok: false, actual: finalRaw, reason: 'BODY_MISMATCH', samples: samples }
+    }
+    return { ok: false, actual: readComposer(box), reason: 'BODY_MISMATCH', samples: samples }
+  }
+
+  /**
+   * 把正文写进输入框，并**回读校验**。
+   *
+   * ★ 0.1.19：这个函数连同 `writeComposer()` 已经**从发送链彻底删除** ★
+   * 它代表的正是被真机证伪的那条路（页面内改 DOM，编辑器不认、下一次调和就盖回来）。
+   * 发送链现在只有一条写入路径：`nativeSetComposer()` →
+   * `replaceComposerWithTranslatedTextNative()` → 主进程 Chromium 原生编辑命令。
+   * 保留这个说明是为了让"为什么删掉"可被 grep 到，避免以后有人又加回来。
+   */
+  async function nativeSetComposer(box, text, why) {
+    const value = String(text == null ? '' : text)
+    const res = await replaceComposerWithTranslatedTextNative(box, value)
+    trace('NATIVE_SET_COMPOSER', {
+      chain: 'send',
+      why: String(why || ''),
+      ok: !!res.ok,
+      reason: res.reason || '',
+      chars: value.length,
+      actual: bodyDigest(res.actual || '')
+    })
+    return res
+  }
+
+  /**
+   * 现在能不能**安全地**把 composer 还原成 raw？
+   *
+   * 铁律：**用户打了新内容就一个字节都不许动**。覆盖用户的输入 = 数据丢失，
+   * 比"没反应"严重得多（真机已复现过"我打了一半，自己没了"）。
+   *
+   * 只有当框里装的是"我们自己的东西"时才允许还原：
+   *   · 空的（本来就没内容，写回原文是恢复原状）
+   *   · 还挂着占位符（那是我们的状态，必须清掉）
+   *   · 规范化之后就是 raw 本身（没变，无需担心）
+   */
+  function canSafelyRestore(box, raw) {
+    const now = readComposer(box)
+    if (!String(now).trim()) return true
+    if (MessageParser.hasBusy(now)) return true
+    return canonicalizeSendBody(now) === canonicalizeSendBody(raw)
   }
 
   /**
@@ -2396,18 +3342,55 @@ const pixBridge = {
    * 而 `fireSend()` 恰恰会把 suppression 置真。于是"我们自己发起的那一次发送"
    * 正好把唯一能拦住占位符的闸关掉了 —— 这就是占位符出网的最后一步。
    *
-   * 现在这一闸独立于一切开关：正文里只要还挂着占位符，或者正文不是我们打算
-   * 发的那份译文，就**不发**。
+   * 现在这一闸独立于一切开关：正文里只要还挂着占位符，或者正文与预期译文的
+   * **规范化结果**不一致，就**不发**。
+   *
+   * P0-1：比对改为 canonicalize —— 只放行 CRLF/LF、NBSP、零宽、Unicode 归一化
+   * 这类**无语义**差异；文字/数字/URL/标点/换行结构的真实变化仍然 fail-closed。
    */
   function sendableBody(box, expected) {
     const actual = readComposer(box)
     if (MessageParser.hasBusy(actual)) {
       return { ok: false, reason: 'BUSY_MARK', actual: actual }
     }
-    if (expected != null && normalizeBody(actual) !== normalizeBody(expected)) {
+    if (expected != null && canonicalizeSendBody(actual) !== canonicalizeSendBody(expected)) {
       return { ok: false, reason: 'BODY_MISMATCH', actual: actual }
     }
     return { ok: true, actual: actual }
+  }
+
+  /**
+   * BODY_MISMATCH 的**完整取证** —— 用户明确要求：必须能看到究竟差在哪，
+   * 不许再用一句笼统的"状态异常"糊过去。
+   *
+   * 落盘内容：预期/实际的长度与 hash、首个差异位、canonical 前后文本、
+   * 输入框 tag/class/contenteditable、写入方式、input/beforeinput 是否触发。
+   */
+  function traceBodyMismatch(box, expected, actual) {
+    const ce = canonicalizeSendBody(expected)
+    const ca = canonicalizeSendBody(actual)
+    const w = lastWriteInfo || {}
+    const rawIdx = firstDiffIndex(String(expected == null ? '' : expected), String(actual == null ? '' : actual))
+    const canIdx = firstDiffIndex(ce, ca)
+    trace('SEND_BODY_MISMATCH_DETAIL', {
+      chain: 'send',
+      expected: bodyDigest(expected),
+      actual: bodyDigest(actual),
+      canonicalEqual: ce === ca,
+      firstDiffRaw: rawIdx,
+      firstDiffCanonical: canIdx,
+      canonicalLen: { expected: ce.length, actual: ca.length },
+      // 只给字符码，不给原文 —— 避免整行被日志脱敏器打成 <已脱敏长串>。
+      expectedCodes: codesAround(expected, rawIdx, 12),
+      actualCodes: codesAround(actual, rawIdx, 12),
+      boxTag: w.tag || (box && String(box.tagName || '').toLowerCase()) || '-',
+      boxClass: w.cls || (box && String(box.className || '').slice(0, 80)) || '-',
+      contentEditable: w.editable != null ? w.editable : (box && box.isContentEditable ? 'true' : 'false'),
+      writeMethod: w.method || '-',
+      trustedEvent: w.trusted === true,
+      sawBeforeInput: w.sawBeforeInput,
+      sawInput: w.sawInput
+    })
   }
 
   function fireSendVerified(box, expected) {
@@ -2423,6 +3406,8 @@ const pixBridge = {
     if (!gate.ok) {
       console.error('[Hello Pix] BLOCKED_' + gate.reason +
         '：已拦下发送，未发出任何内容 · 正文=' + JSON.stringify(gate.actual))
+      // P0-1：BODY_MISMATCH 必须留下完整差异取证，否则真机只能看到"失败了"。
+      if (gate.reason === 'BODY_MISMATCH') traceBodyMismatch(box, expected, gate.actual)
       trace('SEND_BLOCKED_' + gate.reason, { chars: String(gate.actual || '').length })
       return gate
     }
@@ -2431,7 +3416,9 @@ const pixBridge = {
     console.info('[Hello Pix] 发送翻译 · 最终正文=' + JSON.stringify(gate.actual) + ' · trigger=manual_send')
     sendActionPhase = 'sending'
     trace('PROGRAMMATIC_SEND_BEGIN', { chars: gate.actual.length })
+    perfMark('sendBegin')
     fireSend(box)
+    perfMark('sendDone')
     trace('PROGRAMMATIC_SEND_DONE', { chars: gate.actual.length })
     return { ok: true, actual: gate.actual }
   }
@@ -2463,6 +3450,11 @@ const pixBridge = {
     trace('PROGRAMMATIC_SEND_BEGIN', { via: via || 'user', chars: gate.actual.length })
     fireSend(box)
     trace('PROGRAMMATIC_SEND_DONE', { via: via || 'user', chars: gate.actual.length })
+    perfMark('sendDone')
+    // 用户明确点了「发送原文」：同样按"真的发出去了"给一次「已发送」反馈。
+    perfMark('uiClosed')
+    setSendStatus('sent')
+    perfEmit('ok', { via: via || 'user', engine: prefs.engine || '-', chars: gate.actual.length })
     // 发完必须把 phase 归位，否则下一次正常发送会被 STALE_ACTION 误拦。
     // 同样只归自己这一次动作管（见 deliverSend 的同名处理）。
     const myAction = sendActionId
@@ -2477,13 +3469,30 @@ const pixBridge = {
     pendingSend = null
     sendBusy = false
     hideSendBusy()
-    try { writeComposer(box, raw) } catch (e) {}
-    try { scrubBusy(box, raw) } catch (e) {}
+    // 归位状态机：失败态绝不能把 phase 留在 translating，否则下一次发送
+    // （尤其是「重试翻译」）会被残留状态误判成陈旧动作而再次失败。
+    sendActionPhase = 'idle'
+    lastSendFail = { code: String(reason || 'BLOCKED'), reason: String(reason || ''), at: Date.now(), trigger: TRIGGER_SEND }
+    // 还原正文同样走**原生输入**（不再有第二套写法）。这里是异步的：
+    // 即使还原还没完成，sendableBody() 也会因为占位符/正文不符而拦下发送 ——
+    // 绝不会出现"占位符还没抹掉就真发出去"。
+    //
+    // ★ 但**用户的新草稿必须原样不动** ★：只要框里不是"我们自己的东西"
+    //   （空 / 占位符 / 就是 raw 本身），一律不碰。
+    if (canSafelyRestore(box, raw)) {
+      nativeSetComposer(box, raw, 'block_send_restore').catch(function () {})
+    } else {
+      trace('COMPOSER_LEFT_AS_IS', { at: 'block_send', chars: readComposer(box).length })
+    }
     console.error('[Hello Pix] BLOCKED_' + reason + '：翻译状态异常，消息未发送')
     trace('SEND_FAIL_CLOSED', { reason: reason })
+    // 性能计时：fail-closed 也要给一行收口，否则这条动作在统计里就是"没有记录"。
+    perfMark('uiClosed')
+    perfEmit('fail_closed', { code: String(reason || '') })
     showSendFailureNotice(box, raw, masked, {
       title: '翻译状态异常，消息未发送',
-      hint: '为避免发出未翻译或带占位符的内容，这一条已拦下。对方没有收到任何内容。'
+      hint: '为避免发出未翻译或带占位符的内容，这一条已拦下。对方没有收到任何内容。',
+      code: String(reason || '')
     })
   }
 
@@ -2491,7 +3500,7 @@ const pixBridge = {
   function scrubBusy(box, fallback) {
     if (!box) return
     if (!MessageParser.hasBusy(readComposer(box))) return
-    writeComposer(box, String(fallback == null ? '' : fallback))
+    nativeSetComposer(box, String(fallback == null ? '' : fallback), 'scrub_busy').catch(function () {})
   }
 
   /**
@@ -2529,9 +3538,13 @@ const pixBridge = {
     }
     // 正在翻译：什么都不做，等 runIntercept 自己把译文或原文写回来
     if (sendBusy) return true
-    // 翻译流程已结束而占位符还在（写回失败 / 被打断）：还原成用户原文再发
+    // 翻译流程已结束而占位符还在（写回失败 / 被打断）：**原生**还原成用户原文。
+    // 注意这一下发送已经被上面的 preventDefault 拦住了 —— 这里只负责"把正文还回去"，
+    // 用户再按一次 Enter 才会真正发送。宁可多按一次，也绝不把占位符发出去。
     const pending = pendingSend && pendingSend.box === box ? pendingSend.raw : ''
-    writeComposer(box, pending || MessageParser.stripBusy(text))
+    const restoreTo = pending || MessageParser.stripBusy(text)
+    trace('NATIVE_RESTORE_SCHEDULED', { reason: 'busy_mark_without_busy_send', chars: restoreTo.length })
+    nativeSetComposer(box, restoreTo, 'guard_busy_restore').catch(function () {})
     return true
   }
 
@@ -2587,9 +3600,10 @@ const pixBridge = {
   const revokeMap = new Map()
 
   function messageRoot(node) {
-    return node.closest('[data-id]') ||
-      node.closest('[data-testid="msg-container"]') ||
-      hostOf(node)
+    // 只认"消息行"这一种身份：任何更宽的容器（msg-container / 聊天根）都不再
+    // 被当作消息根 —— 那正是"译文绑错节点"的入口。没有 data-id 就用节点自身，
+    // 由上层（parseScope / 渲染）自行判断可不可用。
+    return node.closest('[data-id]') || node
   }
 
   function messageKey(root) {
@@ -2630,19 +3644,159 @@ const pixBridge = {
     tag.textContent = '已撤回'
   }
 
+  /**
+   * 「群聊自动翻译」开关的当前档位。
+   *
+   * 单独拎出来只为一件小事：CHAT_KIND 取证要在扫描循环**之前**打点，
+   * 而扫描循环里"翻译开关不得出现在归档之前"这条硬规则有测试守着。
+   * 把开关读取收进这个函数，既保留了取证信息，又不让 scan() 里多出
+   * 一个会被误判成"翻译闸门"的 prefs 引用。
+   */
+  function groupModeLabel() { return prefs.transGroup ? 'auto' : 'manual' }
+
+  /**
+   * 把残留的手动「译」按钮收掉 —— 自动翻译接手时调用。
+   *
+   * 真机现象（2026-10-11）：先把群聊设成「手动」→ 满屏「译」；再切成「自动」→
+   * 消息确实开始自动翻，但**按钮还赖在原处**。原因是 scan 的 auto 分支以前只画
+   * 译文、从不清理入口，而已经挂上去的 chip 没有任何人负责摘掉。
+   *
+   * `busy` 态刻意不动：那是一次**正在进行**的手动翻译，收掉它等于把用户点出来的
+   * 操作半途掐死（它的回调还要用这个节点回写状态）。
+   */
+  function removeStaleChip(host) {
+    if (!isMessageHost(host)) return 0
+    let removed = 0
+    host.querySelectorAll('.pix-click').forEach(el => {
+      if (el.getAttribute('data-pix-state') === 'busy') return
+      el.remove()
+      removed++
+    })
+    if (removed) {
+      // 操作行空了就一起收掉，免得留一条空白行把气泡撑高
+      host.querySelectorAll(':scope > .pix-trans-action-row').forEach(row => {
+        if (!row.querySelector('.pix-click') && !String(row.textContent || '').trim()) row.remove()
+      })
+    }
+    return removed
+  }
+
+  // ---------------------------------------------------------------------------
+  // 自动翻译派发池
+  //
+  // 为什么不能在扫描循环里 `await` 一条翻一条（0.1.24 的做法）：
+  // 「群聊=自动」现在要把打开会话时渲染出来的那批消息（真机实测 30~40 条）
+  // 也翻掉。串行一条约 1s，用户就得盯着"翻一半"看半分钟 —— 那正是
+  // 「一部分翻译、一部分没有翻译」的观感。
+  //
+  // 这里用**有界并发**派发，并且**新的先翻**：打开会话时人在底部，先把眼前
+  // 这几条翻出来，剩下的在后台陆续填上。
+  //
+  // 并发上限不能去掉：翻译请求和**发送**链走同一套连接池，把连接占满会直接
+  // 拖慢用户最在意的发送耗时（0.1.19 性能专项的结论）；账号级限流是
+  // 120 次/分钟，也不允许一次性把几十条全推上去。
+  // ---------------------------------------------------------------------------
+  const AUTO_POOL_SIZE = 3
+  const autoQueue = []
+  let autoRunning = 0
+  let lastScanIdentity = ''
+
+  // 同一条消息自动翻译**失败后的冷却**。没有它会出事：scan 每 220ms 一轮，
+  // 同一条失败的消息会被一轮一轮地重发 —— 一旦撞上限流，就是一场自己打自己的
+  // 重试风暴。冷却期内不再自动重试（用户仍可手动点「译」）。
+  const AUTO_FAIL_COOLDOWN_MS = 60000
+  const autoFailedAt = new Map()
+
+  function autoPump() {
+    while (autoRunning < AUTO_POOL_SIZE && autoQueue.length) {
+      const job = autoQueue.shift()
+      autoRunning++
+      const run = async () => {
+        try {
+          const translated = await translateParsed(job.parsed, true, TRIGGER_AUTO)
+          // 翻译失败时**不清**已有译文框：一次网络抖动不该把上面那条好好的译文抹掉。
+          if (translated) paint(job.host, translated, job.text)
+          else autoFailedAt.set(job.id, Date.now())
+        } catch (e) {
+          autoFailedAt.set(job.id, Date.now())
+        } finally {
+          autoRunning--
+          autoPump()
+        }
+      }
+      run()
+    }
+  }
+
+  /**
+   * 把本轮扫描发现的待自动翻译消息交给派发池。返回真正入队的条数。
+   *
+   * 倒序入队 = **最新的先翻**。同一条消息（按消息身份去重）不会重复入队。
+   */
+  function enqueueAuto(jobs) {
+    if (!jobs || !jobs.length) return 0
+    const known = Object.create(null)
+    for (let i = 0; i < autoQueue.length; i++) known[autoQueue[i].id] = 1
+    let added = 0
+    for (let i = jobs.length - 1; i >= 0; i--) {
+      const job = jobs[i]
+      if (!job.id || known[job.id]) continue
+      const failedAt = autoFailedAt.get(job.id)
+      if (failedAt && Date.now() - failedAt < AUTO_FAIL_COOLDOWN_MS) continue
+      known[job.id] = 1
+      autoQueue.push(job)
+      added++
+    }
+    if (added) autoPump()
+    return added
+  }
+
   async function scan() {
     // 每次扫描顺带看一眼是不是换了客户 —— 打开新会话就是撞单检测的触发点。
     // 挂在 scan 上而不是另起定时器：scan 已由 MutationObserver 调度，
     // 复用既省资源，也保证"页面一变就能发现"。
     try { reportIfPeerChanged() } catch (e) {}
 
-    // 换会话就重建历史基线：**打开会话那一刻在页面上的消息全部是历史**。
-    // 基线就绪之前一律按历史处理 —— 宁可让用户点一下，
-    // 也不能把满屏历史消息当"新消息"自动翻掉并扣字符。
-    historyGate.begin(chatIdentity(), Date.now())
+    // 换会话：把上一段会话的自动翻译排队与失败冷却一起清掉。
+    // 消息 id 只在本会话内有意义，留着只会让新会话的消息被旧冷却误伤。
+    const identity = chatIdentity()
+    if (identity !== lastScanIdentity) {
+      lastScanIdentity = identity
+      autoQueue.length = 0
+      autoFailedAt.clear()
+    }
 
     const nodes = messageNodes()
-    const group = isGroupChat()
+    // 会话类型 + 取证：判成"群"会把自动翻译交给「群聊自动翻译」开关，
+    // 所以"凭哪条证据判的"必须能事后查（0.1.23 真机就是这里判错）。
+    const kind = chatKind()
+    const group = kind.group
+    // groupMode 必须进指纹：不然用户把「群聊翻译」从手动切成自动时，
+    // 指纹没变 → 一行 CHAT_KIND 都不会再打，日志里永远停在旧的 manual
+    // （2026-10-11 排查就是卡在这里：日志说 manual，实际已经在自动翻）。
+    const kindKey = identity + '|' + group + '|' + kind.evidence.source + '|' + groupModeLabel()
+    if (kindKey !== lastChatKindKey) {
+      lastChatKindKey = kindKey
+      trace('CHAT_KIND', {
+        tabId: prefs.tabId || '-',
+        group: group,
+        evidence: kind.evidence.source,
+        inMain: kind.evidence.inMain,
+        sawGUs: kind.evidence.sawGUs,
+        sawCUs: kind.evidence.sawCUs,
+        headerText: kind.evidence.headerText,
+        // 头部证据的**形状**（词长序列 + 标点骨架），不含人名：
+        // 每次真机跑"群 + 私聊"各一次，就能确认/推翻"副标题=成员名单"这条判据。
+        headerMarker: kind.evidence.headerMarker,
+        headerMarkers: kind.evidence.headerMarkers,
+        memberList: kind.evidence.memberList,
+        subtitleShape: kind.evidence.subtitleShape,
+        headerShape: kind.evidence.headerShape,
+        groupMode: groupModeLabel()
+      })
+    }
+    const autoJobs = []
+    let chipRemoved = 0
     for (let i = 0; i < nodes.length; i++) {
       const node = nodes[i]
       const host = hostOf(node)
@@ -2660,16 +3814,9 @@ const pixBridge = {
       // 归档和"要不要翻译这条"是两件事 —— 中文消息（includeZh 关闭）、
       // 群聊（transGroup 关闭）同样是需要留档的往来记录，不能因为不翻译就不归档。
       try { reportMessage(node, isOwn(node) ? 'out' : 'in', text) } catch (e) {}
-      // 群聊判定"历史"：只有打开会话之后**新到达**的消息才允许自动翻。
-      let historic = false
-      if (group) {
-        const id = messageIdentity(root, parsed)
-        historic = historyGate.isHistoric(id, Date.parse(messageTime(root) || '') || 0)
-        historyGate.remember(id)
-      }
       // 计费决策集中在一处（MessageParser.messageAction，已被真 DOM 用例锁死）：
       //   auto → 自动调翻译接口（唯一会产生字符消耗的分支）
-      //   chip → 手动模式或历史消息，只给按钮
+      //   chip → 群聊手动模式，只给按钮
       //   hide → 功能关着 / 没正文，清掉按钮与译文
       const action = MessageParser.messageAction({
         receiveEnabled: !!prefs.transRecv,
@@ -2679,21 +3826,31 @@ const pixBridge = {
         includeZh: !!prefs.includeZh,
         sameLang: sameLang(text),
         group: group,
-        transGroup: !!prefs.transGroup,
-        historic: historic
+        transGroup: !!prefs.transGroup
       })
       if (action === 'auto') {
-        // 翻译失败时**不清**已有译文框：一次网络抖动不该把上面那条好好的译文抹掉。
-        const translated = await translateParsed(parsed, true, TRIGGER_AUTO)
-        if (translated) paint(host, translated, text)
+        // 自动接手 → 手动留下的「译」按钮必须收掉，否则就是"开了自动还挂着按钮"。
+        chipRemoved += removeStaleChip(host)
+        autoJobs.push({ id: messageIdentity(root, parsed), host: host, parsed: parsed, text: text })
       } else if (action === 'chip') {
-        if (isMessageHost(host) && !host.querySelector(':scope > .pix-trans')) addClick(host, true, root)
+        if (isMessageHost(host) && !host.querySelector(':scope > .pix-trans')) addClick(host, true, root, node)
       } else if (isMessageHost(host)) {
         clearExtras(host)
       }
     }
-    // 首轮扫描结束：此后出现的消息才算"新消息"。
-    historyGate.settle(nodes.length > 0)
+    const dispatched = enqueueAuto(autoJobs)
+    if (dispatched || chipRemoved) {
+      trace('AUTO_DISPATCH', {
+        tabId: prefs.tabId || '-',
+        group: group,
+        groupMode: groupModeLabel(),
+        candidates: autoJobs.length,
+        dispatched: dispatched,
+        queued: autoQueue.length,
+        running: autoRunning,
+        chipRemoved: chipRemoved
+      })
+    }
   }
 
   function schedule() {

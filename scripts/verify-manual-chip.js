@@ -293,15 +293,21 @@ async function main () {
       } finally { h.close() }
     }
 
-    // 11 · 失败：余额不足 → 按钮必须变成「翻译失败 · 点击重试」，不许静默
+    // 11 · 失败：余额不足 → 按钮必须说清是「余额不足」，不许静默、也不许含糊成"翻译失败"
+    //
+    // 0.1.22 真机缺陷：chip 曾写死「翻译失败 · 点击重试」，把"余额不足"这种
+    // 用户**能自己解决**的问题也说成"我们翻译坏了"。现在按错误码给专门文案
+    // （见 guest-inject.js 的 CHIP_FAIL_TEXT），所以这里断言的是**具体那一条**，
+    // 而不是放之四海皆可的"含失败二字"——否则映射被删回默认也测不出来。
     {
       const h = await mount({ fail: 'INSUFFICIENT_CHARS' })
       try {
         h.click(); await sleep(400)
         const c = h.chip()
-        check('11 · 余额不足 → chip 显示「翻译失败 · 点击重试」+ 弹提示（不静默）',
-          !!c && c.textContent.indexOf('失败') !== -1 && !!h.toast(),
-          { 'chip 文案': c ? c.textContent : null, chip状态: c ? c.getAttribute('data-pix-state') : null,
+        const txt = c ? c.textContent : ''
+        check('11 · 余额不足 → chip 显示「余额不足 · 点击重试」+ 弹提示（不静默）',
+          !!c && txt.indexOf('余额不足') !== -1 && txt.indexOf('翻译失败') === -1 && !!h.toast(),
+          { 'chip 文案': txt || null, chip状态: c ? c.getAttribute('data-pix-state') : null,
             提示: h.toast(), trace: h.trace.map(t => t.event) })
       } finally { h.close() }
     }

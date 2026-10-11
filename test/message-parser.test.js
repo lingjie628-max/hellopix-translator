@@ -452,28 +452,60 @@ test('写回输入框之后、点发送之前必须复核占位符', () => {
   // 复核占位符 + 触发发送都在投递阶段（deliverSend）里，不在决策阶段。
   const runAt = guest.indexOf('async function deliverSend')
   const run = guest.slice(runAt, guest.indexOf('function normalizeBody', runAt))
-  // 现状：写回改成「写 + 回读校验」的 writeAndVerify()，发送走 fireSendVerified()。
-  // 关键不变量没变：**校验通过之后**才允许真正发送。
-  const scrubAt = run.indexOf('writeAndVerify(box, finalText)')
+  // ★ 0.1.19：写入方式换成「Chromium 原生输入 + 回读校验」★
+  // 不变量没变，而且更强了：**原生写入校验通过之后**才允许真正发送。
+  const scrubAt = run.indexOf('await replaceComposerWithTranslatedTextNative(box, finalText)')
   const sendAt = run.indexOf('fireSendVerified(box, finalText)')
-  assert.ok(scrubAt > 0 && sendAt > 0, 'deliverSend 里找不到 writeAndVerify / fireSendVerified')
+  assert.ok(scrubAt > 0 && sendAt > 0,
+    'deliverSend 里找不到原生写入 / fireSendVerified')
   assert.ok(scrubAt < sendAt, '必须先复核占位符再发送')
   // 翻译期间必须记住用户原文，否则硬闸还原不出东西
   assert.match(run, /pendingSend = \{ box: box, raw: raw \}/, '没有记住用户原文')
   // 0.1.14 真机 P0 的根因：占位符曾被**写进输入框**。这一条永久拦住它。
   //
-  // 与实现形状无关的不变量：任何 `writeComposer()` 都不许写占位符 ——
+  // 与实现形状无关的不变量：发送链上任何"写入正文"的调用都不许带占位符 ——
   // 泄漏一定发生在"某处把占位符写进了输入框"，把这条钉死就够了。
   // 注意先剔掉注释：注释里正记着"老实现是 writeComposer(box, raw + BUSY_MARK)"。
   const code = guest
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/^[ \t]*\/\/.*$/gm, '')
-  const writes = code.match(/writeComposer\([^)]*\)/g) || []
-  assert.ok(writes.length > 0, '找不到任何 writeComposer 调用，断言失效')
+  const writes = code.match(/nativeSetComposer\([^)]*\)/g) || []
+  assert.ok(writes.length > 0, '找不到任何 nativeSetComposer 调用，断言失效')
   for (const w of writes) {
     assert.ok(!/BUSY_MARK|正在翻译中/.test(w),
-      'writeComposer 绝不能把占位符写进输入框：' + w)
+      'nativeSetComposer 绝不能把占位符写进输入框：' + w)
   }
+})
+
+test('0.1.19：发送链上不允许再出现任何「页面内改 DOM」的写入', () => {
+  // 真机证据（0.1.18）：页面内 `execCommand` 的写入**从未进入** WhatsApp 编辑器的
+  // 输入管线（expected=29 字符译文 vs actual=6 字符原文，sawBeforeInput=false）。
+  // 所以 `writeComposer()` / `writeAndVerify()` 必须彻底消失，且不许有替代品。
+  const code = guest
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^[ \t]*\/\/.*$/gm, '')
+  assert.ok(code.indexOf('function writeComposer') < 0, 'writeComposer 必须已被删除')
+  assert.ok(code.indexOf('function writeAndVerify') < 0, 'writeAndVerify 必须已被删除')
+  const domWrites = (code.match(/\.(innerText|innerHTML|replaceChildren)\s*=(?!=)/g) || [])
+    .concat(code.match(/execCommand\(\s*['"]insertText['"]/g) || [])
+  assert.equal(domWrites.length, 0,
+    '发送链上不允许再出现直接改 DOM 的写入：' + domWrites.join(','))
+  // 唯一写入入口必须存在，且发送链确实调用它。
+  assert.ok(code.indexOf('function replaceComposerWithTranslatedTextNative') > 0,
+    '缺少原生输入管线 replaceComposerWithTranslatedTextNative')
+  assert.ok(code.indexOf('function nativeSetComposer') > 0, '缺少唯一的写入入口 nativeSetComposer')
+})
+
+test('0.1.19：主进程必须提供原生输入通道（Chromium 编辑命令），且不碰 DOM', () => {
+  assert.ok(main.indexOf("require('./native-composer')") > 0, '主进程没有引入 native-composer')
+  assert.ok(main.indexOf("ipcMain.handle('translate:composerSelectAllDelete'") > 0,
+    '缺少原生清空通道')
+  assert.ok(main.indexOf("ipcMain.handle('translate:composerInsertText'") > 0,
+    '缺少原生插入通道')
+  // 通道必须走可信来源校验（否则任意页面都能驱动 WhatsApp 输入框）。
+  const at = main.indexOf("ipcMain.handle('translate:composerSelectAllDelete'")
+  const seg = main.slice(at, main.indexOf('ipcMain.handle', at + 10))
+  assert.ok(/trustedTabSender|composerTargetOf/.test(seg), '原生输入通道缺少来源校验')
 })
 
 test('主进程独立再拦一次（不信任渲染进程）', () => {

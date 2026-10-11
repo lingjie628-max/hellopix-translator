@@ -1,11 +1,14 @@
 {
   "name": "hello-pix-desktop",
   "productName": "Hello Pix",
-  "version": "0.1.16",
+  "version": "0.1.25",
   "private": true,
   "description": "Hello Pix 桌面客户端",
   "author": "Hello Pix",
   "main": "main.js",
+  "dependencies": {
+    "undici": "^6.29.0"
+  },
   "scripts": {
     "start": "electron .",
     "pack:mac": "electron-builder --mac --publish never",
@@ -13,7 +16,13 @@
     "pack:win": "electron-builder --win --publish never",
     "pack:all": "electron-builder --mac --win --publish never",
     "pack:dir": "electron-builder --dir --publish never",
-    "verify:proxy": "env -u ELECTRON_RUN_AS_NODE electron scripts/proxy-mechanism-electron.js"
+    "verify:proxy": "env -u ELECTRON_RUN_AS_NODE electron scripts/proxy-mechanism-electron.js",
+    "verify:native-input": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-native-input-electron.js",
+    "verify:concurrency": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-concurrency.js",
+    "verify:settle-safety": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-settle-safety.js",
+    "verify:api-net": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-api-net-electron.js",
+    "bench:send": "env -u ELECTRON_RUN_AS_NODE electron scripts/bench-send-timing.js",
+    "bench:translate:live": "env -u ELECTRON_RUN_AS_NODE electron scripts/bench-translate-live.js"
   },
   "devDependencies": {
     "electron": "^33.2.1",
@@ -49,7 +58,9 @@
       "background-mode.js",
       "log-file.js",
     "bridge-warning.js",
+      "native-composer.js",
       "package.json",
+      "node_modules/undici/**/*",
       "renderer/**/*",
       "!renderer/*.mp4",
       "!renderer/*.m4v",

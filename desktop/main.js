@@ -45,6 +45,9 @@ const logFile = require('./log-file')
 // 翻译桥警告条：preload 死了以后，唯一还能把警告画到用户眼前的手段
 // （隔离世界注入，见该文件顶部注释）。
 const bridgeWarning = require('./bridge-warning')
+// composer 的原生输入（Chromium 编辑命令）—— 见 desktop/native-composer.js 顶部
+// 的根因说明：页面内直接改 DOM 的写入进不了 WhatsApp 编辑器的输入管线。
+const nativeComposer = require('./native-composer')
 
 const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 const TABS_HEIGHT = 72
@@ -680,15 +683,151 @@ function rememberCookies(res) {
   })
 }
 
+// ── API 传输层：连接超时 / 整体兜底 / 错误分类 ────────────────────────
+//
+// 真机（0.1.20，macOS）复现过：发一条要翻译的消息，客户端白等约 10.4s 后报
+// `TRANSLATE_FAILED`。取证结论是请求**根本没到服务端**（nginx 无记录、
+// translation_reservations 无预留），底层是 undici 的 `UND_ERR_CONNECT_TIMEOUT`
+// —— TCP 连接 10s 内没建起来，而 10s 正是 undici 的**默认连接超时**。
+//
+// 两个**不能**用的做法（都论证过）：
+//   · 给整个翻译请求设 4 秒超时 —— 正常翻译本身要 2.4~3.4s、上游最坏 8s，
+//     砍到 4s 会把好请求一起砍掉；
+//   · "先建一条 TCP 探一下连通性" —— 那是**另一条连接**：既控制不了 undici 的
+//     连接超时（探通了 undici 仍可能卡满 10s），又在每次请求上白加一次握手。
+//
+// 真正可行的做法：**用我们自己的 undici 发请求，并显式给它的"连接阶段"设超时**。
+// `Agent({ connect: { timeout } })` 只管连接建立这一段；响应阶段由
+// headersTimeout / bodyTimeout 单独兜底 —— 两段天然分开，互不误伤（GPT 慢响应不会被误杀）。
+// 自带 undici 与 Node 内置 fetch 是同一个库，行为一致，差别只在"连接超时归我们管"。
+const API_CONNECT_TIMEOUT_MS = 4000
+const API_CONNECT_TIMEOUT_FIRST = 8000
+const API_TOTAL_TIMEOUT_MS = 30000
+
+// 冷启动首次要现做 DNS 解析 + TLS 握手（还隔着 Cloudflare），4s 预算会误伤；
+// 首轮过后回到 4s。与 pingLine 的 PING_TIMEOUT_FIRST 是同一个道理。
+let apiNetWarm = false
+let apiAgents = null
+let apiLib = null
+let apiLibTried = false
+
+/** 惰性取到自带的 undici；取不到则退回全局 fetch（连接超时退化为不可控，但绝不崩）。 */
+function apiTransport() {
+  if (!apiLibTried) {
+    apiLibTried = true
+    try { apiLib = require('undici') } catch (e) { apiLib = null }
+  }
+  return apiLib
+}
+
+/**
+ * 取本进程共用的 dispatcher。
+ *
+ * 为什么分冷 / 热两个 Agent：`connect.timeout` 构造时就定死、没法按请求改，
+ * 而"冷启动首次"必须给更宽预算；两个 Agent 各维护自己的连接池，互不干扰。
+ */
+function apiDispatcher() {
+  const lib = apiTransport()
+  if (!lib || !lib.Agent) return undefined
+  if (!apiAgents) {
+    apiAgents = {
+      cold: new lib.Agent({
+        connect: { timeout: API_CONNECT_TIMEOUT_FIRST },
+        headersTimeout: API_TOTAL_TIMEOUT_MS,
+        bodyTimeout: API_TOTAL_TIMEOUT_MS
+      }),
+      warm: new lib.Agent({
+        connect: { timeout: API_CONNECT_TIMEOUT_MS },
+        headersTimeout: API_TOTAL_TIMEOUT_MS,
+        bodyTimeout: API_TOTAL_TIMEOUT_MS
+      })
+    }
+  }
+  return apiNetWarm ? apiAgents.warm : apiAgents.cold
+}
+
+/** 退出时收掉连接池，别把 keep-alive 的 socket 留在进程里。 */
+function closeApiAgents() {
+  const agents = apiAgents
+  apiAgents = null
+  if (!agents) return
+  for (const key of ['cold', 'warm']) {
+    try { if (agents[key] && agents[key].close) agents[key].close() } catch (e) {}
+  }
+}
+
+/** 真正发一次请求：优先自带 undici（连接超时可控），否则退回全局 fetch。 */
+function apiRaw(url, init) {
+  const lib = apiTransport()
+  const dispatcher = apiDispatcher()
+  if (lib && lib.fetch && dispatcher) {
+    return lib.fetch(url, Object.assign({ dispatcher: dispatcher }, init))
+  }
+  return fetch(url, init)
+}
+
+/**
+ * 连接建立阶段**可以安全自动重试**的错误码。
+ *
+ * 只收"请求还没发出去"的那几种：DNS 解析失败、TCP 连接被拒 / 不可达 / 连接建立超时。
+ * 故意**不收** ECONNRESET / EPIPE / UND_ERR_SOCKET —— 它们发生在连接建立之后，
+ * 请求可能已经到服务端了，属于"是否送达不确定"，不允许盲目重发。
+ */
+function isRetryableNetworkError(err) {
+  const pix = err && err.pix
+  if (!err || err.code !== 'NETWORK_UNREACHABLE' || !pix || pix.gotResponse) return false
+  const cause = String(pix.causeCode || '')
+  return ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH',
+    'UND_ERR_CONNECT_TIMEOUT'].indexOf(cause) >= 0
+}
+
+/** 造一个带错误码 + 取证信息的异常，并落一条日志（只含非敏感字段）。 */
+function apiFailure(code, message, info) {
+  if (clientLog) {
+    try { clientLog.warn('api', code + ' ' + JSON.stringify(info)) } catch (e) {}
+  }
+  const err = new Error(message)
+  err.code = code
+  err.pix = info
+  return err
+}
+
+/** 分类一次**没拿到 HTTP 响应**的传输失败：整体超时 vs 连接不可达。 */
+function classifyTransportError(err, baseInfo) {
+  const cause = err && err.cause
+  const causeCode = String((cause && cause.code) || err.code || '')
+  const causeMessage = String((cause && cause.message) || err.message || '')
+  // undici 的连接超时**:必须**归成"连不上"（可安全重试），
+  // 不能因为它带 Timeout 字样就被当成"响应超时"而放弃重试。
+  const isConnectTimeout = causeCode === 'UND_ERR_CONNECT_TIMEOUT'
+  const isResponseTimeout = !isConnectTimeout && (
+    causeCode === 'UND_ERR_HEADERS_TIMEOUT' || causeCode === 'UND_ERR_BODY_TIMEOUT' || (err && err.name === 'TimeoutError'))
+  const connectLike = isConnectTimeout
+    || ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH',
+      'ETIMEDOUT', 'ECONNABORTED'].indexOf(causeCode) >= 0
+  const info = Object.assign({}, baseInfo, {
+    phase: connectLike ? 'connect' : 'response',
+    gotResponse: false,
+    errName: (err && err.name) || '',
+    causeCode: causeCode,
+    causeMessage: causeMessage
+  })
+  if (isResponseTimeout) {
+    return apiFailure('NETWORK_TIMEOUT', '服务器响应超时，请稍后重试', info)
+  }
+  return apiFailure('NETWORK_UNREACHABLE', '连不上服务器（' + (causeCode || (err && err.name) || '连接失败') + '）', info)
+}
+
 async function api(pathname, opts) {
   const base = safeApiUrl(apiBase)
   if (!base) throw new Error('API 线路不符合安全策略')
   const options = opts || {}
+  const method = String(options.method || 'GET')
   const headers = { Accept: 'application/json' }
   const cookieHeader = Object.keys(cookieJar).map(name => `${name}=${cookieJar[name]}`).join('; ')
   if (cookieHeader) headers.Cookie = cookieHeader
   headers['X-Pix-Device'] = deviceId()
-  if (!['GET', 'HEAD', 'OPTIONS'].includes(String(options.method || 'GET').toUpperCase())) {
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase())) {
     const csrf = cookieJar['__Host-pix_csrf'] || cookieJar.pix_csrf
     if (csrf) headers['X-CSRF-Token'] = csrf
   }
@@ -697,17 +836,38 @@ async function api(pathname, opts) {
     headers['Content-Type'] = 'application/x-www-form-urlencoded'
     body = new URLSearchParams(options.form).toString()
   }
-  const res = await fetch(base + '/apis' + pathname, {
-    method: options.method || 'GET',
-    headers: headers,
-    body: body
-  })
+  const started = Date.now()
+  // 取证字段：只放"哪个请求、走到哪一步、底层报了什么"，不含任何凭据。
+  const trace = { path: pathname, method: method, requestId: options.requestId || '' }
+
+  // 直接发请求，**不做任何额外的连通性预检**（那是另一条连接，既控不住超时又白增开销）。
+  // 连接超时由 apiRaw() 里的 undici Agent 在"连接阶段"独立控制；
+  // 这里的总超时只是最后的兜底，绝不用来卡正常的慢翻译。
+  let res
+  try {
+    const init = { method: method, headers: headers, body: body }
+    const rawTotal = options.totalTimeoutMs
+    const totalMs = rawTotal === 0 ? 0 : (Number(rawTotal) || API_TOTAL_TIMEOUT_MS)
+    if (totalMs > 0) init.signal = AbortSignal.timeout(totalMs)
+    res = await apiRaw(base + '/apis' + pathname, init)
+  } catch (err) {
+    throw classifyTransportError(err, Object.assign({}, trace, {
+      elapsedMs: Date.now() - started
+    }))
+  }
+  // 拿到了响应头 = 连接确实建立过，之后的请求可以吃"热"预算（4s）。
+  apiNetWarm = true
   rememberCookies(res)
   const text = await res.text()
   try {
     return JSON.parse(text)
   } catch (e) {
-    throw new Error('线路无法连接，请换一条再试：' + apiBase)
+    // 拿到 HTTP 响应了，只是 body 不是 JSON —— 这是"服务端返回异常"，不是网络不可达。
+    throw apiFailure('SERVER_BAD_RESPONSE', '服务器返回异常，请稍后重试', Object.assign({}, trace, {
+      phase: 'parse', gotResponse: true, httpStatus: res.status,
+      elapsedMs: Date.now() - started, errName: e.name || '',
+      causeCode: '', causeMessage: String(e.message || '')
+    }))
   }
 }
 
@@ -1252,6 +1412,13 @@ function pickLang(value, fallback) {
   return v
 }
 
+// 原生输入后的沉降确认窗默认值（毫秒）。
+// 下限 60ms：给编辑器留一拍，连续确认正文稳定且等于译文就立刻发送。
+// 上限 400ms：到点仍不稳定就换插入方式重试，再不行 fail-closed。
+// （0.1.19 性能专项：原实现是固定 500ms 观察窗，实测占满整条发送链的客户端开销。）
+const SEND_SETTLE_FLOOR_MS = 60
+const SEND_SETTLE_CEILING_MS = 400
+
 function tabPrefs(tab) {
   const g = guestPrefs()
   const s = (tab && tab.settings) || {}
@@ -1274,7 +1441,14 @@ function tabPrefs(tab) {
     // 少了这三项，一条 MANUAL_TRANSLATE_CLICK 没法定位到具体实例。
     tabId: (tab && tab.id) || '',
     partition: (tab && tab.partition) || '',
-    engine: s.engine || g.engine || ''
+    engine: s.engine || g.engine || '',
+    // 原生输入的沉降确认窗（毫秒）。0.1.19 性能专项起语义为**最短确认窗**：
+    // 连续确认正文已稳定且等于译文就立刻发送，不再无条件等满一个固定值
+    // （实测固定 500ms 占满整条发送链 100% 的客户端开销）。
+    // 需要完整 0/100/300/500 漂移时间线的取证模式：把实例设置的 sendSettleMs 调到 500。
+    sendSettleMs: Number.isFinite(Number(s.sendSettleMs)) ? Number(s.sendSettleMs) : SEND_SETTLE_FLOOR_MS,
+    // 等待上限：到点仍不稳定 → 换插入方式重试 → 仍不行就 fail-closed。
+    sendSettleCeilingMs: Number.isFinite(Number(s.sendSettleCeilingMs)) ? Number(s.sendSettleCeilingMs) : SEND_SETTLE_CEILING_MS
   }
 }
 
@@ -1450,7 +1624,15 @@ function isDeadRequest(data) {
 }
 
 /**
- * 发一次 /translate/run；命中"号用死了"就**原地换号重发一次**。
+ * 发一次 /translate/run；两类失败各自**原地重发一次**。
+ *
+ * ## 一类：连接建立失败（网络传输层，**不换号**）
+ *
+ * 明确的 DNS / TCP 连接失败时，请求**没有发出去**，可以安全地原样重发一次：
+ * 复用同一个 requestId（= 服务端幂等键），所以即使第一次其实到达了服务端，
+ * 服务端也只会返回已存结果，不会重复扣费。连接失败不再让用户白等 10s。
+ *
+ * ## 二类：命中"号用死了"（业务层，**必须换号**）
  *
  * 为什么要在原地重发、而不是把错误抛给用户让他手动再点一次：
  * 这类失败与"翻译服务坏了"完全无关（上一轮的预留被退款而已），
@@ -1462,12 +1644,35 @@ async function requestTranslate(text, from, to, engine, trigger) {
     text: text, from: from, to: to, engine: engine, trigger: trigger,
     requestId: transRequestId(text, from, to, engine)
   })
-  let data = await api('/translate/run', { method: 'POST', form: body() })
+  // requestId 同时就是服务端的 Idempotency-Key；带上它只为取证（日志里能看出用的哪个号）。
+  const call = () => api('/translate/run', {
+    method: 'POST', form: body(),
+    requestId: transRequestId(text, from, to, engine)
+  })
+
+  let data
+  try {
+    data = await call()
+  } catch (err) {
+    // 只在"连接建立失败、请求根本没发出去"时重发一次。
+    // **不换号**（同一个 requestId = 同一个幂等键）：即便第一次其实到达过服务端，
+    // 服务端也只会返回已存结果、不会重复扣费；若真没连上，这次也只是再试一下。
+    if (!isRetryableNetworkError(err)) throw err
+    if (clientLog) {
+      try {
+        clientLog.warn('translate', '连接失败，复用同一幂等号重试一次 · requestId='
+          + transRequestId(text, from, to, engine)
+          + ' · cause=' + String((err.pix && err.pix.causeCode) || ''))
+      } catch (e) {}
+    }
+    data = await call()
+  }
+
   if (!isDeadRequest(data)) return data
   // 换号重发一次。注意 `body()` 是在**换号之后**才求值的，
   // 否则 requestId 还是旧的，重发等于白发一次。
   bumpTransAttempt(text, from, to, engine)
-  data = await api('/translate/run', { method: 'POST', form: body() })
+  data = await call()
   // 连换两个号都还是"号用死了"：说明不是号的问题，下一轮别再无谓地原地打转。
   if (isDeadRequest(data)) bumpTransAttempt(text, from, to, engine)
   return data
@@ -2764,6 +2969,54 @@ ipcMain.handle('translate:guestPrefs', event => {
   bridgeReport(tab.id, true, '')
   return tabPrefs(tab)
 })
+
+// ---------------------------------------------------------------------------
+// composer 的**原生输入**通道（0.1.19）
+//
+// 真机 0.1.18 证据：expected="Test translation information."(29) vs
+// actual="测试翻译信息"(6) —— 页面内 `execCommand` 的写入**从未进入** WhatsApp
+// 编辑器的输入管线（它拦掉 `isTrusted:false` 的 beforeinput）。所以改由浏览器
+// 进程发起真实输入：这里只做 Chromium 编辑命令，**不碰 DOM**。
+//
+// 拆成两步（清空 / 插入）而不是一次做完，是为了让 guest 能在两步之间**回读 DOM**
+// 留证：COMPOSER_CLEARED / NATIVE_TEXT_INSERTED —— 这是本轮要求的关键 trace。
+// ---------------------------------------------------------------------------
+function composerTargetOf (event) {
+  const tab = trustedTabSender(event.sender)
+  if (!tab) return { tab: null, wc: null }
+  const wc = tab.view && tab.view.webContents
+  if (!wc || wc.isDestroyed()) return { tab: tab, wc: null }
+  return { tab: tab, wc: wc }
+}
+
+ipcMain.handle('translate:composerSelectAllDelete', event => {
+  const { tab, wc } = composerTargetOf(event)
+  if (!tab) return rejectUntrustedSender()
+  if (!wc) return { ok: false, reason: 'NO_WEB_CONTENTS' }
+  const res = nativeComposer.selectAllAndClear(wc)
+  if (clientLog) {
+    clientLog.info('native-input', '实例 ' + tab.id + ' COMPOSER_CLEARED ok=' + res.ok +
+      (res.ok ? '' : ' reason=' + res.reason) + ' focused=' + res.focused)
+  }
+  return res
+})
+
+ipcMain.handle('translate:composerInsertText', (event, payload) => {
+  const { tab, wc } = composerTargetOf(event)
+  if (!tab) return rejectUntrustedSender()
+  if (!wc) return { ok: false, reason: 'NO_WEB_CONTENTS' }
+  const text = String((payload && payload.text) || '')
+  // 逐行模式：只在前一种写法的换行结构没对上时由 guest 显式要求。
+  const res = (payload && payload.linewise)
+    ? nativeComposer.insertTextLines(wc, text)
+    : nativeComposer.insertText(wc, text)
+  if (clientLog) {
+    clientLog.info('native-input', '实例 ' + tab.id + ' NATIVE_TEXT_INSERTED chars=' + text.length +
+      ' ok=' + res.ok + (payload && payload.linewise ? ' linewise=1' : '') +
+      (res.ok ? '' : ' reason=' + res.reason))
+  }
+  return res
+})
 ipcMain.handle('translate:run', async (event, payload) => {
   const tab = trustedTabSender(event.sender)
   if (!tab) return rejectUntrustedSender()
@@ -2802,9 +3055,18 @@ ipcMain.handle('translate:run', async (event, payload) => {
       putTransCached(from, to, engine, text, out)
       if (out !== text) putTransCached('auto', from === 'auto' ? 'zh' : from, engine, out, text)
     }
+    // 把这次实际使用的幂等号带回渲染层：真机取证要求 trace 里能看到 requestId，
+    // 才能分清"同一次动作内的重发（复用幂等号）"和"用户再次点击（新号）"。
+    if (data && typeof data === 'object') {
+      try { data.requestId = transRequestId(text, from, to, engine) } catch (e) {}
+    }
     return data
   } catch (e) {
-    return { success: false, code: 'TRANSLATE_FAILED', msg: e.message || '翻译失败' }
+    // 只有"已拿到服务端响应、翻译服务处理失败"才算 TRANSLATE_FAILED。
+    // 传输层给过分类的（连不上 / 超时 / 服务端返回异常）按原码上报，
+    // 绝不把网络不可达冒充成"翻译服务坏了"，否则用户会一直以为是我们这边的问题。
+    const code = (e && e.pix && e.code) ? e.code : 'TRANSLATE_FAILED'
+    return { success: false, code: code, msg: (e && e.message) || '翻译失败' }
   }
 })
 ipcMain.handle('app:overlay', (event, on) => {
@@ -2845,6 +3107,8 @@ app.on('before-quit', () => {
     socksRelays.forEach(item => { try { item.relay.close() } catch (e) {} })
     socksRelays.clear()
   } catch (e) {}
+  // 收掉 API 传输层的连接池（自带 undici 的 keep-alive socket），别留在进程里。
+  try { closeApiAgents() } catch (e) {}
   // 归还槽位，让下一个窗口能拿回同一个分区（登录态得以保留）。
   // 崩溃时不会执行到这里，由 acquireSlot 的陈旧锁接管逻辑兜底。
   try { instanceSlot.releaseSlot(instanceSlotHandle) } catch (e) {}

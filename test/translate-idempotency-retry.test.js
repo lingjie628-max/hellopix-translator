@@ -84,6 +84,7 @@ function makeSandbox(responder) {
     crypto: crypto,
     currentPixUser: () => box.account,
     deviceId: () => 'desktop-abc123',
+    clientLog: null,
     api: async (pathname, opts) => {
       calls.push(opts.form)
       return responder(opts.form, calls.length)
@@ -97,6 +98,7 @@ function makeSandbox(responder) {
     sliceBlock(mainSrc, 'function transRequestId(text, from, to, engine)'),
     sliceBlock(mainSrc, 'function bumpTransAttempt(text, from, to, engine)'),
     sliceBlock(mainSrc, 'function isDeadRequest(data)'),
+    sliceBlock(mainSrc, 'function isRetryableNetworkError(err)'),
     sliceBlock(mainSrc, 'async function requestTranslate(text, from, to, engine, trigger)')
   ].join('\n\n')
   vm.runInContext(
@@ -109,6 +111,13 @@ function makeSandbox(responder) {
 
 const OK = { success: true, translation: '你好', chars: 2 }
 const dead = code => ({ success: false, code: code, msg: '该请求已结束，不能重试' })
+/** 造一个传输层已分类的连接失败错误（与 main.js api() 抛出的形态一致）。 */
+const netErr = causeCode => {
+  const e = new Error('连不上服务器（' + causeCode + '）')
+  e.code = 'NETWORK_UNREACHABLE'
+  e.pix = { phase: 'connect', gotResponse: false, causeCode: causeCode, requestId: 'r-1' }
+  return e
+}
 
 // ---------------------------------------------------------------------------
 // 1. 键的构成
@@ -182,6 +191,59 @@ test('网络异常时不换代 —— 这是防止重复扣费的关键一条', 
   await assert.rejects(() => box.api.requestTranslate('hello', 'auto', 'zh', 'deepseek', 'auto_receive'))
   assert.match(box.api.transRequestId('hello', 'auto', 'zh', 'deepseek'), /:0$/,
     '服务端很可能已经翻完并扣了费，只是响应没读到；换号重发会让用户被扣两次')
+})
+
+// ---------------------------------------------------------------------------
+// 2b. 网络传输层：连接建立失败的安全重试（0.1.20 真机 TRANSLATE_FAILED 的修复）
+// ---------------------------------------------------------------------------
+
+test('连接建立失败后恢复：复用同一幂等号自动重试一次，第二次成功', async () => {
+  const box = makeSandbox((form, n) => (n === 1 ? (() => { throw netErr('ECONNREFUSED') })() : OK))
+  const out = await box.api.requestTranslate('hello', 'auto', 'zh', 'deepseek', 'auto_receive')
+
+  assert.equal(out.success, true, '第二次连上就该成功，不能把偶发网络抖动当成翻译失败')
+  assert.equal(box.calls.length, 2, '连接失败必须自动重发一次')
+  assert.equal(box.calls[0].requestId, box.calls[1].requestId,
+    '重发必须**复用同一个 requestId**（= 同一幂等键）；换号就等于新开一次计费动作')
+  assert.match(box.api.transRequestId('hello', 'auto', 'zh', 'deepseek'), /:0$/,
+    '网络重试不许换代')
+})
+
+test('持续连接失败：最多重发一次就如实上报，仍然不换号、不伪装成功', async () => {
+  const box = makeSandbox(() => { throw netErr('ECONNREFUSED') })
+  await assert.rejects(
+    () => box.api.requestTranslate('hello', 'auto', 'zh', 'deepseek', 'auto_receive'),
+    e => e.code === 'NETWORK_UNREACHABLE'
+  )
+  assert.equal(box.calls.length, 2, '最多两次：首发 + 一次安全重试')
+  assert.equal(box.calls[0].requestId, box.calls[1].requestId, '两次都用同一个幂等号')
+  assert.match(box.api.transRequestId('hello', 'auto', 'zh', 'deepseek'), /:0$/, '失败也不换代')
+})
+
+test('是否送达不确定的错误（连接建立之后才断）不参与自动重试', async () => {
+  const box = makeSandbox(() => { throw netErr('ECONNRESET') })
+  await assert.rejects(() => box.api.requestTranslate('hello', 'auto', 'zh', 'deepseek', 'auto_receive'))
+  assert.equal(box.calls.length, 1,
+    'ECONNRESET 发生在连接建立之后，请求可能已经到服务端，属于"不确定"，不许盲目重发')
+})
+
+test('已拿到服务端响应（含 502 上游超时）绝不重发，避免重复计费', async () => {
+  const box = makeSandbox(() => ({ success: false, code: 'TRANSLATE_FAILED', msg: '上游超时' }))
+  const out = await box.api.requestTranslate('hello', 'auto', 'zh', 'deepseek', 'auto_receive')
+
+  assert.equal(out.code, 'TRANSLATE_FAILED')
+  assert.equal(box.calls.length, 1, '服务端已经回了话，这不是网络问题，重发只会重复撞同一个错误')
+})
+
+test('就算码是网络类，只要 gotResponse=true 也不重发', async () => {
+  const box = makeSandbox(() => {
+    const e = new Error('x')
+    e.code = 'NETWORK_UNREACHABLE'
+    e.pix = { phase: 'response', gotResponse: true, causeCode: 'ECONNREFUSED' }
+    throw e
+  })
+  await assert.rejects(() => box.api.requestTranslate('hello', 'auto', 'zh', 'deepseek', 'auto_receive'))
+  assert.equal(box.calls.length, 1, '拿到过 HTTP 响应，就不再当作"请求没发出去"')
 })
 
 test('连换两个号都还是"号已终结"时就停下，不无限重试', async () => {
