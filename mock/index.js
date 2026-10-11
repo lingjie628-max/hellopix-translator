@@ -155,23 +155,39 @@ module.exports = function registerMock(app, options) {
       { id: 1, username: 'admin', password: 'admin123', nickname: '超级管理员', role: 'superadmin' }
     ],
     versions: [
-      { id: 1, title: 'Hello Pix 基础版', subtitle: '基本功能，适合小型企业', port: 0, portUnlimited: 1, chars: 1500000, price: 35, engines: ['deepseek', 'baidu', 'niutrans'], clients: { standalone: 0, mobile: 1, counter: 0 }, highlights: ['150万字符', 'DeepSeek 翻译', '百度翻译', '小牛翻译', '语种全，性价比高', '手机版'], features: { autoFill: 1, export: 1, moveMaster: 1, fanStats: 1, autoReply: 1, assistant: 1, repeatFan: 1, rotate: 1, keepChat: 0, counterRepeat: 1, ssl: 1, aws: 0, support: 0, feedback: 1 } },
-      { id: 2, title: 'Hello Pix 高级版', subtitle: '高级功能，适合中大型企业', port: 0, portUnlimited: 1, chars: 3000000, price: 65, engines: ['deepseek', 'baidu', 'niutrans', 'google'], clients: { standalone: 0, mobile: 1, counter: 0 }, highlights: ['300万字符', '谷歌翻译', '+基础版各翻译通道', '语种全，翻译准确性高', '手机版'], features: { autoFill: 1, export: 1, moveMaster: 1, fanStats: 1, autoReply: 1, assistant: 1, repeatFan: 1, rotate: 1, keepChat: 1, counterRepeat: 1, ssl: 1, aws: 0, support: 1, feedback: 1 } },
-      { id: 3, title: 'Hello Pix 专业版', subtitle: '定制化解决方案', port: 0, portUnlimited: 1, chars: 7500000, price: 125, engines: ['deepseek', 'baidu', 'niutrans', 'google', 'deepl', 'aws'], clients: { standalone: 0, mobile: 1, counter: 1 }, highlights: ['750万字符', 'DEEPL翻译', '亚马逊AWS翻译', '+高级版各翻译通道', '语种全，通道多，翻译准确性高', '手机版'], features: { autoFill: 1, export: 1, moveMaster: 1, fanStats: 1, autoReply: 1, assistant: 1, repeatFan: 1, rotate: 1, keepChat: 1, counterRepeat: 1, ssl: 1, aws: 1, support: 1, feedback: 1 } }
+      { id: 1, title: 'Hello Pix 基础版', subtitle: '基本功能，适合小型企业', port: 0, portUnlimited: 1, chars: 1500000, price: 35, engines: ['deepseek', 'gpt'], clients: { standalone: 0, mobile: 1, counter: 0 }, highlights: ['150万字符', 'DeepSeek、GPT'], features: { autoFill: 1, export: 1, moveMaster: 1, fanStats: 1, autoReply: 1, assistant: 1, repeatFan: 1, rotate: 1, keepChat: 0, counterRepeat: 1, ssl: 1, aws: 0, support: 0, feedback: 1 } },
+      { id: 2, title: 'Hello Pix 高级版', subtitle: '高级功能，适合中大型企业', port: 0, portUnlimited: 1, chars: 3000000, price: 65, engines: ['deepseek', 'gpt'], clients: { standalone: 0, mobile: 1, counter: 0 }, highlights: ['300万字符', 'DeepSeek、GPT'], features: { autoFill: 1, export: 1, moveMaster: 1, fanStats: 1, autoReply: 1, assistant: 1, repeatFan: 1, rotate: 1, keepChat: 1, counterRepeat: 1, ssl: 1, aws: 0, support: 1, feedback: 1 } },
+      { id: 3, title: 'Hello Pix 专业版', subtitle: '定制化解决方案', port: 0, portUnlimited: 1, chars: 7500000, price: 125, engines: ['deepseek', 'gpt'], clients: { standalone: 0, mobile: 1, counter: 1 }, highlights: ['750万字符', 'DeepSeek、GPT'], features: { autoFill: 1, export: 1, moveMaster: 1, fanStats: 1, autoReply: 1, assistant: 1, repeatFan: 1, rotate: 1, keepChat: 1, counterRepeat: 1, ssl: 1, aws: 1, support: 1, feedback: 1 } }
     ],
     settings: loadSettings(),
     // costPerMillion 的单位是**美元/百万字符**（与 packages.price 同币种，见迁移 032）。
-    // 这里有历史遗留的旧通道（baidu / niutrans）与缺失的新通道 —— 那是另一件事，
-    // 但币种必须与生产一致，否则本地开发会看到"表头写美元、数值是人民币"。
+    //
+    // 这份清单**对齐生产实况（2026-10-11 复核）**：在架且接通的只有
+    // `deepseek` + `gpt` 两条，其余全部退役（`retired_at` 非空 + enabled=false，
+    // 见迁移 031/039）。本地开发看到的通道列表必须与生产一致 ——
+    // 否则会出现"本地点得通、线上一选就 503"这种只在部署后才暴露的错觉。
+    //
+    // ⚠️ 这里曾经躺着一个**生产上根本不存在的 `baidu`**，且所有通道都写成
+    //    `enabled: 1, wired: 0`（即"在架但没接通"），与生产的
+    //    "只有两条在架且已接通"完全相反。
     engines: [
-      { id: 'deepseek', name: 'DeepSeek 翻译', provider: 'DeepSeek', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 0.83, model: 'deepseek-flash', apiKey: '', secret: '', endpoint: '', note: '需要 API Key 与模型名。' },
-      { id: 'baidu', name: '百度翻译', provider: '百度', tier: 'basic', enabled: 1, wired: 0, costPerMillion: 6.81, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
-      { id: 'niutrans', name: '小牛翻译', provider: '小牛', tier: 'basic', enabled: 1, wired: 0, costPerMillion: 6.94, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
-      { id: 'google', name: '谷歌翻译', provider: 'Google', tier: 'advanced', enabled: 1, wired: 0, costPerMillion: 18.61, model: 'google-translate-v2', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
-      { id: 'deepl', name: 'DeepL 翻译', provider: 'DeepL', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 23.33, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
-      { id: 'aws', name: '亚马逊 AWS 翻译', provider: 'Amazon', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 13.89, model: '', apiKey: '', secret: '', endpoint: '', note: '成本超管手填。接口板块已就位，未接厂商。' },
-      { id: 'gpt', name: 'GPT 翻译', provider: 'OpenAI', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 0.69, model: 'gpt-4o-mini', apiKey: '', secret: '', endpoint: '', note: 'Hello Pix 增补。成本超管手填，按 token 估算。未接厂商。' },
-      { id: 'grok', name: 'Grok 翻译', provider: 'xAI', tier: 'pro', enabled: 1, wired: 0, costPerMillion: 4.03, model: 'grok-4.3', apiKey: '', secret: '', endpoint: '', note: 'Hello Pix 增补。成本超管手填，按 token 估算。未接厂商。' }
+      { id: 'deepseek', name: 'DeepSeek 翻译', provider: 'DeepSeek', tier: 'pro', enabled: 1, wired: 1, costPerMillion: 0.83, model: 'deepseek-flash', apiKey: '', secret: '', endpoint: '', note: '在架。需要 API Key 与模型名。' },
+      { id: 'gpt', name: 'GPT 翻译', provider: 'OpenAI', tier: 'pro', enabled: 1, wired: 1, costPerMillion: 0.69, model: 'gpt-4o-mini', apiKey: '', secret: '', endpoint: '', note: '在架。成本超管手填，按 token 估算。' },
+      // ---- 以下均已退役（保留实现与记录，便于重新上架）----
+      { id: 'claude', name: 'Claude 翻译', provider: 'Anthropic', tier: 'pro', enabled: 0, wired: 0, costPerMillion: 0, model: '', apiKey: '', secret: '', endpoint: '', note: '已下架（迁移 031）。实现保留。' },
+      { id: 'grok', name: 'Grok 翻译', provider: 'xAI', tier: 'pro', enabled: 0, wired: 0, costPerMillion: 4.03, model: 'grok-4.3', apiKey: '', secret: '', endpoint: '', note: '已下架（迁移 039）。实现保留。' },
+      { id: 'doubao', name: '豆包翻译', provider: '字节跳动', tier: 'basic', enabled: 0, wired: 0, costPerMillion: 0, model: '', apiKey: '', secret: '', endpoint: '', note: '已下架（迁移 039）。实现保留。' },
+      { id: 'kimi', name: 'Kimi 翻译', provider: '月之暗面', tier: 'advanced', enabled: 0, wired: 0, costPerMillion: 0, model: '', apiKey: '', secret: '', endpoint: '', note: '已下架（迁移 039）。实现保留。' },
+      { id: 'glm', name: 'GLM 翻译', provider: '智谱 AI', tier: 'advanced', enabled: 0, wired: 0, costPerMillion: 0, model: '', apiKey: '', secret: '', endpoint: '', note: '已下架（迁移 039）。实现保留。' },
+      { id: 'mistral', name: 'Mistral 翻译', provider: 'Mistral', tier: 'advanced', enabled: 0, wired: 0, costPerMillion: 0, model: '', apiKey: '', secret: '', endpoint: '', note: '已下架（迁移 039）。实现保留。' },
+      { id: 'minimax', name: 'MiniMax 翻译', provider: 'MiniMax', tier: 'advanced', enabled: 0, wired: 0, costPerMillion: 0, model: '', apiKey: '', secret: '', endpoint: '', note: '已下架（迁移 039）。实现保留。' },
+      { id: 'qwen', name: '通义千问翻译', provider: '阿里云', tier: 'basic', enabled: 0, wired: 0, costPerMillion: 0, model: '', apiKey: '', secret: '', endpoint: '', note: '已下架（迁移 039）。实现保留。' },
+      { id: 'google', name: '谷歌翻译', provider: 'Google', tier: 'advanced', enabled: 0, wired: 0, costPerMillion: 18.61, model: 'google-translate-v2', apiKey: '', secret: '', endpoint: '', note: '已下架。按字符计价，无 token 用量。' },
+      { id: 'gemini', name: 'Gemini 翻译', provider: 'Google', tier: 'pro', enabled: 0, wired: 0, costPerMillion: 0, model: 'gemini-2.5-flash', apiKey: '', secret: '', endpoint: '', note: '已下架。实现保留（已支持 usageMetadata 用量）。' },
+      { id: 'deepl', name: 'DeepL 翻译', provider: 'DeepL', tier: 'pro', enabled: 0, wired: 0, costPerMillion: 23.33, model: '', apiKey: '', secret: '', endpoint: '', note: '已下架。按字符计价。' },
+      { id: 'aws', name: '亚马逊 AWS 翻译', provider: 'Amazon', tier: 'pro', enabled: 0, wired: 0, costPerMillion: 13.89, model: '', apiKey: '', secret: '', endpoint: '', note: '已下架。' },
+      { id: 'niutrans', name: '小牛翻译', provider: '小牛', tier: 'basic', enabled: 0, wired: 0, costPerMillion: 6.94, model: '', apiKey: '', secret: '', endpoint: '', note: '已下架。' },
+      { id: 'papago', name: 'Papago 翻译', provider: 'Naver', tier: 'pro', enabled: 0, wired: 0, costPerMillion: 0, model: '', apiKey: '', secret: '', endpoint: '', note: '已下架。' }
     ],
     translateLogs: [
       { id: 1, userId: 10001, username: 'pix', engine: 'deepseek', direction: 'en→zh', chars: 86, cost: 0.0041, sell: 0.0487, snippet: 'Hello, I want to know the price', createTime: now() },
@@ -186,10 +202,10 @@ module.exports = function registerMock(app, options) {
     ],
     faqs: [
       { id: 1, question: '新用户有试用字符吗？', answer: '超管新建商户时默认赠送 10000 试用字符，可在系统设置里改数量。', sort: 1, enabled: 1 },
-      { id: 2, question: '翻译接口接好了吗？', answer: '通道列表已就位，真实 API 尚未接入，选择通道只记账不翻译。', sort: 2, enabled: 1 },
+      { id: 2, question: '翻译接口接好了吗？', answer: '已接通。当前开放 DeepSeek 与 GPT 两条翻译通道，填好 API Key 即可正常翻译。', sort: 2, enabled: 1 },
       { id: 3, question: '端口还限吗？', answer: '子账号里 WhatsApp / Telegram 等聊天号不限。同一账号同时只能在一台电脑登录，新电脑登录会把旧电脑踢下线。', sort: 3, enabled: 1 },
       { id: 4, question: '怎么开子账号？', answer: '购买字符即可成为企业用户，每买 1 组增加 1 个子账户名额，主账户在网站里开子账号并分配字符。', sort: 4, enabled: 1 },
-      { id: 6, question: '字符怎么计费？', answer: '和官网一样按套餐整包买：基础 200 元 / 150 万、高级 350 元 / 150 万、专业 850 元 / 150 万。1 组 9 折、10 组 8 折、50 组 7.5 折。计字按国际标准，英文 1 个字符、汉字 2 个字符。翻译时扣余额，不另按 1500 字计价。', sort: 6, enabled: 1 }
+      { id: 6, question: '字符怎么计费？', answer: '和官网一样按套餐整包买（美元）：基础 $35 / 150 万字符、高级 $65 / 300 万字符、专业 $125 / 750 万字符。1 组 9 折、10 组 8 折、50 组 7.5 折。计字按国际标准，英文 1 个字符、汉字 2 个字符。翻译时扣余额，不另按 1500 字计价。', sort: 6, enabled: 1 }
     ],
     clients: [
       { id: 1, group: 'Windows', title: '跨境电商助手', os: 'Windows 10/11', arch: '64位', app: '', version: '1.0.0', url: '', enabled: 1, note: '官网对应项，安装包后补' },

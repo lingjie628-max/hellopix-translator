@@ -144,9 +144,18 @@ function estimateTokens(text) {
 /**
  * 把各家五花八门的用量字段归一。
  *
- * OpenAI 兼容系是 prompt_tokens / completion_tokens，
- * Anthropic 是 input_tokens / output_tokens。两者都要能进同一张
+ * OpenAI 兼容系是 `prompt_tokens` / `completion_tokens`，
+ * Anthropic 是 `input_tokens` / `output_tokens`，
+ * Gemini 是 `usageMetadata.promptTokenCount` / `candidatesTokenCount`，
+ * 还有的厂商把缓存命中的 token 单列。它们都要能进同一张
  * `translation_usage` 表，否则成本对账得按厂商写四套查询。
+ *
+ * ⚠️ 各适配器的成功分支**必须**把它接上。2026-10-11 的 DeepSeek 成本记 0
+ * 事故就是适配器把用量整个丢了 —— 厂商给了，代码扔了。
+ *
+ * 接受两种入参：
+ *   · 用量对象本身（OpenAI 兼容 / Anthropic）：`normalizeUsage(data.usage)`
+ *   · Gemini 的 `usageMetadata`：`normalizeUsage(data.usageMetadata)`
  */
 function normalizeUsage(raw) {
   if (!raw || typeof raw !== 'object') return null
@@ -157,14 +166,17 @@ function normalizeUsage(raw) {
     }
     return 0
   }
-  const promptTokens = pick(raw.prompt_tokens, raw.input_tokens)
-  const completionTokens = pick(raw.completion_tokens, raw.output_tokens)
+  // Gemini 把用量包在 usageMetadata 里，字段名也不同
+  const meta = (raw.usageMetadata && typeof raw.usageMetadata === 'object') ? raw.usageMetadata : raw
+  const promptTokens = pick(raw.prompt_tokens, raw.input_tokens, meta.promptTokenCount)
+  const completionTokens = pick(raw.completion_tokens, raw.output_tokens, meta.candidatesTokenCount)
   const reasoningTokens = pick(
     raw.completion_tokens_details && raw.completion_tokens_details.reasoning_tokens,
     raw.output_tokens_details && raw.output_tokens_details.reasoning_tokens,
-    raw.reasoning_tokens
+    raw.reasoning_tokens,
+    meta.thoughtsTokenCount
   )
-  const totalTokens = pick(raw.total_tokens) || (promptTokens + completionTokens)
+  const totalTokens = pick(raw.total_tokens, meta.totalTokenCount) || (promptTokens + completionTokens)
   if (!promptTokens && !completionTokens && !totalTokens) return null
   return { promptTokens, completionTokens, reasoningTokens, totalTokens }
 }

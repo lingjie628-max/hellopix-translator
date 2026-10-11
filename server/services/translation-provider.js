@@ -3,11 +3,19 @@
 /**
  * 翻译通道适配层。
  *
- * 契约（core-service 调用）：translate(engine, payload, options) -> { ok, text, skipped?, msg? }
+ * 契约（core-service 调用）：
+ *   translate(engine, payload, options) -> { ok, text, model?, retries?, usage?, skipped?, msg? }
  *   - engine: package_engines 查出来的通道行（含 id / name / enabled / wired）
  *   - payload: { text, from, to, detected }
  *   - options: { fetch, timeoutMs }（allowPublicNetwork 已随公共端点实现一并移除，
  *     该标志在生产环境本就被 config.js 列为禁止项，进程会拒绝启动）
+ *
+ * ⚠️ `model` / `retries` / `usage` 是**记账字段，不是可选项**。
+ * `core-service.recordUpstreamUsage()` 靠它们写内部成本台账：拿不到 usage
+ * 就只能按字符估、且成本标记为"未核实"。2026-10-11 的 DeepSeek 成本记 0
+ * 事故就是这么来的 —— 适配器返回了 `{ ok: true, text }`，把厂商给的用量丢了。
+ * **新增/修改适配器时，成功分支必须带上这三个字段**（有对应实现可参考
+ * `translation-adapters.js` 的 `openAiCompatible`）。
  *
  * 三条硬规则：
  *   1. 凭据未配置一律 ok:false，绝不返回演示译文、绝不产生计费（fail-closed）。
@@ -20,7 +28,10 @@
 const crypto = require('node:crypto')
 
 const {
-  gptAdapter, grokAdapter, deeplAdapter, papagoAdapter, niutransAdapter
+  gptAdapter, grokAdapter, deeplAdapter, papagoAdapter, niutransAdapter,
+  // DeepSeek 是独立实现（见下方 providers 里的说明），但用量字段的归一
+  // 必须与通用实现同一个口径，否则两本账对不上。
+  normalizeUsage
 } = require('./translation-adapters')
 const {
   claudeAdapter, qwenMtAdapter,
@@ -187,12 +198,36 @@ const GEMINI_LANGUAGES = {
   fil: '菲律宾语'
 }
 
+/**
+ * 语言码 → 提示词里的语言名。查不到就原样回退（Gemini / DeepSeek 都是 LLM，
+ * 认语言码，退回原文比丢掉更安全）。
+ *
+ * ⚠️ 这个函数**必须写成不递归的**。表里 `auto: ''` 是「自动识别」的内部约定，
+ * 值就是空串；而原先"第一段为空就递归查第二段"的写法，在两段都为空时会
+ * **无限自递归**：
+ *
+ *     languageName(table, '', '')        // 第一段空 → 查第二段
+ *   → languageName(table, '', '')        // 第二段也空 → RangeError
+ *
+ * 这在真实链路上是能触发的：客户端选「自动识别语种」（`from='auto'`，
+ * 而 `auto` 恰好映射到空串）且 `detectLang()` 没识别出语种（`detected=''`）时，
+ * 两段都是空 —— 翻译直接 500，栈里只有本函数，看不出真正原因。
+ * 2026-10-11 由 `test/adapter-usage-contract.test.js` 暴露。
+ */
+function languageName(table, code, fallback) {
+  // 顺序尝试：主语言码 → 回退语言码。只两层，且**不递归**，总有终点。
+  for (const candidate of [code, fallback]) {
+    const key = String(candidate || '').trim().toLowerCase()
+    if (!key) continue
+    if (key in table) return table[key]
+    return String(candidate)
+  }
+  return ''
+}
+
 /** 语言码 → 提示词里的语言名；未收录的原样回退（Gemini 是 LLM，认语言码）。 */
 function geminiLanguage(code, fallback) {
-  const key = String(code || '').trim().toLowerCase()
-  if (!key) return geminiLanguage(fallback, '')
-  if (key in GEMINI_LANGUAGES) return GEMINI_LANGUAGES[key]
-  return String(code)
+  return languageName(GEMINI_LANGUAGES, code, fallback)
 }
 
 /**
@@ -296,7 +331,16 @@ async function geminiTranslate(engine, payload, options) {
     .join('')
     .trim()
   if (!translated) return { ok: false, msg: 'Gemini 未返回译文' }
-  return { ok: true, text: translated }
+  // 与 DeepSeek 同一个契约：model / retries / usage 都要回传，否则成本台账记 0。
+  // 本通道已下架（engines.enabled=false），但实现是保留的、可重新上架 ——
+  // 不留 usage 的话，重新上架当天就会复发"成本全 0"。
+  return {
+    ok: true,
+    text: translated,
+    model,
+    retries: 0,
+    usage: normalizeUsage(data && data.usageMetadata)
+  }
 }
 
 
@@ -344,10 +388,7 @@ const DEEPSEEK_LANGUAGES = {
 
 /** 语言码 → 提示词里的语言名；未收录的原样回退（DeepSeek 是 LLM，认语言码）。 */
 function deepseekLanguage(code, fallback) {
-  const key = String(code || '').trim().toLowerCase()
-  if (!key) return deepseekLanguage(fallback, '')
-  if (key in DEEPSEEK_LANGUAGES) return DEEPSEEK_LANGUAGES[key]
-  return String(code)
+  return languageName(DEEPSEEK_LANGUAGES, code, fallback)
 }
 
 /**
@@ -467,7 +508,27 @@ async function deepseekTranslate(engine, payload, options) {
   if (!translated) {
     return { ok: false, msg: `DeepSeek 未返回译文${data && data.error ? '：' + data.error.message : ''}` }
   }
-  return { ok: true, text: translated }
+  /**
+   * `usage` / `model` / `retries` **必须回传**，它们不是给用户看的装饰。
+   *
+   * 这是 2026-10-11 在生产上定到的根因：这里曾经返回
+   * `{ ok: true, text }`，把厂商的用量整个丢掉了。DeepSeek 走的是
+   * OpenAI 兼容的 `/chat/completions`，**它在响应里本来就有 `usage`**
+   * （`prompt_tokens` / `completion_tokens` / `total_tokens`）。
+   * 不是厂商不给，是适配层扔了 —— 于是 `recordUpstreamUsage` 拿不到用量，
+   * 48 次真实调用在成本台账上全记成 0，`cost_verified` 还显示 true。
+   *
+   * 契约见 `translation-adapters.js` 的 `openAiCompatible`：两条路径
+   * （通用 / DeepSeek 专用）的返回体在**记账字段上必须一致**，
+   * 否则成本报表会按"通道"分叉，而这种分叉没有任何人会发现。
+   */
+  return {
+    ok: true,
+    text: translated,
+    model,
+    retries: 0,
+    usage: normalizeUsage(data && data.usage)
+  }
 }
 
 // --- 通道注册表 --------------------------------------------------------------
