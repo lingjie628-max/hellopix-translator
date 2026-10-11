@@ -90,13 +90,22 @@ test('企业账号数必须按 users.enterprise 真实统计', () => {
     + '超管已经把商户设为「企业」，平台总览就该跟着变')
 })
 
-test('进粉统计不得引用不存在的 fans 表', () => {
+test('进粉统计的口径必须与「进粉统计」页一致，且不得引用已下线的表', () => {
   const block = statsBlock()
-  // 生产库没有 fans 表（只有 order_fans / customers）。
-  // 写成 FROM fans 会让整个 /admin/stats 直接 500 —— 那比少一个数字严重得多。
-  assert.ok(!/FROM fans\b/.test(block),
-    '生产库里没有 fans 表，FROM fans 会让总览整体 500；进粉落在 order_fans 上')
-  assert.match(block, /FROM order_fans/, '进粉数应当取 order_fans')
+  // 生产没有 fans 表（FROM fans 会让总览整体 500）；
+  // order_fans 是随工单一起下线的表，恒为 0。
+  // 正确来源是 conversations JOIN users —— 与 /admin/fans 的 total 同口径。
+  assert.ok(!/FROM fans\b/.test(block), '生产库里没有 fans 表，FROM fans 会让总览整体 500')
+  assert.ok(!/FROM order_fans/.test(block),
+    'order_fans 随工单一起下线、恒为 0，用它统计会出现"卡片 0、进粉页有数据"的错位')
+  assert.match(block, /FROM conversations c JOIN users u ON u\.id=c\.user_id/,
+    '进粉数必须与 /admin/fans 的 total 同口径（conversations JOIN users）')
+
+  // 与页面路由同源，避免两边再次漂移
+  const fansAt = routes.indexOf("router.get('/admin/fans'")
+  const fans = routes.slice(fansAt, fansAt + 1200)
+  assert.match(fans, /FROM conversations c JOIN users u ON u\.id=c\.user_id WHERE/,
+    '/admin/fans 的 total 也应基于 conversations JOIN users')
 })
 
 test('最近翻译扣费：别名要对齐前端列（cost / sell / direction / createTime）', () => {

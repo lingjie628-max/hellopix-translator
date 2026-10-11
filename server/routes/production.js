@@ -685,8 +685,11 @@ function productionRouter(context) {
        (SELECT count(*) FROM users WHERE status=1)::int AS active_users,
        (SELECT count(*) FROM users WHERE enterprise)::int AS enterprise_users,
        (SELECT count(*) FROM sub_accounts)::int AS sub_count,
-       -- 进粉：没有独立的 fans 表，进粉落在 order_fans 上（迁移 003）
-       (SELECT count(*) FROM order_fans)::int AS fan_count,
+       -- 进粉的口径必须与「进粉统计」页（/admin/fans）**完全一致**：
+       -- 那个页面的 total 就是 conversations JOIN users 的行数（新客户模型，
+       -- 见下方 /admin/fans 路由）。早先我这里是数 order_fans —— 那是随工单
+       -- 一起下线的表，恒为 0，会出现"卡片 0、页面有数据"的经典错位。
+       (SELECT count(*) FROM conversations c JOIN users u ON u.id=c.user_id)::int AS fan_count,
        (SELECT COALESCE(sum(hits),0) FROM short_links)::int AS short_link_hits,
        (SELECT COALESCE(sum(char_balance),0) FROM users)::bigint AS char_balance,
        (SELECT COALESCE(sum(chars),0) FROM translate_logs)::bigint AS char_used,
