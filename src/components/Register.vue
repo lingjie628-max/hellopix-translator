@@ -103,17 +103,12 @@ export default {
         this.$message.error('请输入邮箱地址')
         return
       }
-      if (!this.form.imageCode) {
-        this.$message.error('请输入图形验证码')
-        return
-      }
-      // imageId 与 imageCode 必须一起提交。少了它们，后端拿不到用户抄的图形码，
-      // 会把这次请求判成「图形验证码已过期」，用户永远收不到邮箱验证码。
+      // 不再要求先填图形验证码：商户大多不知道要先填那一格，
+      // 点「获取验证码」永远得到「图形验证码已过期」——注册直接卡死。
+      // 图形验证码只在最后提交注册时才校验。
       this.postRequest('/user/emailCode', {
         email: this.form.email,
-        scene: 'register',
-        imageId: this.form.imageId,
-        imageCode: this.form.imageCode
+        scene: 'register'
       }, { silent: true }).then(resp => {
         if (!resp || !resp.data) return
         if (resp.data.success === false) {
@@ -126,15 +121,6 @@ export default {
         // 400 会被全局拦截器 reject，失败一律走这里（已用 silent 关掉全局提示，
         // 避免和下面的提示叠成两条）。
         const data = (error && error.response && error.response.data) || {}
-        if (data.code === 'CAPTCHA_EXPIRED') {
-          this.refreshImageCode('图形验证码已过期，已为您刷新，请重新输入')
-          return
-        }
-        if (data.code === 'CAPTCHA_INVALID') {
-          // 码错也要换一张：校验是一次性的，那张图已经不能再用了
-          this.refreshImageCode('图形验证码错误，已为您刷新，请重新输入')
-          return
-        }
         this.$message.error(data.msg || '获取验证码失败，请稍后重试')
       })
     },
@@ -151,7 +137,9 @@ export default {
           if (!resp || !resp.data) return
           if (resp.data.success === false || resp.data.success === 'error') {
             this.$message.error(resp.data.msg)
-            this.getImageCode()
+            // 图形验证码是一次性的：这次请求已经把它用掉了，
+            // 必须换图 + 清空输入，否则用户重试时必然是「新 imageId + 旧码」。
+            this.refreshImageCode()
             return
           }
           this.$message.success(resp.data.msg || '注册成功')

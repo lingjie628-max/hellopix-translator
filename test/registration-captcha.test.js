@@ -22,10 +22,22 @@
  *
  * 1. lib/captcha 的返回契约：EXPIRED 与 INVALID 必须可区分
  * 2. TTL 由服务端唯一控制（10 分钟）且真的写进了 Redis
- * 3. 过期/错误**不得**发信、不得占用邮箱配额、不得落验证码
- * 4. 换一张新图之后能继续发信（用户能被救回来）
+ * 3. **取邮箱验证码不再需要图形验证码**（见下），但发信仍受频率/配额限制
+ * 4. 注册 / 找回的**提交**仍然需要图形验证码，且一次性、失败后要换图
  * 5. 旧 captcha 一次性，不能重复使用
- * 6. 前端确实把 imageId + imageCode 一起提交了，且会同步换图与清空
+ * 6. 前端取码时不再要求填图形验证码，提交时仍把它带上
+ *
+ * ## 后续变更：取邮箱验证码去掉了图形验证码（2026-10-11）
+ *
+ * 上面那次 hotfix 修的是"前端没把 imageId 传上去"，修法是**让前端必须传**。
+ * 但真机使用后暴露了更根本的问题：注册页把图形验证码排在邮箱验证码**之后**，
+ * 而绝大多数商户根本不知道要先填那一格 —— 他们点「获取验证码」，
+ * 得到的永远是「图形验证码已过期」，于是注册卡死。
+ *
+ * 这一轮把它反过来：**发信不需要图形验证码**（防护交给 IP 限流 +
+ * 按邮箱冷却/配额），图形验证码只在真正建号 / 改密时才要。
+ * 所以 `sendEmailCode` 不再 consume captcha，
+ * `register` / `forgot` 仍然 consume —— 后者是本文件第 4 条守的东西。
  */
 
 const test = require('node:test')
@@ -157,7 +169,6 @@ function makeHarness() {
 
 const EMAIL = 'merchant@example.com'
 const CAPTCHA_KEY = id => `pix:captcha:${id}`
-const LAST_KEY = email => `pix:verify:last:${email}`
 const CODE_KEY = (scene, email) => `pix:verify:code:${scene}:${email}`
 
 /** 直接种一张已知答案的图形验证码（与 issue 走同一个 store，同一套哈希/键） */
@@ -242,82 +253,71 @@ test('issue 返回的是可用的 key 与 data:image/svg+xml 图片，且码已�
 })
 
 // ================================================================== 3. 发信链路
-test('正确的图形验证码 → 邮箱验证码发出、并落下记录', async () => {
+test('获取邮箱验证码不再需要图形验证码（本轮变更的核心）', async () => {
   const { svc, redis, sent } = makeHarness()
-  await seedCaptcha(redis, 'img-1', 'ABCD')
 
+  // 不带 imageId / imageCode —— 之前这一步会被判 CAPTCHA_EXPIRED，
+  // 用户永远收不到邮件，注册直接卡死。
   const result = await svc.sendEmailCode(
-    { email: EMAIL, scene: 'register', imageId: 'img-1', imageCode: 'abcd' },
+    { email: EMAIL, scene: 'register' },
     { ip: '1.2.3.4' }
   )
 
-  assert.equal(result.ok, true)
+  assert.equal(result.ok, true, '不带图形验证码也必须能发信')
   assert.equal(sent.length, 1, '必须真的发了一封信')
-  const code = await redis.get(CODE_KEY('register', EMAIL))
-  assert.match(String(code), /^\d{6}$/, '邮箱验证码应已落库')
+  assert.match(String(await redis.get(CODE_KEY('register', EMAIL))), /^\d{6}$/, '邮箱验证码应已落库')
 })
 
-test('过期/缺失的图形验证码 → CAPTCHA_EXPIRED，且不发信、不占配额、不落码', async () => {
-  const { svc, redis, sent } = makeHarness()
+test('就算带了过期/错误的图形验证码，也不该拦住发信', async () => {
+  for (const payload of [
+    { imageId: undefined, imageCode: undefined },
+    { imageId: 'img-gone', imageCode: 'ABCD' },
+    { imageId: 'img-wrong', imageCode: 'ZZZZ' }
+  ]) {
+    const { svc, sent } = makeHarness()
+    const result = await svc.sendEmailCode(
+      Object.assign({ email: EMAIL, scene: 'register' }, payload),
+      { ip: '1.2.3.4' }
+    )
+    assert.equal(result.ok, true, `载荷 ${JSON.stringify(payload)} 不应被图形验证码拦住`)
+    assert.equal(sent.length, 1)
+  }
+})
 
+test('发信仍受频率/配额限制 —— 图形验证码不是唯一防线', async () => {
+  const { svc, sent } = makeHarness()
+
+  const first = await svc.sendEmailCode({ email: EMAIL, scene: 'register' }, { ip: '1.2.3.4' })
+  assert.equal(first.ok, true)
+
+  // 同一邮箱立刻再来一次：60 秒冷却必须生效。
+  // 去掉图形验证码之后，这道限流是防止"被当免费发信机"的关键兜底。
   await assert.rejects(
-    svc.sendEmailCode({ email: EMAIL, scene: 'register', imageId: undefined, imageCode: undefined }, { ip: '1.2.3.4' }),
+    svc.sendEmailCode({ email: EMAIL, scene: 'register' }, { ip: '1.2.3.4' }),
+    error => error.code === 'TOO_FREQUENT',
+    '去掉图形验证码之后，服务端自己的频率限制必须仍然拦得住重复发送'
+  )
+  assert.equal(sent.length, 1, '被限流的那次不得再发信')
+})
+
+test('注册本身仍然需要图形验证码（真实建号的口子不放开）', async () => {
+  const { svc, users } = makeHarness()
+  await assert.rejects(
+    svc.register({
+      userName: 'nocap', passWord: 'Abcd1234567', passWord1: 'Abcd1234567',
+      email: EMAIL, code: '123456'
+    }),
     error => error.code === 'CAPTCHA_EXPIRED'
   )
-
-  assert.equal(sent.length, 0, '过期请求绝不能发信')
-  assert.equal(await redis.get(CODE_KEY('register', EMAIL)), null, '不得创建邮箱验证码记录')
-  assert.equal(await redis.get(LAST_KEY(EMAIL)), null, '不得启动 60 秒冷却')
-  assert.equal(await redis.get(`pix:verify:quota-mail:${EMAIL}`), null, '不得占用邮箱发送次数')
-  assert.equal(await redis.get('pix:verify:quota-ip:1.2.3.4'), null, '不得占用 IP 发送次数')
-})
-
-test('码填错 → CAPTCHA_INVALID，同样不发信、不占配额、不落码', async () => {
-  const { svc, redis, sent } = makeHarness()
-  await seedCaptcha(redis, 'img-x', 'ABCD')
-
-  await assert.rejects(
-    svc.sendEmailCode({ email: EMAIL, scene: 'register', imageId: 'img-x', imageCode: 'ZZZZ' }, { ip: '1.2.3.4' }),
-    error => error.code === 'CAPTCHA_INVALID'
-  )
-
-  assert.equal(sent.length, 0)
-  assert.equal(await redis.get(CODE_KEY('register', EMAIL)), null)
-  assert.equal(await redis.get(LAST_KEY(EMAIL)), null)
-  assert.equal(await redis.get(`pix:verify:quota-mail:${EMAIL}`), null)
-})
-
-test('过期之后换一张新图 → 立刻能继续发信（用户能被救回来）', async () => {
-  const { svc, redis, sent } = makeHarness()
-
-  await assert.rejects(
-    svc.sendEmailCode({ email: EMAIL, scene: 'register', imageId: 'img-gone', imageCode: 'ABCD' }, { ip: '1.2.3.4' }),
-    error => error.code === 'CAPTCHA_EXPIRED'
-  )
-
-  // 前端收到 CAPTCHA_EXPIRED 后会自动调 /user/captcha 换图
-  const fresh = await captcha.issue(redis)
-  const result = await svc.sendEmailCode(
-    { email: EMAIL, scene: 'register', imageId: fresh.imageId, imageCode: '____' },
-    { ip: '1.2.3.4' }
-  ).catch(error => error)
-
-  // 新图的答案是随机的，这里不猜；只要是 CAPTCHA_INVALID（而不是 EXPIRED）
-  // 就说明新 imageId 已经被正确接收、键存在 —— 链路通了。
-  assert.equal(result.code, 'CAPTCHA_INVALID', `期望新图被识别，实际 ${JSON.stringify(result.code)}`)
-  assert.equal(sent.length, 0)
+  assert.equal(users.size, 0, '没通过图形验证码时不得建号')
 })
 
 // ================================================================== 4. 完整链路
 test('完整注册链：图形验证码 → 邮箱验证码 → 注册成功', async () => {
   const { svc, redis, sent, users } = makeHarness()
 
-  // 1) 图形验证码
-  await seedCaptcha(redis, 'img-chain', 'ABCD')
-  await svc.sendEmailCode(
-    { email: EMAIL, scene: 'register', imageId: 'img-chain', imageCode: 'abcd' },
-    { ip: '1.2.3.4' }
-  )
+  // 1) 直接取邮箱验证码 —— 不再需要先过图形验证码
+  await svc.sendEmailCode({ email: EMAIL, scene: 'register' }, { ip: '1.2.3.4' })
   assert.equal(sent.length, 1)
 
   // 2) 从库里取出真实下发的邮箱验证码（用户是从邮件里看到的）
@@ -341,7 +341,7 @@ test('完整注册链：图形验证码 → 邮箱验证码 → 注册成功', a
 })
 
 // ================================================================== 5. 前端守卫
-test('注册/找回页把 imageId 与 imageCode 一起提交，并静默处理错误码', () => {
+test('注册/找回页取邮箱验证码时不再要求图形验证码', () => {
   for (const file of ['src/components/Register.vue', 'src/components/Forgot.vue']) {
     const source = fs.readFileSync(path.join(root, file), 'utf8')
 
@@ -349,19 +349,28 @@ test('注册/找回页把 imageId 与 imageCode 一起提交，并静默处理�
     assert.ok(at > 0, `${file}: 找不到 /user/emailCode 调用`)
     const call = source.slice(at, at + 420)
 
-    assert.match(call, /imageId:\s*this\.form\.imageId/, `${file}: 必须提交 imageId`)
-    assert.match(call, /imageCode:\s*this\.form\.imageCode/, `${file}: 必须提交 imageCode`)
+    // 关键：发信请求里不再出现图形验证码
+    assert.ok(!/imageCode/.test(call), `${file}: 发信请求不应再提交 imageCode`)
+    assert.ok(!/imageId/.test(call), `${file}: 发信请求不应再提交 imageId`)
     assert.match(call, /silent:\s*true/, `${file}: 需要 silent 关掉全局提示，避免提示叠两条`)
 
-    // 这是本次缺陷的原始写法，必须不再出现
-    assert.ok(
-      !/email:\s*this\.form\.email,\s*scene:\s*'[a-z]+'\s*\}\)/.test(source),
-      `${file}: 仍存在不带 imageId/imageCode 的旧写法`
-    )
+    // getCode() 里不得再有"请输入图形验证码"这道前置校验 ——
+    // 正是它让商户点「获取验证码」时收不到邮件
+    const getAt = source.indexOf('getCode() {')
+    const getCode = source.slice(getAt, getAt + 700)
+    assert.ok(!/请输入图形验证码/.test(getCode),
+      `${file}: getCode() 里仍要求先填图形验证码 —— 这正是商户收不到邮箱验证码的原因`)
 
-    assert.ok(source.includes('CAPTCHA_EXPIRED'), `${file}: 必须处理 CAPTCHA_EXPIRED`)
-    assert.ok(source.includes('CAPTCHA_INVALID'), `${file}: 必须处理 CAPTCHA_INVALID`)
-    assert.ok(source.includes('已为您刷新'), `${file}: 过期时应告知已自动刷新`)
+    // 但**提交**仍必须把整份表单（含图形验证码）发给服务端：
+    // 建号 / 改密是必须拦住的写操作，这道闸门不能一起放开
+    const subAt = source.indexOf('submit() {')
+    const submit = source.slice(subAt, subAt + 900)
+    assert.match(submit, /postRequest\('\/user\/(register|forgot)',\s*this\.form\)/,
+      `${file}: 提交时应把整份表单（含 imageId/imageCode）发给服务端`)
+
+    // 一次性图形码：提交失败后必须换图并清空输入
+    assert.match(submit, /this\.refreshImageCode\(\)/,
+      `${file}: 提交失败后要换一张图形验证码（那个码已经用掉了）`)
   }
 })
 

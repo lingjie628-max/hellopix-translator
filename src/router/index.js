@@ -17,7 +17,6 @@ import AdminLogin from '../components/admin/AdminLogin.vue'
 import AdminLayout from '../components/admin/AdminLayout.vue'
 import AdminDashboard from '../components/admin/AdminDashboard.vue'
 import AdminUsers from '../components/admin/AdminUsers.vue'
-import AdminOrders from '../components/admin/AdminOrders.vue'
 import AdminPackages from '../components/admin/AdminPackages.vue'
 import AdminRecharges from '../components/admin/AdminRecharges.vue'
 import AdminPayments from '../components/admin/AdminPayments.vue'
@@ -66,7 +65,6 @@ const routes = [
     children: [
       { path: '/admin/dashboard', name: '超管总览', component: AdminDashboard },
       { path: '/admin/users', name: '商户管理', component: AdminUsers },
-      { path: '/admin/orders', name: '全部工单', component: AdminOrders },
       { path: '/admin/accounts', name: '在线账号', component: AdminAccounts },
       { path: '/admin/fans', name: '进粉统计', component: AdminFans },
       { path: '/admin/links', name: '分流链接', component: AdminLinks },

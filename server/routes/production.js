@@ -366,7 +366,12 @@ function productionRouter(context) {
 
   // 旧的商户端「工单」接口（/order/*、/orderDetails/*）已于 2026-09-25 移除：
   // 对应的 7 个前端页面在同日删除，生产库 orders / order_details / order_fans
-  // 均为 0 行。超管后台的 /admin/orders 与「全部工单」页**不在此列**，仍然保留。
+  // 均为 0 行。
+  //
+  // 2026-10-11 补记：超管后台残存的「全部工单」页与 /admin/orders（读）
+  // 也一并移除 —— 全代码库**没有任何 INSERT INTO orders**，这个页面永远不可能
+  // 有数据，留着只会让超管以为"工单功能坏了"。orders 表本身保留
+  // （merchant-purge 仍会为旧数据做快照），只是不再有读写的界面与接口。
 
   router.get('/translate/engines', asyncRoute(async (req, res) => res.json(await core.engines(req.pixUser))))
   router.post('/translate/engines/active', asyncRoute(async (req, res) => {
@@ -651,17 +656,44 @@ function productionRouter(context) {
     await security.destroySession(req, res, 'admin')
     ok(res, '已退出')
   }))
+  /**
+   * 超管总览的数据源。
+   *
+   * ## 为什么要重写
+   *
+   * 前端 `AdminDashboard.vue`（以及「翻译计费」页）读的是 `enterpriseUsers`、
+   * `translateSell`、`translateCost`、`activeEngine`、`packageBill`、
+   * `recentTranslates`、`recentAudits`、`fanCount`、`rechargeCount` 这些字段，
+   * 这个契约**只在 mock 里实现过** —— 真后端只回了其中 10 个计数，
+   * 其余字段一个都没有。于是生产上：
+   *
+   *   · 「企业账号」恒为 0（明明已把商户升成企业）
+   *   · 「翻译售出 / 通道成本」恒为空
+   *   · 「当前通道」一直显示 "-"
+   *   · 「最近翻译扣费」「超管操作记录」永远"暂无数据"
+   *     —— 而库里 audit_logs 有 135 行、translate_logs 有 457 行
+   *
+   * 有一处口径要如实说明：`translate_logs.sell_amount` 在 core-service 里是
+   * **写死的 0**（`VALUES(...,$8,0,...)`）—— 本系统按套餐整包售卖，
+   * 并不按字符计价。所以「翻译售出」的真实值就是 0，不是取错了列；
+   * 真正的钱在「充值金额」（实收）与「通道成本」（translate_logs.cost_amount）。
+   */
   router.get('/admin/stats', asyncRoute(async (_req, res) => {
-    const result = await repo.query(
+    const counts = await repo.query(
       `SELECT
        (SELECT count(*) FROM users)::int AS user_count,
        (SELECT count(*) FROM users WHERE status=1)::int AS active_users,
-       (SELECT count(*) FROM orders)::int AS order_count,
-       (SELECT count(*) FROM orders WHERE status=1)::int AS open_orders,
+       (SELECT count(*) FROM users WHERE enterprise)::int AS enterprise_users,
        (SELECT count(*) FROM sub_accounts)::int AS sub_count,
+       -- 进粉：没有独立的 fans 表，进粉落在 order_fans 上（迁移 003）
+       (SELECT count(*) FROM order_fans)::int AS fan_count,
+       (SELECT COALESCE(sum(hits),0) FROM short_links)::int AS short_link_hits,
        (SELECT COALESCE(sum(char_balance),0) FROM users)::bigint AS char_balance,
        (SELECT COALESCE(sum(chars),0) FROM translate_logs)::bigint AS char_used,
-       (SELECT COALESCE(sum(paid_amount),0) FROM recharges WHERE status=1)::numeric AS recharge_sum,
+       (SELECT ROUND(COALESCE(sum(paid_amount),0),2) FROM recharges WHERE status=1)::numeric AS recharge_sum,
+       (SELECT count(*) FROM recharges WHERE status=1)::int AS recharge_count,
+       (SELECT ROUND(COALESCE(sum(cost_amount),0),4) FROM translate_logs)::numeric AS translate_cost,
+       (SELECT ROUND(COALESCE(sum(sell_amount),0),4) FROM translate_logs)::numeric AS translate_sell,
        -- 有效待支付：仍在有效期内、真的还能付款的单
        (SELECT count(*) FROM recharges r
          WHERE r.status=0 AND r.expires_at > now())::int AS recharge_pending,
@@ -669,7 +701,61 @@ function productionRouter(context) {
        (SELECT count(*) FROM recharges r
          WHERE r.status=0 AND r.expires_at <= now())::int AS recharge_pending_stale`
     )
-    res.json(mapRow(result.rows[0]))
+
+    // 最近翻译扣费 / 超管操作记录：总览两张表原本永远是空的，因为后端根本没查。
+    // 别名必须对齐前端（cost / sell / direction / createTime / admin ...）。
+    const [recentTranslates, recentAudits, settings] = await Promise.all([
+      repo.query(
+        `SELECT t.id,t.chars,ROUND(t.cost_amount,6) AS cost,ROUND(t.sell_amount,6) AS sell,t.snippet,
+                t.engine_id AS engine,t.created_at AS create_time,
+                (t.source_language||'→'||t.target_language) AS direction,u.username
+           FROM translate_logs t JOIN users u ON u.id=t.user_id
+          ORDER BY t.id DESC LIMIT 6`
+      ),
+      repo.query(
+        `SELECT id,actor AS admin,action,COALESCE(detail->>'message','') AS detail,created_at AS create_time
+           FROM audit_logs ORDER BY id DESC LIMIT 6`
+      ),
+      repo.settings()
+    ])
+
+    // 毛利估算 = 累计实收 − 累计通道成本。
+    // 两者现在都是美元（迁移 032 已把 cost_amount 的单位统一成美元），
+    // 所以可以直接相减。它是估算：实收按订单口径、成本按字符口径，
+    // 不是严格的会计周期配比，卡片文案里已注明"估算"。
+    const stats = mapRow(counts.rows[0])
+    const grossProfit = Math.round(
+      (Number(stats.rechargeSum || 0) - Number(stats.translateCost || 0)) * 100) / 100
+
+    // 当前通道：取「后台设置的默认通道」，退回第一个已接通且启用的通道。
+    // 前端要的是通道名（如 GPT），不是 id。
+    const configured = String(settingOf(settings, 'translation.active_engine', '') || '').trim()
+    const engineRow = (await repo.query(
+      `SELECT id,name,cost_per_million FROM engines
+        WHERE ($1 <> '' AND id=$1) OR ($1 = '' AND wired AND enabled)
+        ORDER BY (id=$1) DESC, id LIMIT 1`,
+      [configured]
+    )).rows[0]
+
+    // 套餐文案：币种必须跟「系统设置 → 价格货币」一致，
+    // 否则会出现"套餐 ¥200"而全站别的金额都是 $ 的错位。
+    const symbol = { USD: '$', CNY: '¥', HKD: 'HK$', JPY: '¥', EUR: '€' }[
+      String(settingOf(settings, 'billing.currency', 'USD') || 'USD').toUpperCase()] || '$'
+    const packages = (await repo.query(
+      `SELECT title,price,included_chars FROM packages WHERE active ORDER BY sort_order,id`
+    )).rows
+    const packageBill = packages
+      .map(p => `${p.title} ${symbol}${p.price}/${Number(p.includedChars || 0) / 10000}万`)
+      .join(' · ')
+
+    res.json(Object.assign(stats, {
+      grossProfit,
+      recentTranslates: mapRows(recentTranslates.rows),
+      recentAudits: mapRows(recentAudits.rows),
+      activeEngine: engineRow ? engineRow.name : '',
+      engineCostPerMillion: engineRow ? engineRow.costPerMillion : null,
+      packageBill
+    }))
   }))
 
   async function adminList(req, res, table, whereBuilder) {
@@ -706,7 +792,13 @@ function productionRouter(context) {
     select: `u.id,u.username,u.nickname,u.email,u.phone,u.status,u.package_id AS version_id,
       p.title AS basename,u.package_catalog_version,u.char_balance,u.char_used,u.translate_count,u.sub_quota,u.auto_alloc_master,
       u.auto_reply,u.enterprise,u.port_limit AS port,u.ports_in_use AS user_ports,u.bound_device,
-      u.expires_at AS expire_time,u.remarks,u.created_at AS create_time`,
+      u.expires_at AS expire_time,u.remarks,u.created_at AS create_time,
+      -- 子账号数必须是**真计数**。
+      -- 这个字段原先只存在于 mock 的 enrichUser 里，真后端 SELECT 从来没查过，
+      -- 于是列表这一列在生产上恒为 0/空白 —— 超管会以为"商户没有子账号"，
+      -- 而实际上 jiufa 名下有三个（查库可见），只是界面永远显示 0。
+      -- （工单数已随工单功能一起移除，见文件上方 2026-10-11 的说明。）
+      (SELECT count(*) FROM sub_accounts s WHERE s.parent_id=u.id)::int AS sub_count`,
     keyword: ['u.username', 'u.nickname'],
     order: 'u.id DESC'
   })))
@@ -717,14 +809,6 @@ function productionRouter(context) {
       s.created_at AS create_time`,
     keyword: ['s.username', 's.nickname', 'u.username'],
     order: 's.id DESC'
-  })))
-  router.get('/admin/orders', asyncRoute((req, res) => adminJoinedList(req, res, {
-    from: 'orders o JOIN users u ON u.id=o.user_id',
-    select: `o.*,o.port_limit AS port,o.total_users AS total_user,o.completed_target AS complete_target,
-      o.expires_at AS expiration_time,o.share_password_expires_at AS password_expiration_time,
-      u.username,u.nickname`,
-    keyword: ['o.serial_number', 'o.title', 'u.username'],
-    order: 'o.id DESC'
   })))
   router.get('/admin/recharges', asyncRoute((req, res) => adminJoinedList(req, res, {
     from: 'recharges r JOIN users u ON u.id=r.user_id LEFT JOIN packages p ON p.id=r.package_id',
@@ -852,11 +936,6 @@ function productionRouter(context) {
     ok(res, `已删除商户 ${result.username}`
       + (cleared.length ? `，一并清除 ${cleared.join('、')}` : '')
       + `；字符余额 ${result.charBalance} 随账号清除，已存档`)
-  }))
-  router.post('/admin/orders/status', asyncRoute(async (req, res) => {
-    const data = input(req)
-    await repo.query('UPDATE orders SET status=$2,updated_at=NOW() WHERE id=$1', [data.id, number(data.status)])
-    ok(res, '工单状态已更新')
   }))
   /**
    * 确认收款（超管手动把订单标记为已支付）。
@@ -1006,7 +1085,15 @@ function productionRouter(context) {
         : (packageChanged ? (Number(pack.catalogVersion) || null) : null)
       const result = await repo.query(
         `UPDATE users SET nickname=COALESCE($2,nickname),status=COALESCE($3,status),
-         package_id=$4,port_limit=COALESCE($5,port_limit),expires_at=COALESCE($6::timestamptz,expires_at),
+         package_id=$4,port_limit=COALESCE($5,port_limit),
+         -- 到期时间支持"清空成无限期"。
+         -- 原来是 COALESCE($6::timestamptz,expires_at)：传 null 只会**保留原值**，
+         -- 于是后台根本无法把一个已设到期时间的商户改回不过期 —— 想设"无限"
+         -- 只能填 2038 这种假日期（jiufa 现在就停在 2038-10-10，正是这么来的）。
+         -- 现在用显式开关 $14 区分三态：开 → NULL；给了日期 → 用日期；都没给 → 保持原值。
+         expires_at=CASE WHEN $14::boolean THEN NULL
+                         WHEN $6::timestamptz IS NOT NULL THEN $6::timestamptz
+                         ELSE expires_at END,
          password_hash=COALESCE($7,password_hash),phone=COALESCE($8,phone),remarks=COALESCE($9,remarks),
          enterprise=COALESCE($10,enterprise),auto_reply=COALESCE($13,auto_reply),
          sub_quota=COALESCE($11,sub_quota),
@@ -1024,7 +1111,9 @@ function productionRouter(context) {
           catalogVersion,
           // 自动回复原来**根本没写**：编辑态点了等于没点（新建时却会写）。
           // 补上这一列，让两边的行为一致。
-          bool(data.autoReply)]
+          bool(data.autoReply),
+          // $14：到期时间是否设为「无限期」。null（没传）时不动作。
+          bool(data.expireUnlimited)]
       )
       if (!result.rows[0]) throw new ApiError(404, '用户不存在', 'USER_NOT_FOUND')
       if (passwordHash || number(result.rows[0].status) !== 1) await auth.revokeUser('main', data.id)
@@ -1068,7 +1157,11 @@ function productionRouter(context) {
         `INSERT INTO users(username,password_hash,nickname,status,package_id,port_limit,expires_at,
          char_balance,auto_reply,phone,remarks,active_engine_id,enterprise,email,sub_quota,
          package_catalog_version)
-         VALUES($1,$2,$3,1,$4,$5,COALESCE($6::timestamptz,NOW()+interval '30 days'),
+         -- $16 勾了「无限期」就建一个不过期的号（NULL）；
+         -- 否则维持原行为：给了日期用日期，没给就默认 30 天。
+         VALUES($1,$2,$3,1,$4,$5,
+          CASE WHEN $16::boolean THEN NULL
+               ELSE COALESCE($6::timestamptz,NOW()+interval '30 days') END,
           $7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id,username`,
         [String(data.username).trim(), await auth.hash(data.password), data.nickname || data.username,
           pack.id, number(data.port, number(pack.portLimit)), data.expireTime || null, gift,
@@ -1077,7 +1170,7 @@ function productionRouter(context) {
           bool(data.autoReply) === true, data.phone || null, data.remarks || '',
           defaultEngine || null, bool(data.enterprise) === true,
           data.email ? String(data.email).toLowerCase() : null, subQuotaForNew,
-          newVersion], client
+          newVersion, bool(data.expireUnlimited)], client
       )
       if (gift) {
         await repo.query(

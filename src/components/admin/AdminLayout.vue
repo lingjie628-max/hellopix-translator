@@ -6,7 +6,6 @@
       <el-menu-item index="/admin/users"><i class="el-icon-user"></i><span slot="title">商户管理</span></el-menu-item>
       <el-submenu index="ops">
         <template slot="title"><i class="el-icon-s-operation"></i><span>运营</span></template>
-        <el-menu-item index="/admin/orders">全部工单</el-menu-item>
         <el-menu-item index="/admin/accounts">在线账号</el-menu-item>
         <el-menu-item index="/admin/fans">进粉统计</el-menu-item>
         <el-menu-item index="/admin/links">分流链接</el-menu-item>

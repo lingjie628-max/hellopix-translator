@@ -20,28 +20,42 @@
           <el-button type="text" @click="openSubs(scope.row)">{{ scope.row.subCount || 0 }}</el-button>
         </template>
       </el-table-column>
-      <el-table-column prop="orderCount" label="工单" width="70"></el-table-column>
       <el-table-column prop="charBalance" label="字符余额" width="100"></el-table-column>
       <el-table-column label="自动回复" width="90">
         <template slot-scope="scope">
           <el-tag :type="scope.row.autoReply ? 'success' : 'info'" size="mini">{{ scope.row.autoReply ? '开' : '关' }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="expireTime" label="到期时间" width="170"></el-table-column>
+      <el-table-column label="到期时间" width="150">
+        <template slot-scope="scope">
+          <span v-if="!scope.row.expireTime" class="never-expire">无限期</span>
+          <span v-else>{{ scope.row.expireTime | formatDateTime }}</span>
+        </template>
+      </el-table-column>
       <el-table-column label="状态" width="90">
         <template slot-scope="scope">
           <el-tag :type="scope.row.status === 1 ? 'success' : 'info'">{{ scope.row.status === 1 ? '启用' : '停用' }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="500">
+      <!--
+        操作列原来是并排 7 个文字按钮（width=500）：整个表格因此必须横向滚动，
+        而其中真正常用的只有「编辑 / 重置密码」两个。
+        这里收成「常用按钮 + 更多菜单」，动作一个没少，表格却不再横向滚动。
+      -->
+      <el-table-column label="操作" width="180" fixed="right">
         <template slot-scope="scope">
           <el-button type="text" @click="openEdit(scope.row)">编辑</el-button>
           <el-button type="text" @click="openReset(scope.row)">重置密码</el-button>
-          <el-button type="text" @click="setEnterprise(scope.row)">{{ scope.row.enterprise ? '降为个人' : '升企业' }}</el-button>
-          <el-button type="text" @click="unbind(scope.row)">踢下线</el-button>
-          <el-button type="text" @click="toggle(scope.row)">{{ scope.row.status === 1 ? '停用' : '启用' }}</el-button>
-          <el-button type="text" @click="reclaim(scope.row)">回收字符</el-button>
-          <el-button type="text" class="danger-link" @click="openDelete(scope.row)">删除</el-button>
+          <el-dropdown trigger="click" @command="cmd => onAction(cmd, scope.row)">
+            <el-button type="text">更多<i class="el-icon-arrow-down el-icon--right"></i></el-button>
+            <el-dropdown-menu slot="dropdown">
+              <el-dropdown-item :command="'enterprise'">{{ scope.row.enterprise ? '降为个人' : '升企业' }}</el-dropdown-item>
+              <el-dropdown-item :command="'unbind'">踢下线</el-dropdown-item>
+              <el-dropdown-item :command="'toggle'">{{ scope.row.status === 1 ? '停用' : '启用' }}</el-dropdown-item>
+              <el-dropdown-item :command="'reclaim'">回收字符</el-dropdown-item>
+              <el-dropdown-item :command="'delete'" divided>删除</el-dropdown-item>
+            </el-dropdown-menu>
+          </el-dropdown>
         </template>
       </el-table-column>
     </el-table>
@@ -75,7 +89,18 @@
           </span>
         </el-form-item>
         <el-form-item label="到期时间">
-          <el-date-picker v-model="form.expireTime" type="datetime" value-format="yyyy-MM-dd HH:mm:ss" style="width:100%"></el-date-picker>
+          <el-date-picker v-model="form.expireTime" type="datetime" value-format="yyyy-MM-dd HH:mm:ss"
+                          style="width:100%" :disabled="!!form.expireUnlimited"></el-date-picker>
+          <!--
+            「无限期」开关：不开的话原先根本没有办法把到期时间清空，
+            只能填 2038-10-10 这种假日期来假装不过期（jiufa 就是这么来的）。
+          -->
+          <div class="expire-unlimited">
+            <el-switch v-model="form.expireUnlimited" :active-value="1" :inactive-value="0"></el-switch>
+            <span class="trial-tip" style="margin-left:8px">
+              {{ form.expireUnlimited ? '无限期，永不过期' : '到期后自动停用' }}
+            </span>
+          </div>
         </el-form-item>
         <el-form-item label="联系电话">
           <el-input v-model="form.phone"></el-input>
@@ -256,6 +281,22 @@ export default {
       this.page = page
       this.load()
     },
+    /**
+     * 「更多」下拉的派发。
+     * 把这些动作收进菜单只是为了让表格不再横向滚动，
+     * 能力与原来的并排按钮完全一致 —— 没有功能被藏起来之后消失。
+     */
+    onAction(cmd, row) {
+      const handlers = {
+        enterprise: () => this.setEnterprise(row),
+        unbind: () => this.unbind(row),
+        toggle: () => this.toggle(row),
+        reclaim: () => this.reclaim(row),
+        delete: () => this.openDelete(row)
+      }
+      const handler = handlers[cmd]
+      if (handler) handler()
+    },
     onPack(id) {
       const pack = this.packs.find(p => p.id === id)
       if (!pack) return
@@ -288,7 +329,11 @@ export default {
         this.form = Object.assign({}, row, {
           password: '',
           enterprise: Number(row.enterprise) ? 1 : 0,
-          autoReply: Number(row.autoReply) ? 1 : 0
+          autoReply: Number(row.autoReply) ? 1 : 0,
+          // 没有到期时间 == 无限期。不这么归一的话，编辑一个不过期的商户时
+          // 开关会显示为「关」，保存后服务端按"保持原值"处理，看不出问题，
+          // 但超管会误以为这个号是有到期时间的。
+          expireUnlimited: row.expireTime ? 0 : 1
         })
       } else {
         // 新建：默认取第一个套餐自带的端口与子账号额度，省一步手填
@@ -300,7 +345,9 @@ export default {
           charBalance: this.trialChars,
           autoReply: 0,
           enterprise: 0,
-          subQuota: Number(first.subQuota || 0)
+          subQuota: Number(first.subQuota || 0),
+          // 新建默认仍是 30 天（服务端 COALESCE 兜底），要用「无限期」需显式打开
+          expireUnlimited: 0
         }
       }
       this.visible = true
@@ -441,4 +488,6 @@ export default {
 .danger-link { color: #f56c6c; }
 .dialog-tip { color: var(--w-text-faint); font-size: 12px; line-height: 1.6; }
 .impact-list { margin: 10px 0; padding-left: 18px; font-size: 13px; line-height: 1.8; }
+.never-expire { color: var(--w-text-faint); }
+.expire-unlimited { margin-top: 6px; display: flex; align-items: center; }
 </style>

@@ -22,7 +22,6 @@ const PASS = process.env.ADMIN_PASS
 const PAGES = [
   ['总览', '/admin/dashboard'],
   ['商户管理', '/admin/users'],
-  ['全部工单', '/admin/orders'],
   ['在线账号', '/admin/accounts'],
   ['进粉统计', '/admin/fans'],
   ['分流链接', '/admin/links'],

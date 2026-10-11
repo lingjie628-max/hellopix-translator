@@ -66,10 +66,16 @@ class AccountService {
     const email = normalizeEmail(data.email)
     const scene = data.scene === 'forgot' ? 'forgot' : 'register'
 
-    // 图形验证码先过 —— 它是挡机器人刷发信的第一道闸。
-    // 用 lib/captcha 的 consume：它是一次性的（用完即删），
-    // 自己实现很容易漏掉"同一个码重复提交"这条。
-    await this.consumeCaptcha(data)
+    // 这里**刻意不校验图形验证码**。
+    //
+    // 原先要求先填图形验证码才能拿邮箱验证码，结果是大多数商户根本不知道
+    // 要先填那一格 —— 点「获取验证码」永远得到「图形验证码已过期」，注册卡死。
+    // 图形验证码现在只在**真正建号 / 改密**（register / forgot）时才要，
+    // 那是必须拦住的写操作；"发一封信"不该设这道门槛。
+    //
+    // 发信仍有两道限流兜底，不会变成免费发信机：
+    //   · 路由层 emailCodeLimit：同一 IP 10 次 / 10 分钟
+    //   · 下面 verification.canSend：按邮箱 60 秒冷却 + 邮箱/IP 配额
 
     const mailReady = await this.mailer.configured()
     if (!mailReady) {

@@ -19,6 +19,15 @@ function later(days) {
   return new Date(Date.now() + days * 86400000).toISOString().slice(0, 19).replace('T', ' ')
 }
 
+/**
+ * 表单里的「无限期」开关解析。
+ * 前端 el-switch 送的是数字 0/1，encodeForm 会把它变成字符串 '0'/'1'，
+ * 而 COALESCE 语义要求"没传"必须是 null（保持原值）—— 所以只认明确的真值。
+ */
+function isUnlimited(value) {
+  return value === 1 || value === '1' || value === true || value === 'true'
+}
+
 function q(req) {
   return Object.assign(Object.create(null), req.query || {}, req.body || {})
 }
@@ -349,7 +358,10 @@ module.exports = function registerMock(app, options) {
   }
 
   function packageBillText() {
-    return db.versions.map(v => packShortName(v.title) + ' ¥' + v.price + '/' + (Number(v.chars || 0) / 10000) + '万').join(' · ')
+    // 币种符号必须与全站的 currencySymbol 一致。
+    // 原先是写死的 '¥'，而套餐价与站内其它金额都是美元 ——
+    // 会出现"套餐 ¥200"与旁边"$35.685"并排的错位。
+    return db.versions.map(v => packShortName(v.title) + ' $' + v.price + '/' + (Number(v.chars || 0) / 10000) + '万').join(' · ')
   }
 
   function costYuan(chars, engineId) {
@@ -361,7 +373,6 @@ module.exports = function registerMock(app, options) {
     const copy = Object.assign({}, u)
     delete copy.password
     const subs = db.subAccounts.filter(s => s.parentId === u.id)
-    copy.orderCount = db.orders.filter(o => o.userId === u.id).length
     copy.fanCount = db.fans.filter(f => {
       const order = db.orders.find(o => o.serialNumber === f.orderNum)
       return order && order.userId === u.id
@@ -1772,8 +1783,11 @@ module.exports = function registerMock(app, options) {
     res.json({
       userCount: db.users.length,
       activeUsers: db.users.filter(u => u.status === 1).length,
-      orderCount: db.orders.length,
-      openOrders: db.orders.filter(o => o.status === 1).length,
+      // 工单已下线（见路由注释）：orderCount / openOrders 一并移除，
+      // 与真后端 /admin/stats 保持一致。
+      // 待支付订单：仍在有效期内的未支付单 —— 与真后端的 recharge_pending 同口径
+      rechargePending: db.recharges.filter(r => r.status === 0).length,
+      rechargePendingStale: 0,
       portTotal: db.users.reduce((s, u) => s + Number(u.port || 0), 0),
       portUsed: db.users.reduce((s, u) => s + Number(u.userPorts || 0), 0),
       onlineAccounts: db.details.filter(d => Number(d.onlineStatus) === 1).length,
@@ -1789,6 +1803,8 @@ module.exports = function registerMock(app, options) {
       translateSell: Math.round(translateSell * 10000) / 10000,
       enterpriseUsers: db.users.filter(u => u.enterprise).length,
       subCount: db.subAccounts.length,
+      // 毛利估算：与真后端同口径（累计实收 − 累计通道成本）
+      grossProfit: Math.round((paid.reduce((s, r) => s + Number(r.price || 0), 0) - translateCost) * 100) / 100,
       packageBill: packageBillText(),
       activeEngine: activeEngine.name,
       engineCostPerMillion: activeEngine.costPerMillion,
@@ -1819,7 +1835,13 @@ module.exports = function registerMock(app, options) {
       user.versionId = Number(query.versionId || user.versionId)
       user.basename = pack.title
       user.port = Number(query.port || pack.port)
-      user.expireTime = query.expireTime || user.expireTime
+      // 「无限期」= 到期时间为 null。与生产端 /admin/users/save 的三态一致：
+      // 勾了无限期就清空；没勾且给了日期就更新；都没给则保持原值。
+      if (isUnlimited(query.expireUnlimited)) {
+        user.expireTime = null
+      } else if (query.expireTime) {
+        user.expireTime = query.expireTime
+      }
       if (query.password) {
         if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 6 位' }); return }
         user.password = security.hashPassword(query.password)
@@ -1854,7 +1876,7 @@ module.exports = function registerMock(app, options) {
       versionId: pack.id,
       port: Number(query.port || pack.port),
       userPorts: 0,
-      expireTime: query.expireTime || later(30),
+      expireTime: isUnlimited(query.expireUnlimited) ? null : (query.expireTime || later(30)),
       createTime: now(),
       charBalance: gift,
       autoReply: Number(query.autoReply || 0),
@@ -1954,25 +1976,8 @@ module.exports = function registerMock(app, options) {
     }
     res.json(page(list, query.rows ? query : Object.assign({}, query, { page: 1, rows: 50 })))
   })
-  app.get('/apis/admin/orders', (req, res) => {
-    if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
-    const query = q(req)
-    let list = db.orders.map(o => {
-      const user = db.users.find(u => u.id === o.userId)
-      return Object.assign({}, o, { username: user ? user.username : '', nickname: user ? user.nickname : '' })
-    })
-    if (query.keyword) {
-      list = list.filter(o => String(o.serialNumber).includes(query.keyword) || String(o.title).includes(query.keyword) || String(o.username).includes(query.keyword))
-    }
-    res.json(page(list, query))
-  })
-  app.post('/apis/admin/orders/status', (req, res) => {
-    if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
-    const query = q(req)
-    const item = db.orders.find(o => String(o.id) === String(query.id))
-    if (item) item.status = Number(query.status)
-    okMsg(res, '工单状态已更新')
-  })
+  // 工单（orders）相关接口于 2026-10-11 移除：与真后端一致 ——
+  // 没有任何创建入口，保留 @/admin/orders 只会让 mock 与生产的路由表不一致。
   app.get('/apis/admin/packages', (req, res) => {
     if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
     res.json(db.versions)

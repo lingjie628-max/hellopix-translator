@@ -17,7 +17,13 @@
             <el-table-column prop="username" label="商户" width="90"></el-table-column>
             <el-table-column prop="direction" label="方向" width="80"></el-table-column>
             <el-table-column prop="chars" label="字符" width="70"></el-table-column>
-            <el-table-column prop="sell" label="售价" width="80"></el-table-column>
+            <!--
+              这一列原来显示「售价」，而 translate_logs.sell_amount 是 core-service
+              里写死的 0（本系统按套餐整包售卖，不按字符计价）—— 每一行都是 0，
+              等于一列噪声。改显示「成本」，那是真实发生的上游消耗。
+              完整的成本/售价两列仍在「翻译计费」页。
+            -->
+            <el-table-column prop="cost" label="成本" width="90"></el-table-column>
             <el-table-column prop="snippet" label="摘要" min-width="120" show-overflow-tooltip></el-table-column>
           </el-table>
         </el-card>
@@ -44,14 +50,23 @@ export default {
   computed: {
     cards() {
       const s = this.stats
+      // 卡片顺序：先"是谁"（商户/企业），再"运营/钱"（进粉/待支付/充值/毛利），
+      // 最后"资产与通道"（字符余额/当前通道）。正好 8 张、两行四列。
+      //
+      // 已移除的两张卡：
+      //   · 「工单」—— 工单功能 2026-09-25 已下线、代码里没有任何创建入口，
+      //     生产 orders 表 0 行，留着只会让人以为显示坏了。
+      //   · 「翻译售出」—— 本系统按套餐整包售卖，translate_logs.sell_amount
+      //     是 core-service 里写死的 0，按字符计价的售出恒为 $0。
+      //     换成「毛利估算」（实收 − 通道成本），那才是真正能看的钱。
       return [
         { label: '商户', value: s.userCount || 0, sub: '启用 ' + (s.activeUsers || 0) },
-        { label: '工单', value: s.orderCount || 0, sub: '进行中 ' + (s.openOrders || 0) },
         { label: '企业账号', value: s.enterpriseUsers || 0, sub: '子账号 ' + (s.subCount || 0) + ' · 聊天号不限' },
         { label: '进粉', value: s.fanCount || 0, sub: '短链点击 ' + (s.shortLinkHits || 0) },
+        { label: '待支付订单', value: s.rechargePending || 0, sub: '已失效 ' + (s.rechargePendingStale || 0) },
         { label: '充值金额', value: this.currencySymbol + (s.rechargeSum || 0), sub: (s.rechargeCount || 0) + ' 笔' },
+        { label: '毛利估算', value: this.currencySymbol + (s.grossProfit || 0), sub: '减通道成本 ' + this.currencySymbol + (s.translateCost || 0) },
         { label: '字符余额', value: s.charBalance || 0, sub: '已用 ' + (s.charUsed || 0) },
-        { label: '翻译售出', value: this.currencySymbol + (s.translateSell || 0), sub: '通道成本 ' + this.currencySymbol + (s.translateCost || 0) },
         { label: '当前通道', value: s.activeEngine || '-', sub: s.packageBill || '按套餐整包售卖' }
       ]
     }

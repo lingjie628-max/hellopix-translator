@@ -92,16 +92,11 @@ export default {
         this.$message.error('请输入邮箱地址')
         return
       }
-      if (!this.form.imageCode) {
-        this.$message.error('请输入图形验证码')
-        return
-      }
-      // imageId 与 imageCode 必须一起提交，否则后端拿不到图形码、直接判「已过期」。
+      // 与注册页一致：取邮箱验证码不再需要先填图形验证码。
+      // 图形验证码只在最后提交「重置密码」时才校验。
       this.postRequest('/user/emailCode', {
         email: this.form.email,
-        scene: 'forgot',
-        imageId: this.form.imageId,
-        imageCode: this.form.imageCode
+        scene: 'forgot'
       }, { silent: true }).then(resp => {
         if (!resp || !resp.data) return
         if (resp.data.success === false) {
@@ -112,14 +107,6 @@ export default {
         this.startCountdown()
       }).catch(error => {
         const data = (error && error.response && error.response.data) || {}
-        if (data.code === 'CAPTCHA_EXPIRED') {
-          this.refreshImageCode('图形验证码已过期，已为您刷新，请重新输入')
-          return
-        }
-        if (data.code === 'CAPTCHA_INVALID') {
-          this.refreshImageCode('图形验证码错误，已为您刷新，请重新输入')
-          return
-        }
         this.$message.error(data.msg || '获取验证码失败，请稍后重试')
       })
     },
@@ -136,7 +123,8 @@ export default {
           if (!resp || !resp.data) return
           if (resp.data.success === false || resp.data.success === 'error') {
             this.$message.error(resp.data.msg)
-            this.getImageCode()
+            // 同注册页：图形验证码一次性，失败后必须换图并清空输入
+            this.refreshImageCode()
             return
           }
           this.$message.success(resp.data.msg)

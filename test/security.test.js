@@ -310,7 +310,11 @@ test('operator accounts are read-only for admin mutations', async t => {
     body: new URLSearchParams({ username: 'operator-test', password: 'operator-pass' })
   })
   const operatorJar = cookieJar(operatorResponse)
-  response = await request(api.base, '/apis/admin/orders/status', {
+  // 用一个仍然存在的管理端写接口来验证角色守卫。
+  // （原先这里打的是 /apis/admin/orders/status —— 工单功能已下线，
+  //   mock 与真后端都不再提供该路由。守卫本身是"非超管的一切写操作都 403"，
+  //   所以换哪条写路由都能验到同一件事。）
+  response = await request(api.base, '/apis/admin/users/status', {
     method: 'POST',
     headers: {
       Cookie: cookieHeader(operatorJar),

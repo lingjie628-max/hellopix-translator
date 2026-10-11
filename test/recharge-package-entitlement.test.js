@@ -528,4 +528,74 @@ test('套餐随结算发放 / 编辑商户 / 子账号额度', { skip: !database
       '企业账号不受额度限制，结算不该把它的 sub_quota 改成套餐值 —— '
       + '否则日后降为个人账号会得到一个含义不明的额度')
   })
+
+  // ================================================ ⑤ 到期时间「无限期」
+
+  await t.test('编辑商户：勾「无限期」必须把到期时间清成 NULL', async () => {
+    const pack = await makePackage({ tag: 'x1', subQuota: 2, chars: 1000, price: 35, portLimit: 0, catalogVersion: 7 })
+    const user = await makeUser({ expiresAt: new Date(Date.now() + days(20)).toISOString() })
+    assert.ok(await expiresAt(user.id), '夹具应当先有一个到期时间')
+
+    const res = await post('/admin/users/save', { id: user.id, versionId: pack.id, expireUnlimited: 'true' })
+    assert.equal(res.status, 200, `HTTP ${res.status} ${res.text.slice(0, 200)}`)
+    assert.equal(await expiresAt(user.id), null,
+      '勾「无限期」必须能把 expires_at 清成 NULL。原先是 COALESCE($6::timestamptz,expires_at)，'
+      + '传 null 只会保留原值 —— 后台根本没法把已设到期时间的商户改回不过期，'
+      + '只能填 2038 这种假日期（jiufa 就是这么来的）')
+  })
+
+  await t.test('编辑商户：不勾无限期且给了日期时，仍按日期更新', async () => {
+    const pack = await makePackage({ tag: 'x2', subQuota: 2, chars: 1000, price: 35, portLimit: 0, catalogVersion: 7 })
+    const user = await makeUser()
+    const target = new Date(Date.now() + days(45))
+    const res = await post('/admin/users/save', {
+      id: user.id,
+      versionId: pack.id,
+      expireUnlimited: 'false',
+      expireTime: target.toISOString().slice(0, 19).replace('T', ' ')
+    })
+    assert.equal(res.status, 200, `HTTP ${res.status} ${res.text.slice(0, 200)}`)
+    const left = new Date(await expiresAt(user.id)).getTime() - Date.now()
+    assert.ok(left > days(44) && left <= days(46),
+      `期望到期时间约为 45 天后，实际 ${(left / days(1)).toFixed(2)} 天`)
+  })
+
+  await t.test('编辑商户：既没勾无限期也没给日期时，保持原到期时间不动', async () => {
+    const pack = await makePackage({ tag: 'x3', subQuota: 2, chars: 1000, price: 35, portLimit: 0, catalogVersion: 7 })
+    const user = await makeUser({ expiresAt: new Date(Date.now() + days(15)).toISOString() })
+    const before = new Date(await expiresAt(user.id)).getTime()
+
+    const res = await post('/admin/users/save', { id: user.id, versionId: pack.id, nickname: 'x3改个名' })
+    assert.equal(res.status, 200, `HTTP ${res.status} ${res.text.slice(0, 200)}`)
+    assert.equal(new Date(await expiresAt(user.id)).getTime(), before,
+      '只改备注/套餐这类编辑不能顺手清掉到期时间 —— COALESCE 的原语义要保留')
+  })
+
+  // ================================================ ⑥ 列表真实计数
+
+  await t.test('商户列表：子账号数与工单数必须是真计数', async () => {
+    const user = await makeUser({ subQuota: 5 })
+    for (let i = 1; i <= 2; i++) {
+      const created = await post('/team/subs/save', {
+        username: `entprobeCnt_${rand()}_${i}`, password: 'ProbePass123'
+      }, user.id)
+      assert.equal(created.status, 200, `建子账号失败：HTTP ${created.status} ${created.text.slice(0, 200)}`)
+      const row = (await pool.query(
+        'SELECT id FROM sub_accounts WHERE parent_id=$1 ORDER BY id DESC LIMIT 1', [user.id])).rows[0]
+      if (row) createdSubs.push(row.id)
+    }
+
+    const list = await request('GET', `/admin/users?keyword=${encodeURIComponent(user.username)}`, null, 'admin')
+    assert.equal(list.status, 200, `列表 HTTP ${list.status} ${list.text.slice(0, 200)}`)
+    const row = ((list.json && list.json.data && list.json.data.rows) || [])[0]
+    assert.ok(row, '列表里找不到刚建的商户')
+
+    assert.equal(Number(row.subCount), 2,
+      '列表必须回真实的子账号数。原先真后端 SELECT 里根本没有 sub_count，'
+      + '只有 mock 的 enrichUser 会算 —— 于是生产上这列恒为 0，'
+      + '超管以为商户开不出子账号（jiufa 实际有 3 个）')
+    // 工单已下线：这一列不该再出现在响应里
+    assert.ok(!('orderCount' in row),
+      '工单功能已下线，/admin/users 不该再返回 orderCount')
+  })
 })
