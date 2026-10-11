@@ -10,6 +10,17 @@
       <el-table-column label="字符" width="100">
         <template slot-scope="scope">{{ (scope.row.chars || 0) / 10000 }} 万</template>
       </el-table-column>
+      <!--
+        单位价列：这一列的存在就是为了让"阶梯非单调"自己暴露出来。
+        生产上曾经是 23.33 / 26.00 / 20.83 —— 高级版比基础版还贵，
+        而这个错误靠人眼看"35 / 65 / 125"和"250万 / 600万"两组数字是发现不了的。
+        单位价沿档位必须严格下降，`npm run check:plan-copy` 会在 CI 里拦。
+      -->
+      <el-table-column label="单位价" width="150">
+        <template slot-scope="scope">
+          <span :class="{ 'unit-bad': !unitOk(scope.row) }">{{ unitOf(scope.row) || '—' }}</span>
+        </template>
+      </el-table-column>
       <el-table-column label="子账号" width="80">
         <template slot-scope="scope">{{ Number(scope.row.subQuota || 0) }} 个</template>
       </el-table-column>
@@ -81,6 +92,9 @@
   </div>
 </template>
 <script>
+// 单位价算法唯一真源：官网定价卡、商户充值页、本表三处共用一份
+import { formatUnitPrice, unitPricePerMillion } from '../../utils/plan-value'
+
 const FEATURES = [
   { key: 'autoFill', label: '自动补录' },
   { key: 'export', label: '数据导出' },
@@ -118,6 +132,26 @@ export default {
     nameOf(id) {
       const item = this.engineList.find(e => e.id === id)
       return item ? item.name : id
+    },
+    /** 单位价：与官网定价卡、商户充值页共用同一份算法（src/utils/plan-value） */
+    unitOf(row) {
+      return formatUnitPrice(row.price, row.chars, this.currencySymbol)
+    },
+    /**
+     * 这一档的单位价是否比低一档便宜。
+     *
+     * 不比它便宜就是**阶梯断了**（生产上真出现过：高级版比基础版贵 11.4%）。
+     * 返回 false 时那一格标红，"哪一档配错了"一眼可见。
+     * 与 `npm run check:plan-copy` 的单调性校验是同一个判据。
+     */
+    unitOk(row) {
+      const priced = this.rows
+        .map(r => ({ row: r, unit: unitPricePerMillion(r.price, r.chars), price: Number(r.price) }))
+        .filter(x => x.unit !== null)
+        .sort((a, b) => a.price - b.price)
+      const at = priced.findIndex(x => String(x.row.id) === String(row.id))
+      if (at <= 0) return true // 最便宜的那一档没有"低一档"可比
+      return priced[at].unit < priced[at - 1].unit
     },
     // 未接通的通道是"套餐里有、但翻不了"的：选中它必然 503，客户只看到"没有译文"。
     // 在套餐编辑处标出来，避免再配出一个"配了却不能翻"的套餐。
@@ -161,6 +195,8 @@ export default {
 <style scoped>
 .admin-page { text-align: left; }
 .unit-tip { margin-left: 10px; color: var(--w-text-faint); font-size: 12px; }
+/* 阶梯断了的那一档标红：不用去比三组数字，哪一行配错一眼可见 */
+.unit-bad { color: var(--w-danger); font-weight: 600; }
 .coming-soon { color: var(--w-text-faint); font-size: 12px; }
 .coming-soon-tip { margin-top: 6px; color: var(--w-text-faint); font-size: 12px; line-height: 1.6; }
 </style>

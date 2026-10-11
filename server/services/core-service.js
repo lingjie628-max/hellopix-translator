@@ -713,13 +713,37 @@ class CoreService {
     try {
       const usage = (result && result.usage) || {}
       const model = String((result && result.model) || (engine && engine.model) || '')
-      const cost = estimateUpstreamCost({
-        model,
-        promptTokens: usage.promptTokens,
-        completionTokens: usage.completionTokens,
-        // 按字符计价的通道（谷歌）没有 token 数，用实际送翻的字符数
-        characters: (engine && engine.provider === 'Google') ? number(reservation && reservation.reservedChars) : 0
-      })
+      const sentChars = number(reservation && reservation.reservedChars)
+
+      /**
+       * 厂商没回 `usage` 时**不能把成本记成 0**。
+       *
+       * 这是 2026-10-11 在生产上发现的真实缺陷：`deepseek` 通道 48 次调用
+       * 全部是 `prompt_tokens=0 / completion_tokens=0 / upstream_cost=0`，
+       * 而 `cost_verified=true`。原因两条：
+       *   1. `normalizeUsage()` 在厂商未返回 usage 时返回 `null`；
+       *   2. 这里拿不到 token 就直接按 0 记账。
+       * 于是成本报表上整条通道显示"几乎零成本"，而 `cost_verified=true`
+       * 还让人误以为"已核实"——它核的是**单价查到了**，不是**用量记到了**。
+       * 金额现在还小（约 $0.005），但机制是坏的：DeepSeek 一旦成为主力通道，
+       * 月度对账会凭空少一整块成本。
+       *
+       * 现在的处置：按通道成本表里的**字符单价**兜底估算（与
+       * `translate_logs.cost_amount` 同一口径），并把 `cost_verified`
+       * 如实置为 false —— 宁可标记成"估的"，也不要一个看起来干净的 0。
+       */
+      const hasUsage = Boolean(
+        number(usage.promptTokens) || number(usage.completionTokens) || number(usage.totalTokens)
+      )
+      const cost = hasUsage
+        ? estimateUpstreamCost({
+          model,
+          promptTokens: usage.promptTokens,
+          completionTokens: usage.completionTokens,
+          // 按字符计价的通道（谷歌）没有 token 数，用实际送翻的字符数
+          characters: (engine && engine.provider === 'Google') ? sentChars : 0
+        })
+        : this.estimateCostFromChars(engine, model, sentChars)
       await this.repo.query(
         `INSERT INTO translation_usage(reservation_id,translate_log_id,user_id,sub_account_id,
          engine_id,provider,model,prompt_tokens,completion_tokens,reasoning_tokens,total_tokens,
@@ -758,11 +782,65 @@ class CoreService {
         client
       )
       // 落库之外再喊一声：库里的标记要人去查才看得到，日志是主动的。
-      if (!cost.verified) this.reportUnverifiedCost(engine, model, cost)
+      // 两种"未核实"要分开喊 —— 处置完全不同：一个是去补价目表，
+      // 另一个是去查厂商为什么没回 usage。
+      if (!cost.verified) {
+        if (cost.estimated) this.reportEstimatedUsage(engine, model, cost, sentChars)
+        else this.reportUnverifiedCost(engine, model, cost)
+      }
     } catch (error) {
       // 台账是旁路：写失败要能在日志里看见，但不能把已经成功的翻译带崩
       console.error('Upstream usage ledger write failed:', error.message)
     }
+  }
+
+  /**
+   * 厂商没回 `usage` 时的兜底成本估算。
+   *
+   * 口径：`通道成本表单价 × 送翻字符数 ÷ 1e6` —— 与
+   * `translate_logs.cost_amount` 的算法**完全一致**，所以两本账可以直接对照，
+   * 不会出现"客户账本上一个数、内部台账上另一个数"。
+   *
+   * 它是**上界估算**（`cost_per_million` 本身是按保守 token/字符比折算的），
+   * 因此一定标 `verified=false`。
+   *
+   * 拿不到 `cost_per_million`（未定价通道）时仍返回 0，但同样标未核实
+   * —— 0 在这里的含义是"我们真的不知道"，不是"免费"。
+   */
+  estimateCostFromChars(engine, model, chars) {
+    const perMillion = number(engine && engine.costPerMillion)
+    const cost = perMillion * number(chars) / 1e6
+    return {
+      cost: Number(cost.toFixed(8)),
+      currency: 'USD',
+      unit: 'token',
+      provider: (engine && engine.provider) || '',
+      model: String(model || ''),
+      verified: false,
+      estimated: true,
+      note: '厂商未返回 usage（拿不到 token 数），成本按通道成本表的字符单价估算；'
+        + '与 translate_logs.cost_amount 同口径，属上界估算，需人工复核。',
+      source: 'estimate:cost_per_million',
+      asOf: ''
+    }
+  }
+
+  /**
+   * 厂商没回 usage 时喊一声（按"渠道:模型"去重）。
+   *
+   * 不合并进 `reportUnverifiedCost`：那条消息告诉人去补价目表，
+   * 而这里的病在**适配器没拿到用量**，去补价目表是白费功夫。
+   */
+  reportEstimatedUsage(engine, model, cost, chars) {
+    const key = `est:${(engine && engine.id) || '?'}:${model || '(空 model)'}`
+    if (this.unverifiedCostReported.has(key)) return
+    this.unverifiedCostReported.add(key)
+    console.warn(
+      `[usage-cost] 渠道「${(engine && engine.id) || '?'}」的模型「${model || '(空)'}」` +
+      `本次**没有拿到厂商用量**（token 数未知），成本按字符单价估为 ${cost.cost}（USD，` +
+      `${chars} 字符）并标记 cost_verified=false。` +
+      '0 或估值都不代表真实账单 —— 处置：检查该渠道的响应里是否真的带 usage。'
+    )
   }
 
   /**

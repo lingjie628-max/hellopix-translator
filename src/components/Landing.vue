@@ -185,6 +185,13 @@
             <p class="sub">{{ p.subtitle }}</p>
             <div class="amount"><em>{{ currencySymbol }}</em>{{ formatPrice(p.price) }}</div>
             <p class="quota">含 {{ formatChars(p.includedChars) }}字符</p>
+            <!--
+              单位价 + 「较基础版省 X%」：客户判断"升级值不值"靠的就是这一个数。
+              三张卡片并排时，"$23.33 → $21.67 → $16.67"一眼可读，
+              比只看"$35 / $65 / $125"直观得多（后者还得自己心算除法）。
+            -->
+            <p class="unit" v-if="unitOf(p)">{{ unitOf(p) }}</p>
+            <span class="save" v-if="saveOf(p, i)">较基础版省 {{ saveOf(p, i) }}%</span>
             <ul>
               <li><i class="el-icon-check"></i>
                 {{ p.portUnlimited || !p.portLimit ? '账号数量不限' : '可开 ' + p.portLimit + ' 个账号' }}
@@ -283,6 +290,8 @@
 
 <script>
 import ThemeToggle from './ThemeToggle.vue'
+// 单位价与"较基础版省 X%"的算法唯一真源（三个展示页面共用）
+import { formatUnitPrice, savingVsBase } from '../utils/plan-value'
 
 // 场景与优势是产品定位，属于"我们怎么讲自己"，放前端常量：
 // 不随运营改动，也能避免后台被改坏导致官网没内容。
@@ -424,6 +433,21 @@ export default {
     formatChars(value) {
       const n = Number(value || 0)
       return n >= 10000 ? (n / 10000) + ' 万' : String(n)
+    },
+    /** 单位价展示串。除放在 plan-value 里，三个页面共用一份，避免各算一份。 */
+    unitOf(pkg) {
+      return formatUnitPrice(pkg.price, pkg.includedChars, this.currencySymbol)
+    },
+    /**
+     * 「较基础版省 X%」。
+     *
+     * 基准取 `packages[0]` —— 接口按 `sort_order,id` 返回，第 0 张就是入门档。
+     * 入门档自己返回 null（不跟自己比）。
+     */
+    saveOf(pkg, index) {
+      const base = (this.packages || [])[0]
+      if (!base || index === 0) return null
+      return savingVsBase(base.price, base.includedChars, pkg.price, pkg.includedChars)
     },
     /**
      * 权益列表里若含"150万字符"这类纯额度项就跳过 ——
@@ -641,6 +665,13 @@ export default {
 .quota {
   font-size: 13px; color: var(--w-accent-text, #0958d9);
   margin: 0 0 16px; font-weight: 500;
+}
+/* 单位价：客户比价时真正看的那一行，要比 quota 更醒目一点但不能抢价格的风头 */
+.unit { font-size: 13px; color: var(--w-text-muted, #64748b); margin: -12px 0 6px; }
+.save {
+  display: inline-block; font-size: 12px; font-weight: 600;
+  color: var(--w-success, #16a34a); background: var(--w-success-soft, #e8f7ee);
+  border-radius: 10px; padding: 1px 8px; margin-bottom: 10px;
 }
 .price-card ul { list-style: none; padding: 0; margin: 0 0 20px; }
 .price-card li { display: flex; align-items: flex-start; gap: var(--w-space-2); font-size: 13px; color: var(--w-text-muted, #4b5563); padding: var(--w-space-1) 0; }
