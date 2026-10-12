@@ -128,6 +128,89 @@ test('openEdit 必须把"无到期时间"归一成「无限期」', () => {
     + '不归一的话开关显示为「关」，超管会误以为这个号有到期时间')
 })
 
+// --- 2b. 「改不成无限期」的真正入口（2026-10-11 超管再次反馈）-------------
+
+test('openEdit 必须把 ISO 时间串归一成选择器认得的格式', () => {
+  const at = usersVue.indexOf('openEdit(row) {')
+  const block = usersVue.slice(at, usersVue.indexOf('\n    },', at))
+  assert.match(block, /expireTime:\s*row\.expireTime\s*\?\s*formatDateTime\(row\.expireTime\)/,
+    '接口回的是 Postgres timestamptz 的 ISO 串（2038-10-10T16:42:04.000Z），'
+    + '而 el-date-picker 的 value-format 是 yyyy-MM-dd HH:mm:ss。'
+    + 'Element UI 解析失败会**原样回显那个串**（picker.vue 里 '
+    + '`parseAsFormatAndType(...) || this.value`），编辑框里就是一段 ISO 原文 ——'
+    + '超管会以为这个字段坏了，转而去手动清它')
+  assert.match(usersVue, /from '\.\.\/\.\.\/utils\/filters'/,
+    'formatDateTime 是全局过滤器，JS 里要用必须显式 import')
+})
+
+test('清空到期时间 = 无限期（这是"改不成无限期"的死路所在）', () => {
+  const at = usersVue.indexOf('<el-form-item label="到期时间">')
+  const block = usersVue.slice(at, usersVue.indexOf('</el-form-item>', at))
+  assert.match(block, /@change="onExpireChange"/,
+    '选择器必须有 @change。缺了它，用户把日期清空后保存，'
+    + '服务端走的是「既没勾无限期也没给日期 → 保持原值」分支 —— '
+    + '日期纹丝不动，用户看到"清掉了却还在"，于是认定后台没有设置无限期的能力')
+
+  const fn = usersVue.slice(usersVue.indexOf('onExpireChange(value) {'),
+    usersVue.indexOf('\n    },', usersVue.indexOf('onExpireChange(value) {')))
+  assert.match(fn, /this\.form\.expireUnlimited\s*=\s*value\s*\?\s*0\s*:\s*1/,
+    'onExpireChange 必须把"清空"翻译成「无限期」——'
+    + '清空就是用户表达"不要到期时间"的自然手势，控件要顺着它走')
+})
+
+test('列表「更多」里要有「设为无限期」，且只在有到期时间时出现', () => {
+  const at = usersVue.indexOf('<el-table-column label="操作"')
+  const block = usersVue.slice(at, usersVue.indexOf('</el-table-column>', at))
+  assert.match(block, /:command="'unlimited'"/,
+    '等价能力原先只藏在「编辑」弹窗的一枚小开关里，藏得深就等于没有 —— '
+    + '超管的原话是"我没办法去自己改成无限期"')
+  assert.match(block, /v-if="scope\.row\.expireTime"[^>]*:command="'unlimited'"/,
+    '本来就不过期的号不需要这个动作，有到期时间时才显示')
+
+  const dispatch = usersVue.slice(usersVue.indexOf('onAction(cmd, row) {'),
+    usersVue.indexOf('\n    },', usersVue.indexOf('onAction(cmd, row) {')))
+  assert.match(dispatch, /unlimited:\s*\(\)\s*=>\s*this\.setUnlimited\(row\)/,
+    'onAction 要把 unlimited 派发到 setUnlimited，否则菜单点了没反应')
+})
+
+test('设为无限期走独立接口，不借用整套更新的 save', () => {
+  const at = usersVue.indexOf('setUnlimited(row) {')
+  assert.ok(at > 0, '找不到 setUnlimited()')
+  const fn = usersVue.slice(at, usersVue.indexOf('\n    },', at))
+  assert.match(fn, /'\/admin\/users\/expiry'/,
+    '要调只改到期时间的独立接口。复用 /admin/users/save 要求带 versionId '
+    + '并按整套字段更新，从列表一键触发太重，还可能顺手把套餐刷一遍')
+})
+
+// --- 2c. 服务端那个独立接口 ------------------------------------------------
+
+test('/admin/users/expiry 只碰 expires_at 一列', () => {
+  const at = routes.indexOf("router.post('/admin/users/expiry'")
+  assert.ok(at > 0, '找不到 /admin/users/expiry 路由')
+  const block = routes.slice(at, routes.indexOf('}))', routes.indexOf('await repo.audit', at)))
+
+  assert.match(block, /UPDATE users SET expires_at=NULL,updated_at=NOW\(\) WHERE id=\$1/,
+    '必须是一条只改 expires_at 的 UPDATE。列越少，越不可能误伤 ——'
+    + '这正是它与 /admin/users/save 分开的理由')
+  // 不能顺手改别的列
+  for (const col of ['package_id', 'port_limit', 'sub_quota', 'enterprise', 'char_balance', 'status']) {
+    assert.ok(!new RegExp(col + '\\s*=').test(block),
+      `这条路由不该碰 ${col}：它的职责只有"清空到期时间"`)
+  }
+  assert.match(block, /repo\.audit\([^)]*'设为无限期'/,
+    '要写审计：事后被问"谁把这个号设成永不过期"必须有答案')
+  assert.match(block, /USER_NOT_FOUND/,
+    '商户不存在要报 404，不能静默成功')
+})
+
+test('mock 与真后端行为一致地提供「设为无限期」', () => {
+  const at = mock.indexOf("app.post('/apis/admin/users/expiry'")
+  assert.ok(at > 0, 'mock 缺少 /admin/users/expiry —— 本地开发的列表会没有这个动作')
+  const block = mock.slice(at, mock.indexOf('app.post(', at + 10))
+  assert.match(block, /user\.expireTime = null/,
+    'mock 也要把到期时间清成 null（null 才是"无限期"，列表据此显示）')
+})
+
 test('操作列收窄：不再横向滚动，但 7 个动作一个都不能少', () => {
   const at = usersVue.indexOf('<el-table-column label="操作"')
   assert.ok(at > 0, '找不到操作列')

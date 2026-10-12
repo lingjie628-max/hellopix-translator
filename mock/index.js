@@ -1960,6 +1960,17 @@ module.exports = function registerMock(app, options) {
     audit(req, user.enterprise ? '升级企业账号' : '降为个人账号', user.username)
     okMsg(res, user.enterprise ? '已升级为企业账号，可无限开子账号' : '已降为个人账号')
   })
+  app.post('/apis/admin/users/expiry', (req, res) => {
+    if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
+    const query = q(req)
+    const user = db.users.find(u => String(u.id) === String(query.id))
+    if (!user) { res.json({ success: 'error', msg: '商户不存在' }); return }
+    // 与 server/routes/production.js 的 /admin/users/expiry 对齐：只动到期时间。
+    // null == 无限期，列表据此显示「无限期」。
+    user.expireTime = null
+    audit(req, '设为无限期', user.username)
+    okMsg(res, `${user.username} 已设为无限期`)
+  })
   app.post('/apis/admin/users/unbind', (req, res) => {
     if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
     const query = q(req)

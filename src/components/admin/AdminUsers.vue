@@ -50,6 +50,15 @@
             <el-button type="text">更多<i class="el-icon-arrow-down el-icon--right"></i></el-button>
             <el-dropdown-menu slot="dropdown">
               <el-dropdown-item :command="'enterprise'">{{ scope.row.enterprise ? '降为个人' : '升企业' }}</el-dropdown-item>
+              <!--
+                「设为无限期」放在列表里直接给。
+
+                等价能力原先只存在于「编辑」弹窗内的一枚小开关，藏得深，
+                超管找不到就会以为后台没这个功能（实际诉求就是这句
+                "我没办法去自己改成无限期"）。有到期时间时才显示 ——
+                本来就没有到期时间的号，这个动作没有意义。
+              -->
+              <el-dropdown-item v-if="scope.row.expireTime" :command="'unlimited'">设为无限期</el-dropdown-item>
               <el-dropdown-item :command="'unbind'">踢下线</el-dropdown-item>
               <el-dropdown-item :command="'toggle'">{{ scope.row.status === 1 ? '停用' : '启用' }}</el-dropdown-item>
               <el-dropdown-item :command="'reclaim'">回收字符</el-dropdown-item>
@@ -89,11 +98,22 @@
           </span>
         </el-form-item>
         <el-form-item label="到期时间">
-          <el-date-picker v-model="form.expireTime" type="datetime" value-format="yyyy-MM-dd HH:mm:ss"
-                          style="width:100%" :disabled="!!form.expireUnlimited"></el-date-picker>
           <!--
-            「无限期」开关：不开的话原先根本没有办法把到期时间清空，
-            只能填 2038-10-10 这种假日期来假装不过期（jiufa 就是这么来的）。
+            @change 是这里的关键，不能省。
+
+            清空日期是用户表达"不要到期时间"的**自然手势**，但如果只是把
+            form.expireTime 置空、不同时打开「无限期」开关，保存时服务端会走
+            「既没勾无限期也没给日期 → 保持原值」那一分支 —— 日期纹丝不动。
+            用户看到的结果就是"我清掉了、保存了、它还在"，于是认定**后台改不了无限期**。
+            （jiufa 当初被填成 2038-10-10 这种假日期，正是这条死路的产物。）
+            所以清空即视为无限期，让控件行为符合直觉。
+          -->
+          <el-date-picker v-model="form.expireTime" type="datetime" value-format="yyyy-MM-dd HH:mm:ss"
+                          style="width:100%" :disabled="!!form.expireUnlimited"
+                          @change="onExpireChange"></el-date-picker>
+          <!--
+            「无限期」开关：明确、可发现的那条路。
+            和上面的清空手势是同一个语义，两条路都通到 expires_at = NULL。
           -->
           <div class="expire-unlimited">
             <el-switch v-model="form.expireUnlimited" :active-value="1" :inactive-value="0"></el-switch>
@@ -211,6 +231,10 @@
   </div>
 </template>
 <script>
+// 编辑表单里要把接口回的 ISO 时间串归一成选择器认得的 `yyyy-MM-dd HH:mm:ss`。
+// 全局过滤器 `formatDateTime` 只在模板里可用，JS 里要用得显式 import。
+import { formatDateTime } from '../../utils/filters'
+
 export default {
   data() {
     return {
@@ -289,6 +313,7 @@ export default {
     onAction(cmd, row) {
       const handlers = {
         enterprise: () => this.setEnterprise(row),
+        unlimited: () => this.setUnlimited(row),
         unbind: () => this.unbind(row),
         toggle: () => this.toggle(row),
         reclaim: () => this.reclaim(row),
@@ -296,6 +321,42 @@ export default {
       }
       const handler = handlers[cmd]
       if (handler) handler()
+    },
+    /**
+     * 一键设为无限期。
+     *
+     * 走独立的 `/admin/users/expiry` 而不是复用 `/admin/users/save`：
+     * 后者要求带上 `versionId` 并按整套字段更新，从列表一键触发太重、
+     * 也容易顺手改掉别的列。独立接口只碰 `expires_at` 一列 ——
+     * 与 `/admin/users/resetPassword`（"只做一件事：不碰套餐/状态/到期"）
+     * 是同一个思路：动作越窄，越不可能误伤。
+     */
+    setUnlimited(row) {
+      this.$confirm(`把「${row.username}」设为无限期（永不过期）？`, '设为无限期', {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }).then(() => this.postRequest('/admin/users/expiry', { id: row.id }).then(resp => {
+        const data = resp.data || {}
+        // HTTP 层的错误由 axios 拦截器统一提示；这里处理的是 200 里的业务失败，
+        // 不能一律当成功弹 —— 那会让人以为改好了，其实没有。
+        if (data.success === 'error') {
+          this.$message.error(data.msg || '设置失败')
+          return
+        }
+        this.$message.success(data.msg || '已设为无限期')
+        this.load()
+      })).catch(() => {})
+    },
+    /**
+     * 到期时间选择器的 @change。
+     *
+     * 清空日期 == 不要到期时间 == 无限期。必须在这里把开关同步打开，
+     * 否则保存时服务端走「保持原值」分支，日期原样留着 ——
+     * 用户的体感就是"清掉了却改不动"，进而认定后台没有设置无限期的能力。
+     */
+    onExpireChange(value) {
+      this.form.expireUnlimited = value ? 0 : 1
     },
     onPack(id) {
       const pack = this.packs.find(p => p.id === id)
@@ -330,6 +391,16 @@ export default {
           password: '',
           enterprise: Number(row.enterprise) ? 1 : 0,
           autoReply: Number(row.autoReply) ? 1 : 0,
+          // 到期时间必须**归一成选择器认识的格式**再塞进表单。
+          //
+          // 列表接口回的是 Postgres timestamptz 经 JSON 序列化后的 ISO 串
+          // （`2038-10-10T16:42:04.000Z`），而上面 el-date-picker 的 value-format
+          // 是 `yyyy-MM-dd HH:mm:ss`。Element UI 解析失败时会**原样回显这个串**
+          // （见 node_modules/element-ui/.../picker.vue 里
+          // `parseAsFormatAndType(...) || this.value`），于是编辑框里显示的是一段
+          // ISO 原文而不是日期 —— 用户以为这个字段坏了，就去手动清它。
+          // 走 formatDateTime 还顺带把时区对齐成列表那一列的口径，两处显示一致。
+          expireTime: row.expireTime ? formatDateTime(row.expireTime) : '',
           // 没有到期时间 == 无限期。不这么归一的话，编辑一个不过期的商户时
           // 开关会显示为「关」，保存后服务端按"保持原值"处理，看不出问题，
           // 但超管会误以为这个号是有到期时间的。

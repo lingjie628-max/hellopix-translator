@@ -358,6 +358,44 @@ test('套餐随结算发放 / 编辑商户 / 子账号额度', { skip: !database
     assert.equal((await userRow(user.id)).auto_reply, false, '关掉也要生效')
   })
 
+  // ================================================ ③b 设为无限期
+
+  await t.test('设为无限期：只清 expires_at，其余列一动不动', async () => {
+    // 夹具必须先把到期时间设上，否则"清空"这件事根本测不出来
+    const user = await makeUser({ expiresAt: '2038-10-10T16:42:04.000Z', enterprise: true, tag: 'exp' })
+    const before = await userRow(user.id)
+    assert.ok(before.expires_at, '夹具没把到期时间写进去，这个测试就失去意义了')
+
+    const res = await post('/admin/users/expiry', { id: user.id })
+    assert.equal(res.status, 200, `HTTP ${res.status} ${res.text.slice(0, 200)}`)
+
+    const after = await userRow(user.id)
+    assert.equal(after.expires_at, null,
+      '设为无限期必须把 expires_at 清成 NULL —— 那正是列表显示「无限期」的依据')
+
+    // 这条路由与 /admin/users/save 分开的**全部理由**就在这里：
+    // 从列表一键触发时，绝不该顺手改掉套餐/额度/企业性质。
+    for (const col of ['package_id', 'package_catalog_version', 'sub_quota',
+      'port_limit', 'char_balance', 'enterprise', 'auto_reply', 'active_engine_id']) {
+      assert.deepEqual(after[col], before[col],
+        `${col} 被「设为无限期」改掉了 —— 这个动作只该碰 expires_at 一列`)
+    }
+  })
+
+  await t.test('设为无限期：商户不存在要报 404，不能静默成功', async () => {
+    const res = await post('/admin/users/expiry', { id: 999999999 })
+    assert.equal(res.status, 404,
+      '不存在的 id 必须报错。静默返回 200 会让界面提示"已设为无限期"而实际上什么都没发生')
+  })
+
+  await t.test('设为无限期：重复调用幂等', async () => {
+    const user = await makeUser({ expiresAt: '2038-10-10T16:42:04.000Z', tag: 'exp2' })
+    await post('/admin/users/expiry', { id: user.id })
+    const res = await post('/admin/users/expiry', { id: user.id })
+    assert.equal(res.status, 200, '对本来就无限期的号再点一次不该报错（单列更新天然幂等）')
+    assert.equal((await userRow(user.id)).expires_at, null)
+  })
+
   // ================================================ ④ 结算发放套餐
 
   await t.test('手工确认收款：套餐、到期时间、额度、权益版本一起落地', async () => {

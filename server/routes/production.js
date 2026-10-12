@@ -871,6 +871,33 @@ function productionRouter(context) {
       { type: 'user', id: userId })
     ok(res, '密码已重置')
   }))
+  /**
+   * 设为「无限期」：把 `expires_at` 清成 NULL。
+   *
+   * 为什么不复用 `/admin/users/save`：那条路由要求带 `versionId`，
+   * 并按整套字段更新（套餐/状态/子账号额度/权益版本…）。从列表一键触发太重，
+   * 而且"只想改到期时间，却顺手把套餐也刷了一遍"是真实存在的误伤面。
+   * 这里**只碰 expires_at 一列**，与 `/admin/users/resetPassword`
+   * （"只做一件事：不碰套餐/状态/到期等其它字段"）同一个思路。
+   *
+   * 单列更新也让这个动作天然幂等：本来就是无限期的号再点一次，结果不变。
+   */
+  router.post('/admin/users/expiry', asyncRoute(async (req, res) => {
+    const data = input(req)
+    const userId = number(data.id || data.userId)
+    if (!userId) throw new ApiError(400, '缺少商户 id', 'USER_ID_REQUIRED')
+    const result = await repo.query(
+      'UPDATE users SET expires_at=NULL,updated_at=NOW() WHERE id=$1 RETURNING username',
+      [userId]
+    )
+    if (!result.rows[0]) throw new ApiError(404, '商户不存在', 'USER_NOT_FOUND')
+    // 不清会话：清到期时间是**放宽**限制，不是收紧；被过期时间挡在外面的
+    // 会话在下一个请求就会通过（auth 每次都重新比对 expires_at），
+    // 这里再 revoke 一次只会把人无谓地踢下线。
+    await repo.audit(null, req.pixAdmin, '设为无限期', result.rows[0].username, req.ip,
+      { type: 'user', id: userId })
+    ok(res, `${result.rows[0].username} 已设为无限期`)
+  }))
   router.post('/admin/users/enterprise', asyncRoute(async (req, res) => {
     const data = input(req)
     // 解析一次、用到底。原先 SQL 与审计/提示各自算一遍 `number(...)`，
