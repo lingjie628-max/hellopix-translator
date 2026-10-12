@@ -261,10 +261,16 @@ test('★0.1.23★ 私聊判定必须只看 #main，且 @c.us 是硬证据', () 
   // header → 命中「群组」→ 每个私聊都被判成群 → 私聊自动翻译全失效。
   const src = grab('chatKind')
   assert.ok(/querySelector\('#main'\)/.test(src), 'chatKind 必须以 #main 为作用域')
-  // 唯一的 document 查询必须就是取 #main；不许再出现"全文档找 header"那种写法。
+  // 允许的 document 查询只有两个：
+  //   · `#main`     —— WhatsApp 的会话区
+  //   · `.ChatInfo` —— Telegram 的会话信息块（Telegram 页面里没有 #main）
+  // 下面还锁住了 `.ChatInfo` 只可能出现在 `if (!main)` 分支里，所以它
+  // **在 WhatsApp 上永远不会被执行** —— 不可能再读到左侧列表的 header。
   const docQueries = [...src.matchAll(/document\.querySelector\(\s*'([^']*)'/g)].map(m => m[1])
-  assert.deepEqual(docQueries, ['#main'],
-    'chatKind 只允许 document.querySelector(\'#main\')，实际：' + JSON.stringify(docQueries))
+  assert.deepEqual(docQueries, ['#main', '.ChatInfo'],
+    'chatKind 只允许 document.querySelector 取 #main / .ChatInfo，实际：' + JSON.stringify(docQueries))
+  assert.ok(src.indexOf("querySelector('.ChatInfo')") > src.indexOf('if (!main)'),
+    '.ChatInfo 只能在拿不到 #main（即非 WhatsApp）时读；提前读等于又回到"全文档找会话信息"的老路')
   assert.ok(!/\|\|\s*document\b/.test(src),
     'chatKind 不许退回整份 document 兜底 —— 那会把左侧列表的「群组」标签读进来')
   // 真实装配：带侧边栏 + 私聊
@@ -281,6 +287,31 @@ test('★0.1.23★ 私聊判定必须只看 #main，且 @c.us 是硬证据', () 
   assert.equal(kind.group, false, '私聊被判成群 → 自动翻译会整个失效（真机 P0 复现）')
   assert.equal(kind.evidence.source, 'dataid:c.us')
   assert.equal(api.isGroupChat(), false)
+})
+
+test('★Telegram★ peer id 为负必须判群（否则「群聊翻译」开关在 Telegram 上失效）', () => {
+  // Telegram Web A **没有 #main**，会话类型只能从 URL hash 的 peer id 符号拿。
+  // 修复前 chatKind 拿不到 #main 就恒返回"私聊"，于是群聊被当成私聊：
+  // 「群聊=手动」那条唯一的计费闸门永不命中，用户在 TG 群里的消息照样自动翻、照样扣字符。
+  const dom = new JSDOM('<!doctype html><html><body>' +
+    '<div id="MiddleColumn"><div class="ChatInfo">' +
+    '<div class="title">Some Group</div><div class="subtitle">online</div></div></div>' +
+    '</body></html>', { url: 'https://web.telegram.org/a/' })
+  Object.defineProperty(dom.window.HTMLElement.prototype, 'innerText', {
+    configurable: true, get () { return this.textContent }
+  })
+  // 走 mount 注入的 location（真机里就是页面 location）。
+  const api = mount(dom.window.document, { hash: '#-1001234567890' }, dom.window)
+  const kind = api.chatKind()
+  assert.equal(kind.group, true, 'Telegram 群被漏判成私聊 —— 群聊翻译开关会失效')
+  assert.equal(kind.evidence.platform, 'telegram')
+  assert.equal(kind.evidence.negativePeer, true)
+  assert.equal(kind.evidence.source, 'peer:negative')
+  assert.equal(kind.evidence.inMain, false, 'Telegram 上没有 #main，inMain 必须是 false')
+
+  // 个人 id 是正数 → 私聊（私聊始终自动翻译）。
+  const apiPrivate = mount(dom.window.document, { hash: '#123456789' }, dom.window)
+  assert.equal(apiPrivate.chatKind().group, false, '个人 id 不该判成群')
 })
 
 test('whatsappPeer / whatsappConversationKey 都不许扫整个 document', () => {

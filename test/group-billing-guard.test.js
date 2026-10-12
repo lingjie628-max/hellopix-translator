@@ -798,3 +798,143 @@ test('判定只在头部搜 group 字样（源码锁：不许再出现扫整个 
   assert.ok(fn.indexOf("main.querySelector('[data-testid*=\"group\" i]") < 0,
     '又出现了扫整个 #main 的 group 选择器 —— 群邀请链接会再次把私聊判成群')
 })
+
+// ---------------------------------------------------------------------------
+// ★Telegram★ —— 页面里**没有** #main，另走一条分支
+// ---------------------------------------------------------------------------
+//
+// 修复前的缺陷：`chatKind()` 只认 WhatsApp 的 `#main`，拿不到就恒返回"私聊"。
+// 于是 Telegram 上 `messageAction` 拿到的 `group` 永远是 false ——
+// 「群聊翻译 = 手动」那条**唯一的计费闸门**永不命中，用户把群聊设成手动，
+// 群消息照样全自动翻译、照样扣字符。这组用例锁死这个行为。
+
+/**
+ * Telegram Web A 整页：**没有 #main**。
+ * 会话类型只能从 URL hash 的 peer id 符号 / `.ChatInfo` 的成员数文案拿。
+ */
+function tgDom (rows, opts) {
+  const o = opts || {}
+  const peer = o.peer === undefined ? '123456789' : o.peer
+  const info = o.chatInfo === false
+    ? ''
+    : '<div class="ChatInfo">' +
+        '<div class="title">' + (o.title || 'Peer') + '</div>' +
+        '<div class="subtitle">' + (o.subtitle === undefined ? 'online' : o.subtitle) + '</div>' +
+      '</div>'
+  // 左侧会话列表照样塞一个"群"，证明判据不会被列里的别的东西带跑。
+  const sidebar = '<div id="column-left"><div class="chat-list-item">' +
+    '<span>Some Group</span><span>1 234 members</span></div></div>'
+  const html = '<!doctype html><html><body>' + sidebar +
+    '<div id="MiddleColumn">' + info + rows.join('') + '</div>' +
+    '</body></html>'
+  return withInnerText(new JSDOM(html, { url: 'https://web.telegram.org/a/#' + peer }))
+}
+
+/** Telegram Web A 消息行：`.message-list-item > .text-content > .translatable-message`。 */
+function tgRow (body, id) {
+  return '<div class="message-list-item" data-message-id="' + (id || 'T1') + '">' +
+    '<div class="text-content">' +
+    '<div class="message-author-title">Bob</div>' +
+    '<div class="translatable-message">' + body + '</div>' +
+    '<span class="MessageMeta"><span class="message-time">10:31</span></span>' +
+    '</div></div>'
+}
+
+test('Telegram：群 / 频道的 peer id 是负数 → 必须判成群（结构性硬证据）', () => {
+  const d = tgDom([tgRow('Hello there', 'G1')], { peer: '-1001234567890' })
+  const kind = chatKindOf(d.window.document)
+  assert.equal(kind.group, true, 'Telegram 群被漏判成私聊 —— 群聊翻译开关又失效了')
+  assert.equal(kind.evidence.platform, 'telegram')
+  assert.equal(kind.evidence.negativePeer, true)
+  assert.equal(kind.evidence.source, 'peer:negative')
+})
+
+test('Telegram：个人 peer id 是正数 → 判私聊（私聊始终自动翻译）', () => {
+  const d = tgDom([tgRow('Hello there', 'D1')], { peer: '123456789' })
+  const kind = chatKindOf(d.window.document)
+  assert.equal(kind.group, false, '个人 id 被判成了群 —— 私聊的自动翻译会被关掉')
+  assert.equal(kind.evidence.source, 'peer:positive')
+})
+
+test('Telegram：公开群（#@username）靠 .ChatInfo 成员数文案判群，但必须带数字', () => {
+  const group = tgDom([tgRow('Hello there', 'P1')], { peer: '@somepublicgroup', subtitle: '1 234 members, 56 online' })
+  const gk = chatKindOf(group.window.document)
+  assert.equal(gk.group, true, '公开群的成员数文案没被识别')
+  assert.equal(gk.evidence.source, 'header-members')
+
+  // ★没有数字就不许判群★ —— 否则一个恰好叫 "Members" 的私聊会被判成群，
+  // 那是 0.1.23 那次"左栏筛选标签把私聊判成群" P0 的同类错误。
+  const fake = tgDom([tgRow('Hello there', 'P2')], { peer: '@alice', subtitle: 'Members' })
+  assert.equal(chatKindOf(fake.window.document).group, false,
+    '私聊副标题里出现 members 但没有数字，不该判成群')
+
+  // 频道（subscribers）也是群聊语义：同样要按"手动"闸门走。
+  const channel = tgDom([tgRow('Hello there', 'P3')], { peer: '@somechannel', subtitle: '9 subscribers' })
+  assert.equal(chatKindOf(channel.window.document).group, true, '频道应判成群（有 subscribers 计数）')
+})
+
+test('Telegram：私聊的在线的状态文案（online / last seen）绝不判群', () => {
+  for (const sub of ['online', 'last seen recently', 'last seen today at 10:31']) {
+    const d = tgDom([tgRow('Hello there', 'D2')], { peer: '@alice', subtitle: sub })
+    assert.equal(chatKindOf(d.window.document).group, false, '私聊在线状态被误判成群：' + sub)
+  }
+})
+
+test('Telegram：消息区里的 members / 群名字样一律不参与会话类型判定', () => {
+  const d = tgDom([
+    tgRow('We are 1 234 members in this group', 'M1') + tgRow('Join our subscribers channel', 'M2')
+  ], { peer: '@alice', subtitle: 'online' })
+  assert.equal(chatKindOf(d.window.document).group, false,
+    '消息正文里的 members 把私聊判成群了 —— 会话类型绝不能看消息区')
+})
+
+test('Telegram：拿不到任何证据时判"私聊"（不拿别的会话猜）', () => {
+  const d = tgDom([], { peer: '@alice', chatInfo: false })
+  const kind = chatKindOf(d.window.document)
+  assert.equal(kind.group, false)
+  assert.equal(kind.evidence.source, 'none', '证据不足时必须明确记为 none，别假装有证据')
+})
+
+// ---------------------------------------------------------------------------
+// ★验收：Telegram 群聊 = 手动 → 0 次请求 / 0 字符（这是修复前必挂的那条）★
+// ---------------------------------------------------------------------------
+
+test('★修复前必挂★ Telegram 群聊 + 手动 → 0 次请求 / 0 字符', () => {
+  const rows = Array.from({ length: 20 }, (_, i) => tgRow('Hello number ' + i, 'TG' + i))
+  const d = tgDom(rows, { peer: '-1001234567890' })
+  const h = makeHarness(d.window.document, { transGroup: false, includeZh: true })
+  h.scan()
+  assert.equal(h.stats.calls, 0, 'Telegram 群聊在手动模式下竟然调了翻译接口（修复前就是这个现象）')
+  assert.equal(h.stats.chars, 0)
+  assert.equal(h.stats.actions.auto, undefined, '手动模式不该出现 auto 动作')
+  assert.equal(h.stats.actions.chip, 20, '群聊手动模式应给每一条都挂「译」按钮')
+})
+
+test('Telegram 群聊 + 自动 → 全部自动翻（含打开会话时页面上的那批）', () => {
+  const rows = Array.from({ length: 20 }, (_, i) => tgRow('Hello number ' + i, 'TA' + i))
+  const d = tgDom(rows, { peer: '-1001234567890' })
+  const h = makeHarness(d.window.document, { transGroup: true, includeZh: true })
+  h.scan()
+  assert.equal(h.stats.actions.auto, 20)
+  assert.equal(h.stats.actions.chip, undefined, '开了自动就不该再挂「译」按钮')
+  assert.equal(h.stats.calls, 20)
+})
+
+test('Telegram 私聊 → 始终自动翻译（与「群聊翻译」开关无关）', () => {
+  const d = tgDom([tgRow('Hello there', 'DP1')], { peer: '123456789' })
+  const h = makeHarness(d.window.document, { transGroup: false, includeZh: true })
+  h.scan()
+  assert.equal(h.stats.actions.auto, 1, '私聊必须自动翻译，用户不该手动点「译」')
+  assert.equal(h.stats.actions.chip, undefined)
+})
+
+test('源码锁：Telegram 判据必须用 peer id 符号，且只读 .ChatInfo（不扫消息区）', () => {
+  const at = guest.indexOf('function chatKind()')
+  const fn = guest.slice(at, guest.indexOf('function isGroupChat()', at))
+  assert.ok(fn.includes('^-\\d{4,}$'), 'chatKind 必须用"负号 peer id = 群"作 Telegram 的结构性判据')
+  assert.ok(fn.indexOf("querySelector('.ChatInfo')") > 0, 'Telegram 的头部证据必须限定在 .ChatInfo 内查找')
+  assert.ok(fn.indexOf("document.querySelector('.ChatInfo, header')") < 0,
+    '又回到全文档找 .ChatInfo/header 了 —— 那个 P0 就是这么来的')
+  assert.ok(!/querySelector(All)?\(\s*['"][^'"]*(message-list-item|text-content)/.test(fn),
+    'chatKind 不许把消息区选择器当判据（消息正文里的 members 会把私聊判成群）')
+})

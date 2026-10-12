@@ -137,6 +137,25 @@ function findAsar (given) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
+/**
+ * 等条件成立（有上限），而不是"睡够固定的一段时间"。
+ *
+ * 发送链里有**真实的定时器**（原生写入 + 编辑器沉降轮询，下限 0 / 上限 400ms），
+ * 在 CPU 争抢场景下（CI、并行跑测试）固定窗口会让**发版闸门**偶发假红：
+ * 实测原始源码在 12 路 CPU 压力下 25 次里红 7 次。
+ *
+ * 假红比不检查更糟 —— 它会让红灯失去意义，最后被人绕过。所以这里等"结论成立"，
+ * 并且超时后**照常执行原来的断言**（真坏了还是会红，只是多等一会儿）。
+ */
+async function until (cond, timeoutMs) {
+  const deadline = Date.now() + (timeoutMs == null ? 5000 : timeoutMs)
+  while (Date.now() < deadline) {
+    try { if (cond()) return true } catch (e) {}
+    await sleep(10)
+  }
+  return false
+}
+
 const HTML = '<!doctype html><html><body><div id="main"><div id="msg-list"></div><footer>' +
   '<div id="editable-message-text" contenteditable="true" role="textbox" aria-label="Type a message"></div>' +
   '<button id="send-btn" aria-label="Send" data-icon="wds-ic-send-filled"><span></span></button>' +
@@ -255,7 +274,10 @@ async function main () {
     check('guest-inject.js 装载不抛错', !h.loadError, h.loadError ? h.loadError.message : '')
     let prevented = h.pressEnter()
     check('装载后 Enter 被拦截（监听器真的挂上）', prevented === true, prevented ? '' : '未拦截 = 原文会直通 WhatsApp')
-    await sleep(120)
+    // 等"真的发出去了"，不是等"睡够 120ms"：这条就是发版闸门最容易假红的地方。
+    await until(() => h.sent.length >= 1, 8000)
+    // 再多给一点时间：闸门要抓的另一半是"重复发送"，光等第一条出来抓不到。
+    await sleep(150)
     check('成功路径：调 1 次翻译接口', h.calls.length === 1, '实际 ' + h.calls.length + ' 次')
     check('成功路径：trigger=manual_send', h.calls[0] && h.calls[0].trigger === 'manual_send', h.calls[0] ? String(h.calls[0].trigger) : '无调用')
     check('成功路径：只发出 1 条译文', h.sent.length === 1 && h.sent[0] === 'Hello there', JSON.stringify(h.sent))
@@ -265,7 +287,8 @@ async function main () {
     for (const code of ['INSUFFICIENT_CHARS', 'ENGINE_NOT_ALLOWED']) {
       h = await runPreload(guest, { fail: code })
       prevented = h.pressEnter()
-      await sleep(120)
+      // 等提示真的画出来 = 这条链真的走完了（再断言"一个字节都没发"才有意义）。
+      await until(() => !!h.doc.getElementById('pix-send-failure'), 8000)
       check('失败(' + code + ')：Enter 仍被拦截', prevented === true, '')
       check('失败(' + code + ')：对方什么都收不到', h.sent.length === 0, JSON.stringify(h.sent))
       check('失败(' + code + ')：给出可见提示', !!h.doc.getElementById('pix-send-failure'), '')
@@ -275,7 +298,7 @@ async function main () {
     // 3. 拦截流程中途抛错：也必须拦下，且一个字节都不发（否则就是 0.1.12 重演）
     h = await runPreload(guest, { crash: 'parse-error' })
     prevented = h.pressEnter()
-    await sleep(120)
+    await until(() => !!h.doc.getElementById('pix-send-failure'), 8000)
     check('崩溃兜底：拦截流程抛错时 Enter 仍被拦截', prevented === true,
       prevented ? '' : '未拦截 = 原文会直通 WhatsApp（这正是 0.1.12 的表现）')
     check('崩溃兜底：抛错时对方什么都收不到', h.sent.length === 0, JSON.stringify(h.sent))

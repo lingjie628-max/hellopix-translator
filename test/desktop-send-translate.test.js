@@ -286,6 +286,23 @@ async function settle (ms) {
   await sleep(ms == null ? 200 : ms)
 }
 
+/**
+ * 等「失败提示」真的画出来。
+ *
+ * 不能用固定 `settle(200)`：失败提示是在 `nativeSetComposer()`（原生写入 +
+ * 编辑器沉降轮询）**之后**才画的，而沉降轮询自带真实定时器（下限默认 0 /
+ * 上限 400ms，负载下单次 sleep 还会明显超时）。固定等待会让这条 P0 用例在
+ * 并行跑全量时偶发假红 —— 而假红会让人不再相信这道闸。
+ *
+ * 所以这里等"条件成立"而不是等"够久了"：提示真的没画出来时用例仍然会红，
+ * 只是多等一会儿，并把原因说清楚。
+ */
+async function untilSendFailure (h, timeoutMs) {
+  await until(() => !!h.doc.getElementById('pix-send-failure'),
+    timeoutMs == null ? 5000 : timeoutMs, '失败提示必须画出来（原文已退回输入框）')
+  return h.doc.getElementById('pix-send-failure')
+}
+
 // ---------------------------------------------------------------------------
 // D1 · 装载守卫：整份 preload 必须能在真 DOM 里起来
 // ---------------------------------------------------------------------------
@@ -446,7 +463,7 @@ for (const [label, code] of FAILURES) {
     try {
       h.composer.textContent = '你好，今天下午三点开会'
       assert.equal(h.pressEnter(), true, 'Enter 仍然必须被拦截')
-      await settle()
+      await untilSendFailure(h)
       assert.equal(h.translateCalls.length, 1, '失败是要调接口才知道的')
       assert.deepEqual(h.sent, [], '翻译失败时绝不允许发送任何内容（这就是本次的 P0）')
       assert.equal(h.composer.textContent, '你好，今天下午三点开会', '原文必须退回输入框')
@@ -460,7 +477,7 @@ test('线路层失败（超时 / 断网 reject）→ 对方什么都收不到', 
   try {
     h.composer.textContent = '你好，今天下午三点开会'
     h.pressEnter()
-    await settle()
+    await untilSendFailure(h)
     assert.deepEqual(h.sent, [], '断网时更不能静默发原文')
     assert.equal(h.composer.textContent, '你好，今天下午三点开会')
     assert.ok(h.doc.getElementById('pix-send-failure'))
@@ -472,8 +489,7 @@ test('失败提示必须写明「翻译失败，消息尚未发送」并给两�
   try {
     h.composer.textContent = '你好'
     h.pressEnter()
-    await settle()
-    const box = h.doc.getElementById('pix-send-failure')
+    const box = await untilSendFailure(h)
     assert.ok(box, '必须有提示框')
     assert.match(box.textContent, /翻译失败/, '文案要点明是翻译失败')
     assert.match(box.textContent, /尚未发送|没有收到/, '必须告诉用户消息没发出去')
@@ -489,7 +505,7 @@ test('「发送原文」必须由用户明确点击才发送，且只发一次',
   try {
     h.composer.textContent = '你好，今天下午三点开会'
     h.pressEnter()
-    await settle()
+    await untilSendFailure(h)
     assert.deepEqual(h.sent, [], '失败时不能自动发')
 
     const btn = noticeButton(h.doc, '发送原文')
@@ -509,10 +525,13 @@ test('「重试翻译」成功 → 发译文；再次失败 → 仍然一个字�
   try {
     h.composer.textContent = '你好'
     h.pressEnter()
-    await settle()
+    await untilSendFailure(h)
     const btn = noticeButton(h.doc, '重试翻译')
     assert.ok(btn)
     btn.dispatchEvent(new h.win.MouseEvent('click', { bubbles: true, cancelable: true }))
+    // 重试提示是「粘性」的（不会自己消失），所以要等的是"第二次翻译真的回来了"，
+    // 不是"提示又出现了一次"。
+    await until(() => h.translateCalls.length === 2, 3000, '重试真的再调一次接口')
     await settle()
     assert.deepEqual(h.sent, [], '重试再失败也不能发原文')
     assert.equal(h.translateCalls.length, 2, '重试必须真的再调一次接口')
@@ -530,7 +549,7 @@ test('「重试翻译」在恢复后成功 → 发出译文', async () => {
   try {
     h.composer.textContent = '你好'
     h.pressEnter()
-    await settle()
+    await untilSendFailure(h)
     assert.deepEqual(h.sent, [], '第一次失败：不发')
     assert.ok(noticeButton(h.doc, '重试翻译'))
 
@@ -547,10 +566,9 @@ test('提示里的按钮不会被误判成「点了发送」（自噬保护）',
   try {
     h.composer.textContent = '你好'
     h.pressEnter()
-    await settle()
+    const box = await untilSendFailure(h)
     const before = h.translateCalls.length
     // 点「重试翻译」之外的地方：点提示框本体不该触发发送翻译
-    const box = h.doc.getElementById('pix-send-failure')
     box.dispatchEvent(new h.win.MouseEvent('click', { bubbles: true, cancelable: true }))
     await settle()
     assert.deepEqual(h.sent, [], '点提示框本体不该发出任何东西')
@@ -772,9 +790,11 @@ test('拦截流程抛错 → 原文退回输入框，并给出可操作提示', 
     h.composer.textContent = '你好，今天下午三点开会'
     h.win.__helloPixFaultInject = () => { throw new Error('boom') }
     h.pressEnter()
-    await settle()
+    const box = await untilSendFailure(h)
+    // 崩溃兜底这条路的原文还原是**异步且不被 await** 的（`nativeSetComposer().catch()`），
+    // 所以提示框会先出现、原文晚一拍才回填。这里必须等"还原完成"，不是等"够久了"。
+    await until(() => h.composer.textContent === '你好，今天下午三点开会', 3000, '原文必须退回输入框')
     assert.equal(h.composer.textContent, '你好，今天下午三点开会', '原文必须退回输入框')
-    const box = h.doc.getElementById('pix-send-failure')
     assert.ok(box, '异常不能是静默的 —— 必须有可见提示')
     assert.ok(noticeButton(h.doc, '重试翻译'), '必须能重试')
     assert.ok(noticeButton(h.doc, '发送原文'), '「发送原文」必须由用户明确点击')
@@ -787,7 +807,7 @@ test('抛错解除后重试可以正常发送译文（兜底不能把功能一�
     h.composer.textContent = '你好'
     h.win.__helloPixFaultInject = () => { throw new Error('boom') }
     h.pressEnter()
-    await settle()
+    await untilSendFailure(h)
     assert.deepEqual(h.sent, [], '第一次被兜底拦下')
 
     h.win.__helloPixFaultInject = null

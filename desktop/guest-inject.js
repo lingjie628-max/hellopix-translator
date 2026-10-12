@@ -1177,6 +1177,25 @@ const pixBridge = {
    *    `你、张三、李四`，逗号分隔），私聊的副标题是**在线状态**（`online` /
    *    `last seen ...`，无逗号）。这是群/私聊在头部的**结构差异**。
    *
+   * ## Telegram（页面里**没有** `#main`，另走一条分支）
+   *
+   * 上面四条判据全部挂在 `#main` 上，而 `#main` 是 WhatsApp 专有 —— 拿不到就
+   * 早返回"私聊"。于是 Telegram 的**群聊**一律被判成私聊，「群聊翻译」开关
+   * 在 Telegram 上**完全失效**（`messageAction` 里 `s.group` 恒为 false，那条
+   * 唯一的计费闸门永不命中，用户设成「手动」也照样自动翻、照样扣字符）。
+   *
+   * Telegram 分支的证据（同样**只认结构与头部文案，消息区一律不参与**）：
+   *
+   * T1. **URL hash 里 peer id 的符号**：Telegram 的群 / 超级群 / 频道 id
+   *     **一律为负**（`#-1001234567890`），个人为正（`#123456789`）。这是
+   *     结构性硬证据，等价于 WhatsApp 的 `@g.us`，页面文案伪造不了。
+   * T2. `.ChatInfo` 里的**成员数文案，且必须同时含数字**
+   *     （`1 234 members` / `123 位成员` / `1 234 subscribers`）。要求数字是
+   *     为了不再犯"一个叫 Members 的私聊被判成群"的同款错误。公开会话的 URL
+   *     是 `#@username`（符号不可知），只能落到这条。
+   *
+   * 两条都拿不到 → 判"私聊"（与 WhatsApp 分支同一条原则：不拿别的会话猜）。
+   *
    * ★两种错的代价不对等★：把群误判成私聊 → 打开群聊自动翻满屏历史 → **扣费 P0**；
    * 把私聊误判成群 → 用户以为"自动翻译坏了"。所以只要头部证据成立就判群，
    * 且 `@g.us` 一旦出现绝不因同时看到 `@c.us` 而改判。
@@ -1188,12 +1207,90 @@ const pixBridge = {
    */
   function chatKind() {
     const evidence = {
-      inMain: false, sawCUs: false, sawGUs: false,
+      platform: '', inMain: false, sawCUs: false, sawGUs: false,
+      negativePeer: false,
       headerText: false, headerMarker: false, headerMarkers: 0,
       memberList: false, subtitleShape: '', headerShape: '', source: 'none'
     }
+
+    // 只记"形状"（词长序列 + 标点骨架），不记人名 —— 日志可以留档。
+    const shape = function (v) {
+      const s = String(v == null ? '' : v).trim()
+      if (!s) return ''
+      const words = s.split(/\s+/)
+      return words.map(function (w) { return w.length }).join('-') +
+        '|' + s.replace(/[A-Za-z0-9\u4e00-\u9fa5]/g, '').slice(0, 16)
+    }
+
+    // -------------------------------------------------------------------
+    // Telegram Web A —— **页面上没有 `#main`**
+    // -------------------------------------------------------------------
+    // chatKind() 曾经只认 WhatsApp 的 `#main`，拿不到就恒返回"私聊"。于是
+    // Telegram 上「群聊翻译」开关**完全失效**：用户把群聊设成「手动」，群消息
+    // 照样全自动翻译、照样扣字符（`messageAction` 里 `s.group` 永远是 false，
+    // 那条唯一的计费闸门永不命中）。
+    //
+    // Telegram Web A 的会话类型有两条独立证据，按强度排序：
+    //
+    //  1. **peer id 的符号**（结构性硬证据，不依赖任何 class 名）。
+    //     Telegram 的**群 / 超级群 / 频道 id 一律是负数**，URL hash 形如
+    //     `#-1001234567890`；个人 id 是正数 `#123456789`；公开会话是
+    //     `#@username`（符号不可知，落到判据 2）。这与 WhatsApp 的 `@g.us`
+    //     是同一类证据，且同样**不可能被页面文案伪造**。
+    //  2. 会话信息块 `.ChatInfo` 里的成员数文案（`1 234 members` /
+    //     `123 位成员` / `1 234 subscribers`）。**必须同时出现数字**才算命中：
+    //     否则一个恰好叫 "Members" 的私聊就会被判成群 —— 那是 0.1.23 那次
+    //     "左栏筛选标签把私聊判成群" P0 的同类错误。
+    //     `.ChatInfo` 是 Telegram 的会话信息块，左侧会话列表**不是**它，
+    //     所以不会重蹈覆辙。
+    //
+    // ★消息区（`.message-list-item` / `.text-content`）一律不参与判定★
+    // ★判不出来就从宽判"私聊"★ —— 与 WhatsApp 分支同一条原则：不拿别的
+    //   会话去猜，宁可少一次自动翻译，也不能凭空关掉用户的自动翻译。
     const main = document.querySelector('#main')
-    if (!main) return { group: false, evidence: evidence }
+    if (!main) {
+      let hash = ''
+      try {
+        const loc = (typeof location !== 'undefined' && location) ||
+          (document && document.location) || null
+        hash = String((loc && loc.hash) || '').replace(/^#\/?/, '').trim()
+      } catch (e) {}
+      const peerId = /^-\d{4,}$/.test(hash)
+        ? 'group'
+        : (/^\d{4,}$/.test(hash) ? 'private' : '')
+      const info = document.querySelector('.ChatInfo')
+
+      // 既没有 #main、也没有 Telegram 的会话信息块、hash 也不是 peer id
+      // → 不是我们能判的平台。维持"私聊"（自动翻译优先）。
+      if (!peerId && !info) return { group: false, evidence: evidence }
+
+      evidence.platform = 'telegram'
+      if (peerId === 'group') {
+        evidence.negativePeer = true
+        evidence.source = 'peer:negative'
+        return { group: true, evidence: evidence }
+      }
+      if (peerId === 'private') {
+        evidence.source = 'peer:positive'
+        return { group: false, evidence: evidence }
+      }
+
+      // 用户名形式的会话：只能看会话信息块的成员数文案，且必须有数字。
+      const infoText = String(
+        (info && (info.innerText || info.textContent)) || ''
+      ).slice(0, 300)
+      evidence.headerShape = shape(infoText)
+      evidence.headerText =
+        /(members?|participants?|subscribers?|участник\w*|miembros?|miembro|mitglieder|abonnenten|subscriber|成员|订阅者)/i.test(infoText) &&
+        /\d/.test(infoText)
+      if (evidence.headerText) {
+        evidence.source = 'header-members'
+        return { group: true, evidence: evidence }
+      }
+      return { group: false, evidence: evidence }
+    }
+
+    evidence.platform = 'whatsapp'
     evidence.inMain = true
 
     // 判据 1：data-id 里的 JID。老构建有，新构建 data-id 只剩消息哈希。
@@ -1207,14 +1304,6 @@ const pixBridge = {
     // 判据 2/3/4：**只看会话头部**。消息区（链接预览卡片等）绝不参与。
     const header = main.querySelector('header')
     if (header) {
-      // 只记"形状"（词长序列 + 标点骨架），不记人名 —— 日志可以留档。
-      const shape = function (v) {
-        const s = String(v == null ? '' : v).trim()
-        if (!s) return ''
-        const words = s.split(/\s+/)
-        return words.map(function (w) { return w.length }).join('-') +
-          '|' + s.replace(/[A-Za-z0-9\u4e00-\u9fa5]/g, '').slice(0, 16)
-      }
       const text = String(header.innerText || header.textContent || '').slice(0, 300)
       evidence.headerShape = shape(text)
       evidence.headerText = /(members?|participants?|subscribers?)|位成员|位订阅|成员|群组|群聊|gruppe|mitglieder|miembros|участник/i.test(text)
@@ -3781,9 +3870,11 @@ const pixBridge = {
         tabId: prefs.tabId || '-',
         group: group,
         evidence: kind.evidence.source,
+        platform: kind.evidence.platform,
         inMain: kind.evidence.inMain,
         sawGUs: kind.evidence.sawGUs,
         sawCUs: kind.evidence.sawCUs,
+        negativePeer: kind.evidence.negativePeer,
         headerText: kind.evidence.headerText,
         // 头部证据的**形状**（词长序列 + 标点骨架），不含人名：
         // 每次真机跑"群 + 私聊"各一次，就能确认/推翻"副标题=成员名单"这条判据。
