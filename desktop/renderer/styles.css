@@ -848,6 +848,34 @@ button {
   flex-shrink: 0;
   box-shadow: 0 4px 13px rgb(var(--c-black-rgb) / 0.24);
 }
+.tab-icon-wrap {
+  position: relative;
+  display: block;
+  flex-shrink: 0;
+}
+.tab-unread {
+  position: absolute;
+  top: -6px;
+  right: -9px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border-radius: 999px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 0 0 2px #0b1a2e;
+  pointer-events: none;
+  transition: right 0.15s ease;
+}
+/* 悬停/选中时右上角会出现关闭按钮，角标往图标内侧收，避免压住它 */
+.tab:hover .tab-unread,
+.tab.active .tab-unread { right: 3px; }
 
 .utility {
   height: 40px;

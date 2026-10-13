@@ -1747,7 +1747,11 @@ function makeTabEl(tab, active) {
     el.title = '翻译组件未启动：此窗口的发送/接收翻译都不会生效，请重启 Hello Pix'
   }
   const name = tabLabel(tab)
-  el.innerHTML = iconTag(tab.platform, 'tab-icon', tab.icon) +
+  const unread = Number(tab.unread) || 0
+  const badge = unread > 0
+    ? '<span class="tab-unread" title="' + unread + ' 条未读消息">' + (unread > 99 ? '99+' : unread) + '</span>'
+    : ''
+  el.innerHTML = '<span class="tab-icon-wrap">' + iconTag(tab.platform, 'tab-icon', tab.icon) + badge + '</span>' +
     (name ? '<span class="tab-name" title="' + esc(name) + '">' + esc(name) + '</span>' : '') +
     (tab.bridgeDown ? '<span class="tab-warn" title="翻译组件未启动">⚠</span>' : '') +
     '<span class="x" title="关闭">×</span>'

@@ -360,7 +360,63 @@ function safePlatformHomeUrl(item, settings) {
   return candidate
 }
 
+/**
+ * 从网页标题里读未读数。
+ *
+ * 各家网页版有未读时都会改标题：WhatsApp / Messenger / Facebook / Zalo / Instagram
+ * 是 `(3) WhatsApp`，部分是 `WhatsApp (3)` 或 `3 • Telegram`。标题是这些页面
+ * **对外公开的未读信号**，不依赖任何会随改版失效的 DOM 结构。
+ * 读不到数字一律视为 0（宁可不显示，也不显示错的数）。
+ */
+function unreadFromTitle(title) {
+  const s = String(title || '')
+  const m = s.match(/^\s*[(\[]\s*(\d{1,5})\+?\s*[)\]]/) ||
+    s.match(/^\s*(\d{1,4})\+?\s*[•·]\s*\S/) ||
+    s.match(/[(\[]\s*(\d{1,5})\+?\s*[)\]]\s*$/)
+  return m ? Number(m[1]) : 0
+}
+
+/** 未读数清零要延迟确认的时长：Messenger 等会在 `(1) Messenger` 与「某某发来消息」之间来回闪标题。 */
+const UNREAD_CLEAR_DELAY_MS = 2500
+
+function bindTabUnread(tab) {
+  let clearTimer = null
+  const wc = tab.view.webContents
+  const apply = n => {
+    if ((tab.unread || 0) === n) return
+    tab.unread = n
+    sendTabs()
+  }
+  wc.on('page-title-updated', (_event, title) => {
+    const n = unreadFromTitle(title)
+    if (n > 0) {
+      if (clearTimer) { clearTimeout(clearTimer); clearTimer = null }
+      apply(n)
+      return
+    }
+    if (!tab.unread || clearTimer) return
+    clearTimer = setTimeout(() => {
+      clearTimer = null
+      if (wc.isDestroyed()) return
+      apply(unreadFromTitle(wc.getTitle()))
+    }, UNREAD_CLEAR_DELAY_MS)
+  })
+  wc.once('destroyed', () => { if (clearTimer) clearTimeout(clearTimer) })
+}
+
+let lastGlobalUnread = -1
+
+/** Dock / 任务栏角标：只统计开了「包含在全局未读消息提示中」的标签。 */
+function syncGlobalUnread() {
+  const total = tabs.reduce((sum, t) =>
+    sum + ((t.settings && t.settings.globalUnread === false) ? 0 : (t.unread || 0)), 0)
+  if (total === lastGlobalUnread) return
+  lastGlobalUnread = total
+  try { app.setBadgeCount(total) } catch (e) {}
+}
+
 function bindTabLoading(tab) {
+  bindTabUnread(tab)
   tab.view.webContents.on('did-start-loading', () => {
     tab.loading = true
     sendTabs()
@@ -1034,12 +1090,14 @@ function tabPayload() {
       // 翻译桥没起来 = 这个窗口的翻译整体失效。侧边栏必须打标记，
       // 不能让它看起来和正常窗口一样（0.1.12 就是这样静默坑人的）。
       bridgeDown: bridgeHealth.get(t.id) ? bridgeHealth.get(t.id).ok === false : false,
+      unread: (t.settings && t.settings.tabUnread === false) ? 0 : (t.unread || 0),
       trans: tabTransPayload(t)
     }))
   }
 }
 
 function sendTabs() {
+  syncGlobalUnread()
   if (!win || win.isDestroyed()) return
   win.webContents.send('app:tabs', tabPayload())
 }
