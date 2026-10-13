@@ -21,6 +21,7 @@
     "verify:concurrency": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-concurrency.js",
     "verify:settle-safety": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-settle-safety.js",
     "verify:api-net": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-api-net-electron.js",
+    "probe:dom": "env -u ELECTRON_RUN_AS_NODE electron scripts/probe-platform-dom.js",
     "bench:send": "env -u ELECTRON_RUN_AS_NODE electron scripts/bench-send-timing.js",
     "bench:translate:live": "env -u ELECTRON_RUN_AS_NODE electron scripts/bench-translate-live.js"
   },

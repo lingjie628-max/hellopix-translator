@@ -83,3 +83,6 @@ __pycache__/
 
 # 链上收款对账导出（含生产财务明细，不入库）
 reconcile/
+
+# 平台 DOM 结构采集结果（脱敏，但仍只留本地）
+desktop/scripts/probe-out/
