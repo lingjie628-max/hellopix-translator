@@ -39,7 +39,8 @@ const {
   trustedApiHosts,
   validateApiUrl,
   isAllowedPlatformUrl,
-  isAllowedExternalUrl
+  isAllowedExternalUrl,
+  PLATFORM_EXTENSION_IDS
 } = require('./security-policy')
 const logFile = require('./log-file')
 // 翻译桥警告条：preload 死了以后，唯一还能把警告画到用户眼前的手段
@@ -1812,6 +1813,8 @@ function showGuestBridgeWarning(tab, reason) {
  */
 function watchdogBridge(tab) {
   if (!tab || !tab.id) return
+  // 没挂翻译桥的页面（自定义网页 / 工单 / LINE 扩展）本来就不会来握手，不能报"桥没起来"。
+  if (!bridgeEnabledFor(tab.item)) return
   // 装载期就已经报错了：立刻上报，不用等满 8 秒。
   const wc = tab.view && tab.view.webContents
   if (wc && wc.__pixPreloadError) {
@@ -2153,14 +2156,57 @@ async function detectProxyNode(payload) {
 // applySessionProxy 的实现已移到 ./proxy-settings.js。
 // 这里不再保留第二份 —— 由 applyTabProxy 统一调度「ssh 隧道 → 写 session」。
 
+/**
+ * 内置扩展目录（如 LINE 官方扩展）。打包后在 resources/<name>-ext（extraResources，
+ * 不进 asar —— Chromium 直接读扩展文件，asar 里的读不到）；开发时在 desktop/vendor/。
+ */
+function platformExtensionDir(name) {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, name + '-ext')
+    : path.join(__dirname, 'vendor', name + '-ext')
+}
+
+/** 每个分区只装一次；装载失败不缓存，下次打开会重试。 */
+const extensionLoads = new Map()
+
+function ensurePlatformExtension(tab) {
+  const name = tab && tab.item && tab.item.extension
+  if (!name) return Promise.resolve()
+  const extId = PLATFORM_EXTENSION_IDS[name]
+  const key = tab.partition + '|' + name
+  if (!extensionLoads.has(key)) {
+    const job = (async () => {
+      const ses = session.fromPartition(tab.partition)
+      const host = ses.extensions || ses
+      if (typeof host.getExtension === 'function' && host.getExtension(extId)) return
+      const ext = await host.loadExtension(platformExtensionDir(name))
+      if (!ext || ext.id !== extId) throw new Error('扩展 ID 不符：' + (ext && ext.id))
+    })()
+    job.catch(e => {
+      extensionLoads.delete(key)
+      if (clientLog) clientLog.error('extension', name + ' 扩展装载失败：' + ((e && e.message) || e))
+    })
+    extensionLoads.set(key, job)
+  }
+  return extensionLoads.get(key)
+}
+
 function startTabLoad(tab) {
   if (!tab || !tab.view || !tab.view.webContents || tab.view.webContents.isDestroyed()) return
   // 新建线路 / 重启恢复走这里；修改已存在线路的代理走 updateTabSettings。
   // 两条路径都必须经过 applyTabProxy，否则又会退回"改了不生效"的老缺陷。
   applyTabProxy(tab, tabProxyDeps()).finally(() => {
-    if (!tab.view || !tab.view.webContents || tab.view.webContents.isDestroyed()) return
-    tab.view.webContents.loadURL(tab.url)
+    // 扩展承载的平台（LINE）：扩展必须先装进该分区，否则 chrome-extension:// 页面打不开。
+    ensurePlatformExtension(tab).catch(() => {}).then(() => {
+      if (!tab.view || !tab.view.webContents || tab.view.webContents.isDestroyed()) return
+      tab.view.webContents.loadURL(tab.url)
+    })
   })
+}
+
+/** 翻译桥（guest-inject.js）只挂在已适配的网页平台上。 */
+function bridgeEnabledFor(item) {
+  return !!item && !item.customUrl && item.id !== 'tickets' && !item.extension
 }
 
 function createWebView(partition, settings, item, homeUrl, tabInfo) {
@@ -2171,7 +2217,7 @@ function createWebView(partition, settings, item, homeUrl, tabInfo) {
     const allowNotification = trusted && permission === 'notifications' && (!settings || settings.showNotify !== false)
     callback(!!allowNotification)
   })
-  const bridgeEnabled = !item.customUrl && item.id !== 'tickets'
+  const bridgeEnabled = bridgeEnabledFor(item)
   const view = new WebContentsView({
     webPreferences: {
       preload: bridgeEnabled ? path.join(__dirname, 'guest-inject.js') : undefined,

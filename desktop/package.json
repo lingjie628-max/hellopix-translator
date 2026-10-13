@@ -1,7 +1,7 @@
 {
   "name": "hello-pix-desktop",
   "productName": "Hello Pix",
-  "version": "0.1.25",
+  "version": "0.1.26",
   "private": true,
   "description": "Hello Pix 桌面客户端",
   "author": "Hello Pix",
@@ -11,11 +11,11 @@
   },
   "scripts": {
     "start": "electron .",
-    "pack:mac": "electron-builder --mac --publish never",
-    "pack:mac:release": "PIX_REQUIRE_NOTARIZED=1 electron-builder --mac --publish never",
-    "pack:win": "electron-builder --win --publish never",
-    "pack:all": "electron-builder --mac --win --publish never",
-    "pack:dir": "electron-builder --dir --publish never",
+    "pack:mac": "node scripts/fetch-line-ext.js && electron-builder --mac --publish never",
+    "pack:mac:release": "node scripts/fetch-line-ext.js && PIX_REQUIRE_NOTARIZED=1 electron-builder --mac --publish never",
+    "pack:win": "node scripts/fetch-line-ext.js && electron-builder --win --publish never",
+    "pack:all": "node scripts/fetch-line-ext.js && electron-builder --mac --win --publish never",
+    "pack:dir": "node scripts/fetch-line-ext.js && electron-builder --dir --publish never",
     "verify:proxy": "env -u ELECTRON_RUN_AS_NODE electron scripts/proxy-mechanism-electron.js",
     "verify:native-input": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-native-input-electron.js",
     "verify:concurrency": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-concurrency.js",
@@ -23,7 +23,9 @@
     "verify:api-net": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-api-net-electron.js",
     "probe:dom": "env -u ELECTRON_RUN_AS_NODE electron scripts/probe-platform-dom.js",
     "bench:send": "env -u ELECTRON_RUN_AS_NODE electron scripts/bench-send-timing.js",
-    "bench:translate:live": "env -u ELECTRON_RUN_AS_NODE electron scripts/bench-translate-live.js"
+    "bench:translate:live": "env -u ELECTRON_RUN_AS_NODE electron scripts/bench-translate-live.js",
+    "fetch:line-ext": "node scripts/fetch-line-ext.js",
+    "verify:line-ext": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-line-ext-electron.js"
   },
   "devDependencies": {
     "electron": "^33.2.1",
@@ -58,7 +60,7 @@
       "instance-slot.js",
       "background-mode.js",
       "log-file.js",
-    "bridge-warning.js",
+      "bridge-warning.js",
       "native-composer.js",
       "package.json",
       "node_modules/undici/**/*",
@@ -152,6 +154,15 @@
       "target": [
         "AppImage"
       ]
-    }
+    },
+    "extraResources": [
+      {
+        "from": "vendor/line-ext",
+        "to": "line-ext",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ]
   }
 }

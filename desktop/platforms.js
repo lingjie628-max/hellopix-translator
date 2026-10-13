@@ -2,7 +2,7 @@ module.exports = [
   { id: 'whatsapp-green', name: 'WhatsApp绿色版', url: 'https://web.whatsapp.com/', icon: 'whatsapp' },
   { id: 'whatsapp-pro', name: 'WhatsApp多功能版', url: 'https://web.whatsapp.com/', icon: 'whatsapp' },
   { id: 'telegram-z', name: 'Telegram', url: 'https://web.telegram.org/a/', icon: 'telegram' },
-  { id: 'line', name: 'Line', url: 'https://timeline.line.me/' },
+  { id: 'line', name: 'Line', url: 'chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc/index.html', extension: 'line' },
   { id: 'line-biz', name: 'Line商业版', url: 'https://chat.line.biz/', icon: 'line' },
   { id: 'instagram', name: 'Instagram', url: 'https://www.instagram.com/' },
   { id: 'messenger', name: 'Messenger', url: 'https://www.messenger.com/' },

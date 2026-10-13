@@ -36,6 +36,11 @@ const PLATFORM_DOMAINS = {
   'pm-office': ['hellowoorld.com']
 }
 
+/** 以内置 Chrome 扩展承载的平台：只放行该扩展自己的页面。 */
+const PLATFORM_EXTENSION_IDS = {
+  line: 'ophjlpahpchlmihnnnihgmmeilfjmjjc'
+}
+
 const SHARED_AUTH_DOMAINS = [
   'accounts.google.com',
   'appleid.apple.com',
@@ -109,6 +114,10 @@ function isAllowedPlatformUrl(item, candidate, initialUrl) {
   const parsed = parseUrl(candidate)
   const initial = parseUrl(initialUrl)
   if (!parsed || parsed.username || parsed.password) return false
+  if (item && item.extension) {
+    const extId = PLATFORM_EXTENSION_IDS[item.extension]
+    return !!extId && parsed.protocol === 'chrome-extension:' && parsed.hostname === extId
+  }
   if (parsed.protocol !== 'https:' && !(item && item.id === 'tickets' && parsed.protocol === 'http:')) return false
   if (item && item.customUrl) return !!initial && parsed.origin === initial.origin
   if (item && item.id === 'tickets') return !!initial && parsed.origin === initial.origin
@@ -129,5 +138,6 @@ module.exports = {
   trustedApiHosts,
   validateApiUrl,
   isAllowedPlatformUrl,
-  isAllowedExternalUrl
+  isAllowedExternalUrl,
+  PLATFORM_EXTENSION_IDS
 }
