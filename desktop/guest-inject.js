@@ -238,14 +238,65 @@ const pixBridge = {
   // ---------------------------------------------------------------------------
 
   /**
-   * 当前会话的容器（WhatsApp 是 `#main`）。
+   * 各平台的消息结构。接收翻译（扫描 / 挂「译」按钮 / 画译文 / 点击后重定位）
+   * 只通过这一份配置认识页面，不再在各处写死 WhatsApp 的 `#main` / `[data-id]`。
+   *
+   *   scope     当前会话容器。拿不到就不扫描、不绘制（绝不退回整个 document）
+   *   row       一条消息的行。消息的唯一身份挂在它上面
+   *   keyAttr   行上的稳定 id 属性（点「译」后跨重绘重新定位用）
+   *   text      行内正文节点。译文画在它所在的块级容器里
+   *   nodes     扫描入口
+   *   chatKindVerified  群聊/私聊判定是否经过真机验证。未验证的平台一律只给
+   *             「译」按钮、不自动翻译 —— 判不准群聊就可能整群自动扣费
+   *
+   * 认不出的站点沿用 WhatsApp 配置：选择器在别的站点上命中不了任何节点，
+   * 行为与没有接收翻译一致。
+   */
+  // ==== SITE ADAPTERS BEGIN ====
+  const SITE_ADAPTERS = {
+    whatsapp: {
+      id: 'whatsapp',
+      scope: '#main',
+      row: '[data-id]',
+      keyAttr: 'data-id',
+      text: '.selectable-text',
+      nodes: '.message-list-item .text-content, .Message .text-content, div.message-in span.selectable-text, div.message-out span.selectable-text, div.copyable-text span.selectable-text',
+      chatKindVerified: true
+    },
+    telegram: {
+      id: 'telegram',
+      scope: '#MiddleColumn',
+      row: '.Message[data-message-id]',
+      keyAttr: 'data-message-id',
+      text: '.text-content',
+      nodes: '.Message[data-message-id] .text-content',
+      chatKindVerified: true
+    }
+  }
+
+  function detectSite() {
+    let host = ''
+    try { host = String((location && location.hostname) || '').toLowerCase() } catch (e) {}
+    if (/(^|\.)web\.telegram\.org$/.test(host)) return SITE_ADAPTERS.telegram
+    return SITE_ADAPTERS.whatsapp
+  }
+  const SITE = detectSite()
+
+  function matchesSite(el, selector) {
+    if (!el || typeof el.matches !== 'function') return false
+    try { return el.matches(selector) } catch (e) { return false }
+  }
+  // ==== SITE ADAPTERS END ====
+
+  /**
+   * 当前会话的容器（WhatsApp 是 `#main`，Telegram 是 `#MiddleColumn`）。
    *
    * 拿不到就返回 null —— **绝不退回整个 document**：左侧会话列表的行也在
    * document 里，且带 `[data-id]`。退回 document 等于把别的会话当成当前会话。
    */
   function conversationScope() {
     return document && typeof document.querySelector === 'function'
-      ? document.querySelector('#main')
+      ? document.querySelector(SITE.scope)
       : null
   }
 
@@ -1023,6 +1074,9 @@ const pixBridge = {
       if (s.emojiOnly) return 'hide'
       if (s.hasChinese && !s.includeZh) return 'hide'
       if (s.sameLang && !(s.includeZh && s.hasChinese)) return 'hide'
+      // 这个平台的群聊/私聊判定还没经过真机验证：判不准群聊，就可能把整群当私聊
+      // 自动翻译扣费。一律只给按钮，用户点了才翻。
+      if (s.chatKindUnverified) return 'chip'
       // 群聊 + 手动：一条都不自动翻，只给按钮。这是**唯一**剩下的计费闸门，别动它。
       if (s.group && !s.transGroup) return 'chip'
       // 群聊 + 自动 / 私聊（私聊与开关无关，始终自动）：
@@ -1131,9 +1185,7 @@ const pixBridge = {
   }
 
   function messageNodes() {
-    return Array.from(document.querySelectorAll(
-      '.message-list-item .text-content, .Message .text-content, div.message-in span.selectable-text, div.message-out span.selectable-text, div.copyable-text span.selectable-text'
-    ))
+    return Array.from(document.querySelectorAll(SITE.nodes))
   }
 
   function isOwn(node) {
@@ -1337,9 +1389,9 @@ const pixBridge = {
 
   function isGroupChat() { return chatKind().group }
 
-  /** 一个节点所在的消息行（`[data-id]`）。这是消息的**唯一身份**。 */
+  /** 一个节点所在的消息行（WhatsApp 是 `[data-id]`）。这是消息的**唯一身份**。 */
   function rowOf(el) {
-    return (el && typeof el.closest === 'function') ? el.closest('[data-id]') : null
+    return (el && typeof el.closest === 'function') ? el.closest(SITE.row) : null
   }
 
   /**
@@ -1387,9 +1439,9 @@ const pixBridge = {
     const row = rowOf(node)
     if (!row) return null
     // 优先用调用方明确给的那个正文 span（扫描时就是它），保证与点击时一致。
-    const span = (node && node.classList && node.classList.contains('selectable-text'))
+    const span = matchesSite(node, SITE.text)
       ? node
-      : row.querySelector('.selectable-text')
+      : row.querySelector(SITE.text)
     return bubbleFromSpan(span, row)
   }
 
@@ -1707,8 +1759,8 @@ const pixBridge = {
     if (HOST_FORBIDDEN_IDS.indexOf(el.id) >= 0) return false
     const doc = typeof document === 'undefined' ? null : document
     if (doc && el === doc.body) return false
-    // 必须在会话区 #main 内 —— 左侧会话列表里的节点不是消息气泡。
-    const main = doc && doc.getElementById('main')
+    // 必须在会话区（WhatsApp 的 #main）内 —— 左侧会话列表里的节点不是消息气泡。
+    const main = conversationScope()
     if (main && !main.contains(el)) return false
     // 必须挂在某个消息行（[data-id]）上；可以是行**内部**的正文容器，
     // 也可以是行本身（被点的那条消息）。二者之外一律拒绝。
@@ -1716,7 +1768,7 @@ const pixBridge = {
     if (!row) return false
     if (!row.contains(el)) return false
     // 宿主自身不能再包住别的消息行 —— 那是列表容器，不是气泡。
-    if (el.querySelector && el.querySelector('[data-id]')) return false
+    if (el.querySelector && el.querySelector(SITE.row)) return false
     return true
   }
 
@@ -2222,8 +2274,8 @@ const pixBridge = {
    */
   function keyOf(root) {
     if (!root || !root.getAttribute) return null
-    const id = root.getAttribute('data-id')
-    if (id) return { attr: 'data-id', value: id }
+    const id = root.getAttribute(SITE.keyAttr)
+    if (id) return { attr: SITE.keyAttr, value: id }
     const pre = root.getAttribute('data-pre-plain-text')
     if (pre) return { attr: 'data-pre-plain-text', value: pre }
     return null
@@ -2246,7 +2298,7 @@ const pixBridge = {
     for (let i = 0; i < nodes.length; i++) {
       if (nodes[i].getAttribute(key.attr) !== key.value) continue
       // 优先返回**带正文 span 的那一行**（真正的消息气泡）。
-      if (nodes[i].querySelector && nodes[i].querySelector('.selectable-text')) return nodes[i]
+      if (nodes[i].querySelector && nodes[i].querySelector(SITE.text)) return nodes[i]
       if (!fallback) fallback = nodes[i]
     }
     return fallback
@@ -2466,7 +2518,7 @@ const pixBridge = {
       return
     }
     // 精确回到当初点的那一段正文；没有 path（老 chip）则退回"行内第一个正文 span"。
-    let span = key.path ? nodeAtPath(curRow, key.path) : curRow.querySelector('.selectable-text')
+    let span = key.path ? nodeAtPath(curRow, key.path) : curRow.querySelector(SITE.text)
     // ★ 硬校验：路径命中的节点必须**仍是真正的正文节点** ★
     //   索引路径在列表重绘 / 我们插入了自己的控件之后会漂移，最坏情况会命中
     //   chip / 译文框自身（测试已复现）。真机上的等价事故就是"译文绑错了节点"。
@@ -2474,8 +2526,7 @@ const pixBridge = {
     //   · 必须是 .selectable-text 正文；
     //   · 不能落在我们自己的界面里（data-pix-ui）；
     //   · 必须仍在这一条消息行内。
-    const looksLikeText = span && span.classList &&
-      span.classList.contains('selectable-text') &&
+    const looksLikeText = span && matchesSite(span, SITE.text) &&
       !(span.closest && span.closest('[data-pix-ui]'))
     const textMatches = looksLikeText && normalizeBody(span.textContent) === normalizeBody(sourceText)
     if (!looksLikeText) span = null
@@ -2492,7 +2543,7 @@ const pixBridge = {
         hadPath: !!key.path,
         looksLikeText: !!looksLikeText,
         textMatches: !!textMatches,
-        rowHasDataId: curRow.hasAttribute('data-id')
+        rowHasDataId: curRow.hasAttribute(SITE.keyAttr)
       })
       leaveBusy('fail', 'MANUAL_RENDER_MISSED')
       notifyTranslateIssue({ code: 'MANUAL_RENDER_MISSED', msg: '没能把译文绑回这条消息，已放弃显示（不会放到别处）' })
@@ -2504,7 +2555,7 @@ const pixBridge = {
       messageId: String(key.value || '').slice(0, 64),
       byKey: key.attr || '-',
       byPath: key.path ? key.path.join('.') : '-',
-      rowId: String((curRow.getAttribute('data-id') || '')).slice(0, 64),
+      rowId: String((curRow.getAttribute(SITE.keyAttr) || '')).slice(0, 64),
       rowIsSameNode: true,
       textMatches: !!textMatches,
       hostTag: String(host.tagName || '').toLowerCase(),
@@ -3692,12 +3743,12 @@ const pixBridge = {
     // 只认"消息行"这一种身份：任何更宽的容器（msg-container / 聊天根）都不再
     // 被当作消息根 —— 那正是"译文绑错节点"的入口。没有 data-id 就用节点自身，
     // 由上层（parseScope / 渲染）自行判断可不可用。
-    return node.closest('[data-id]') || node
+    return node.closest(SITE.row) || node
   }
 
   function messageKey(root) {
     if (!root) return ''
-    return root.getAttribute('data-id') || root.getAttribute('data-pre-plain-text') || ''
+    return root.getAttribute(SITE.keyAttr) || root.getAttribute('data-pre-plain-text') || ''
   }
 
   function isDeletedText(text) {
@@ -3917,7 +3968,8 @@ const pixBridge = {
         includeZh: !!prefs.includeZh,
         sameLang: sameLang(text),
         group: group,
-        transGroup: !!prefs.transGroup
+        transGroup: !!prefs.transGroup,
+        chatKindUnverified: !SITE.chatKindVerified
       })
       if (action === 'auto') {
         // 自动接手 → 手动留下的「译」按钮必须收掉，否则就是"开了自动还挂着按钮"。

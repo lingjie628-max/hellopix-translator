@@ -70,7 +70,10 @@ test('失败 chip 必须带真实错误类别（禁止把"连不上服务器"说
 test('硬规则 4：渲染前必须有 isMessageHost 硬守卫 + TARGET_MISSING 兜底（禁止画到聊天根节点）', () => {
   assert.match(guest, /function isMessageHost\b/, '缺少 isMessageHost')
   assert.match(guest, /HOST_FORBIDDEN_IDS\s*=\s*\[[^\]]*'main'/, 'isMessageHost 没有禁止 #main')
-  assert.match(guest, /el\.closest\('\[data-id\]'\)/, 'isMessageHost 没有要求 data-id 结构证据')
+  assert.match(guest, /el\.closest\(SITE\.row\)/, 'isMessageHost 没有要求消息行结构证据')
+  assert.match(guest, /whatsapp: \{[^}]*row: '\[data-id\]'/, 'WhatsApp 的消息行不再是 [data-id]')
+  const host = section('function isMessageHost', '==== TRANSLATE FAILURE NOTICE BEGIN')
+  assert.match(host, /const row = rowOf\(el\)\s*\n\s*if \(!row\) return false/, 'isMessageHost 没有要求宿主挂在消息行上')
   const paint = section('function paint', '==== MANUAL CHIP BEGIN')
   assert.match(paint, /if \(!isMessageHost\(host\)\) return false/, 'paint 没有硬拒绝非消息宿主')
   const body = section('async function manualTranslateInner', '/**')

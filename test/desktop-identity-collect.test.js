@@ -33,6 +33,12 @@ const SRC = fs.readFileSync(path.join(__dirname, '..', 'desktop', 'guest-inject.
  */
 const PEER_FNS = ['telegramPeer', 'whatsappPeer', 'currentPeer', 'conversationScope']
 
+/** 平台配置（`SITE`）：conversationScope 等函数按它取会话容器。 */
+const SITE_SRC = SRC.slice(
+  SRC.indexOf('// ==== SITE ADAPTERS BEGIN ===='),
+  SRC.indexOf('// ==== SITE ADAPTERS END ====')
+)
+
 /**
  * 假 document。
  *
@@ -60,7 +66,7 @@ function loadPeerFns() {
   })
   const sandbox = { location: { hash: '' }, document: fakeDocument(null) }
   vm.createContext(sandbox)
-  vm.runInContext(srcs.join('\n') + '\nthis.__f = currentPeer', sandbox)
+  vm.runInContext(SITE_SRC + '\n' + srcs.join('\n') + '\nthis.__f = currentPeer', sandbox)
   return hash => { sandbox.location.hash = hash; sandbox.document = fakeDocument(null); return sandbox.__f() }
 }
 
@@ -126,7 +132,7 @@ test('WhatsApp 的 chatId 能解析出手机号，且**群聊必须排除**', ()
   })
   const sandbox = { document: fakeDocument(null) }
   vm.createContext(sandbox)
-  vm.runInContext(srcs.join('\n') + '\nthis.__f = whatsappPeer', sandbox)
+  vm.runInContext(SITE_SRC + '\n' + srcs.join('\n') + '\nthis.__f = whatsappPeer', sandbox)
   const parse = raw => {
     sandbox.document = fakeDocument(raw)
     return sandbox.__f()
@@ -167,7 +173,7 @@ test('没有 #main（拿不到当前会话）时绝不猜客户身份', () => {
     }
   }
   vm.createContext(sandbox)
-  vm.runInContext(srcs.join('\n') + '\nthis.__f = whatsappPeer', sandbox)
+  vm.runInContext(SITE_SRC + '\n' + srcs.join('\n') + '\nthis.__f = whatsappPeer', sandbox)
   assert.equal(sandbox.__f(), null, '没有 #main 时必须返回 null，不得退回 document')
 })
 

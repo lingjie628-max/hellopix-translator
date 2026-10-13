@@ -63,10 +63,15 @@ function grab(name) {
   throw new Error('大括号不平衡: ' + name)
 }
 
-const SOURCE_FNS = [
+const SITE_SRC = guest.slice(
+  guest.indexOf('// ==== SITE ADAPTERS BEGIN ===='),
+  guest.indexOf('// ==== SITE ADAPTERS END ====')
+)
+
+const SOURCE_FNS = [SITE_SRC].concat([
   'telegramPeer', 'whatsappPeer', 'conversationScope', 'whatsappConversationKey',
   'currentPeer', 'chatDisplayName', 'chatIdentity', 'chatKind', 'isGroupChat'
-].map(grab)
+].map(grab))
 
 /** 在 jsdom 里装配真实函数（document / location 由页面提供）。 */
 function mount(document, location, window) {
