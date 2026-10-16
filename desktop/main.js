@@ -29,7 +29,7 @@ const {
 } = proxySettings
 // 带认证的 SOCKS5 只能走本地中继（Chromium 不会为 SOCKS5 触发 login 事件，
 // 详见 socks-relay.js 顶部注释）。它是纯 Node 模块，产品与测试共用同一份。
-const { createSocksRelay } = require('./socks-relay')
+const { createSocksRelay, precheckSocks5 } = require('./socks-relay')
 // 读远程页面文本走隔离世界（不是 page world）—— 见 probe-page.js 顶部注释。
 const { readPageText } = require('./probe-page')
 const instanceSlot = require('./instance-slot')
@@ -2045,6 +2045,25 @@ function noteProxyIp(ip) {
 const probeWindows = new Set()
 const PROBE_TIMEOUT_MS = 15000
 
+/**
+ * 在一个隐藏窗口里加载 `url`（走指定 session 的代理），把页面正文读回来。
+ *
+ * ## ★ 清理必须"温柔"（0.1.29 修的真机缺陷）★
+ *
+ * 真机复现：当代理上游**连得上但不回话**时，Chromium 会一直卡在 SOCKS5 握手，
+ * `did-finish-load` / `did-fail-load` / `render-process-gone` **一个事件都不触发**。
+ * 此时若直接 `wc.destroy()` + `win.destroy()`，会把 Electron 的渲染进程基础设施弄坏
+ * （实测：`MachPortRendezvousServer ... No rendezvous client, terminating process`），
+ * **之后整个应用再也创建不出可用窗口** —— 用户看到的就是"节点检测永远在转圈"。
+ *
+ * 所以清理分两步：
+ *   1. 先 `stop()` 让加载**优雅中止**（给 Chromium 一个收口的机会），
+ *      并解除所有监听 —— 我们不再关心它的任何后续事件；
+ *   2. **延迟**再销毁窗口，且销毁包在 try 里。
+ *
+ * 这只是第二道保险：正常情况下真正的防线是 detectProxyNode 里的
+ * `precheckSocks5()`（不可用的节点根本不会走到这里、不会创建窗口）。
+ */
 function probeTextWithProxy(ses, url, creds) {
   return new Promise((resolve, reject) => {
     let settled = false
@@ -2071,8 +2090,22 @@ function probeTextWithProxy(ses, url, creds) {
       timer = null
       try { proxyAuthByWebContents.delete(wc.id) } catch (e) {}
       probeWindows.delete(win)
-      try { if (!wc.isDestroyed()) wc.destroy() } catch (e) {}
-      try { if (!win.isDestroyed()) win.destroy() } catch (e) {}
+      // 第一步：优雅中止加载，并摘掉监听（此后不再依赖它触发任何事件）。
+      try {
+        if (!wc.isDestroyed()) {
+          wc.removeAllListeners('did-finish-load')
+          wc.removeAllListeners('did-fail-load')
+          wc.stop()
+        }
+      } catch (e) {}
+      // 第二步：延迟销毁。卡在握手的渲染进程需要一拍才能收口，
+      // 立刻 destroy 正是把应用弄坏的那一下。
+      const target = win
+      const contents = wc
+      setTimeout(() => {
+        try { if (!contents.isDestroyed()) contents.destroy() } catch (e) {}
+        try { if (!target.isDestroyed()) target.destroy() } catch (e) {}
+      }, 250)
     }
     const done = (fn, arg) => {
       if (settled) return
@@ -2101,6 +2134,32 @@ async function detectProxyNode(payload) {
   const target = proxyTargetOf(settings)
   if (target.direct || !target.host) return { success: false, msg: '请先填写代理主机和端口' }
   const creds = proxyAuthOf(settings)
+
+  // ★ 第一步：先用**纯 Node** 把节点验一遍，不碰 Chromium ★
+  //
+  // 这一步是 0.1.29 的关键修复。老实现直接创建隐藏窗口去探测：
+  // 节点连得上但不回话时，Chromium 一直卡在 SOCKS5 握手，任何 webContents 事件
+  // 都不触发；15 秒后超时清理会把渲染进程基础设施弄坏（实测：
+  // `MachPortRendezvousServer ... No rendezvous client, terminating process`），
+  // 之后**整个应用再也起不了窗口** → 表现为"节点检测永远正在检测"。
+  //
+  // 所以在创建窗口**之前**就把不可用的节点挡掉：既避免弄坏应用，
+  // 又能把"死在哪儿"（连不上/没回话/认证错）直接说给用户听。
+  if (target.scheme === 'socks5') {
+    const pre = await precheckSocks5({
+      host: target.host,
+      port: target.port,
+      user: target.user,
+      pass: target.pass
+    })
+    if (!pre.ok) {
+      return { success: false, msg: '节点连不上：' + pre.reason, code: pre.code }
+    }
+    if (pre.code === 'OK' && /无需认证/.test(pre.reason) && target.hasAuth) {
+      // 节点存活但不需要认证 —— 继续走正常探测，不拦。
+    }
+  }
+
   const ses = session.fromPartition('temp:pix-proxy-detect')
   let relay = null
   try {
@@ -2209,6 +2268,146 @@ function bridgeEnabledFor(item) {
   return !!item && !item.customUrl && item.id !== 'tickets' && !item.extension
 }
 
+/* ---------------------------------------------------------------------------
+   译文/正文的复制、粘贴、全选（P0：多开窗口里选不中、复制不出来）
+
+   ## 真机现象
+   在聊天窗口（WhatsApp / Telegram / Line 等）里，中文译文**看得见、选不中**，
+   复制更是没反应。
+
+   ## 根因（与 CSS 无关的另一半）
+   聊天应用跑在 **WebContentsView** 里，而不是主窗口的 DOM。Electron 里
+   `Cmd/Ctrl+C` / `V` / `A` 这些**编辑快捷键不会自动**作用到嵌入的
+   webContents —— 它们要靠**应用程序菜单里的编辑角色**（role: 'copy' /
+   'paste' / 'selectAll' …）来转发到当前聚焦的 webContents。
+   本应用为隐藏菜单栏调了 `setMenuBarVisibility(false)`，且**从未注册任何
+   编辑角色**（也没有 setApplicationMenu）。于是：
+     · 选中靠 `Cmd+A` / 菜单全选 —— 没有 → 连"全选"都做不到；
+     · 复制靠 `Cmd+C` / 菜单复制 —— 没有 → 复制无声失败；
+     · 右键菜单 —— WebContentsView 默认**不弹**系统上下文菜单。
+   三样全缺，"译文复制不出来"是必然结果。（注入网页里的 CSS/事件修复是**另一半**，
+   两者都到位才能真正复制。）
+
+   ## 修法（两条独立通道，互为兜底）
+   1. **应用菜单**：给 macOS 装一份含编辑角色的标准菜单（Linux/Windows 用
+      `setMenu(null)` + 快捷键事件，见下）。
+   2. **WebContentsView 级 before-input-event + 右键菜单**：在每个 view 上直接
+      接住 Cmd/Ctrl+C/V/X/A，调用 webContents 的编辑命令。这条路**不依赖菜单**，
+      是最稳的兜底 —— 菜单在某些平台/打包方式下可能被系统吞掉，这条不会。
+   --------------------------------------------------------------------------- */
+
+/** 对某个 webContents 执行一次编辑动作，带可用性保护。 */
+function runEditCommand(wc, action) {
+  if (!wc || (typeof wc.isDestroyed === 'function' && wc.isDestroyed())) return false
+  try {
+    if (action === 'copy' && typeof wc.copy === 'function') return wc.copy(), true
+    if (action === 'paste' && typeof wc.paste === 'function') return wc.paste(), true
+    if (action === 'cut' && typeof wc.cut === 'function') return wc.cut(), true
+    if (action === 'selectAll' && typeof wc.selectAll === 'function') return wc.selectAll(), true
+  } catch (e) {
+    if (clientLog) clientLog.warn('edit', action + ' 失败：' + ((e && e.message) || e))
+  }
+  return false
+}
+
+/**
+ * 给一个 WebContentsView 的 webContents 装"编辑快捷键 + 右键菜单"。
+ *
+ * 为什么在 **view 层** 而不是主窗口：快捷键必须作用在**聚焦的那个
+ * webContents** 上。多开时可能有多个 view，只有当前聚焦的一个该响应。
+ */
+function installEditSupport(view) {
+  const wc = view && view.webContents
+  if (!wc) return
+  // 1) 键盘：Cmd/Ctrl+C/V/X/A。用 before-input-event 在**输入进入页面前**接住，
+  //    避免被宿主网页自己的 keydown 处理器吞掉（WhatsApp 等会拦一部分快捷键）。
+  wc.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return
+    const mod = process.platform === 'darwin' ? input.meta : input.control
+    if (!mod || input.alt) return
+    const key = String(input.key || '').toLowerCase()
+    if (key === 'c') { if (runEditCommand(wc, 'copy')) event.preventDefault() }
+    else if (key === 'v') { if (runEditCommand(wc, 'paste')) event.preventDefault() }
+    else if (key === 'x') { if (runEditCommand(wc, 'cut')) event.preventDefault() }
+    else if (key === 'a') { if (runEditCommand(wc, 'selectAll')) event.preventDefault() }
+  })
+  // 2) 右键菜单：WebContentsView 默认不弹系统菜单。用户习惯右键复制/粘贴，
+  //    缺了它会以为"复制功能坏了"。
+  wc.on('context-menu', (_event, params) => {
+    const template = []
+    const hasSelection = !!(params && params.selectionText)
+    const isEditable = !!(params && params.isEditable)
+    if (hasSelection) {
+      template.push({ label: '复制', accelerator: 'CmdOrCtrl+C', click: () => runEditCommand(wc, 'copy') })
+    }
+    if (isEditable) {
+      template.push({ label: '剪切', accelerator: 'CmdOrCtrl+X', click: () => runEditCommand(wc, 'cut') })
+      template.push({ label: '粘贴', accelerator: 'CmdOrCtrl+V', click: () => runEditCommand(wc, 'paste') })
+    }
+    if (hasSelection || isEditable) {
+      template.push({ type: 'separator' })
+      template.push({ label: '全选', accelerator: 'CmdOrCtrl+A', click: () => runEditCommand(wc, 'selectAll') })
+    }
+    if (!template.length) return
+    Menu.buildFromTemplate(template).popup({ window: win })
+  })
+}
+
+/**
+ * 装应用菜单。
+ *
+ * macOS：必须有一份含编辑角色的菜单 —— 否则 Cmd+C/V/A 不会转发到聚焦的
+ * webContents（这是 Electron 在 macOS 上的既有行为，不是 bug）。
+ * 保留应用菜单（含退出、隐藏、窗口切换）+ 编辑菜单（撤销/剪切/复制/粘贴/全选）。
+ *
+ * Windows/Linux：菜单栏用 `setMenu(null)` 隐藏（与既有观感一致），编辑快捷键
+ * 完全由 installEditSupport 的 before-input-event 负责。
+ */
+function installApplicationMenu() {
+  if (process.platform !== 'darwin') {
+    try { Menu.setApplicationMenu(null) } catch (e) {}
+    return
+  }
+  const template = [
+    {
+      label: app.name,
+      submenu: [
+        { role: 'about', label: '关于 Hello Pix' },
+        { type: 'separator' },
+        { role: 'hide', label: '隐藏 Hello Pix' },
+        { role: 'hideOthers', label: '隐藏其他' },
+        { role: 'unhide', label: '全部显示' },
+        { type: 'separator' },
+        { role: 'quit', label: '退出 Hello Pix' }
+      ]
+    },
+    {
+      label: '编辑',
+      submenu: [
+        { role: 'undo', label: '撤销' },
+        { role: 'redo', label: '重做' },
+        { type: 'separator' },
+        { role: 'cut', label: '剪切' },
+        { role: 'copy', label: '复制' },
+        { role: 'paste', label: '粘贴' },
+        { role: 'selectAll', label: '全选' }
+      ]
+    },
+    {
+      label: '窗口',
+      submenu: [
+        { role: 'minimize', label: '最小化' },
+        { role: 'zoom', label: '缩放' },
+        { type: 'separator' },
+        { role: 'front', label: '前置全部窗口' }
+      ]
+    }
+  ]
+  try { Menu.setApplicationMenu(Menu.buildFromTemplate(template)) } catch (e) {
+    if (clientLog) clientLog.warn('menu', '装应用菜单失败：' + ((e && e.message) || e))
+  }
+}
+
 function createWebView(partition, settings, item, homeUrl, tabInfo) {
   const ses = session.fromPartition(partition)
   ses.setUserAgent(CHROME_UA)
@@ -2238,6 +2437,9 @@ function createWebView(partition, settings, item, homeUrl, tabInfo) {
   view.webContents.on('will-navigate', guardNavigation)
   view.webContents.on('will-redirect', guardNavigation)
   view.webContents.on('did-finish-load', () => pushPrefsToGuest(view))
+  // 复制 / 粘贴 / 全选：Electron 不会把编辑快捷键自动作用到 WebContentsView，
+  // 必须显式接住（否则译文选不中、复制不出来 —— 见上方大段注释）。
+  installEditSupport(view)
   // preload 装载失败必须留痕：光靠控制台，线上看不到（0.1.12 就是这么漏出去的）。
   // 此刻 tab 可能还没进 tabs（按 id 找不到），所以先挂在 view 上，由
   // watchdogBridge() 按 tab 归属上报。
@@ -3196,6 +3398,9 @@ app.whenReady().then(() => {
     handle.file ? '' : '（槽位已满，本次使用一次性分区）')
   try { fs.rmSync(userFile('translate-cache.json'), { force: true }) } catch (e) {}
   loadConfig()
+  // 应用菜单：macOS 上 Cmd+C/V/A 依赖菜单的编辑角色才能转发到 webContents。
+  // 必须在建窗口之前装好，窗口一出现快捷键就可用。
+  installApplicationMenu()
   // 托盘要先于窗口建好：关闭拦截依赖 `tray` 是否为真来决定"隐藏还是退出"。
   createTray()
   createWindow()
