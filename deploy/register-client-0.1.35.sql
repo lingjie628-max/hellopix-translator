@@ -49,7 +49,9 @@
 --
 -- ## 与上一版的关系
 --   0.1.34 记录停用不删除，留作回滚（0.1.34 仅加了检测日志，未改判定）。
---   本版**未构建 Windows 包**，Windows 仍以 0.1.33 为准（见下）。
+--   **已构建 Windows 包**（原本计划跳过，后补上）。Windows 与 macOS 同因回归，
+--   一并修复。沿用既有约定：Windows 只登记安装版（Setup），
+--   portable（免安装版）同样上传到 downloads 供直接下载，但不登记进更新通道。
 --
 -- ## 与上一版的关系
 --   0.1.34 记录停用不删除，留作回滚。
@@ -63,9 +65,7 @@ BEGIN;
 -- 停用旧版本。注意：Windows 的 url 指向 Setup.exe，app 字段区分两种形态。
 UPDATE client_releases
 SET enabled = false, updated_at = NOW()
--- ★ 只停用 macOS ★ Windows 本版未构建，0.1.33 必须继续 enabled，
---   否则 Windows 用户的更新通道会指向一个不存在的 Setup.exe。
-WHERE release_group = 'macos'
+WHERE release_group IN ('macos', 'windows')
   AND version <> '0.1.35'
   AND enabled = true;
 
@@ -77,7 +77,11 @@ VALUES
    '修复节点检测的回归问题：之前版本会给节点检测额外加一道前置检查，这道检查不通过就直接判定失败，导致原本能用的节点也检测不过。现在这道检查只在节点完全没有响应时才提前拦截，其余情况一律以「能否真的经该节点打开网页」为准，与更早的版本保持一致。同时修正了节点返回错误时容易误导的提示文案。macOS 首次打开可能需要在系统安全设置中手动允许（安装包内附详细操作说明）'),
   ('macos', 'macOS（Intel 芯片）', 'macOS', 'x64', '', '0.1.35',
    'https://pixfanyi.com/downloads/HelloPix-0.1.35-x64.dmg', true,
-   '修复节点检测的回归问题：之前版本会给节点检测额外加一道前置检查，这道检查不通过就直接判定失败，导致原本能用的节点也检测不过。现在这道检查只在节点完全没有响应时才提前拦截，其余情况一律以「能否真的经该节点打开网页」为准，与更早的版本保持一致。同时修正了节点返回错误时容易误导的提示文案。macOS 首次打开可能需要在系统安全设置中手动允许（安装包内附详细操作说明）')
+   '修复节点检测的回归问题：之前版本会给节点检测额外加一道前置检查，这道检查不通过就直接判定失败，导致原本能用的节点也检测不过。现在这道检查只在节点完全没有响应时才提前拦截，其余情况一律以「能否真的经该节点打开网页」为准，与更早的版本保持一致。同时修正了节点返回错误时容易误导的提示文案。macOS 首次打开可能需要在系统安全设置中手动允许（安装包内附详细操作说明）'),
+  -- ---------------- Windows（只登记安装版）----------------
+  ('windows', 'Windows（64 位）', 'Windows', 'x64', '', '0.1.35',
+   'https://pixfanyi.com/downloads/HelloPix-Setup-0.1.35.exe', true,
+   '修复节点检测的回归问题：之前版本会给节点检测额外加一道前置检查，这道检查不通过就直接判定失败，导致原本能用的节点也检测不过。现在这道检查只在节点完全没有响应时才提前拦截，其余情况一律以「能否真的经该节点打开网页」为准，与更早的版本保持一致。同时修正了节点返回错误时容易误导的提示文案。')
 ON CONFLICT (release_group, os, arch, app, version) DO UPDATE
   SET url = EXCLUDED.url, title = EXCLUDED.title, enabled = true,
       note = EXCLUDED.note, updated_at = NOW();
@@ -99,7 +103,7 @@ END $$;
 
 COMMIT;
 
-\echo '--- 登记结果（macos 应恰为 2 条 0.1.35；windows 应仍为 0.1.33）---'
+\echo '--- 登记结果（macos 应恰为 2 条 0.1.35；windows 应恰为 1 条 0.1.35）---'
 SELECT release_group, os, arch, app, version, enabled FROM client_releases
 WHERE release_group IN ('windows', 'macos')
 ORDER BY release_group, enabled DESC, version DESC, os, arch, app;
