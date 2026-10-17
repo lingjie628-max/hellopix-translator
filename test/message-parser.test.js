@@ -141,6 +141,41 @@ const WA_FILE_CAPTION = waRow(
 )
 
 // ---------------------------------------------------------------------------
+// 0.1.28 真机缺陷：图文消息的文字**没有** span.selectable-text 包裹
+// ---------------------------------------------------------------------------
+// 用户报障：「图文一起发送的时候，不翻译」。
+// 老实现只认 `.selectable-text`，而真机上「图片 + 文字」的 caption 常常：
+//   · 直接在 .copyable-text 容器里；或
+//   · 落在 [data-testid="msg-container"] 的 caption 子容器里；
+//   · 且 WhatsApp 已移除 .message-in/.message-out（nodes 选择器里那两个分支是死的）。
+// 于是正文取空 → translatable=false → messageAction 返回 hide（连「译」按钮都没有）。
+// 这组 fixture 把真机的四种结构逐一锁死，并且**必须**证明时间/图标没漏进正文。
+
+const WA_MEDIA_IMG = '<img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" alt="">'
+
+/** 结构 B：文字直接在 .copyable-text 里（无 selectable-text 包裹）。 */
+const WA_MEDIA_CAPTION_PLAIN = waRow(
+  WA_MEDIA_IMG + '<div dir="ltr" class="x1iyjqo2">看这张图</div>' + WA_META
+)
+
+/** 结构 C：文字在 caption 容器里。 */
+const WA_MEDIA_CAPTION_BOX = waRow(
+  '<div class="media-container">' + WA_MEDIA_IMG + '</div>' +
+  '<div class="caption-container" dir="ltr"><span>看这张图</span></div>' + WA_META
+)
+
+/** 结构 D：文字在 .text-content 里（非 selectable）。 */
+const WA_MEDIA_TEXT_CONTENT = waRow(
+  WA_MEDIA_IMG + '<div class="text-content">看这张图</div>' + WA_META
+)
+
+/** 结构 G：整条消息包在 [data-testid="msg-container"] 里。 */
+const WA_MEDIA_MSG_CONTAINER =
+  '<div data-id="false_8613800138000@c.us_3EB0ABC" data-testid="msg-container">' +
+  '<div class="copyable-text" data-pre-plain-text="[3:25 PM, 9/25/2026] Alice: ">' +
+  WA_MEDIA_IMG + '<div dir="ltr"><span>看这张图</span></div></div>' + WA_META + '</div>'
+
+// ---------------------------------------------------------------------------
 // 验收用例 1-10
 // ---------------------------------------------------------------------------
 
@@ -234,6 +269,53 @@ test('用例 8：文件 + caption —— 文件名与 Download 按钮不进正�
   assertClean('文件+caption', parsed, el.textContent)
 })
 
+// ---------------------------------------------------------------------------
+// 用例 8.1 - 8.4：0.1.28 图文消息兜底提取（真机四种结构）
+// ---------------------------------------------------------------------------
+
+test('用例 8.1：图文 —— 文字直接在 .copyable-text 里（无 selectable-text）也要翻', () => {
+  const el = query(WA_MEDIA_CAPTION_PLAIN)
+  const parsed = MessageParser.parseForTranslation(el)
+  assert.equal(parsed.messageText, '看这张图', '图文消息的 caption 必须被取到')
+  assert.equal(parsed.translatable, true, '有 caption 就应可翻译')
+  assertClean('图文·copyable-text', parsed, el.textContent)
+  assert.equal(
+    MessageParser.messageAction({ receiveEnabled: true, translatable: parsed.translatable, group: false }),
+    'auto', '私聊图文消息应自动翻译，不能 hide'
+  )
+})
+
+test('用例 8.2：图文 —— caption 容器结构也要翻', () => {
+  const el = query(WA_MEDIA_CAPTION_BOX)
+  const parsed = MessageParser.parseForTranslation(el)
+  assert.equal(parsed.messageText, '看这张图')
+  assertClean('图文·caption 容器', parsed, el.textContent)
+})
+
+test('用例 8.3：图文 —— 文字在 .text-content 里也要翻', () => {
+  const el = query(WA_MEDIA_TEXT_CONTENT)
+  const parsed = MessageParser.parseForTranslation(el)
+  assert.equal(parsed.messageText, '看这张图')
+  assertClean('图文·text-content', parsed, el.textContent)
+})
+
+test('用例 8.4：图文 —— 整条消息在 [data-testid="msg-container"] 里也要翻', () => {
+  const el = query(WA_MEDIA_MSG_CONTAINER)
+  const parsed = MessageParser.parseForTranslation(el)
+  assert.equal(parsed.messageText, '看这张图')
+  assertClean('图文·msg-container', parsed, el.textContent)
+})
+
+test('用例 8.5：纯图片（无 caption）仍不可翻译 —— 兜底不能把空消息翻出来', () => {
+  const el = query(waRow(WA_MEDIA_IMG + WA_META))
+  const parsed = MessageParser.parseForTranslation(el)
+  assert.equal(parsed.translatable, false, '没有文字就不该调翻译接口')
+  assert.equal(
+    MessageParser.messageAction({ receiveEnabled: true, translatable: parsed.translatable, group: false }),
+    'hide'
+  )
+})
+
 test('用例 9：emoji —— 只有表情时不产生可翻译内容', () => {
   assert.equal(MessageParser.hasTranslatableText('😀🎉'), false)
   assert.equal(MessageParser.hasTranslatableText('😀 hi'), true, '有文字就该翻')
@@ -241,7 +323,8 @@ test('用例 9：emoji —— 只有表情时不产生可翻译内容', () => {
 })
 
 test('用例 10：时间 / 已读图标 —— 任何 fixture 都不许把它们带进翻译', () => {
-  const ALL = [WA_GROUP_INVITE, WA_WEB_PREVIEW, WA_QUOTED, WA_IMAGE_CAPTION, WA_FILE_CAPTION]
+  const ALL = [WA_GROUP_INVITE, WA_WEB_PREVIEW, WA_QUOTED, WA_IMAGE_CAPTION, WA_FILE_CAPTION,
+    WA_MEDIA_CAPTION_PLAIN, WA_MEDIA_CAPTION_BOX, WA_MEDIA_TEXT_CONTENT, WA_MEDIA_MSG_CONTAINER]
   for (const html of ALL) {
     const el = query(html)
     const parsed = MessageParser.parseForTranslation(el)

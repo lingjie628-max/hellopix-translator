@@ -1613,3 +1613,132 @@ test('P0-3c：超短正文（1~3 字）也必须给出可点的入口，且不�
   assert.match(guestSrc, /chip\.textContent = '译'/)
 })
 
+
+// ---------------------------------------------------------------------------
+// 0.1.28 真机缺陷：发送「图文消息」时文字不翻译
+// ---------------------------------------------------------------------------
+// 用户报障：「图文一起发送的时候，不翻译」——文字原样发出去了，消息发成功。
+// 真机日志里**一条 SEND_CAPTURED 都没有**，说明发送拦截根本没触发（不是翻译失败）。
+//
+// 根因：附加图片后，WhatsApp 的输入区变成**图片预览面板**，footer 里会出现
+// 不止一个 contenteditable（媒体标题框 + caption 框）。老 composerEl() 按选择器
+// 顺序取"第一个可见的"，拿到的可能不是用户正在打字的 caption 框 ——
+// 于是 eventInComposer 不匹配 / readComposer 读到空 → 静默放行。
+//
+// 修法：composerEl() 优先返回 document.activeElement（用户正在打字的框）。
+// 下面用真 jsdom 把"附件预览面板"这套结构锁死。
+
+/**
+ * 附件预览面板：footer 里**先**出现一个媒体标题框（不可见/非焦点），
+ * caption 框（真机里同样是 #editable-message-text）排在它**后面**。
+ *
+ * 这个"错序"就是缺陷的触发器：老 composerEl() 按选择器顺序取第一个可见框，
+ * 会拿到前面那个，于是用户真正在打字的 caption 被漏掉 → 静默放行。
+ */
+const ATTACH_PREVIEW_MAIN =
+  '<div id="main"><div id="msg-list"></div><footer>' +
+  '<div id="media-editor">' +
+  '<div id="media-title" contenteditable="true" role="textbox" aria-label="Add a caption"></div>' +
+  '<div id="editable-message-text" contenteditable="true" role="textbox" aria-label="Type a message"></div>' +
+  '</div>' + SEND_BTN + '</footer></div>'
+
+test('0.1.28-图文发送：附件预览面板里打字，按回车必须被拦下并翻译（不是静默放行）', async () => {
+  const h = await mount({ html: ATTACH_PREVIEW_MAIN, translation: 'Image caption translated' })
+  try {
+    // 用户把光标放进 caption 框（真机上 attachment 后焦点自动落在这里）
+    const caption = h.doc.getElementById('editable-message-text')
+    caption.focus()
+    caption.textContent = '这张图很好看'
+    h.doc.__editor.setModel('这张图很好看')
+
+    const prevented = h.pressEnter()
+    assert.equal(prevented, true,
+      '图文消息的发送必须被拦下（defaultPrevented）——没拦就是原文直接出网')
+
+    await sleep(200)
+    assert.equal(h.translateCalls.length, 1, '必须发起 1 次翻译请求')
+    assert.equal(h.translateCalls[0].text, '这张图很好看', '翻译的必须是 caption 正文')
+    assert.deepEqual(h.sent, ['Image caption translated'], '发出的必须是译文，只能一条')
+  } finally { h.close() }
+})
+
+test('0.1.28-图文发送：焦点在 caption 框时点发送按钮，也必须被拦下', async () => {
+  const h = await mount({ html: ATTACH_PREVIEW_MAIN, translation: 'Image caption translated' })
+  try {
+    const caption = h.doc.getElementById('editable-message-text')
+    caption.focus()
+    caption.textContent = '这张图很好看'
+    h.doc.__editor.setModel('这张图很好看')
+
+    h.clickSendButton()
+
+    await sleep(200)
+    assert.equal(h.translateCalls.length, 1,
+      '点发送按钮也必须触发翻译（否则就是原文出网）')
+    assert.equal(h.translateCalls[0].text, '这张图很好看', '翻译的必须是 caption 正文')
+    assert.deepEqual(h.sent, ['Image caption translated'], '发出的必须是译文')
+  } finally { h.close() }
+})
+
+test('0.1.28-图文发送：附件场景下"媒体标题框"不该被误当成正文', async () => {
+  // 防回归：修好"取错框"之后，绝不能反过来把前面的媒体标题框当正文翻译。
+  const h = await mount({ html: ATTACH_PREVIEW_MAIN, translation: 'Image caption translated' })
+  try {
+    const title = h.doc.getElementById('media-title')
+    title.textContent = 'IMG_2043.HEIC'
+    const caption = h.doc.getElementById('editable-message-text')
+    caption.focus()
+    caption.textContent = '这张图很好看'
+    h.doc.__editor.setModel('这张图很好看')
+
+    h.pressEnter()
+    await sleep(200)
+    assert.equal(h.translateCalls.length, 1)
+    assert.equal(h.translateCalls[0].text, '这张图很好看',
+      '翻译的必须是 caption 框的正文，而不是媒体标题框里的文件名')
+  } finally { h.close() }
+})
+
+test('0.1.28-图文发送：composerEl 必须优先取"焦点所在"的输入框，而不是第一个 contenteditable', () => {
+  // 结构级守卫：composerEl() 里 activeElement 分支必须排在 firstMatch 之前。
+  const at = guestSrc.indexOf('function composerEl()')
+  assert.ok(at > 0, '找不到 composerEl')
+  const body = guestSrc.slice(at, guestSrc.indexOf('\n  function readComposer', at))
+  const aeAt = body.indexOf('document.activeElement')
+  const fmAt = body.indexOf('firstMatch(')
+  assert.ok(aeAt > 0, 'composerEl 必须考虑 document.activeElement')
+  assert.ok(fmAt > 0, 'composerEl 仍然要有选择器兜底')
+  assert.ok(aeAt < fmAt,
+    'activeElement 必须排在 firstMatch 之前 —— 附件后 footer 里有多个输入框，' +
+    '只按选择器顺序取会拿错框，导致发送静默放行')
+})
+
+test('0.1.28-图文发送：焦点不在 caption 框（用户先打字后附加图片）时，Enter 也必须被拦下', async () => {
+  // 真机最可能的现场：用户先在普通输入框打出中文 → 点附加图片 → 焦点没跟着切到
+  // caption 框 → Enter 事件发生在 caption 框里，但 composerEl()（取焦点）拿到的是
+  // 前面那个框 → eventInComposer 失败 → **静默放行**，中文原文原样出网。
+  // 这条用例把"事件优先、焦点兜底"这个修复钉死。
+  const h = await mount({ html: ATTACH_PREVIEW_MAIN, translation: 'Image caption translated' })
+  try {
+    const title = h.doc.getElementById('media-title') // 让焦点**故意**留在别的框上
+    title.focus()
+    assert.equal(h.doc.activeElement.id, 'media-title', '前置条件：焦点必须不在 caption 框')
+
+    const caption = h.doc.getElementById('editable-message-text')
+    caption.textContent = '这张图很好看'
+    h.doc.__editor.setModel('这张图很好看')
+
+    const ev = new h.win.KeyboardEvent('keydown', {
+      key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
+    })
+    caption.dispatchEvent(ev)
+
+    assert.equal(ev.defaultPrevented, true,
+      '即使焦点不在 caption 框，也要按"事件发生在哪个框"来拦 —— 否则原文直接出网')
+
+    await sleep(200)
+    assert.equal(h.translateCalls.length, 1, '必须发起 1 次翻译请求')
+    assert.equal(h.translateCalls[0].text, '这张图很好看', '翻译的必须是 caption 正文')
+    assert.deepEqual(h.sent, ['Image caption translated'], '发出的必须是译文')
+  } finally { h.close() }
+})

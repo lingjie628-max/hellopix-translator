@@ -141,7 +141,11 @@ test('main.js：先装扩展再打开页面；LINE 不挂翻译桥、不误报',
   assert.match(MAIN, /function bridgeEnabledFor\(item\) \{\s*return !!item && !item\.customUrl && item\.id !== 'tickets' && !item\.extension/)
   assert.match(MAIN, /const bridgeEnabled = bridgeEnabledFor\(item\)/)
   const wd = MAIN.slice(MAIN.indexOf('function watchdogBridge('))
-  assert.match(wd.slice(0, 400), /if \(!bridgeEnabledFor\(tab\.item\)\) return/)
+  // 取整个函数体来断言，不要用固定字符数切片 —— 函数开头加几行注释/清理
+  // 就会把目标断言挤出窗口，那是"测试写脆了"，不是功能坏了。
+  const wdBody = wd.slice(0, wd.indexOf('\nfunction ', 10) > 0 ? wd.indexOf('\nfunction ', 10) : 3000)
+  assert.match(wdBody, /if \(!bridgeEnabledFor\(tab\.item\)\) return/,
+    'watchdogBridge 必须在入口就排除不挂翻译桥的平台，否则 LINE 会误报"桥没起来"')
   assert.match(MAIN, /path\.join\(process\.resourcesPath, name \+ '-ext'\)/)
   const pkg = require(path.join(DESKTOP, 'package.json'))
   assert.ok((pkg.build.extraResources || []).some((r) => r.from === 'vendor/line-ext' && r.to === 'line-ext'),

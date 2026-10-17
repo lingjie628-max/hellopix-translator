@@ -380,7 +380,29 @@ const pixBridge = {
       line-height: 1.45;
       opacity: 0.9;
       white-space: pre-wrap;
-      user-select: text;
+      /* ------------------------------------------------------------------
+         译文必须能被选中、复制。
+         真机现象：译文看得见却选不中 / 复制不出来。
+         根因：译文框是宿主（WhatsApp / LINE / Telegram）气泡的后代，而这些宿主
+         会在气泡容器上打 user-select: none（很多构建用的是**带前缀**的
+         -webkit-user-select: none）。我们原来只声明了不带前缀、也不带
+         !important 的 user-select: text，特异性/层叠上压不过宿主 →
+         整个子树被禁选，译文跟着一起选不中。
+         改法：两种写法都写、都加 !important 把选择权抢回来；同时挡住宿主
+         在译文上重新开禁选的可能（用 -webkit-user-drag 关掉拖拽干扰）。
+         这里的 !important 与下面 .pix-click 的 pointer-events 同理 ——
+         与宿主争夺控件自身的交互能力，必须显式压过。
+         ------------------------------------------------------------------ */
+      user-select: text !important;
+      -webkit-user-select: text !important;
+      -webkit-user-drag: none;
+      pointer-events: auto;
+    }
+    /* 宿主常把「按住拖动 = 选中整条消息」绑在气泡上；译文在气泡内，这会让
+       在译文上按下时被宿主接管、选不中。放大可点/可选区域，别被父级吞掉。 */
+    .pix-trans::selection,
+    .pix-trans *::selection {
+      background: rgba(96, 165, 250, .35);
     }
     .message-in .pix-trans, .message-list-item:not(.own) .pix-trans {
       border-top-color: rgba(255,255,255,.12);
@@ -458,6 +480,46 @@ const pixBridge = {
   }
   mountStyle()
   if (!document.documentElement) document.addEventListener('DOMContentLoaded', mountStyle, { once: true })
+
+  /* ------------------------------------------------------------------
+     译文可选中的第二道保险（事件层）。
+     CSS 只能解决"宿主用 user-select: none 禁选"。有一类宿主用的是**事件**：
+     在气泡 / 消息列表上挂 selectstart / mousedown / copy 并 preventDefault，
+     于是即便 CSS 允许选中，按下拖动 / 复制那一刻也会被宿主取消。
+     这里在 **document 捕获阶段**监听：document 捕获是最外层，比宿主挂在
+     气泡 / #main 上的任何监听都先收到事件；对落在译文框里的目标直接
+     stopPropagation —— 宿主**根本收不到**这一下，它的 preventDefault 无从生效。
+     只对 .pix-trans 生效，其它区域照旧向上传，绝不影响宿主自己的禁选逻辑。
+     ------------------------------------------------------------------ */
+  function inPixTrans(target) {
+    if (!target || typeof target.closest !== 'function') return false
+    try { return !!target.closest('.pix-trans') } catch (e) { return false }
+  }
+  ;['selectstart', 'copy'].forEach(function (type) {
+    document.addEventListener(type, function (event) {
+      if (!inPixTrans(event.target)) return
+      const box = (typeof event.target.closest === 'function') ? event.target.closest('.pix-trans') : null
+      // 掐断向宿主的传播：宿主挂在气泡 / #main 上的捕获监听收不到这一下。
+      // 注意 —— stopPropagation 不阻止**同一个 document 节点**上的其它监听；
+      // 若真有宿主把监听挂在 document 且比我们更早注册，那已经超出我们能救的
+      // 范围（它先执行并取消）。真机宿主都挂在气泡层，这里覆盖得住。
+      event.stopPropagation()
+      // 兜底：极少数宿主在更内层、更早的阶段已经取消过（defaultPrevented 为真），
+      // 我们无法"撤销"一次 preventDefault。此时直接把译文整段选中，
+      // 让用户至少能立刻 Cmd/Ctrl+C 复制走 —— 好过"选不中"。
+      if (event.type === 'selectstart' && event.defaultPrevented) {
+        try {
+          const sel = window.getSelection()
+          if (sel && sel.rangeCount === 0) {
+            const range = document.createRange()
+            range.selectNodeContents(box)
+            sel.removeAllRanges()
+            sel.addRange(range)
+          }
+        } catch (e) {}
+      }
+    }, true)
+  })
 
   function api() {
     return pixBridge
@@ -589,6 +651,14 @@ const pixBridge = {
       // 任何新加的控件只要带上它，就会被解析/采集自动跳过。
       '[data-pix-ui]',
       '.pix-trans', '.pix-click', '.pix-trans-action-row', '.pix-kept', '.pix-revoked'
+    ].join(', ')
+
+    // WhatsApp 兜底提取时，"这个容器里含有 UI/媒体元信息"的判据。
+    // 命中即整块不当正文 —— 挡住时间、已读勾、图标、按钮、图片、预览缩略图。
+    var MEDIA_UI_DESC_SEL = [
+      'img', 'canvas', 'svg', 'video', '[data-icon]',
+      'time', '.message-time', '.time', 'button', '[role="button"]',
+      '.MessageMeta', '.pix-trans', '.pix-click', '.pix-trans-action-row', '.pix-kept', '.pix-revoked'
     ].join(', ')
 
     // -------------------------------------------------------------------
@@ -835,11 +905,37 @@ const pixBridge = {
     // -------------------------------------------------------------------
 
     /**
-     * 收集真正的正文候选：`.selectable-text`，且不落在预览卡片 / 引用块里。
+     * 收集真正的正文候选。
      *
-     * 只认这个标记是有意的 —— WhatsApp 把"用户可选中的文本"都打了它，
-     * 而时间、勾、卡片文案、按钮都没有。找不到就是没有正文，返回空。
-     * 外层若已收录，内层直接跳过（外层的 textContent 已含内层）。
+     * ## 第一优先：`.selectable-text`（WhatsApp 给"用户可选中文字"打的正规标记）
+     *
+     * 时间、勾、卡片文案、按钮都没有这个标记，所以它是最可靠的正文信号。
+     * 外层若已收录，内层直接跳过（外层 textContent 已含内层）。
+     *
+     * ## 为什么还要兜底（0.1.28 修的真机缺陷）
+     *
+     * 用户报障：「图文一起发送的时候，不翻译」。真机「图片 + 文字」消息有二类形态：
+     *
+     *   ① caption **没有** `span.selectable-text`（直接在 `.copyable-text` 容器里，
+     *      或在 `[data-testid="msg-container"]` 的 caption 子容器里）。
+     *      → `.selectable-text` 命中 0 → 正文取空 → translatable=false → hide。
+     *
+     * ## 为什么是"非此即彼"而不是两路合并（这是本修复的关键取舍）
+     *
+     * 曾经试过把兜底候选与 `.selectable-text` **合并**，结果立刻回归：
+     * 兜底会把文件名（`invoice-2026.pdf`）、图片占位（`photo.jpg`）这类
+     * "不在 selectable-text 里但我们不该翻"的 UI 文字一并收进来 ——
+     * 用例 8「文件名不能进正文」当场变红。
+     *
+     * `.selectable-text` 一旦存在就说明它有权威性：WhatsApp 只给"用户可选中
+     * 的文字"打这个标记，文件名/占位/时间/按钮都没有。此时再掺入启发式候选
+     * 只会引入噪音。所以：**只在 selectable 命中 0 个时才启用兜底** ——
+     * 既修好"文字没有标记"的图文消息，又不动任何既有行为。
+     *
+     * 待确认（需要真机 DOM 证据）：若真机上图片**自身**带 `.selectable-text`
+     * 而 caption 在它旁边没有标记，本方案会取到图片占位而不是 caption。
+     * 这种情况必须靠真机证据决定怎么处理，不能靠猜 —— 因为在没有真机结构时
+     * 每加一条启发式规则，都会先打破一个已通过的用例。
      */
     function whatsappCandidates(root) {
       var out = []
@@ -858,7 +954,67 @@ const pixBridge = {
       if (matchesAny(root, SELECTABLE_SEL)) consider(root)
       var found = root.querySelectorAll ? root.querySelectorAll(SELECTABLE_SEL) : []
       for (var i = 0; i < found.length; i++) consider(found[i])
-      return out
+      if (out.length) return out
+      return whatsappCaptionCandidates(root)
+    }
+
+    /**
+     * 兜底：从消息行里提取 caption 正文候选。
+     *
+     * 判定"这是正文容器"的充分条件（全部满足才算）：
+     *   1. 自身有可读文字（字母/数字/表意文字），不是纯图片/图标/时间；
+     *   2. 不在预览卡片、引用块、自有 UI（data-pix-ui / .pix-*）里；
+     *   3. 不是按钮 / 图标 / 时间戳 / 送达状态（isUiNode + 逐行清洗）；
+     *   4. **自身不含任何 UI 元信息后代**：`img` / `canvas` / `svg` /
+     *      `[data-icon]` / `time` / `button` / `[role=button]` / `.message-time`。
+     *      这一条是硬闸门 —— 没有它，兜底会选到 `.copyable-text` 这类外层容器，
+     *      把时间（3:25 PM）与已读图标（wds-ic-read）的 textContent 一起带进翻译，
+     *      正是 `message-parser.test.js` 的 FORBIDDEN 列表严防的 P0 回归。
+     *   5. 不含 `<img>` / `<canvas>`：媒体容器本身不当正文 —— 但它的**兄弟**
+     *      caption 容器可以。这样"图片 + 文字"里只把文字收进来。
+     *
+     * 收"最内层"：若某候选的祖先也是候选，只留离文字最近的那层；
+     * 同一段文字被多层容器（div > span）包住时按 textContent 去重。
+     */
+    function whatsappCaptionCandidates(root) {
+      var out = []
+      if (!root || !root.querySelectorAll) return out
+      var all = root.querySelectorAll('div, span, p, section')
+      for (var i = 0; i < all.length; i++) {
+        var el = all[i]
+        if (isUiNode(el)) continue
+        if (insideOf(el, PREVIEW_SEL, root)) continue
+        if (insideOf(el, QUOTED_SEL, root)) continue
+        if (insideOf(el, '[data-pix-ui]', root)) continue
+        if (looksLikePreviewCard(el)) continue
+        // 媒体/UI 后代一律剔除：含 img/canvas 的容器，或含时间/图标/按钮的容器
+        if (el.querySelector && el.querySelector(MEDIA_UI_DESC_SEL)) continue
+        var text = nodeText(el)
+        if (!text) continue
+        if (!/[\p{L}\p{N}]/u.test(text)) continue
+        if (hasBusy(text)) continue
+        out.push(el)
+      }
+      // 只留"最内层"：任何被另一个候选包含的候选，丢掉外层（保留离文字最近的那层）
+      var leaves = []
+      for (var j = 0; j < out.length; j++) {
+        var contained = false
+        for (var k = 0; k < out.length; k++) {
+          if (j === k) continue
+          if (out[k].contains && out[k].contains(out[j]) && out[k] !== out[j]) { contained = true; break }
+        }
+        if (!contained) leaves.push(out[j])
+      }
+      // 同一个文字块可能被多个叶子包着（div > span），去重：清理后的正文相同只留一个
+      var picked = []
+      var seen = {}
+      for (var m = 0; m < leaves.length; m++) {
+        var key = cleanLines(nodeText(leaves[m]).split('\n'), true).join('\n')
+        if (!key || seen[key]) continue
+        seen[key] = true
+        picked.push(leaves[m])
+      }
+      return picked
     }
 
     function whatsappBody(root) {
@@ -2659,7 +2815,41 @@ const pixBridge = {
     return null
   }
 
+  /**
+   * 「这个元素能不能输入」。
+   *
+   * 为什么不只信 `el.isContentEditable`：它是**宿主实现**的派生属性，在
+   * 嵌套 contenteditable（`contenteditable="false"` 的子节点）、shadow DOM、
+   * 以及非浏览器环境里都可能是 `undefined`。一旦它假阴性，composerEl() 就会
+   * 跳过"用户正在打字的框"退回选择器兜底 —— 那正是 0.1.28 图文不翻译的根因。
+   * 所以这里**属性优先**，isContentEditable 仅作补充。
+   */
+  function isEditableEl(el) {
+    if (!el || el.nodeType !== 1) return false
+    const tag = el.tagName
+    if (tag === 'TEXTAREA' || tag === 'INPUT') return true
+    const attr = el.getAttribute && el.getAttribute('contenteditable')
+    if (attr != null) return String(attr).toLowerCase() !== 'false'
+    return el.isContentEditable === true
+  }
+
   function composerEl() {
+    // ★ 优先"用户正在打字的那个框"（document.activeElement）。
+    //
+    // 为什么把它提到最前（0.1.28 修的真机缺陷）：
+    // 用户报「图文一起发送的时候，不翻译」—— 附加图片后，WhatsApp 的输入区变成
+    // 图片预览面板，footer 里会出现**不止一个** contenteditable（标题框、caption 框…）。
+    // 老实现按选择器顺序 `firstMatch` 取"第一个可见的"，会拿到**不是**用户在打字的那个
+    // （比如标题框），于是 readComposer 读到空、或 eventInComposer 不匹配 →
+    // 整条发送拦截被**静默放行**，中文原文直接出网。
+    //
+    // activeElement 天然就是"焦点所在、用户正在输入"的元素，对"只有一个输入框"和
+    // "附件后有多个输入框"两种形态都正确。放在最前不改变常规行为：
+    // 常规情况下 activeElement 就是 footer 里那个唯一的输入框。
+    const ae = document.activeElement
+    if (ae && isEditableEl(ae) && visible(ae)) {
+      if (!ae.closest('header, [role="search"], [data-testid="chat-list-search"]')) return ae
+    }
     const found = firstMatch([
       'footer [contenteditable="true"]',
       '#editable-message-text',
@@ -2674,10 +2864,6 @@ const pixBridge = {
       'textarea[aria-label*="message" i]'
     ])
     if (found) return found
-    const ae = document.activeElement
-    if (ae && visible(ae) && (ae.isContentEditable || ae.tagName === 'TEXTAREA' || ae.tagName === 'INPUT')) {
-      if (!ae.closest('header, [role="search"], [data-testid="chat-list-search"]')) return ae
-    }
     return null
   }
 
@@ -2764,6 +2950,58 @@ const pixBridge = {
     if (!event || !box) return false
     const t = event.target
     return t === box || box.contains(t)
+  }
+
+  /**
+   * ★ 0.1.28 ★ 事件发生在哪个输入框里 —— 以**事件自己**为准，而不是只看焦点。
+   *
+   * 为什么需要它（真机缺陷「图文一起发送的时候，不翻译」）：
+   *   附加图片后 footer 里会出现多个 contenteditable。用户很可能是**先在普通输入框
+   *   打字、再点附加图片**，此时焦点不一定跟着切到 caption 框 —— 于是
+   *   `composerEl()`（取焦点框）返回的是 A，而 Enter 事件发生在 B，
+   *   `eventInComposer` 判定失败 → 整条拦截被**静默放行**，中文原文直接出网。
+   *
+   * 真机上这种情况**不会**有任何报错，消息也发得出去，用户只看到"没翻译"。
+   * 所以这里把"事件落在哪个可编辑框"作为**独立且优先**的判据：
+   * 事件目标在哪个框里，就拦哪个框 —— 与焦点无关。
+   *
+   * 排除项（绝不能误抓）：不是可编辑元素、或落在我们自己的界面 / 搜索框里。
+   */
+  function boxFromEvent(event) {
+    if (!event || !event.target) return null
+    const t = event.target
+    const host = t.closest
+      ? t.closest('[contenteditable="true"], textarea, [role="textbox"]')
+      : null
+    const el = host || (isEditableEl(t) ? t : null)
+    if (!el) return null
+    if (el.closest && el.closest('header, [role="search"], [data-testid="chat-list-search"]')) return null
+    if (el.closest && el.closest('[data-pix-own-ui], #pix-send-failure, #pix-notice')) return null
+    return el
+  }
+
+  /**
+   * 发送事件的目标输入框：**事件优先，焦点兜底**。
+   *
+   * 只要事件本身发生在某个可编辑框里，就以它为准；这解决了"焦点没跟上、
+   * composerEl() 取错框导致静默放行"的整类问题（图文、转发、编辑等）。
+   */
+  function sendTargetBox(event) {
+    const fromEvent = boxFromEvent(event)
+    if (fromEvent) {
+      const focusBox = composerEl()
+      // 事件框与焦点框不一致时，至少让 composerEl() 的"当前框"缓存跟上事件框，
+      // 否则后续 readComposer / nativeSetComposer 会对着另一个框操作。
+      if (focusBox && focusBox !== fromEvent) {
+        trace('COMPOSER_FOCUS_MISMATCH', {
+          at: 'send_target',
+          eventBoxEditable: String(!!fromEvent.getAttribute('contenteditable'))
+        })
+      }
+      return fromEvent
+    }
+    const box = composerEl()
+    return box
   }
 
   function fireSend(box) {
@@ -3703,8 +3941,11 @@ const pixBridge = {
     if (!prefs.transSend) return
     if (event.defaultPrevented) return
     if (!isSendEnter(event)) return
-    const box = composerEl()
-    if (!box || !eventInComposer(event, box)) return
+    const box = sendTargetBox(event)
+    if (!box || !eventInComposer(event, box)) {
+      traceSkip('keydown', event, box)
+      return
+    }
     safeIntercept(event, box)
   }
 
@@ -3714,8 +3955,11 @@ const pixBridge = {
     if (!prefs.transSend) return
     if (suppression) return
     if (event.inputType !== 'insertParagraph') return
-    const box = composerEl()
-    if (!box || !eventInComposer(event, box)) return
+    const box = sendTargetBox(event)
+    if (!box || !eventInComposer(event, box)) {
+      traceSkip('beforeinput', event, box)
+      return
+    }
     safeIntercept(event, box)
   }
 
@@ -3729,11 +3973,85 @@ const pixBridge = {
     if (guardBusySend(event)) return
     if (suppression) return
     if (!prefs.transSend) return
-    if (!looksLikeSend(event.target)) return
-    const box = composerEl()
-    if (!box) return
-    if (!readComposer(box).trim()) return
+    if (!looksLikeSend(event.target)) {
+      // 「点发送按钮」这条通道最容易静默失效：附件预览面板等新结构下，
+      // 发送按钮可能不带 aria-label/data-icon="send"，looksLikeSend 会漏判。
+      // 但**不是所有点击都该记**（用户点别处也会走到这里），所以只记录
+      // "看起来像发送"的点击：在 compose-box / footer 内、带 send 字样或是个按钮。
+      traceSendClickSkip(event)
+      return
+    }
+    const box = sendTargetBox(event)
+    if (!box) { traceSkip('click-no-box', event, null); return }
+    if (!readComposer(box).trim()) { traceSkip('click-empty-box', event, box); return }
     safeIntercept(event, box)
+  }
+
+  /**
+   * 发送拦截被**静默放行**时的取证日志。
+   *
+   * 为什么需要它：用户报「图文一起发送的时候，不翻译」时，日志里**一条记录都没有** ——
+   * 我们只能靠复述推断。凡是"本该拦下却没拦"的分支，都必须留下能一眼定位现场的一行，
+   * 否则下一次还是同样两眼一抹黑。只记结构与原因，绝不记正文。
+   */
+  function traceSkip(reason, event, box) {
+    try {
+      const t = event && event.target
+      console.info('[PIX_TRACE] SEND_NOT_INTERCEPTED ' + JSON.stringify({
+        reason: reason,
+        via: (event && event.type) || '-',
+        key: (event && event.key) || '-',
+        box: box ? {
+          tag: String(box.tagName || '').toLowerCase(),
+          testid: box.getAttribute ? (box.getAttribute('data-testid') || '') : '',
+          editable: box.getAttribute ? (box.getAttribute('contenteditable') || '') : ''
+        } : null,
+        target: t ? {
+          tag: String(t.tagName || '').toLowerCase(),
+          testid: t.getAttribute ? (t.getAttribute('data-testid') || '') : '',
+          icon: t.getAttribute ? (t.getAttribute('data-icon') || '') : '',
+          ariaLabel: (t.getAttribute ? (t.getAttribute('aria-label') || '') : '').slice(0, 40)
+        } : null,
+        // 当前可见的输入框候选（不记内容，只记结构），用来判断"选错了哪个框"
+        candidates: visibleComposerCandidates()
+      }))
+    } catch (e) {}
+  }
+
+  /**
+   * 只有"看起来像发送按钮"的点击才记录 —— 避免用户在页面上随便点一下就刷日志。
+   * 判据放宽到"在 compose-box / footer 内 且 是个按钮/图标"，因为附件预览面板
+   * 的发送按钮可能没有 send 字样。
+   */
+  function traceSendClickSkip(event) {
+    try {
+      const t = event && event.target
+      if (!t || !t.closest) return
+      const btn = t.closest('button, [role="button"], [data-icon], [data-testid]')
+      if (!btn) return
+      const inCompose = !!(btn.closest('footer, [data-testid*="compose" i], [data-testid*="attach" i], [data-testid*="media" i]'))
+      if (!inCompose) return
+      traceSkip('click-not-send', event, composerEl())
+    } catch (e) {}
+  }
+
+  /** 页面上当前可见的输入框候选结构（供 traceSkip 判断"选错框"）。 */
+  function visibleComposerCandidates() {
+    const out = []
+    try {
+      const all = document.querySelectorAll('[contenteditable="true"], textarea')
+      for (let i = 0; i < all.length && out.length < 6; i++) {
+        const el = all[i]
+        if (!visible(el)) continue
+        out.push({
+          tag: String(el.tagName || '').toLowerCase(),
+          testid: el.getAttribute('data-testid') || '',
+          inFooter: !!el.closest('footer'),
+          focused: el === document.activeElement
+        })
+      }
+    } catch (e) {}
+    return out
   }
 
   const DELETED_RE = /^(this message was deleted\.?|you deleted this message\.?|此消息已删除|你删除了这条消息|你已删除此消息|esta mensagem foi apagada|este mensaje fue eliminado|ce message a été supprimé|diese nachricht wurde gelöscht|pesan ini telah dihapus)$/i

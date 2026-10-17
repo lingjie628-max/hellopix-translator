@@ -128,3 +128,21 @@ test('硬规则 3：失败提示的「重试翻译」必须有可见的「正在
   assert.match(notice, /actions: false/, '重试中的瞬态提示应该没有按钮')
   assert.match(notice, /hideSendFailureNotice\(\)/, '重试成功后没有收起状态条')
 })
+
+test('P0-4：译文必须可选中、可复制（宿主 user-select: none 压不住它）', () => {
+  // 真机现象：译文看得见，却选不中 / 复制不出来。
+  // 根因：译文框是宿主气泡的后代，宿主在气泡容器上打 user-select: none
+  //       （很多构建用带前缀的 -webkit-user-select），我们原来只有不带前缀、
+  //       也不带 !important 的 user-select: text，层叠上压不过宿主。
+  const rule = (guest.match(/\.pix-trans\s*\{[\s\S]*?\n\s*\}/) || [''])[0]
+  assert.ok(rule.length > 0, '找不到 .pix-trans 规则')
+  // 不带前缀 + 带前缀两种写法都要有，且都必须 !important 才能压过宿主。
+  assert.match(rule, /user-select:\s*text\s*!important/, '.pix-trans 缺少 user-select: text !important')
+  assert.match(rule, /-webkit-user-select:\s*text\s*!important/, '.pix-trans 缺少 -webkit-user-select: text !important')
+  // 事件层第二道保险：宿主可能在 selectstart/copy 上 preventDefault。
+  assert.match(guest, /function inPixTrans/, '缺少"目标是否落在译文框内"的判定')
+  assert.match(guest, /'selectstart',\s*'copy'/, '事件层守卫没有覆盖 selectstart 与 copy')
+  // 守卫必须挂在捕获阶段（true），否则宿主更早的监听先取消、我们收不到。
+  const guard = section("['selectstart', 'copy']", 'function api(')
+  assert.match(guard, /addEventListener\(type,[\s\S]*?\},\s*true\)/, '事件层守卫必须在捕获阶段')
+})
