@@ -205,7 +205,78 @@ function initClientLog() {
     exit: code => app.exit(code)
   })
   clientLog = log
+  // 内存采样要在所有窗口创建之前就起来，才能覆盖"从启动到崩溃"的完整爬升过程。
+  startMemorySampling(log)
+
+  // ★ 子进程崩溃必须留痕（GPU / utility / 网络进程）★
+  //
+  // 用户反馈"开很多窗口时闪退"。以往只挂了主窗口的 render-process-gone，
+  // **GPU 进程、utility 进程崩溃在日志里完全看不到**。而这类崩溃正是
+  // "界面突然白屏/软件整个消失、连个错误提示都没有"的常见成因。
+  //
+  // 只记 error 级别、事件很短，不会把日志写大。type 要记清楚：
+  // gpu 崩了 → 渲染/合成问题；utility 崩了 → 网络或杂活进程问题。
+  app.on('child-process-gone', (_event, details) => {
+    try {
+      const reason = (details && details.reason) || '?'
+      clientLog.error('crash', '子进程退出：type=' + ((details && details.type) || '?') +
+        ' name=' + ((details && details.name) || '?') +
+        ' reason=' + reason +
+        ' exitCode=' + ((details && details.exitCode) == null ? '?' : details.exitCode) +
+        (reason === 'oom' ? ' ★内存不足' : ''))
+    } catch (ignore) {}
+  })
+
   return log
+}
+
+/**
+ * 周期性记录内存水位 —— **崩溃之前那一刻的内存，是事后唯一能看到的证据**。
+ *
+ * ## 为什么必须有
+ *
+ * 用户反馈"开着很多窗口时闪退"。崩溃记录只能告诉我们"进程因为内存不足被杀了"
+ * （reason=oom），但**回答不了最关键的问题：当时整机还有多少内存？窗口开了几个？**
+ * 没有这两个数字，改阈值、改策略全是拍脑袋。
+ *
+ * ## 为什么不是每分钟一条
+ *
+ * 那样日志会被刷爆（一天 1440 行噪音），真出事时反而不好找。
+ * 只在**水位发生变化**时写：跨过 70% / 80% / 90% 的档位才记一条。
+ * 平时安静，一旦开始吃紧，日志里就有一串爬升曲线。
+ */
+function startMemorySampling(log) {
+  if (!log) return null
+  const MB = 1024 * 1024
+  let lastBucket = -1
+  let lastAt = 0
+
+  const tick = () => {
+    try {
+      // 节流：距上次记录不足 30 秒就跳过，避免窗口抖动导致重复写。
+      if (Date.now() - lastAt < 30000) return
+      const mem = tabBudget.memoryPressure()
+      if (!mem || !Number.isFinite(mem.ratio) || mem.total <= 0) return
+      const pct = Math.round(mem.ratio * 100)
+      // 70% 以下每 10 个百分点一档；70% 以上每 5 个一档（越接近上限越要密）。
+      const bucket = pct >= 90 ? 90 + Math.floor((pct - 90) / 2) * 2
+        : pct >= 70 ? 70 + Math.floor((pct - 70) / 5) * 5
+          : Math.floor(pct / 10) * 10
+      if (bucket === lastBucket) return
+      lastBucket = bucket
+      lastAt = Date.now()
+      // 同时记实例数与本进程 RSS：后者能看出"是不是我们自己在涨"。
+      const rss = Math.round(process.memoryUsage().rss / MB)
+      log.info('memory', '整机已用 ' + pct + '%（' +
+        Math.round(mem.used / MB) + '/' + Math.round(mem.total / MB) + 'MB，口径 ' + mem.source +
+        '）  实例 ' + tabs.length + ' 个  主进程 RSS ' + rss + 'MB')
+    } catch (ignore) {}
+  }
+
+  tick()
+  const timer = setInterval(tick, 15000)
+  if (timer && typeof timer.unref === 'function') timer.unref()
+  return timer
 }
 
 function timingEqual(left, right) {
@@ -2724,6 +2795,24 @@ function createWebView(partition, settings, item, homeUrl, tabInfo) {
   view.webContents.on('will-navigate', guardNavigation)
   view.webContents.on('will-redirect', guardNavigation)
   view.webContents.on('did-finish-load', () => pushPrefsToGuest(view))
+  // ★ 实例渲染进程崩溃必须留痕 ★
+  //
+  // 用户反馈"开着很多窗口时闪退"。以往只有主窗口记录了 render-process-gone，
+  // **每个实例自己的渲染进程崩了日志里一个字都没有** —— 而开几十个窗口时，
+  // 内存压力最先压垮的恰恰是这些实例进程。
+  //
+  // 记下实例标识（应用 + 序号）而不是内部 id：日志给用户看、也给我们看，
+  // id 对不上任何东西。同时记 reason —— 'oom'（内存耗尽）与 'crashed'
+  // 是两个完全不同的排查方向，不能混成一句"崩了"。
+  view.webContents.on('render-process-gone', (_event, details) => {
+    try {
+      const reason = (details && details.reason) || '?'
+      const exitCode = details && details.exitCode != null ? details.exitCode : '?'
+      clientLog.error('crash', '实例渲染进程退出：' + (item.app || '?') + '#' + (item.index || '?') +
+        ' reason=' + reason + ' exitCode=' + exitCode +
+        (reason === 'oom' ? ' ★内存不足' : ''))
+    } catch (ignore) {}
+  })
   // ★ 加载失败的兜底（真机取证：网络不通时表现为"黑屏"，用户以为是软件坏了）★
   //
   // 这是与 loadURL().catch 并行的第二条通道 —— 有些失败只走事件不走 promise
