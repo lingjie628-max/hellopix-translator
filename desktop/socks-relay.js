@@ -59,6 +59,90 @@ const ATYP_IPV6 = 0x04
 const HANDSHAKE_TIMEOUT_MS = 8000
 
 /**
+ * 预检要试探的目标 —— **任一个 CONNECT 成功就算节点可用**。
+ *
+ * ## 为什么不能只试一个（0.1.32 真机事故）
+ *
+ * 原先只 CONNECT `api.ipify.org:443`，一次失败就判"节点连不上"。真机上抓到一个
+ * 节点：对 `1.1.1.1:443` 回 0x01、对 `8.8.8.8:53` 和域名回 0x08 —— 它**对不同目标
+ * 行为不一致**。只测一个目标就下"坏节点"结论，等于把判定权交给一次偶然。
+ *
+ * 同类产品（比特浏览器）的做法可以印证：它经代理去轮询
+ * `google.com / cloudflare.com / github.com / wikipedia.org / baidu.com` 等多个目标，
+ * 拿到任意一个的内容就算代理可用。判定标准是「**能不能真的出去**」，不是「握手是否漂亮」。
+ *
+ * ## 目标怎么选
+ *
+ *   · `web.whatsapp.com` 排第一 —— 用户真正要打开的站点。它连不上，节点对我们就是没用的，
+ *     哪怕别的目标都通。
+ *   · 其余是轻量、全球可达的兜底，覆盖不同机房策略。
+ *
+ * 全部走**域名**（远程 DNS）：这样测的是节点自己的解析与出网能力，与用户实际访问方式一致。
+ */
+const PRECHECK_TARGETS = [
+  { host: 'web.whatsapp.com', port: 443 },
+  { host: 'api.ipify.org', port: 443 },
+  { host: 'www.google.com', port: 443 },
+  { host: 'www.cloudflare.com', port: 443 }
+]
+
+/**
+ * 「都拒了」到「可以下结论」之间要等的宽限期。
+ *
+ * ## 为什么需要
+ *
+ * 全部失败时不能一看最后一个快目标回了就立刻收工 —— 那个**慢的**目标可能正在
+ * 成功（有的人节点响应慢但可用）。但也不能一直等：只要有目标假死，
+ * 用户就要干等满 8 秒，这跟"检测转圈"没区别。
+ *
+ * 折中：已经失败的目标里，如果有任何一个返回得比这个宽限期还早（说明节点是秒拒的），
+ * 就认为剩下的目标只在"收尸"，立即以失败定论；否则继续等，
+ * 直到全部回齐或整体超时。
+ *
+ * 取 1000ms 的依据：秒拒类节点（本事故里那个）实测 0.5~1.4 秒就回 REP 了；
+ * 而真能用的节点在 1 秒内通常早就 CONNECT 成功了。
+ */
+const PRECHECK_SETTLE_MS = 1000
+
+/**
+ * 把 SOCKS5 CONNECT 的应答码翻成**用户能看懂、并能据此行动**的话。
+ *
+ * ## 为什么要有这个函数（0.1.31 的真机教训）
+ *
+ * 原先只在"节点检测"那一个分支里映射了 0x02~0x05，其余全部落到
+ * `节点拒绝了连接请求（reply=N）`。真机上节点回的是 **0x08**（地址类型不支持）
+ * 和 **0x01**（通用故障）—— 用户拿到 `reply=8` 这种原始数字，
+ * 既不知道什么意思、也不知道该做什么，只能来问客服：
+ * 「新版本是不是把节点检测封了？」（实际是节点自己拒的，与版本无关。）
+ *
+ * ## 每个分支必须回答两件事
+ *
+ *   1. **是什么问题** —— 说清是节点侧还是配置侧；
+ *   2. **用户该做什么** —— 绝大多数情况唯一的出路是"换节点"，
+ *      那就直说，不要让用户去反复检查自己填的地址。
+ *
+ * 参考 RFC1928 的 REP 字段定义。
+ */
+function describeConnectReply(rep) {
+  switch (rep) {
+    case 0x01: return '节点内部故障（可能是流量用尽、套餐到期或账号已失效），请联系代理服务商'
+    case 0x02: return '节点规则不允许连接该目标，请联系代理服务商'
+    case 0x03: return '节点所在网络不可达，请更换节点'
+    case 0x04: return '节点找不到目标主机，请更换节点'
+    case 0x05: return '节点无法解析目标域名，请更换节点'
+    case 0x06: return '节点连接目标超时，请更换节点'
+    case 0x07: return '节点不支持该连接命令，请联系代理服务商'
+    // 0x08 曾经写成「可能只支持 IPv4」。0.1.32 真机反证了这个说法：
+    // 同一节点对 1.1.1.1（纯 IPv4 字面量）回 0x01、对 8.8.8.8 和域名回 0x08 ——
+    // 既然纯 IPv4 也不放行，就**不是**地址类型的问题，而是节点本身不让出去。
+    // 商业代理常借用 0x08 表示"账号侧受限"，但这是非标准含义，我们不能替服务商下结论，
+    // 所以文案只陈述事实 + 给唯一有用的下一步。
+    case 0x08: return '节点拒绝了连接（可能是流量用尽、套餐到期或 IP 白名单未加），请联系代理服务商'
+    default: return '节点拒绝了连接（错误码 ' + rep + '），请联系代理服务商'
+  }
+}
+
+/**
  * 给一个 Promise 加硬超时。
  *
  * 超时后先调用 `onTimeout()`（通常是 destroy 掉底层 socket，让对端感知），
@@ -275,7 +359,7 @@ function createSocksRelay(options) {
       upstream = conn.upstream
       client.write(conn.reply)
       if (conn.reply[1] !== 0x00) {
-        throw new Error('上游 CONNECT 失败，reply=' + conn.reply[1])
+        throw new Error('上游 CONNECT 失败：' + describeConnectReply(conn.reply[1]))
       }
 
       // 4) 摘掉两个读取器（否则它们会继续吞数据），把已缓冲的残字节先冲出去，再互相对接。
@@ -347,140 +431,267 @@ function precheckSocks5(options) {
   const pass = String(opts.pass || '')
   const timeoutMs = Number(opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : HANDSHAKE_TIMEOUT_MS
   const started = Date.now()
+  const targets = Array.isArray(opts.targets) && opts.targets.length ? opts.targets : PRECHECK_TARGETS
 
-  return new Promise(resolve => {
-    let socket = null
-    let done = false
-    let buf = Buffer.alloc(0)
-    // ★ timer 必须在 finish() 之前就声明 ★
-    //   否则"地址非法"这条提前 return 的分支会在 finish() 里碰到 TDZ，抛 ReferenceError。
-    //   这类"只有错误路径才炸"的写法正是真机上最难查的一类。
-    let timer = null
+  // ★ 地址非法必须**同步之前**就判掉，不能进并发调度 ★
+  if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) {
+    return Promise.resolve({ ok: false, reason: '代理地址无效', code: 'BAD_TARGET', ms: 0, tried: [] })
+  }
 
-    const finish = (ok, reason, code) => {
-      if (done) return
-      done = true
-      if (timer) clearTimeout(timer)
-      try { if (socket) socket.destroy() } catch (e) {}
-      resolve({ ok: !!ok, reason: reason || '', code: code || (ok ? 'OK' : 'FAIL'), ms: Date.now() - started })
-    }
+  /**
+   * 并发探测所有目标，**第一个成功立即整体成功**，全部失败才判失败。
+   *
+   * 为什么并发：单目标串行时最坏要等 N × timeout。四目标串行 = 32 秒，
+   * 用户会以为软件卡死。并发后最坏仍是 1 × timeout。
+   *
+   * 为什么"任一成功即成功"：节点的出网策略各不相同（有的只放特定域名、
+   * 有的 DNS 走远程、有的限制端口）。只要有一条路能出去，用户的浏览器就能用。
+   */
+  let settled = false
+  let timer = null
+  const probes = []
 
-    if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) {
-      return finish(false, '代理地址无效', 'BAD_TARGET')
-    }
+  const settle = (ok, reason, code, tried) => {
+    if (settled) return
+    settled = true
+    if (timer) clearTimeout(timer)
+    // 一旦定论，把**仍在飞行中的**探测全部掐掉，不留悬挂 socket。
+    for (const p of probes) p.abort()
+    resolveFn({ ok: !!ok, reason: reason || '', code: code || (ok ? 'OK' : 'FAIL'), ms: Date.now() - started, tried: tried || [] })
+  }
 
-    timer = setTimeout(() => finish(false, '节点无响应（' + Math.round(timeoutMs / 1000) + ' 秒内没有回话）', 'TIMEOUT'), timeoutMs)
+  let resolveFn = null
+  const outer = new Promise(r => { resolveFn = r })
 
-    try {
-      socket = net.connect(port, host)
-    } catch (e) {
-      return finish(false, '无法建立连接：' + ((e && e.message) || '未知错误'), 'CONNECT_FAILED')
-    }
+  // 整体硬上限：无论各目标怎么挂，到这个点必须给用户一个答复。
+  timer = setTimeout(() => {
+    settle(false, '节点无响应（' + Math.round(timeoutMs / 1000) + ' 秒内没有回话）', 'TIMEOUT', outcomes.slice())
+  }, timeoutMs)
+  if (timer && typeof timer.unref === 'function') timer.unref()
 
-    socket.on('error', e => {
-      const code = (e && e.code) || ''
-      const text = code === 'ECONNREFUSED' ? '节点拒绝连接（端口没人监听）'
-        : code === 'ENOTFOUND' ? '节点域名解析不了'
-          : code === 'EHOSTUNREACH' || code === 'ENETUNREACH' ? '节点网络不可达'
-            : '连接失败：' + ((e && e.message) || code || '未知错误')
-      finish(false, text, code || 'CONNECT_FAILED')
-    })
+  const outcomes = []
+  const record = o => { outcomes.push(o) }
 
-    socket.on('connect', () => {
-      // 同时提供「无认证」与「用户名/密码」，由上游选 —— 与中继里的握手完全一致。
-      socket.write(Buffer.from([SOCKS_VERSION, 2, AUTH_NONE, AUTH_USERPASS]))
-    })
-
-    // ★ 单一 data 处理器 + 显式阶段状态机 ★
-    //
-    // 曾经这里用 `socket.once('data', …)` 处理"认证应答"和"CONNECT 应答"，
-    // 外层再挂一个常驻 `socket.on('data')`。这是**错的**：Node 会把同一份数据
-    // 分发给**所有**监听器，于是认证应答（首字节 0x01）也会被外层当成
-    // "首个数据包"去解析 `buf[0] !== 0x05` → 误判成 NOT_SOCKS5。
-    // 结果：**带认证的好节点被一律判成坏节点**。
-    // （真机就是 socks5_auth —— 症状与"检测不出来"完全对得上。）
-    //
-    // 现在只有一个处理器，阶段由 stage 显式推进：greeting → auth → connect → done。
-    let stage = 'greeting'
-    let stageBuf = Buffer.alloc(0)
-
-    const onData = chunk => {
-      if (done) return
-      stageBuf = Buffer.concat([stageBuf, chunk])
-
-      if (stage === 'greeting') {
-        buf = Buffer.concat([buf, chunk])
-        if (buf.length < 2) return
-        if (buf[0] !== SOCKS_VERSION) return finish(false, '这个端口不是 SOCKS5 代理', 'NOT_SOCKS5')
-        const method = buf[1]
-        if (method === AUTH_NO_ACCEPTABLE) {
-          return finish(false, (user || pass) ? '节点拒绝了账号密码认证方式' : '节点要求认证，但没填账号密码', 'AUTH_REJECTED')
-        }
-        if (method === AUTH_USERPASS) {
-          if (!user && !pass) return finish(false, '节点要求认证，但没填账号密码', 'AUTH_REQUIRED')
-          const u = Buffer.from(user)
-          const p = Buffer.from(pass)
-          socket.write(Buffer.concat([Buffer.from([0x01, u.length]), u, Buffer.from([p.length]), p]))
-          stage = 'auth'
-          stageBuf = Buffer.alloc(0)
-          return
-        }
-        if (method === AUTH_NONE) {
-          buf = Buffer.alloc(0)
-          stage = 'connect'
-          stageBuf = Buffer.alloc(0)
-          sendConnect()
-          return
-        }
-        return finish(false, '节点选择了不支持的认证方式：' + method, 'AUTH_UNSUPPORTED')
+  for (const t of targets) {
+    const probe = probeOneTarget({ host, port, user, pass, target: t, timeoutMs })
+    probes.push(probe)
+    probe.promise.then(res => {
+      record({ host: t.host, port: t.port, ok: res.ok, code: res.code, reason: res.reason, ms: res.ms })
+      if (settled) return
+      if (res.ok) {
+        settle(true, pickSuccessReason(user, pass), 'OK', outcomes.slice())
+        return
       }
+      // 全部回齐且都失败 → 用**最有信息量**的那条当结论。
+      if (outcomes.length === targets.length) {
+        const pick = pickWorstOutcome(outcomes)
+        settle(false, pick.reason, pick.code, outcomes.slice())
+        return
+      }
+      // ★ 快速收敛：都已经有目标"秒拒"了，就别陪着可能假死的目标耗到整体超时 ★
+      //
+      // 判据：已回的目标全部失败，且**最快的那一个**比宽限期还早返回。
+      // 这代表节点是立刻拒绝的 —— 剩下没回的只会在超时后被收尸，
+      // 继续等只会让用户对着"正在检测"多盯几秒。
+      //
+      // 反过来，如果回得慢（>宽限期），说明这是"慢而可能可用"的节点，
+      // 必须给其他目标留出成功的机会，不能提前判死。
+      const fastest = outcomes.reduce((m, o) => (o.ms < m ? o.ms : m), Infinity)
+      if (fastest <= PRECHECK_SETTLE_MS) {
+        const pick = pickWorstOutcome(outcomes)
+        settle(false, pick.reason, pick.code, outcomes.slice())
+      }
+    })
+  }
 
-      if (stage === 'auth') {
-        if (stageBuf.length < 2) return
-        if (stageBuf[0] !== 0x01) return finish(false, '节点返回的认证应答不合法', 'BAD_REPLY')
-        if (stageBuf[1] !== 0x00) return finish(false, '账号或密码不对', 'AUTH_FAILED')
+  return outer
+}
+
+/**
+ * 单目标探测：TCP → 问候 → 认证 → CONNECT 该目标 → 读回 reply。
+ *
+ * 返回 `{ promise, abort }`。`abort()` 必须幂等 —— 整体定论时会被调用，
+ * 而正常结束时也可能被再次调用。
+ */
+function probeOneTarget (cfg) {
+  const timeoutMs = cfg.timeoutMs
+  let socket = null
+  let done = false
+  let stage = 'greeting'
+  let stageBuf = Buffer.alloc(0)
+  let resolveProbe = null
+  let timer = null
+  const startedAt = Date.now()
+
+  const promise = new Promise(r => { resolveProbe = r })
+
+  const finish = (ok, reason, code) => {
+    if (done) return
+    done = true
+    if (timer) clearTimeout(timer)
+    try { if (socket) socket.destroy() } catch (e) {}
+    resolveProbe({ ok: !!ok, reason: reason || '', code: code || (ok ? 'OK' : 'FAIL'), ms: Date.now() - startedAt })
+  }
+
+  const abort = () => { finish(false, '已取消', 'ABORTED') }
+
+  // 每个目标自身也要有上限：整体 timer 只有一个，但某个目标可能在
+  // "三次握手都成功了、只是 CONNECT 不回"上耗到整体超时 —— 那时归因会变成
+  // 「节点无响应」，掩盖掉真正有效的失败原因。所以单目标也计时。
+  timer = setTimeout(() => finish(false, '节点无响应（' + Math.round(timeoutMs / 1000) + ' 秒内没有回话）', 'TIMEOUT'), timeoutMs)
+  if (timer && typeof timer.unref === 'function') timer.unref()
+
+  try {
+    socket = net.connect(cfg.port, cfg.host)
+  } catch (e) {
+    finish(false, '无法建立连接：' + ((e && e.message) || '未知错误'), 'CONNECT_FAILED')
+    return { promise, abort }
+  }
+
+  socket.on('error', e => {
+    const code = (e && e.code) || ''
+    const text = code === 'ECONNREFUSED' ? '节点拒绝连接（端口没人监听）'
+      : code === 'ENOTFOUND' ? '节点域名解析不了'
+        : code === 'EHOSTUNREACH' || code === 'ENETUNREACH' ? '节点网络不可达'
+          : '连接失败：' + ((e && e.message) || code || '未知错误')
+    finish(false, text, code || 'CONNECT_FAILED')
+  })
+
+  socket.on('connect', () => {
+    // 同时提供「无认证」与「用户名/密码」，由上游选 —— 与中继里的握手完全一致。
+    socket.write(Buffer.from([SOCKS_VERSION, 2, AUTH_NONE, AUTH_USERPASS]))
+  })
+
+  // ★ 单一 data 处理器 + 显式阶段状态机 ★
+  //
+  // 曾经这里用 `socket.once('data', …)` 处理"认证应答"和"CONNECT 应答"，
+  // 外层再挂一个常驻 `socket.on('data')`。这是**错的**：Node 会把同一份数据
+  // 分发给**所有**监听器，于是认证应答（首字节 0x01）也会被外层当成
+  // "首个数据包"去解析 `buf[0] !== 0x05` → 误判成 NOT_SOCKS5。
+  // 结果：**带认证的好节点被一律判成坏节点**。
+  // （真机就是 socks5_auth —— 症状与"检测不出来"完全对得上。）
+  //
+  // 现在只有一个处理器，阶段由 stage 显式推进：greeting → auth → connect → done。
+  const onData = chunk => {
+    if (done) return
+    stageBuf = Buffer.concat([stageBuf, chunk])
+
+    if (stage === 'greeting') {
+      if (stageBuf.length < 2) return
+      if (stageBuf[0] !== SOCKS_VERSION) return finish(false, '这个端口不是 SOCKS5 代理', 'NOT_SOCKS5')
+      const method = stageBuf[1]
+      // ★ 进入下一阶段前必须清空缓冲 ★
+      //   否则问候应答的这 2 字节会留在 stageBuf 里，与 CONNECT 应答拼在一起，
+      //   解析时整体错位一字节（实测表现为"请求包变成 5,1,3,16,..."）。
+      stageBuf = Buffer.alloc(0)
+      if (method === AUTH_NO_ACCEPTABLE) {
+        return finish(false, (cfg.user || cfg.pass) ? '节点拒绝了账号密码认证方式' : '节点要求认证，但没填账号密码', 'AUTH_REJECTED')
+      }
+      if (method === AUTH_USERPASS) {
+        if (!cfg.user && !cfg.pass) return finish(false, '节点要求认证，但没填账号密码', 'AUTH_REQUIRED')
+        const u = Buffer.from(cfg.user)
+        const p = Buffer.from(cfg.pass)
+        socket.write(Buffer.concat([Buffer.from([0x01, u.length]), u, Buffer.from([p.length]), p]))
+        stage = 'auth'
+        stageBuf = Buffer.alloc(0)
+        return
+      }
+      if (method === AUTH_NONE) {
         stage = 'connect'
         stageBuf = Buffer.alloc(0)
         sendConnect()
         return
       }
-
-      if (stage === 'connect') {
-        if (stageBuf.length < 4) return
-        if (stageBuf[0] !== SOCKS_VERSION) return finish(false, '节点返回的应答不合法', 'BAD_REPLY')
-        const rep = stageBuf[1]
-        if (rep !== 0x00) {
-          const why = rep === 0x05 ? '节点无法解析目标域名'
-            : rep === 0x02 ? '节点不允许该目标'
-              : rep === 0x03 ? '节点网络不可达'
-                : rep === 0x04 ? '节点找不到目标主机'
-                  : '节点拒绝了连接请求（reply=' + rep + '）'
-          return finish(false, why, 'CONNECT_REFUSED')
-        }
-        stage = 'done'
-        return finish(true, '节点可用', 'OK')
-      }
+      return finish(false, '节点选择了不支持的认证方式：' + method, 'AUTH_UNSUPPORTED')
     }
-    socket.on('data', onData)
 
-    /**
-     * 认证过了还不算"节点可用" —— 必须**真的 CONNECT 一次**。
-     *
-     * 为什么（0.1.29 真机证据）：有的节点问候/认证都正常，但 CONNECT 之后
-     * **不回 reply**（假死、被限流、隧道没通）。这种节点如果放进 Chromium，
-     * 就会卡住渲染进程 → 正是我们要根除的那类现场。所以在这里就用真 CONNECT 验掉。
-     */
-    function sendConnect () {
-      // 目标固定用 ipify 的 443：轻、稳、全球可达；只是用来确认"隧道通不通"。
-      const hostBuf = Buffer.from('api.ipify.org')
-      socket.write(Buffer.concat([
-        Buffer.from([SOCKS_VERSION, CMD_CONNECT, ATYP_DOMAIN, hostBuf.length]),
-        hostBuf,
-        Buffer.from([0x01, 0xBB])   // 443
-      ]))
+    if (stage === 'auth') {
+      if (stageBuf.length < 2) return
+      if (stageBuf[0] !== 0x01) return finish(false, '节点返回的认证应答不合法', 'BAD_REPLY')
+      if (stageBuf[1] !== 0x00) return finish(false, '账号或密码不对', 'AUTH_FAILED')
+      stage = 'connect'
       stageBuf = Buffer.alloc(0)
+      sendConnect()
+      return
     }
-  })
+
+    if (stage === 'connect') {
+      if (stageBuf.length < 4) return
+      if (stageBuf[0] !== SOCKS_VERSION) return finish(false, '节点返回的应答不合法', 'BAD_REPLY')
+      const rep = stageBuf[1]
+      // REP 码本身是判断"能不能出去"的唯一依据，不需要再读 BND.ADDR。
+      if (rep !== 0x00) {
+        // 逐个翻译应答码 —— 见 describeConnectReply 顶部说明。
+        // 真机教训：0x08 / 0x01 曾经落到兜底，用户只看到 `reply=8`，
+        // 于是怀疑「新版本封了节点检测」，实际是节点自己拒的。
+        return finish(false, describeConnectReply(rep), 'CONNECT_REFUSED')
+      }
+      stage = 'done'
+      return finish(true, '节点可用', 'OK')
+    }
+  }
+  socket.on('data', onData)
+
+  /**
+   * 认证过了还不算"节点可用" —— 必须**真的 CONNECT 一次**。
+   *
+   * 为什么（0.1.29 真机证据）：有的节点问候/认证都正常，但 CONNECT 之后
+   * **不回 reply**（假死、被限流、隧道没通）。这种节点如果放进 Chromium，
+   * 就会卡住渲染进程 → 正是我们要根除的那类现场。所以在这里就用真 CONNECT 验掉。
+   */
+  function sendConnect () {
+    const h = Buffer.from(cfg.target.host)
+    socket.write(Buffer.concat([
+      Buffer.from([SOCKS_VERSION, CMD_CONNECT, ATYP_DOMAIN, h.length]),
+      h,
+      Buffer.from([(cfg.target.port >> 8) & 0xff, cfg.target.port & 0xff])
+    ]))
+    stageBuf = Buffer.alloc(0)
+  }
+
+  return { promise, abort }
 }
 
-module.exports = { createSocksRelay, precheckSocks5, HANDSHAKE_TIMEOUT_MS }
+/**
+ * 全部目标都失败时，挑一条**最能帮助用户行动**的原因作结论。
+ *
+ * 优先级（越靠前越"确定是节点侧的问题"）：
+ *   CONNECT_REFUSED  >  AUTH_*  >  TIMEOUT  >  CONNECT_FAILED  >  其他
+ *
+ * 理由：如果有的目标被节点拒绝、有的超时，说明节点是**活的但不让出去** ——
+ * 报"被拒"比报"无响应"更准确，也更能引导用户去找服务商。
+ * AUTH_* 排第二：账号密码错是用户自己就能改的事，必须优先于"网络问题"报出来。
+ */
+function pickWorstOutcome (outcomes) {
+  if (!outcomes.length) return { reason: '节点不可用，请更换节点', code: 'FAIL' }
+  const rank = code => {
+    switch (code) {
+      case 'CONNECT_REFUSED': return 0
+      case 'AUTH_FAILED':
+      case 'AUTH_REJECTED':
+      case 'AUTH_REQUIRED': return 1
+      case 'TIMEOUT': return 2
+      case 'CONNECT_FAILED': return 3
+      case 'NOT_SOCKS5':
+      case 'BAD_REPLY':
+      case 'AUTH_UNSUPPORTED': return 4
+      default: return 5
+    }
+  }
+  const sorted = outcomes.slice().sort((a, b) => rank(a.code) - rank(b.code))
+  return sorted[0]
+}
+
+function pickSuccessReason (user, pass) {
+  return (user || pass) ? '节点可用（认证通过）' : '节点可用（无需认证）'
+}
+
+module.exports = {
+  createSocksRelay,
+  precheckSocks5,
+  probeOneTarget,
+  HANDSHAKE_TIMEOUT_MS,
+  PRECHECK_TARGETS,
+  describeConnectReply,
+  pickWorstOutcome
+}
