@@ -32,6 +32,8 @@ const {
 const { createSocksRelay, precheckSocks5 } = require('./socks-relay')
 // 读远程页面文本走隔离世界（不是 page world）—— 见 probe-page.js 顶部注释。
 const { readPageText } = require('./probe-page')
+// 实例页面加载失败时的错误页（见该文件顶部：真机上"网络不通"表现为黑屏）。
+const loadErrorPage = require('./load-error-page')
 const instanceSlot = require('./instance-slot')
 const backgroundMode = require('./background-mode')
 const {
@@ -49,8 +51,36 @@ const bridgeWarning = require('./bridge-warning')
 // composer 的原生输入（Chromium 编辑命令）—— 见 desktop/native-composer.js 顶部
 // 的根因说明：页面内直接改 DOM 的写入进不了 WhatsApp 编辑器的输入管线。
 const nativeComposer = require('./native-composer')
+// 实例资源预算：防止"开太多窗口把应用撑崩"（句柄耗尽 → 闪退，见该文件顶部）。
+const tabBudget = require('./tab-budget')
 
 const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+
+/**
+ * 一个窗口内最多同时开的实例数的**硬顶**。
+ *
+ * ## 为什么默认是 0（不设硬顶）
+ *
+ * 0.1.30 曾把它设成 20，理由是"每实例 24 个句柄、20 个就接近句柄上限"。
+ * 0.1.31 实测发现**那个归因是错的**：
+ *
+ * ```
+ *             句柄      主进程RSS    整机内存
+ *   48 个  →  1178      122MB       6443MB
+ *   80 个  →  1886      150MB       8163MB   ← 句柄才 1886，离上限极远
+ * ```
+ *
+ * Electron 启动时会把软限制**抬到硬限制**（macOS 实测 `ulimit -n` = 1048575），
+ * 所以 `launchd` 默认的 `maxfiles=256` 是个**假象** —— 句柄根本不是瓶颈。
+ * 真正的瓶颈是**内存**，而且它与机器大小强相关：80 个实例约 8GB，
+ * 在 8GB 机器上是灾难，在 32GB 机器上却毫无压力。
+ *
+ * 所以固定一个"最多 N 个"是错的：同一个数字在 8GB 机器上太冒险、
+ * 在 32GB 机器上又太保守。改为**按系统内存水位动态判断**（见 tab-budget.js）。
+ *
+ * 这个常量留着是为了"想强行限死"的场景（设成 >0 即生效），默认 0 = 不限。
+ */
+const MAX_TABS_PER_WINDOW = 0
 const TABS_HEIGHT = 72
 const UTILITY_HEIGHT = 40
 const TRANS_BAR_HEIGHT = 78
@@ -1314,8 +1344,11 @@ function stopChromeAnim() {
 
 function applyViewBounds(y, attach) {
   if (!win || win.isDestroyed()) return
-  if (overlayOpen || showHome || !tabs.length) {
-    tabs.forEach(tab => detachView(tab.view))
+  // destroyTab 会把 tab.view 置空（断开引用让 GC 能收）。这里必须容忍 null ——
+  // 关闭标签与重排是同一个事件循环里的连续动作，中间就会看到已被置空的 tab。
+  const live = tabs.filter(tab => tab && tab.view)
+  if (overlayOpen || showHome || !live.length) {
+    live.forEach(tab => detachView(tab.view))
     return
   }
   const size = win.getContentSize()
@@ -1326,7 +1359,7 @@ function applyViewBounds(y, attach) {
     width: Math.max(0, size[0]),
     height: Math.max(0, size[1] - top - FOOTER_HEIGHT)
   }
-  tabs.forEach(tab => {
+  live.forEach(tab => {
     if (tab.id === activeId) {
       tab.view.setBounds(bounds)
       if (attach) attachView(tab.view)
@@ -1385,13 +1418,32 @@ function destroyTab(tab) {
     clearTimeout(tab.bridgeTimer)
     tab.bridgeTimer = null
   }
+  // 复核定时器也要清 —— 否则它会在 tab 销毁后才触发。
+  // 虽然回调里有 `tabs.includes(tab)` 兜底，但让一个已销毁 tab 的定时器
+  // 白白挂着 82 秒，等于平白多占一份资源，正是 0.1.30 清理句柄泄漏的思路。
+  if (tab.bridgeDeadTimer) {
+    clearTimeout(tab.bridgeDeadTimer)
+    tab.bridgeDeadTimer = null
+  }
   bridgeHealth.delete(tab.id)
   stopSshTunnel(tab)
-  releaseSocksRelay(tab)
+  // releaseSocksRelay 是 async（relay.close() 要等监听端口真正释放）。
+  // 不接住这个 promise 的话，它里面的异步收尾会漂浮在事件循环上 ——
+  // 端口与句柄晚一步才还，而用户可能马上就开下一个实例。
+  const released = releaseSocksRelay(tab)
+  if (released && typeof released.catch === 'function') released.catch(() => {})
   detachView(tab.view)
+  try {
+    // 先摘监听器再销毁：销毁后仍挂着的监听器会一直持有该 webContents 的引用，
+    // 让本该回收的原生对象多活很久（句柄也就跟着多占一份）。
+    const wc = tab.view && tab.view.webContents
+    if (wc && typeof wc.removeAllListeners === 'function') wc.removeAllListeners()
+  } catch (e) {}
   try {
     tab.view.webContents.destroy()
   } catch (e) {}
+  // 断开对 view 的引用，让 JS 侧对象图尽早可回收。
+  try { tab.view = null } catch (e) {}
 }
 
 function clearTabs(opts) {
@@ -1768,7 +1820,50 @@ function pushPrefsToGuest(view) {
 //
 // 判"活"的依据是 guest 主动调用 `translate:guestPrefs` —— 那一步只有 preload
 // 真的执行到了才会发生，比任何字符串特征都可靠。
+//
+// ## ★ 为什么是「先复核、再判死」（0.1.31 真机日志的教训）★
+//
+// 原实现只有一个 8000ms 的死线：到点没收到 guest 的 prefs 询问就**立刻**判死，
+// 写一条 ERROR 并在页面上画常驻警告条。
+//
+// 真机日志（用户开了 54 个实例，见 2026-10-16 的 hello-pix 日志）证明这是**误报**：
+//
+//     实例            报「未启动」      实际就绪        延迟
+//     green-39        20:02:54        20:26:47       1433s
+//     green-48        20:22:28        20:25:26        178s
+//     green-25        19:30:00        19:32:01        120s
+//     ...
+//     43 个实例报过「未启动」，其中 42 个后来**都就绪了**；中位延迟 28 秒
+//
+// 也就是说：**桥没坏，只是慢。** 54 个渲染进程同时装载时，CPU/磁盘被瓜分，
+// preload 跑完 exec + 首次 IPC 远远不止 8 秒。
+//
+// 而这个误报的代价很大 —— 看 bridgeReport 里的文案，它会让用户以为
+// 「按回车就会把原文直接发出去」，于是**不敢用**；侧边栏还会挂一个 ⚠。
+// 42 个实例白挂警告，用户对整个软件的信任就没了。
+//
+// 所以改成两段：
+//   ① **软线**（BRIDGE_PROBE_MS）：到点还没消息 → 只记 debug，**不判死、不告警**。
+//   ② **硬线**（BRIDGE_DEAD_MS）：再等一段仍无消息 → 才判"真未启动"并告警。
+//
+// 为什么硬线不是简单地把 8 秒改成很大：真坏（preload 装载即抛错）时，
+// 用户越早知道越好 —— 8 秒那次仍有价值，只是**结论要等复核**。
+// 而且装载期就报错的路径（`__pixPreloadError`）**依然是立即判死**，不受影响：
+// 那是确凿证据，不需要等。
 const BRIDGE_PROBE_MS = 8000
+
+/**
+ * 判"真未启动"的硬线。到这条线仍无消息才写 ERROR、画警告条。
+ *
+ * 取值依据：真机日志里 42/43 个实例最终都就绪，其中位延迟 28 秒、
+ * 第 90 百分位约 2 分钟。取 90 秒是**折中**：
+ *   · 够覆盖绝大多数"只是慢"（中位 28s 的 3 倍）；
+ *   · 又不至于让真正坏掉的实例拖几十分钟才告诉用户。
+ * 超过 90 秒仍未通的（日志里 green-39 用了 1433s），属于极端拥塞，
+ * 那种情况下面向用户的告警本来也该出现 —— 只是文案要说清"还在加载"。
+ */
+const BRIDGE_DEAD_MS = 90000
+
 const bridgeHealth = new Map() // tabId -> { ok: boolean, reason: string }
 
 function bridgeReport(tabId, ok, reason) {
@@ -1809,24 +1904,58 @@ function showGuestBridgeWarning(tab, reason) {
 
 /**
  * 装载后守一段时间：guest 如果活着，`translate:guestPrefs` 会在这之前到达。
- * 到点还没到 → 桥没起来。定时器 unref，不阻止进程退出。
+ * 定时器 unref，不阻止进程退出。
+ *
+ * 两段判定（见 BRIDGE_PROBE_MS / BRIDGE_DEAD_MS 顶部说明）：
+ *   · 8 秒没消息 → **只记 debug，不判死**（并发装载时这是常态，不是故障）
+ *   · 90 秒仍没消息 → 才判"真未启动"，写 ERROR 并画警告条
+ *   任何时刻收到 guest 的消息，两个定时器都会作废（bridgeReport(ok=true)）。
  */
 function watchdogBridge(tab) {
   if (!tab || !tab.id) return
+  // 幂等：重复调用（重载 / 重建 tab）时先作废上一轮的两个定时器。
+  // 不清的话，旧定时器仍会按"上一轮"的 deadline 触发，可能给一个刚
+  // 重新装载、正在正常握手的 tab 扣上"未启动"。
+  if (tab.bridgeTimer) { clearTimeout(tab.bridgeTimer); tab.bridgeTimer = null }
+  if (tab.bridgeDeadTimer) { clearTimeout(tab.bridgeDeadTimer); tab.bridgeDeadTimer = null }
   // 没挂翻译桥的页面（自定义网页 / 工单 / LINE 扩展）本来就不会来握手，不能报"桥没起来"。
   if (!bridgeEnabledFor(tab.item)) return
   // 装载期就已经报错了：立刻上报，不用等满 8 秒。
+  // 这是**确凿证据**（preload 自己抛错），不需要走"先复核"那套。
   const wc = tab.view && tab.view.webContents
   if (wc && wc.__pixPreloadError) {
     bridgeReport(tab.id, false, wc.__pixPreloadError)
     return
   }
+  // ① 软线：到点还没消息，先不当回事 —— 只在日志留一行 debug。
+  //
+  //    为什么不在这里写 WARN 或 ERROR：并发装载时"慢"是常态（真机中位 28 秒），
+  //    写成错误会让日志被 43 条假故障淹没，真正的问题反而看不见。
   tab.bridgeTimer = setTimeout(() => {
     tab.bridgeTimer = null
     const st = bridgeHealth.get(tab.id)
     if (st && st.ok === true) return
     if (!tabs.includes(tab)) return
-    bridgeReport(tab.id, false, '预加载脚本装载后 ' + Math.round(BRIDGE_PROBE_MS / 1000) + ' 秒内没有与主进程通信（很可能装载就报错了）')
+    if (clientLog) {
+      clientLog.debug('preload', '实例 ' + tab.id + ' 的翻译桥 ' +
+        Math.round(BRIDGE_PROBE_MS / 1000) + ' 秒内还没消息，继续观察（并发装载时常见）')
+    }
+    // ② 硬线：再守一段，仍无消息才判"真未启动"。
+    tab.bridgeDeadTimer = setTimeout(() => {
+      tab.bridgeDeadTimer = null
+      const now = bridgeHealth.get(tab.id)
+      if (now && now.ok === true) return
+      if (!tabs.includes(tab)) return
+      const wcNow = tab.view && tab.view.webContents
+      const secs = Math.round(BRIDGE_DEAD_MS / 1000)
+      // 复核时再查一次 preload 错误 —— 若这时拿到了确凿原因，就报真正的原因，
+      // 而不是笼统的"没通信"（对用户排障更有用）。
+      const detail = (wcNow && wcNow.__pixPreloadError)
+        ? wcNow.__pixPreloadError
+        : ('预加载脚本装载后 ' + secs + ' 秒内没有与主进程通信（很可能装载就报错了）')
+      bridgeReport(tab.id, false, detail)
+    }, Math.max(0, BRIDGE_DEAD_MS - BRIDGE_PROBE_MS))
+    if (tab.bridgeDeadTimer.unref) tab.bridgeDeadTimer.unref()
   }, BRIDGE_PROBE_MS)
   if (tab.bridgeTimer.unref) tab.bridgeTimer.unref()
 }
@@ -1873,9 +2002,29 @@ function startSshTunnel(tab) {
 }
 
 // ── 带认证 SOCKS5 的本地中继生命周期 ──────────────────────────────────
-// 一条线路一个中继实例、一个随机端口，绝不复用给第二条线路（复用即串凭据）。
-// key 覆盖 host/port/账密：任何一项变了都重建，避免"改了密码还在用旧隧道"。
-const socksRelays = new Map()   // tab.id -> { relay, key, endpoint }
+//
+// ★ 同一节点（host/port/账密全同）的所有窗口**共用一个中继实例** ★
+//
+// 原先是「一窗口一中继」，每个窗口都向节点开一条独立的 SOCKS5 控制连接。
+// 真机反馈过一个症状：账号开到一定数量后新窗口连不上。除了系统资源，
+// 还有一个容易被忽略的原因 —— **商业代理常常限制单账号的并发连接数**，
+// 60 个窗口就是 60 条到节点上游的连接，节点侧可能直接开始拒绝。
+//
+// 同类产品（比特浏览器）就是共享的：同一节点复用同一个本地端口
+// （`md5(host+port+user+pass)` 做 key，端口从 5550 起递增）。
+//
+// ## 为什么不直接共享
+//
+// `createSocksRelay().close()` 会**销毁该中继上的所有 socket**（见其实现）。
+// 如果两个窗口共用一个实例，窗口 A 关闭时一次 `close()` 会把窗口 B 的连接一起掐掉。
+// 所以这里必须做**引用计数**：每个 tab 持有一份租约，最后一个租约归还时才真正 close。
+//
+// ## 隔离性没有被削弱
+//
+// 共享的前提是 key 完全一致 —— host、port、账号、密码四项一字不差。
+// 不同线路/不同账号永远落在不同的 key 上，不可能串凭据。
+const socksRelays = new Map()   // tab.id -> { key, endpoint, lease }
+const relayPool = new Map()     // key -> { relay, endpoint, starting, refs }
 
 function relayKeyOf(target) {
   return [target.host, target.port, target.user, target.pass].join('\u0001')
@@ -1886,25 +2035,54 @@ async function releaseSocksRelay(tab) {
   const cur = socksRelays.get(tab.id)
   if (!cur) return
   socksRelays.delete(tab.id)
-  try { await cur.relay.close() } catch (e) {}
+  const entry = relayPool.get(cur.key)
+  if (!entry) return
+  entry.refs -= 1
+  if (entry.refs > 0) return          // 还有别的窗口在用，不能关
+  relayPool.delete(cur.key)
+  try { await entry.relay.close() } catch (e) {}
 }
 
 async function ensureSocksRelay(tab, target) {
   const key = relayKeyOf(target)
   const cur = socksRelays.get(tab.id)
   if (cur && cur.key === key) return { endpoint: cur.endpoint }
+  // 这个 tab 换了节点：先归还旧租约（可能连带关闭旧中继）
   await releaseSocksRelay(tab)
-  const relay = createSocksRelay({
-    host: target.host,
-    port: target.port,
-    user: target.user,
-    pass: target.pass,
-    onError: () => {}
-  })
-  const info = await relay.start()
-  const endpoint = '127.0.0.1:' + info.port
-  socksRelays.set(tab.id, { relay: relay, key: key, endpoint: endpoint })
+
+  let entry = relayPool.get(key)
+  if (!entry) {
+    const relay = createSocksRelay({
+      host: target.host,
+      port: target.port,
+      user: target.user,
+      pass: target.pass,
+      onError: () => {}
+    })
+    entry = { relay: relay, endpoint: '', starting: null, refs: 0 }
+    relayPool.set(key, entry)
+    entry.starting = relay.start().then(info => {
+      entry.endpoint = '127.0.0.1:' + info.port
+      return entry.endpoint
+    }).catch(err => {
+      // 起不来就把池里的空壳清掉，否则后续窗口会拿到一个永远 pending 的实例。
+      if (relayPool.get(key) === entry) relayPool.delete(key)
+      throw err
+    })
+  }
+  const endpoint = await entry.starting
+  entry.refs += 1
+  socksRelays.set(tab.id, { key: key, endpoint: endpoint, lease: true })
   return { endpoint: endpoint }
+}
+
+/** 仅供测试/诊断：当前池状态。 */
+function relayPoolStats() {
+  return {
+    keys: relayPool.size,
+    tabs: socksRelays.size,
+    entries: Array.from(relayPool.entries()).map(([k, v]) => ({ key: k.split('\u0001').slice(0, 2).join(':'), refs: v.refs }))
+  }
 }
 
 // applyTabProxy 的依赖集合。新建 / 重启恢复 / 改代理三条路径共用，避免只在一处接线。
@@ -2258,9 +2436,69 @@ function startTabLoad(tab) {
     // 扩展承载的平台（LINE）：扩展必须先装进该分区，否则 chrome-extension:// 页面打不开。
     ensurePlatformExtension(tab).catch(() => {}).then(() => {
       if (!tab.view || !tab.view.webContents || tab.view.webContents.isDestroyed()) return
-      tab.view.webContents.loadURL(tab.url)
+      // ★ 加载失败必须有兜底 ★
+      //
+      // 真机取证（2026-10-16）：用户那台机器连我们后端都连不上
+      // （/client/session 多次 UND_ERR_CONNECT_TIMEOUT，目标 IP 是 Cloudflare），
+      // 表现是"有的窗口黑屏、有的能扫码"。原先这里只有一句 loadURL，
+      // **没有 catch、也没有 did-fail-load** —— 失败后 Chromium 什么都不画，
+      // 用户只看到 createWebView 设的深色背景，于是把网络问题当成软件故障。
+      //
+      // 这里接住它：显示一个能自己重试的错误页，把"是什么问题 + 该做什么"说清。
+      const job = tab.view.webContents.loadURL(tab.url)
+      if (job && typeof job.catch === 'function') {
+        job.catch(err => {
+          // loadURL 的 reject 与 did-fail-load 会同时到达；由 paintLoadError 内部的
+          // 去重保证只画一次（否则会重复导航）。
+          const code = (err && (err.code || err.errno)) || -2
+          paintLoadError(tab, code, (err && err.message) || '')
+        })
+      }
     })
   })
+}
+
+/**
+ * 画"加载失败"错误页。
+ *
+ * ## 必须去重
+ *
+ * 一次失败会**同时**从两个地方到达：`loadURL()` 的 promise reject，
+ * 以及 `did-fail-load` 事件。两边都画就会连续导航两次 —— 表现为
+ * 错误页一闪、甚至又触发一次失败，形成抖动。
+ * 所以用 `tab.loadErrorUrl` 记住"当前已经画的是哪个错误页"，重复的直接跳过。
+ *
+ * ## 必须防止"错误页自己也失败 → 无限递归"
+ *
+ * 错误页是 `data:` URL，正常不会再失败。但如果它真的失败了，
+ * 我们不能再去画错误页（那会无限循环）。判据是 `webContents.getURL()`
+ * 已经是个 data: URL 时就直接放弃，只留日志。
+ */
+function paintLoadError(tab, code, desc) {
+  if (!tab || !tab.view || !tab.view.webContents || tab.view.webContents.isDestroyed()) return
+  // ERR_ABORTED 不是失败（被新导航取代 / 用户主动停止）——与既有实现同一口径。
+  if (!loadErrorPage.shouldShowErrorPage(code)) return
+  const wc = tab.view.webContents
+  // 已经在错误页上就不要再画（防递归）。
+  let current = ''
+  try { current = String(wc.getURL() || '') } catch (e) {}
+  if (current.indexOf('data:text/html') === 0) return
+
+  const page = loadErrorPage.buildLoadErrorPage({
+    code: code,
+    desc: desc,
+    url: tab.url,
+    platformName: tab.name
+  })
+  if (clientLog) {
+    // 记 warn 而不是 error：这是**网络侧**的问题，不是软件缺陷。
+    // 但要留下足够的现场（哪个实例、什么码、什么地址），否则事后仍只能靠复述。
+    clientLog.warn('load', '实例 ' + tab.id + ' 页面加载失败（错误码 ' + code + '）' +
+      (desc ? '：' + desc : '') + ' → 已显示可重试的错误页')
+  }
+  tab.loadErrorUrl = page
+  const job = wc.loadURL(page)
+  if (job && typeof job.catch === 'function') job.catch(() => {})
 }
 
 /** 翻译桥（guest-inject.js）只挂在已适配的网页平台上。 */
@@ -2437,6 +2675,35 @@ function createWebView(partition, settings, item, homeUrl, tabInfo) {
   view.webContents.on('will-navigate', guardNavigation)
   view.webContents.on('will-redirect', guardNavigation)
   view.webContents.on('did-finish-load', () => pushPrefsToGuest(view))
+  // ★ 加载失败的兜底（真机取证：网络不通时表现为"黑屏"，用户以为是软件坏了）★
+  //
+  // 这是与 loadURL().catch 并行的第二条通道 —— 有些失败只走事件不走 promise
+  // （例如页面已经在加载后中转失败）。两者都调 paintLoadError，
+  // 由那里的 `tab.loadErrorUrl` / `getURL()` 去重，不会重复画。
+  //
+  // 注意 `isMainFrame`：子框架（iframe）失败不该顶掉整个页面 ——
+  // WhatsApp Web 里就有若干第三方 iframe，它们失败是常态。
+  view.webContents.on('did-fail-load', (_e, code, desc, failedUrl, isMainFrame) => {
+    if (!isMainFrame) return
+    const tab = tabs.find(t => t.view === view)
+    if (!tab) return
+    paintLoadError(tab, code, desc)
+  })
+  // 加载成功 → 清掉错误页痕迹，让下一次失败还能正常提示。
+  // 不清理的话：用户点「重新加载」成功后，若日后再失败，去重逻辑会误以为
+  // "还在错误页上"而什么都不做 —— 那就是一个"点了没反应"的死角。
+  //
+  // ★ 但必须排除"错误页自己加载完成"★ —— 错误页也是页面，也会触发
+  //   did-finish-load。若不加判断，它会把自己的去重标记清掉，
+  //   于是下一次失败又能画 → 而错误页若持续失败就是**无限重画**。
+  view.webContents.on('did-finish-load', () => {
+    const tab = tabs.find(t => t.view === view)
+    if (!tab) return
+    let now = ''
+    try { now = String(view.webContents.getURL() || '') } catch (e) {}
+    if (now.indexOf('data:text/html') === 0) return
+    tab.loadErrorUrl = ''
+  })
   // 复制 / 粘贴 / 全选：Electron 不会把编辑快捷键自动作用到 WebContentsView，
   // 必须显式接住（否则译文选不中、复制不出来 —— 见上方大段注释）。
   installEditSupport(view)
@@ -2475,10 +2742,74 @@ function createWebView(partition, settings, item, homeUrl, tabInfo) {
   return view
 }
 
+/**
+ * 资源不足时的提示。
+ *
+ * ## 为什么用原生对话框而不是渲染层
+ *
+ * 主界面是 `WebContentsView` **盖**在渲染层之上的原生视图，渲染层弹的东西
+ * 会被完全挡住。而这个提示出现的场景恰恰是"窗口已经很多"—— 那时用户
+ * 眼前全是实例页面，任何渲染层提示都等于没提示。
+ *
+ * 只在主窗口存在时弹，并且**不阻塞**（不用 modal 的同步返回）：
+ * 用户可能有多个实例在同时收发消息，不能因为一个提示把界面卡住。
+ */
+function showResourceNotice(message, code) {
+  try {
+    if (!win || (typeof win.isDestroyed === 'function' && win.isDestroyed())) return
+    const { dialog } = electron
+    if (!dialog || typeof dialog.showMessageBox !== 'function') return
+    // 标题按原因走：用户一眼看到的是"内存"还是"窗口数"，
+    // 决定他下一步去关窗口还是去关别的程序。
+    const title = code === 'MEMORY_PRESSURE' ? '运行内存不足' : '无法再开新窗口'
+    const job = dialog.showMessageBox(win, {
+      type: 'warning',
+      title: title,
+      message: title,
+      detail: message,
+      buttons: ['知道了'],
+      defaultId: 0,
+      noLink: true
+    })
+    if (job && typeof job.catch === 'function') job.catch(() => {})
+  } catch (e) {
+    if (clientLog) clientLog.warn('resource', '弹资源提示失败：' + ((e && e.message) || e))
+  }
+}
+
 function openPlatform(payload) {
   const platforms = fallbackPlatforms
   const item = platforms.find(p => p.id === payload.platformId)
   if (!item) return { success: false, msg: '不支持该平台' }
+
+  // ★ 资源预算：在创建任何 Chromium 对象**之前**先问"还能不能开"。
+  //
+  // 主判据是**系统内存水位**（见 tab-budget.js 顶部）：
+  // 实测 80 个重型实例约吃 8GB、句柄只用了 1886 个（离上限极远），
+  // 所以"能不能再开"取决于内存，而不是窗口数或句柄。
+  // 不判断的后果：内存吃满后系统开始换页，应用表现为卡死甚至闪退，
+  // 而用户完全不知道是"开太多了"。
+  const budget = tabBudget.canOpenAnotherTab({
+    tabCount: tabs.length,
+    maxTabs: MAX_TABS_PER_WINDOW,
+    used: tabBudget.openHandleCount(),
+    limit: tabBudget.handleLimit()
+  })
+  if (!budget.ok) {
+    if (clientLog) {
+      const m = budget.memory || {}
+      clientLog.warn('resource', '拒绝新增实例（' + budget.code + '）：' + budget.reason +
+        ' · 当前窗口 ' + tabs.length + ' 个' +
+        ' · 内存 ' + Math.round((m.used || 0) / 1048576) + '/' + Math.round((m.total || 0) / 1048576) + 'MB' +
+        (m.ratio === undefined ? '' : '（已用 ' + Math.round(m.ratio * 100) + '%）') +
+        ' · 句柄 ' + budget.used + '/' + budget.limit)
+    }
+    // 必须让用户**看见**。渲染层的弹窗会被 WebContentsView 盖住，
+    // 而这里恰恰是"窗口已经很多"的场景 —— 原生对话框是唯一稳的通道。
+    showResourceNotice(budget.reason, budget.code)
+    return { success: false, code: budget.code, msg: budget.reason }
+  }
+
   usedCount[item.id] = Number(usedCount[item.id] || 0) + 1
   const index = usedCount[item.id]
   const id = item.id + '-' + nextTab++
@@ -3413,7 +3744,8 @@ app.on('before-quit', () => {
   saveOpenApps()
   // 关掉所有本地中继：它们是本进程内的监听端口，进程结束前清干净。
   try {
-    socksRelays.forEach(item => { try { item.relay.close() } catch (e) {} })
+    relayPool.forEach(entry => { try { entry.relay.close() } catch (e) {} })
+    relayPool.clear()
     socksRelays.clear()
   } catch (e) {}
   // 收掉 API 传输层的连接池（自带 undici 的 keep-alive socket），别留在进程里。

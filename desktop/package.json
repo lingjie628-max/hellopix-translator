@@ -1,7 +1,7 @@
 {
   "name": "hello-pix-desktop",
   "productName": "Hello Pix",
-  "version": "0.1.29",
+  "version": "0.1.33",
   "private": true,
   "description": "Hello Pix 桌面客户端",
   "author": "Hello Pix",
@@ -64,6 +64,8 @@
       "log-file.js",
       "bridge-warning.js",
       "native-composer.js",
+      "tab-budget.js",
+      "load-error-page.js",
       "package.json",
       "node_modules/undici/**/*",
       "renderer/**/*",
