@@ -2330,8 +2330,24 @@ async function detectProxyNode(payload) {
       user: target.user,
       pass: target.pass
     })
+    // ★ 预检必须落日志 ★
+    //
+    // 节点检测全程只把结果回给 UI，日志里一个字都没有。于是真机出问题时
+    // 我们手上只有一张截图（"节点拒绝"），既不知道死在哪一步、也不知道
+    // 每个目标的应答码 —— 只能在本地反复猜，而本地环境与用户环境不同，
+    // 猜出来的结论根本对不上。
+    //
+    // 这里记下每个目标的 code 与耗时，下次用户带上日志就能直接定位。
+    // 不记账号密码（logFile 本身就会脱敏，这里也不传）。
+    try {
+      log.info('proxy', 'precheck ' + target.host + ':' + target.port +
+        ' ok=' + pre.ok + ' code=' + pre.code + ' ms=' + pre.ms)
+      for (const t of (pre.tried || [])) {
+        log.info('proxy', '  target ' + t.host + ':' + t.port + ' -> ' + t.code + ' (' + t.ms + 'ms)')
+      }
+    } catch (ignore) {}
     if (!pre.ok) {
-      return { success: false, msg: '节点连不上：' + pre.reason, code: pre.code }
+      return { success: false, msg: '节点连不上：' + pre.reason, code: pre.code, tried: pre.tried }
     }
     if (pre.code === 'OK' && /无需认证/.test(pre.reason) && target.hasAuth) {
       // 节点存活但不需要认证 —— 继续走正常探测，不拦。
