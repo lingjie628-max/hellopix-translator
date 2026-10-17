@@ -540,7 +540,9 @@ const PAPAGO_LANGUAGES = {
   zh: 'zh-CN', 'zh-cn': 'zh-CN', 'zh-hans': 'zh-CN',
   'zh-tw': 'zh-TW', 'zh-hant': 'zh-TW',
   en: 'en', ja: 'ja', ko: 'ko', fr: 'fr', de: 'de', es: 'es', ru: 'ru', vi: 'vi',
-  th: 'th', id: 'id', it: 'it', pt: 'pt', hi: 'hi', ar: 'ar'
+  th: 'th', id: 'id', it: 'it', pt: 'pt', hi: 'hi', ar: 'ar',
+  // Papago 没有葡语变体：两种都落到 pt。
+  'pt-br': 'pt', 'pt-pt': 'pt'
 }
 
 const papagoAdapter = {
@@ -620,6 +622,8 @@ const papagoAdapter = {
 const NIUTRANS_LANGUAGES = {
   zh: 'zh', 'zh-cn': 'zh', 'zh-tw': 'cht', en: 'en', ja: 'ja', ko: 'ko',
   fr: 'fr', de: 'de', es: 'es', pt: 'pt', ru: 'ru', it: 'it', ar: 'ar',
+  // 小牛没有葡语变体：两种都落到 pt（宁可给通用葡语，也不要报"不支持"）。
+  'pt-br': 'pt', 'pt-pt': 'pt',
   th: 'th', vi: 'vi', id: 'id', ms: 'ms', hi: 'hi', tr: 'tr', nl: 'nl', pl: 'pl'
 }
 

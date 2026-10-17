@@ -684,14 +684,21 @@ function iconTag(id, cls, icon) {
 }
 
 async function openApp(id) {
-  await window.pix.open({ platformId: id, multi: true })
+  // 返回值里可能带 success:false（例如已达实例上限、系统句柄不足）。
+  // 主进程会同时弹原生提示；这里不再重复弹窗，只是别把结果丢掉。
+  try {
+    const resp = await window.pix.open({ platformId: id, multi: true })
+    return resp
+  } catch (e) {
+    return { success: false, msg: (e && e.message) || '打开失败' }
+  }
 }
 
 // 语言选项：常用语种置顶，其余按代码字母序跟在后面。
 // LANGS 本身是按语言代码排的（aa 阿法尔语、ace 亚齐语…），直接用会让最常用的
 // 中文落到第 186 位、俄语第 136 位 —— 用户每选一次都要滚过上百个冷门语种。
 // 这里只改**展示顺序**，不动 LANGS 数据本身。
-const LANG_PRIORITY = ['zh', 'en', 'ja', 'ko', 'fr', 'de', 'es', 'ru', 'pt', 'it', 'ar', 'th', 'vi', 'id', 'hi']
+const LANG_PRIORITY = ['zh', 'en', 'ja', 'ko', 'fr', 'de', 'es', 'ru', 'pt-BR', 'pt-PT', 'it', 'ar', 'th', 'vi', 'id', 'hi']
 function langDisplayName(l) {
   if (l.id === 'auto') return '自动识别'
   if (l.id === 'zh') return '简体中文'
@@ -2186,7 +2193,12 @@ const LANGS = [
   { id: 'mt', name: '马耳他语' }, { id: 'my', name: '缅甸语' }, { id: 'mzn', name: '马赞德兰语' }, { id: 'na', name: '瑙鲁语' }, { id: 'ne', name: '尼泊尔语' }, { id: 'nl', name: '荷兰语' },
   { id: 'no', name: '挪威语' }, { id: 'nqo', name: '恩科语' }, { id: 'nr', name: '南恩德贝莱语' }, { id: 'nso', name: '北索托语' }, { id: 'ny', name: '齐切瓦语' }, { id: 'om', name: '奥罗莫语' },
   { id: 'or', name: '奥里亚语' }, { id: 'os', name: '奥塞梯语' }, { id: 'pa', name: '旁遮普语' }, { id: 'pag', name: '邦阿西楠语' }, { id: 'pap', name: '帕皮阿门托语' }, { id: 'pau', name: '帕劳语' },
-  { id: 'pl', name: '波兰语' }, { id: 'prs', name: '达里语' }, { id: 'ps', name: '普什图语' }, { id: 'pt', name: '葡萄牙语' }, { id: 'qu', name: '克丘亚语' }, { id: 'rm', name: '罗曼什语' },
+  { id: 'pl', name: '波兰语' }, { id: 'prs', name: '达里语' }, { id: 'ps', name: '普什图语' },
+  // 葡萄牙语分两种：巴西（pt-BR）与欧洲（pt-PT）。
+  // 界面上必须让用户选得到自己那一种 —— 只写"葡萄牙语"时，巴西用户与葡萄牙
+  // 用户都以为自己选对了，实际译文风格不符合预期。
+  { id: 'pt-BR', name: '葡萄牙语（巴西）' }, { id: 'pt-PT', name: '葡萄牙语（欧洲）' },
+  { id: 'qu', name: '克丘亚语' }, { id: 'rm', name: '罗曼什语' },
   { id: 'rn', name: '基隆迪语' }, { id: 'ro', name: '罗马尼亚语' }, { id: 'ru', name: '俄语' }, { id: 'rw', name: '卢旺达语' }, { id: 'sa', name: '梵语' }, { id: 'sat', name: '桑塔利语' },
   { id: 'sd', name: '信德语' }, { id: 'ses', name: '科伊拉博罗语' }, { id: 'sg', name: '桑戈语' }, { id: 'shi', name: '希尔哈语' }, { id: 'si', name: '僧伽罗语' }, { id: 'sk', name: '斯洛伐克语' },
   { id: 'sl', name: '斯洛文尼亚语' }, { id: 'sm', name: '萨摩亚语' }, { id: 'sn', name: '绍纳语' }, { id: 'so', name: '索马里语' }, { id: 'sq', name: '阿尔巴尼亚语' }, { id: 'sr', name: '塞尔维亚语' },

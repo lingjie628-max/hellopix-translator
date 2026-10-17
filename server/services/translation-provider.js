@@ -87,6 +87,8 @@ const GOOGLE_LANGUAGES = {
   'zh-tw': 'zh-TW',
   'zh-hk': 'zh-TW',
   en: 'en', ja: 'ja', ko: 'ko', fr: 'fr', de: 'de', es: 'es', pt: 'pt',
+  // 葡萄牙语分巴西/欧洲两种，谷歌原生支持这两种代码。
+  'pt-br': 'pt-BR', 'pt-pt': 'pt-PT',
   ru: 'ru', ar: 'ar', th: 'th', vi: 'vi', id: 'id', hi: 'hi', it: 'it',
   tr: 'tr', ms: 'ms', nl: 'nl', pl: 'pl', sv: 'sv', da: 'da', fi: 'fi',
   no: 'no', cs: 'cs', el: 'el', he: 'iw', uk: 'uk', fa: 'fa', bn: 'bn',
@@ -186,6 +188,8 @@ const GEMINI_LANGUAGES = {
   de: '德语',
   es: '西班牙语',
   pt: '葡萄牙语',
+  // 葡萄牙语分巴西/欧洲两种；LLM 走提示词，直接把目标语写清楚最稳。
+  'pt-br': '巴西葡萄牙语', 'pt-pt': '欧洲葡萄牙语',
   ru: '俄语',
   ar: '阿拉伯语',
   th: '泰语',
@@ -374,6 +378,8 @@ const DEEPSEEK_LANGUAGES = {
   de: '德语',
   es: '西班牙语',
   pt: '葡萄牙语',
+  // 葡萄牙语分巴西/欧洲两种；LLM 走提示词，直接把目标语写清楚最稳。
+  'pt-br': '巴西葡萄牙语', 'pt-pt': '欧洲葡萄牙语',
   ru: '俄语',
   ar: '阿拉伯语',
   th: '泰语',

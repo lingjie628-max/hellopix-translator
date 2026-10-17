@@ -112,6 +112,8 @@ function signRequest({ method, host, path, payload, region, service, accessKey, 
 const AWS_LANGUAGES = {
   zh: 'zh', 'zh-cn': 'zh', 'zh-tw': 'zh-TW', en: 'en', ja: 'ja', ko: 'ko',
   fr: 'fr', de: 'de', es: 'es', pt: 'pt', ru: 'ru', it: 'it', ar: 'ar',
+  // AWS 原生支持葡语变体。
+  'pt-br': 'pt-BR', 'pt-pt': 'pt-PT',
   hi: 'hi', th: 'th', vi: 'vi', id: 'id', ms: 'ms', tr: 'tr', nl: 'nl', pl: 'pl',
   he: 'he', fa: 'fa', bn: 'bn', uk: 'uk', cs: 'cs', da: 'da', fi: 'fi', no: 'no', sv: 'sv'
 }
