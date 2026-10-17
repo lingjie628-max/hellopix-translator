@@ -123,7 +123,9 @@ test('多目标预检：全部被拒 → 判失败，并给出节点侧原因', 
     const r = await precheckSocks5({ host: '127.0.0.1', port: up.port, timeoutMs: 3000 })
     assert.equal(r.ok, false)
     assert.equal(r.code, 'CONNECT_REFUSED')
-    assert.match(r.reason, /节点拒绝/)
+    // 0x08 = RFC1928「地址类型不受支持」。文案要说这个，不能说成"账号欠费"。
+    assert.match(r.reason, /地址/)
+    assert.doesNotMatch(r.reason, /流量用尽|套餐到期/)
   } finally { await up.close() }
 })
 
@@ -163,11 +165,23 @@ test('PRECHECK_TARGETS：必须包含用户真实访问的 WhatsApp Web，且都
 // 2. 应答码文案
 // ---------------------------------------------------------------------------
 
-test('0x08 的文案不得再宣称"只支持 IPv4"（已被真机反证）', () => {
+test('0x08 的文案必须回到 RFC1928 原意：地址类型不受支持', () => {
   const text = describeConnectReply(0x08)
   assert.doesNotMatch(text, /IPv4/, '纯 IPv4 目标同样被拒，这个解释是错的：' + text)
-  assert.match(text, /节点拒绝/, '要陈述事实：节点拒绝了连接')
+  // 0.1.32 把它改成"流量用尽/套餐到期"，这个说法没有协议依据，
+  // 且会把用户直接送去换节点，真正的"节点连不上目标网站"永远查不出来。
+  assert.doesNotMatch(text, /流量用尽|套餐到期/, 'RFC1928 里 X\'08\' 不是账号欠费的意思：' + text)
+  assert.match(text, /地址/, 'RFC1928 原文：X\'08\' Address type not supported')
   assert.match(text, /服务商|更换节点/, '要给出用户能做的下一步')
+})
+
+test('main.js：预检不得拥有否决权（0.1.29~0.1.33 回归的护栏）', () => {
+  const src = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
+  // 只有"节点没回话"允许短路返回；其他任何预检结论都必须继续走真实网页探测。
+  assert.match(src, /const hardBlock = pre && pre\.code === 'TIMEOUT'/,
+    '预检只允许 TIMEOUT 直接返回')
+  assert.doesNotMatch(src, /if \(!pre\.ok\)\s*\{\s*return \{ success: false/,
+    '不许再用 !pre.ok 直接判死 —— 那正是"以前能过、修完就过不了"的原因')
 })
 
 test('0x01 / 未知码 都要给出可行动的下一步，而不是裸数字', () => {
@@ -187,12 +201,15 @@ test('pickWorstOutcome：账号密码错必须优先于"网络无响应"报出�
   assert.equal(pick.code, 'AUTH_FAILED', '用户自己就能改的问题要优先说')
 })
 
-test('pickWorstOutcome：有"被节点拒绝"时优先报它', () => {
+test('pickWorstOutcome：CONNECT 应答码**不得**凌驾于"节点没回话"之上', () => {
+  // 0.1.33 时这里断言的是相反方向（CONNECT_REFUSED 优先）。那个排序在真机上造成了回归：
+  // 只要某一个目标的 CONNECT 被拒，整个节点就被判死，连"真实打开网页"都不再尝试。
+  // CONNECT 应答码只说明**那一个地址**没被放行，换目标可能就通了 —— 它不能当死因。
   const pick = pickWorstOutcome([
     { code: 'TIMEOUT', reason: '超时' },
     { code: 'CONNECT_REFUSED', reason: '节点拒绝了连接' }
   ])
-  assert.equal(pick.code, 'CONNECT_REFUSED')
+  assert.equal(pick.code, 'TIMEOUT', '只有"没回话"才是确定的节点侧死因')
 })
 
 // ---------------------------------------------------------------------------

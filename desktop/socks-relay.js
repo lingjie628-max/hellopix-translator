@@ -132,12 +132,13 @@ function describeConnectReply(rep) {
     case 0x05: return '节点无法解析目标域名，请更换节点'
     case 0x06: return '节点连接目标超时，请更换节点'
     case 0x07: return '节点不支持该连接命令，请联系代理服务商'
-    // 0x08 曾经写成「可能只支持 IPv4」。0.1.32 真机反证了这个说法：
-    // 同一节点对 1.1.1.1（纯 IPv4 字面量）回 0x01、对 8.8.8.8 和域名回 0x08 ——
-    // 既然纯 IPv4 也不放行，就**不是**地址类型的问题，而是节点本身不让出去。
-    // 商业代理常借用 0x08 表示"账号侧受限"，但这是非标准含义，我们不能替服务商下结论，
-    // 所以文案只陈述事实 + 给唯一有用的下一步。
-    case 0x08: return '节点拒绝了连接（可能是流量用尽、套餐到期或 IP 白名单未加），请联系代理服务商'
+    // 0x08 曾经写成「可能只支持 IPv4」，0.1.32 又改成「流量用尽/套餐到期」。
+    // 两个都错。RFC1928 原文：
+    //   X'08' Address type not supported
+    // 它说的是**节点处理不了这次 CONNECT 的地址**，不是"节点坏了"。
+    // 真机上同一节点对 1.1.1.1 回 0x01、对域名回 0x08，正是"按地址区别对待"的表现，
+    // 而不是账号被停 —— 当成"套餐到期"会直接把用户送去换节点，问题永远查不出来。
+    case 0x08: return '节点无法转发到这个地址（地址类型不受支持），请更换节点或联系代理服务商'
     default: return '节点拒绝了连接（错误码 ' + rep + '），请联系代理服务商'
   }
 }
@@ -666,12 +667,17 @@ function pickWorstOutcome (outcomes) {
   if (!outcomes.length) return { reason: '节点不可用，请更换节点', code: 'FAIL' }
   const rank = code => {
     switch (code) {
-      case 'CONNECT_REFUSED': return 0
+      // ★ CONNECT 应答码**不能**排在最高优先级 ★
+      //
+      // 它只说明"这一次 CONNECT 的地址没被放行"，而不同目标的地址各不相同，
+      // 拿其中一个的应答码当整个节点的死因，正是 0.1.29~0.1.33 判定过严的根源。
+      // 真正确定的只有认证类错误（账密错了换目标也不会对）。
       case 'AUTH_FAILED':
       case 'AUTH_REJECTED':
-      case 'AUTH_REQUIRED': return 1
-      case 'TIMEOUT': return 2
-      case 'CONNECT_FAILED': return 3
+      case 'AUTH_REQUIRED': return 0
+      case 'TIMEOUT': return 1
+      case 'CONNECT_FAILED': return 2
+      case 'CONNECT_REFUSED': return 3
       case 'NOT_SOCKS5':
       case 'BAD_REPLY':
       case 'AUTH_UNSUPPORTED': return 4

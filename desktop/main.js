@@ -2323,8 +2323,9 @@ async function detectProxyNode(payload) {
   //
   // 所以在创建窗口**之前**就把不可用的节点挡掉：既避免弄坏应用，
   // 又能把"死在哪儿"（连不上/没回话/认证错）直接说给用户听。
+  let pre = null
   if (target.scheme === 'socks5') {
-    const pre = await precheckSocks5({
+    pre = await precheckSocks5({
       host: target.host,
       port: target.port,
       user: target.user,
@@ -2346,12 +2347,35 @@ async function detectProxyNode(payload) {
         log.info('proxy', '  target ' + t.host + ':' + t.port + ' -> ' + t.code + ' (' + t.ms + 'ms)')
       }
     } catch (ignore) {}
-    if (!pre.ok) {
-      return { success: false, msg: '节点连不上：' + pre.reason, code: pre.code, tried: pre.tried }
+
+    // ★ 预检**没有否决权**，只有"提前拦截"的权力 ★
+    //
+    // ## 为什么改（0.1.29~0.1.33 的回归，用户真机反馈）
+    //
+    // 0.1.29 起预检是**强制门**：CONNECT 拿不到 0x00 就直接判死、连窗口都不建。
+    // 而 0.1.28 及之前的判定是「Chromium 经代理真的打开 api.ipify.org，拿到 IP 才算过」。
+    // 同一个节点，后者能过、前者判死 —— 用户看到的就是"以前能检测、修完就再也检测不过"。
+    //
+    // 更糟的是 0.1.32 把 0x08 的文案改成了"流量用尽/套餐到期"。RFC1928 原文是
+    //   X'08' Address type not supported
+    // 意思是**节点处理不了那个地址**，不是"节点坏了"。于是"节点连不上目标网站"
+    // 被伪装成"你的节点已失效"，把排查方向整个带偏。
+    //
+    // ## 现在的规矩
+    //   预检**只拦一种情况**：节点根本没回话（TIMEOUT）。那种节点放进 Chromium 会
+    //   卡在握手、并把渲染进程基础设施弄坏 —— 这是 0.1.29 真正要修的那个 P0。
+    //   其余一切（CONNECT 被拒、应答码不认识、认证方式奇怪），预检都只是**线索**，
+    //   最终结论一律交给"能不能真的经这个节点打开网页"。
+    const hardBlock = pre && pre.code === 'TIMEOUT'
+    if (hardBlock) {
+      return {
+        success: false,
+        msg: '节点连不上：' + pre.reason,
+        code: pre.code,
+        tried: pre.tried
+      }
     }
-    if (pre.code === 'OK' && /无需认证/.test(pre.reason) && target.hasAuth) {
-      // 节点存活但不需要认证 —— 继续走正常探测，不拦。
-    }
+    // 预检已经通过（或只是可疑）→ 继续走真实网页探测，由它来定论。
   }
 
   const ses = session.fromPartition('temp:pix-proxy-detect')
@@ -2388,7 +2412,16 @@ async function detectProxyNode(payload) {
       }
     }
     if (!ip) {
-      return { success: false, msg: lastErr ? ('节点连不上：' + lastErr) : '节点连不上，请检查主机、端口和账密' }
+      // 结论以"真实加载"为准：走到这里说明 Chromium 经这个节点打不开网页。
+      // 预检的应答码只作为**补充线索**附在后面，不冒充原因 ——
+      // 否则又会变成"节点连不上目标网站"被说成"你的节点已失效"。
+      const hint = pre && !pre.ok ? '（预检线索：' + pre.reason + '）' : ''
+      return {
+        success: false,
+        msg: (lastErr ? ('节点连不上：' + lastErr) : '节点连不上，请检查主机、端口和账密') + hint,
+        code: lastErr || '',
+        tried: (pre && pre.tried) || []
+      }
     }
     const geo = await lookupIpGeo(ip, settings.proxyChannel || 'dbip')
     geo.ip = geo.ip || ip
