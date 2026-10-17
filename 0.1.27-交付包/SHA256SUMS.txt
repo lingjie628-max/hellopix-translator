@@ -1,0 +1,2 @@
+7ada22b445d3c9c062764199a2ceb16e716b6ba94ece152fc8fbbf894efdc56e  HelloPix-0.1.27-arm64.dmg
+bfd0b29b9a53d70cdd1c20ceefc8e2e618b7e58f30d992023514ac5739e47356  HelloPix-0.1.27-x64.dmg

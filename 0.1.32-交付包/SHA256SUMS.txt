@@ -1,0 +1,4 @@
+2eebdac21dd725b51d7ea1306bd36a1291d02d6a36062dff87d0b7c34f73586f  HelloPix-0.1.32-arm64.dmg
+8c4cbcfbc534ad39fcaf17bd1c91d45b0779ad43a484819c672707912e103ece  HelloPix-0.1.32-x64.dmg
+fff5934dfca79ea350deeb72198c474e1228bf7f35e8dda739004def89182a79  HelloPix-Setup-0.1.32.exe
+dd1d91ab46beedd66753d08d25aea11795ef79aab4cafa0b451b317255d3f804  HelloPix-0.1.32-portable.exe
