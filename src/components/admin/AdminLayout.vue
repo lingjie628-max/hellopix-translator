@@ -1,7 +1,7 @@
 <template>
   <el-container class="admin-shell">
     <el-menu class="admin-menu" unique-opened router :background-color="menuBg" :text-color="menuText" :active-text-color="menuActive">
-      <div class="admin-logo">Hello Pix 超管</div>
+      <div class="admin-logo">PIX翻译管理 超管</div>
       <el-menu-item index="/admin/dashboard"><i class="el-icon-data-analysis"></i><span slot="title">总览</span></el-menu-item>
       <el-menu-item index="/admin/users"><i class="el-icon-user"></i><span slot="title">商户管理</span></el-menu-item>
       <el-submenu index="ops">
@@ -111,6 +111,12 @@ export default {
   font-weight: 700;
   padding: 20px 16px 12px;
   letter-spacing: 0.04em;
+  /* 侧栏固定 210px，减去左右 16px 只剩 178px。
+     「PIX翻译管理 超管」按 14px 算约 160px，余量本就只有十几像素 ——
+     这里必须允许收缩 + 单行，否则字号/系统缩放一变就折成两行，顶栏会变高。 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .admin-header {
   display: flex;

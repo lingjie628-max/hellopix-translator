@@ -129,6 +129,12 @@ function isAdminHost() {
 }
 
 router.beforeEach((to, from, next) => {
+  // 标签页标题按域名区分：超管域名显示「PIX翻译管理」，商户前台/官网维持原样。
+  // 放在这里而不是 <title>：<title> 是全站共用的，改了会把商户前台一起改掉。
+  try {
+    document.title = isAdminHost() ? 'PIX翻译管理' : 'Hello Pix'
+  } catch (e) {}
+
   // 超管域名下不展示官网首页，根路径直接进后台
   if (isAdminHost() && (to.path === '/' || to.path === '')) {
     next('/admin/login')

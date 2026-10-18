@@ -5,7 +5,7 @@
       :rules="rules" :model="form" ref="form" class="admin-card"
       v-loading="loading" @submit.native.prevent="submit">
       <div class="admin-topbar"><theme-toggle></theme-toggle></div>
-      <div class="admin-brand">Hello Pix</div>
+      <div class="admin-brand">PIX翻译管理</div>
       <h3>超管后台</h3>
       <p>商户、工单、翻译计费与运营数据</p>
       <el-form-item prop="username">
@@ -31,7 +31,7 @@
       :rules="totpRules" :model="totpForm" ref="totpForm" class="admin-card"
       v-loading="loading" @submit.native.prevent="submitTotp">
       <div class="admin-topbar"><theme-toggle></theme-toggle></div>
-      <div class="admin-brand">Hello Pix</div>
+      <div class="admin-brand">PIX翻译管理</div>
       <h3>两步验证</h3>
       <p>请输入验证器 App 上的 6 位动态码</p>
       <el-form-item prop="code">
