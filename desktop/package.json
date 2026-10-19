@@ -1,7 +1,7 @@
 {
   "name": "hello-pix-desktop",
   "productName": "Hello Pix",
-  "version": "0.1.36",
+  "version": "0.1.37",
   "private": true,
   "description": "Hello Pix 桌面客户端",
   "author": "Hello Pix",
@@ -51,6 +51,7 @@
       "preload.js",
       "guest-inject.js",
       "lines.js",
+      "crash-report.js",
       "api-default.js",
       "platforms.js",
       "security-policy.js",

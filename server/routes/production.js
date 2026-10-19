@@ -56,6 +56,10 @@ function productionRouter(context) {
   const translateAccountLimit = limit('translate-account', 120, 60_000, req =>
     req.pixUser ? `${req.pixUser.kind}:${req.pixUser.account.id}` : 'missing'
   )
+  // 崩溃日志上报：每 IP 每小时 20 次。
+  // 客户端正常一年也传不了几次（只在异常退出后的下次启动传一次），
+  // 这个额度只用于挡住刷接口，不会误伤真实用户。
+  const crashReportLimit = limit('crash-report-ip', 20, 60 * 60_000)
 
   // 超管两步验证
   const adminTotp = new AdminTotpService(repo, core.redis)
@@ -120,6 +124,106 @@ function productionRouter(context) {
   }))
   router.get('/client/update', asyncRoute(async (req, res) => {
     res.json(await core.findUpdate(input(req)))
+  }))
+
+  /**
+   * 崩溃日志上报（0.1.36 起客户端在**异常退出后**的下次启动自动调用）。
+   *
+   * ## 为什么这个接口要自己再过滤一遍
+   *
+   * 客户端已经按白名单只挑 crash/memory 行，但**服务端不能信任客户端** ——
+   * 客户端可被打包篡改，或将来有人写错过滤器。这里再过滤一次，
+   * 保证落库的内容**只可能**是这两类。隐私防线不能只有一层。
+   *
+   * ## 为什么允许未登录上报
+   *
+   * 闪退最常发生在**启动阶段**（还没登录、甚至登录页都没显示）。
+   * 若要求登录，最有价值的那批日志反而永远收不到。
+   * 因此只靠 IP 限流控制，不要求鉴权；但仍记录能拿到的用户身份。
+   */
+  router.post('/client/crash-report', crashReportLimit, asyncRoute(async (req, res) => {
+    const data = input(req)
+    // 客户端用 urlencoded 提交，lines 是一个 JSON 字符串字段。
+    // 解析失败就当没收到 —— 不能因为 payload 畸形而 500，
+    // 那会让客户端把"上报失败"误判成"服务器有问题"。
+    let rawLines = []
+    try {
+      const parsed = typeof data.lines === 'string' ? JSON.parse(data.lines) : data.lines
+      rawLines = Array.isArray(parsed) ? parsed : []
+    } catch (e) {
+      rawLines = []
+    }
+
+    // ★ 服务端白名单：与 desktop/crash-report.js 的 ALLOWED_SCOPES 保持一致 ★
+    const ALLOWED = ['crash', 'memory']
+    const lines = rawLines
+      .filter(row => row && ALLOWED.indexOf(String(row.scope || '')) >= 0)
+      .slice(-200)   // 上限与客户端一致，防止超大 payload
+      .map(row => ({
+        at: String(row.at || '').slice(0, 32),
+        scope: String(row.scope),
+        // 单行再截一次：客户端可能被改成不截断
+        text: String(row.text || '').slice(0, 600)
+      }))
+
+    // 没有可存内容就不落库 —— 避免把"什么都没发生"也塞进表里。
+    if (!lines.length) {
+      return ok(res, '无需上报', { stored: false })
+    }
+
+    const session = req.pixUser || null
+    const user = session && session.account ? session.account : null
+    const deviceId = String(req.get('X-Pix-Device') || '').slice(0, 64)
+
+    // 摘要由服务端自己算，不采信客户端提交的统计值。
+    let crashCount = 0
+    let memoryPeak = null
+    const reasons = new Set()
+    for (const line of lines) {
+      if (line.scope === 'crash') {
+        crashCount++
+        const r = /reason=([a-z0-9_-]+)/i.exec(line.text)
+        if (r) reasons.add(r[1])
+      } else {
+        const p = /整机已用\s*(\d+)%/.exec(line.text)
+        if (p) {
+          const pct = Number(p[1])
+          if (Number.isFinite(pct) && (memoryPeak === null || pct > memoryPeak)) memoryPeak = pct
+        }
+      }
+    }
+
+    // crashed_at 取最后一行的时刻（日志按时间顺序写）。
+    const lastAt = lines[lines.length - 1].at
+    const crashedAt = lastAt ? Date.parse(lastAt) : NaN
+
+    const result = await repo.query(
+      `INSERT INTO client_crash_logs
+         (user_id, device_id, username, version, platform, arch, crashed_at,
+          lines, crash_count, memory_peak_pct, reasons)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11)
+       ON CONFLICT (device_id, crashed_at) WHERE crashed_at IS NOT NULL DO NOTHING
+       RETURNING id`,
+      [
+        user ? Number(user.id) || null : null,
+        deviceId,
+        user ? String(user.username || '').slice(0, 64) : '',
+        String(data.version || '').slice(0, 32),
+        String(data.platform || '').slice(0, 16),
+        String(data.arch || '').slice(0, 16),
+        Number.isFinite(crashedAt) ? new Date(crashedAt).toISOString() : null,
+        JSON.stringify(lines),
+        crashCount,
+        memoryPeak,
+        Array.from(reasons)
+      ]
+    )
+
+    ok(res, '已上报', {
+      stored: !!(result && result.rows && result.rows.length),
+      crashCount,
+      memoryPeak
+    })
   }))
 
   router.get('/user/dashboard', asyncRoute(async (req, res) => res.json(await core.dashboard(req.pixUser))))

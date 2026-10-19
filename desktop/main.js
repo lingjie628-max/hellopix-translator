@@ -45,6 +45,7 @@ const {
   PLATFORM_EXTENSION_IDS
 } = require('./security-policy')
 const logFile = require('./log-file')
+const crashReport = require('./crash-report')
 // 翻译桥警告条：preload 死了以后，唯一还能把警告画到用户眼前的手段
 // （隔离世界注入，见该文件顶部注释）。
 const bridgeWarning = require('./bridge-warning')
@@ -231,6 +232,73 @@ function initClientLog() {
 }
 
 /**
+ * 崩溃日志上报 —— 把**上次异常退出**留下的证据自动送回来。
+ *
+ * ## 为什么要有这一步
+ *
+ * 0.1.36 起 `[crash]` / `[memory]` 已经能记录了，但日志只躺在用户本机。
+ * 用户不主动发，我们永远看不到 —— 等于加了取证却没有收回证据的通道。
+ * 这个函数在启动时把上次的痕迹送到服务器，用户无感。
+ *
+ * ## 设计约束（都很硬）
+ *
+ *   · **绝不阻塞启动**：先返回，网络请求在后台跑。启动速度是用户能直接感知的，
+ *     不能因为一个诊断功能而变慢。
+ *   · **失败完全静默**：不写日志、不弹窗。服务器连不上、线路不通都是常态，
+ *     这不该变成用户看到的新问题。
+ *   · **只传 crash / memory 行**：过滤在 crash-report.js 里，服务端还会再滤一次。
+ *   · **传完就写标记**：防止同一次崩溃在下一次启动时重复上报。
+ */
+function reportCrashIfNeeded(log) {
+  if (!log || !log.dir) return
+  let found
+  try {
+    found = crashReport.detectAbnormalExit(log.dir)
+  } catch (e) {
+    return
+  }
+  // 正常退出、首次安装、没有任何日志 —— 都不上报。
+  if (!found) return
+  const picked = found.picked
+  if (!picked || !picked.lines.length) return
+
+  const payload = {
+    version: app.getVersion(),
+    platform: process.platform,
+    arch: process.arch,
+    lines: picked.lines
+  }
+  const summary = crashReport.summarize(picked.lines)
+
+  // 不 await：调用方继续往下走，启动不受影响。
+  setImmediate(() => {
+    api('/client/crash-report', {
+      method: 'POST',
+      // 用 form 而不是 JSON：api() 只实现了 urlencoded 提交，
+      // lines 作为 JSON 字符串放进单个字段，服务端再 parse。
+      form: {
+        version: payload.version,
+        platform: payload.platform,
+        arch: payload.arch,
+        lines: JSON.stringify(payload.lines)
+      },
+      // 诊断流量不该和用户操作抢带宽，超时也给短一点。
+      totalTimeoutMs: 20000
+    }).then(() => {
+      // 传成功 → 写标记，避免重复上报。
+      crashReport.writeMarker(log.dir)
+      try {
+        log.info('crash', '崩溃日志已上报：' + summary.crashCount + ' 条崩溃' +
+          (summary.memoryPeak == null ? '' : '，内存峰值 ' + summary.memoryPeak + '%'))
+      } catch (e) {}
+    }).catch(() => {
+      // 失败就什么都不做：下次启动会再试。
+      // 刻意不写 WARN —— 线路不通时每个用户都会看到这条，纯属噪音。
+    })
+  })
+}
+
+/**
  * 周期性记录内存水位 —— **崩溃之前那一刻的内存，是事后唯一能看到的证据**。
  *
  * ## 为什么必须有
@@ -273,7 +341,14 @@ function startMemorySampling(log) {
     } catch (ignore) {}
   }
 
-  tick()
+  // ★ 首次采样必须异步，不能在这里同步跑 ★
+  //
+  // tick() 在 macOS 上会走 tab-budget 的 vm_stat 分支，那是 execSync ——
+  // 平时 5ms，但系统繁忙时最长卡 3 秒（timeout: 3000）。而本函数在
+  // app.whenReady 的启动路径上被同步调用，卡住的就是用户眼里的
+  // "双击了没反应"。采样是诊断，绝不能拖慢启动。
+  const primed = setTimeout(tick, 1000)
+  if (primed && typeof primed.unref === 'function') primed.unref()
   const timer = setInterval(tick, 15000)
   if (timer && typeof timer.unref === 'function') timer.unref()
   return timer
@@ -3856,11 +3931,14 @@ app.whenReady().then(() => {
   // 必须在 applyAppIdentity() 之后：日志目录由 app name 推导（见 initClientLog）。
   const log = initClientLog()
   if (log) {
-    log.info('app', '启动 Hello Pix v' + app.getVersion() +
-      ' · ' + process.platform + ' ' + process.arch +
+    log.info('app', '启动 Hello Pix v' + app.getVersion() + ' · ' + process.platform + ' ' + process.arch +
       ' · electron ' + process.versions.electron)
     log.info('app', '日志目录：' + log.dir)
   }
+  // 上次若是异常退出（闪退），把崩溃痕迹送到服务器 —— 用户无感。
+  // 放在拿到槽位之前：它不依赖任何窗口状态，且越早发出越不容易被后续
+  // 的初始化失败连累（启动即崩的场景，这段代码本身也可能跑不完）。
+  reportCrashIfNeeded(log)
   // 槽位必须在任何 webview 之前拿到 —— 分区名依赖它。
   const handle = acquireInstanceSlot()
   console.log('[hello-pix] 多开槽位 =', handle.slot,
@@ -3879,6 +3957,10 @@ app.on('before-quit', () => {
   // 必须在最前面：后面 saveOpenApps / releaseSlot 都可能触发窗口操作，
   // 而那些操作若被 close 拦截当成"隐藏"，退出流程就会被自己吃掉。
   isQuitting = true
+  // 写"正常退出"标记：下次启动时靠它判断上次是不是闪退。
+  // 放最前面 —— 后面任何一步若抛异常，标记都已经写下了，
+  // 宁可少上报一次，也不要把"正常退出"误报成崩溃。
+  try { if (clientLog && clientLog.dir) crashReport.writeMarker(clientLog.dir) } catch (e) {}
   saveOpenApps()
   // 关掉所有本地中继：它们是本进程内的监听端口，进程结束前清干净。
   try {

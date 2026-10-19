@@ -149,6 +149,13 @@ class AuthService {
         const path = String(req.path || '').replace(/\/+$/, '') || '/'
         const publicPaths = new Set([
           '/site/info', '/client/lines', '/login', '/client/login', '/admin/login',
+          // 崩溃日志上报：**必须公开**。
+          //
+          // 闪退最常发生在启动阶段 —— 那时还没登录，甚至登录页都没渲染出来。
+          // 若要鉴权，"启动即闪退"这批最有价值的日志反而一份都收不到，
+          // 而它们恰恰是排查的重点。滥用风险由 IP 限流（20 次/小时）兜住，
+          // 而且落库前会按 crash/memory 白名单再过滤一次。
+          '/client/crash-report',
           // 官网内容：未登录的访客必须能看到
           '/site/packages', '/site/faqs', '/site/platforms',
           // 两步验证的第二步：此时还没有会话，靠一次性票据放行
