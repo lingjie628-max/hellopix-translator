@@ -24,6 +24,7 @@ const standaloneList = document.getElementById('standaloneList')
 const standaloneClose = document.getElementById('standaloneClose')
 const logoutBtn = document.getElementById('logoutBtn')
 const tabsEl = document.getElementById('tabs')
+const tabsWrapEl = document.getElementById('tabsWrap')
 const emptyEl = document.getElementById('empty')
 const platformGrid = document.getElementById('platformGrid')
 const userBox = document.getElementById('userBox')
@@ -1817,6 +1818,68 @@ function renderTabs(state) {
     if (!rows.find(tab => tab.id === id)) delete checkedIds[id]
   })
   syncHomeVideo(home)
+  keepActiveTabVisible(state, home)
+}
+
+/**
+ * 保证**当前激活的标签**始终在可视范围内。
+ *
+ * ## 为什么必须有
+ *
+ * 标签栏 overflow-x:auto，开十几个窗口后新标签排在右边、视口却停在最左。
+ * 用户点了「新建」，新窗口其实已经开了，但顶栏里看不见 —— 观感就是
+ * 「点了没反应 / 界面被无限拉长」。
+ *
+ * ## 为什么只滚"激活项"而不是每次都滚到最右
+ *
+ * 重建标签栏是高频操作（任何状态变化都会触发）。若无条件滚到末尾，
+ * 用户手动往回翻看其它窗口时会被一次次拽回右边，非常烦人。
+ * 只跟随激活项：切换/新建时自然跟过去，浏览时保持原地。
+ */
+function keepActiveTabVisible(state, home) {
+  if (!tabsEl) return
+  const target = home
+    ? tabsEl.querySelector('.tab-home')
+    : (state && state.activeId ? tabsEl.querySelector('.tab.active') : null)
+  if (target && typeof target.offsetLeft === 'number') {
+    const left = target.offsetLeft
+    const right = left + target.offsetWidth
+    const viewLeft = tabsEl.scrollLeft
+    const viewRight = viewLeft + tabsEl.clientWidth
+    // 已经在可视区内就不动，避免每次渲染都产生抖动。
+    if (left < viewLeft || right > viewRight) {
+      const next = left < viewLeft ? left - 8 : right - tabsEl.clientWidth + 8
+      try {
+        tabsEl.scrollTo({ left: Math.max(0, next), behavior: 'smooth' })
+      } catch (e) {
+        tabsEl.scrollLeft = Math.max(0, next)
+      }
+    }
+  }
+  // 无论是否滚动，都要刷新两侧渐隐 —— 增删标签也会改变是否溢出。
+  syncTabsOverflowHint()
+}
+
+/**
+ * 根据当前滚动位置切换两侧渐隐提示。
+ *
+ * 滚动条只在溢出时出现，但用户未必第一眼注意到 —— 两侧渐隐是更直观的
+ * "后面还有"信号。必须精确：滚到最左就没有左渐隐，滚到最右就没有右渐隐，
+ * 否则用户会以为"还有"却滚不动，比没有提示更糟。
+ */
+function syncTabsOverflowHint() {
+  if (!tabsEl || !tabsWrapEl) return
+  const maxScroll = tabsEl.scrollWidth - tabsEl.clientWidth
+  const x = tabsEl.scrollLeft
+  // 1px 容差：缩放/小数像素下 scrollLeft 常是 1399 而非 1400。
+  tabsWrapEl.classList.toggle('has-more-left', maxScroll > 1 && x > 1)
+  tabsWrapEl.classList.toggle('has-more-right', maxScroll > 1 && x < maxScroll - 1)
+}
+
+if (tabsEl) {
+  tabsEl.addEventListener('scroll', syncTabsOverflowHint, { passive: true })
+  // 窗口缩放会改变可视宽度 → 是否溢出随之变化。
+  window.addEventListener('resize', syncTabsOverflowHint)
 }
 
 function syncHomeVideo(home) {

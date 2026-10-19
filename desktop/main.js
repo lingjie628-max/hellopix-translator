@@ -82,7 +82,9 @@ const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/5
  * 这个常量留着是为了"想强行限死"的场景（设成 >0 即生效），默认 0 = 不限。
  */
 const MAX_TABS_PER_WINDOW = 0
-const TABS_HEIGHT = 72
+// 顶部标签栏高度。含 6px 横向滚动条 —— 标签本身 62px + 上下 padding 10px = 72px，
+// 多出的 6px 给滚动条，否则开多窗口滚动条会把标签压扁。与 styles.css 的 .tabs 同步。
+const TABS_HEIGHT = 80
 const UTILITY_HEIGHT = 40
 const TRANS_BAR_HEIGHT = 78
 // 渲染层上报的工具条真实高度（CSS 实测约 88px，与上面的常量不一致时会用到）

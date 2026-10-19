@@ -308,6 +308,45 @@ function installConsoleBridge(target, logger) {
  * 以便测试时不必真的杀进程）；unhandledRejection 只记不退出 ——
  * 一个没接住的 Promise 不该把用户正在用的客户端整个关掉。
  */
+/**
+ * 判断未捕获异常是否致命。
+ *
+ * ## 为什么需要这个函数
+ *
+ * 0.1.36/0.1.37 的真实上报显示：代理节点抖动产生的 `ECONNRESET` /
+ * `writeAfterFIN` 被 `uncaughtException` 捕获后无条件 `exit(1)`，
+ * 用户看到的就是「打开就闪退」。90 分钟内 16 次，内存仅 60%。
+ *
+ * ## 判据必须「白名单式」：默认致命
+ *
+ * 宁可让真正严重的问题立刻退出（用户重开一次即可，且日志留痕），
+ * 也不能把未知异常一律吞掉 —— 那会造出"界面还在、但功能已坏"的
+ * 僵尸进程，比闪退更难排查。
+ *
+ * 只放行**能明确归因到网络/流、且已被中继层兜住**的错误码。
+ */
+const NETWORK_ERROR_CODES = new Set([
+  'ECONNRESET',        // 对端重置
+  'EPIPE',             // 写已关闭的管道
+  'ECONNABORTED',      // 连接被本地中止
+  'ETIMEDOUT',         // 超时
+  'ERR_STREAM_WRITE_AFTER_END',  // writeAfterFIN，本次事故的直接元凶
+  'ERR_STREAM_DESTROYED'
+])
+
+function isFatalError(error) {
+  if (!error) return true
+  // 启动期出错必须退出：继续跑只会留下一个残缺的窗口。
+  const code = String(error.code || '')
+  if (NETWORK_ERROR_CODES.has(code)) return false
+  // 有些流错误不带 code，只有 message。按特征串兜一层，仍然是白名单。
+  const message = String(error.message || '')
+  if (/^(read |write )?(ECONNRESET|EPIPE)/.test(message)) return false
+  if (/socket has been ended by the other party/i.test(message)) return false
+  if (/This socket is closed/i.test(message)) return false
+  return true
+}
+
 function attachProcessHandlers(proc, logger, options) {
   const opts = options || {}
   const exit = opts.exit || (code => proc.exit(code))
@@ -318,7 +357,22 @@ function attachProcessHandlers(proc, logger, options) {
     try {
       if (typeof opts.flush === 'function') opts.flush()
     } catch (e) {}
-    exit(1)
+    // ★ 不能对所有未捕获异常一律 exit(1) ★
+    //
+    // 这里原本无条件退出。后果在 0.1.36/0.1.37 的真实上报里暴露出来：
+    // 一次 `ECONNRESET` / `writeAfterFIN`（代理节点抖动、对端先关连接，
+    // **全是常态**）就把整个软件打死，用户看到的就是「打开就闪退」。
+    // 日志里 90 分钟内连崩 16 次，而内存只用了 60%。
+    //
+    // 失控的组件是**网络中继**，不是主进程本身 —— 让它拖垮整个 UI
+    // 才是真正的故障。所以分两类：
+    //   · 致命（启动期、模块缺失、明确标记 fatal）：必须退出，
+    //     继续跑只会变成"界面在但什么都点不动"的僵尸进程。
+    //   · 网络/IO 类（EPIPE/ECONNRESET/writeAfterFIN 等）：记账后继续，
+    //     由具体的连接逻辑自行收尾。
+    // 归到第二类的前提是 socket 层已经补齐 error 监听与安全写入
+    // （见 socks-relay.js），否则会退化成"异常被吞、但功能已坏"。
+    if (isFatalError(error)) exit(1)
   })
 
   proc.on('unhandledRejection', reason => {

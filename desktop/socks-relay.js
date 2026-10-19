@@ -271,6 +271,18 @@ function createSocksRelay(options) {
   function track(socket) {
     sockets.add(socket)
     socket.on('close', () => sockets.delete(socket))
+    // ★ 必须挂 error 监听 ★
+    //
+    // 没有它，代理/中继里一次 ECONNRESET、EPIPE、writeAfterFIN 都会变成
+    // **未捕获异常**，直接冒到 process 的 uncaughtException —— 而那里的
+    // 处理是记录后 exit(1)，于是「上游节点抖一下」=「用户整个软件消失」。
+    //
+    // 代理软件里这类错误是**常态**（节点假死、被墙、对端先关连接），
+    // 绝不能让它升级成进程级事件。这里吞掉并交给 onError 记账，
+    // 真正的收尾由 'close' 分支负责。
+    socket.on('error', error => {
+      try { onError(error) } catch (e) {}
+    })
     return socket
   }
 
@@ -291,7 +303,7 @@ function createSocksRelay(options) {
     }), HANDSHAKE_TIMEOUT_MS, () => { try { upstream.destroy() } catch (e) {} }, '连接上游超时')
 
     // 1) 问候：同时提供「无认证」与「用户名/密码」，由上游选择。
-    upstream.write(Buffer.from([SOCKS_VERSION, 2, AUTH_NONE, AUTH_USERPASS]))
+    safeWrite(upstream, Buffer.from([SOCKS_VERSION, 2, AUTH_NONE, AUTH_USERPASS]))
     // ★ 每一步握手都要有硬超时 ★
     //   上游 TCP 连得上、但**不回数据**（防火墙静默丢弃、节点假死）时，
     //   `reader.need()` 会永远挂着 —— 这正是"检测一直转圈"的现场。
@@ -306,7 +318,7 @@ function createSocksRelay(options) {
       if (!useAuth) throw new Error('上游要求认证，但未配置账号密码')
       const u = Buffer.from(user)
       const p = Buffer.from(pass)
-      upstream.write(Buffer.concat([Buffer.from([0x01, u.length]), u, Buffer.from([p.length]), p]))
+      safeWrite(upstream, Buffer.concat([Buffer.from([0x01, u.length]), u, Buffer.from([p.length]), p]))
       const authReply = await withDeadline(reader.need(2), HANDSHAKE_TIMEOUT_MS,
         () => { try { upstream.destroy() } catch (e) {} }, '上游未响应认证结果')
       if (authReply[0] !== 0x01 || authReply[1] !== 0x00) throw new Error('SOCKS5 用户名/密码认证失败')
@@ -315,7 +327,7 @@ function createSocksRelay(options) {
     }
 
     // 2) 原样转发 CONNECT（客户端与上游都是 RFC1928 的地址格式）。
-    upstream.write(requestChunk)
+    safeWrite(upstream, requestChunk)
 
     // 3) 读回上游 reply：先 4 字节头，再按 ATYP 补足地址与端口。
     const head = await withDeadline(reader.need(4), HANDSHAKE_TIMEOUT_MS,
@@ -325,6 +337,26 @@ function createSocksRelay(options) {
       () => { try { upstream.destroy() } catch (e) {} }, '上游返回的地址不完整')
     const reply = Buffer.concat([head, tail])
     return { upstream, reader, reply }
+  }
+
+  /**
+   * 安全写入：对端已关闭时 `write()` 会抛 `ERR_STREAM_WRITE_AFTER_END`
+   * （堆栈里的 writeAfterFIN），而且它**发生在 process.nextTick 里** ——
+   * 既不走 'error' 事件，也不在调用处的 try/catch 覆盖范围，直接变成
+   * 未捕获异常。
+   *
+   * 代理场景下"对端先关连接"是常态：客户端关窗口、节点断线、被墙重置。
+   * 这些都不该让主进程退出。返回 false 表示没写出去，调用方据此收尾。
+   */
+  function safeWrite(socket, chunk) {
+    if (!socket || socket.destroyed || !socket.writable) return false
+    try {
+      socket.write(chunk)
+      return true
+    } catch (e) {
+      try { onError(e) } catch (ignore) {}
+      return false
+    }
   }
 
   function handleClient(client) {
@@ -343,13 +375,13 @@ function createSocksRelay(options) {
       const head = await reader.need(2)
       if (head[0] !== SOCKS_VERSION) throw new Error('客户端不是 SOCKS5')
       await reader.need(head[1])          // 消费方法列表
-      client.write(Buffer.from([SOCKS_VERSION, AUTH_NONE]))
+      safeWrite(client, Buffer.from([SOCKS_VERSION, AUTH_NONE]))
 
       // 2) 客户端请求：只支持 CONNECT。
       const reqHead = await reader.need(4)
       if (reqHead[0] !== SOCKS_VERSION) throw new Error('客户端请求版本不符')
       if (reqHead[1] !== CMD_CONNECT) {
-        client.write(Buffer.from([SOCKS_VERSION, 0x07, 0x00, ATYP_IPV4, 0, 0, 0, 0, 0, 0]))
+        safeWrite(client, Buffer.from([SOCKS_VERSION, 0x07, 0x00, ATYP_IPV4, 0, 0, 0, 0, 0, 0]))
         throw new Error('只支持 CONNECT')
       }
       const tail = await readAddrPort(reader, reqHead[3])
@@ -358,7 +390,7 @@ function createSocksRelay(options) {
       // 3) 连上游并把 reply 原样交回客户端。
       const conn = await connectUpstream(requestChunk)
       upstream = conn.upstream
-      client.write(conn.reply)
+      safeWrite(client, conn.reply)
       if (conn.reply[1] !== 0x00) {
         throw new Error('上游 CONNECT 失败：' + describeConnectReply(conn.reply[1]))
       }
@@ -366,8 +398,8 @@ function createSocksRelay(options) {
       // 4) 摘掉两个读取器（否则它们会继续吞数据），把已缓冲的残字节先冲出去，再互相对接。
       const clientLeftover = reader.detach()
       const upstreamLeftover = conn.reader.detach()
-      if (clientLeftover.length) upstream.write(clientLeftover)
-      if (upstreamLeftover.length) client.write(upstreamLeftover)
+      if (clientLeftover.length) safeWrite(upstream, clientLeftover)
+      if (upstreamLeftover.length) safeWrite(client, upstreamLeftover)
       client.pipe(upstream)
       upstream.pipe(client)
       client.on('close', () => { try { upstream.destroy() } catch (e) {} })
@@ -560,7 +592,13 @@ function probeOneTarget (cfg) {
 
   socket.on('connect', () => {
     // 同时提供「无认证」与「用户名/密码」，由上游选 —— 与中继里的握手完全一致。
-    socket.write(Buffer.from([SOCKS_VERSION, 2, AUTH_NONE, AUTH_USERPASS]))
+    // 写入用 try 包住：对端可能刚连上就断（节点假死/被重置），
+    // write 会抛 ERR_STREAM_WRITE_AFTER_END，不能让它冒成未捕获异常。
+    try {
+      socket.write(Buffer.from([SOCKS_VERSION, 2, AUTH_NONE, AUTH_USERPASS]))
+    } catch (e) {
+      finish(false, '写入上游失败：' + ((e && e.message) || '未知错误'), 'WRITE_FAILED')
+    }
   })
 
   // ★ 单一 data 处理器 + 显式阶段状态机 ★
@@ -592,7 +630,11 @@ function probeOneTarget (cfg) {
         if (!cfg.user && !cfg.pass) return finish(false, '节点要求认证，但没填账号密码', 'AUTH_REQUIRED')
         const u = Buffer.from(cfg.user)
         const p = Buffer.from(cfg.pass)
-        socket.write(Buffer.concat([Buffer.from([0x01, u.length]), u, Buffer.from([p.length]), p]))
+        try {
+          socket.write(Buffer.concat([Buffer.from([0x01, u.length]), u, Buffer.from([p.length]), p]))
+        } catch (e) {
+          return finish(false, '写入认证信息失败：' + ((e && e.message) || '未知错误'), 'WRITE_FAILED')
+        }
         stage = 'auth'
         stageBuf = Buffer.alloc(0)
         return
@@ -642,11 +684,15 @@ function probeOneTarget (cfg) {
    */
   function sendConnect () {
     const h = Buffer.from(cfg.target.host)
-    socket.write(Buffer.concat([
-      Buffer.from([SOCKS_VERSION, CMD_CONNECT, ATYP_DOMAIN, h.length]),
-      h,
-      Buffer.from([(cfg.target.port >> 8) & 0xff, cfg.target.port & 0xff])
-    ]))
+    try {
+      socket.write(Buffer.concat([
+        Buffer.from([SOCKS_VERSION, CMD_CONNECT, ATYP_DOMAIN, h.length]),
+        h,
+        Buffer.from([(cfg.target.port >> 8) & 0xff, cfg.target.port & 0xff])
+      ]))
+    } catch (e) {
+      return finish(false, '写入 CONNECT 失败：' + ((e && e.message) || '未知错误'), 'WRITE_FAILED')
+    }
     stageBuf = Buffer.alloc(0)
   }
 

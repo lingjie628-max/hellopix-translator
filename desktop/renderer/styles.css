@@ -683,7 +683,11 @@ button {
 .spacer { flex: 1; }
 
 .tabs {
-  height: 72px;
+  /* 72 + 8：多出来的 8px 专门留给横向滚动条。
+   * 标签本身 62px + padding 上下 10px = 72px 正好占满旧高度，
+   * 滚动条若挤进这 72px 就会把标签压扁 —— 必须给它独立空间。
+   * main.js 的 TABS_HEIGHT 常量同步改为 80。 */
+  height: 80px;
   display: flex;
   gap: 8px;
   padding: 6px 10px 4px;
@@ -718,7 +722,83 @@ button {
   color: var(--c-text-strong);
 }
 .stage.is-home .tab .x:hover { background: rgb(var(--c-black-rgb) / 0.45); }
-.tabs::-webkit-scrollbar { height: 0; }
+/* ★ 横向滚动条：必须让用户看见「还有更多」★
+ *
+ * 以前是 `height: 0` —— 滚动条被彻底隐藏。容器本身 overflow-x:auto 是能滚的，
+ * 但用户看不到任何"还有更多"的提示，开十几个窗口后只会觉得界面被无限拉长、
+ * 又滚不动。看不见的可滚动区域等于不可滚动。
+ *
+ * 这里改成一条细的可见滚动条：平时不抢眼，一旦溢出就明确出现。
+ * 用 ::-webkit-scrollbar 而不是 overlay 样式，是因为 Electron/Chromium 下
+ * 前者在各平台表现一致，且能精确控制不挤压标签高度。 */
+.tabs::-webkit-scrollbar {
+  height: 8px;
+}
+.tabs::-webkit-scrollbar-track {
+  background: rgb(var(--c-black-rgb) / 0.05);
+  border-radius: 4px;
+}
+.tabs::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  /* 0.28 的透明度在浅色背景上几乎看不见 —— 而"看得见"正是这次修复的目的。
+   * 提到 0.5 保证一眼可辨，悬停再加深。 */
+  background: rgb(var(--c-accent-rgb) / 0.5);
+}
+.tabs::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--c-accent-rgb) / 0.75);
+}
+
+/* ★ 溢出提示：两侧渐隐 ★
+ *
+ * 滚动条只在溢出时出现，但用户未必立刻注意到。两侧渐隐是最直观的
+ * "后面还有东西"信号，且不占布局空间（用 overlay 层）。
+ * 通过 .has-more-left / .has-more-right 精确控制 —— 滚到头就消失，
+ * 不能让用户看到"以为还有，结果没有了"。 */
+.tabs-wrap {
+  position: relative;
+  flex-shrink: 0;
+  display: flex;
+  /* ★ 必须 min-width: 0 且子项能收缩 ★
+   *
+   * flex 子项默认 min-width:auto = 内容最小宽度。标签栏内容一多，
+   * .tabs 就会被撑到内容宽度（实测 25 个标签时撑到 1912px），
+   * 于是 overflow-x:auto 永远不触发 —— 容器自己变宽了，何来溢出？
+   * 结果就是用户截图里那样：标签一路排到屏幕外，既不换行也不滚动。
+   * 这里把最小宽度按内容释放掉，滚动才会真正生效。 */
+  min-width: 0;
+  width: 100%;
+}
+.tabs-wrap > .tabs {
+  /* 同上：让 .tabs 受限于父宽而不是内容宽 */
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.tabs-wrap::before,
+.tabs-wrap::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 8px;              /* 不盖住滚动条 */
+  width: 28px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+  z-index: 3;
+}
+.tabs-wrap::before {
+  left: 0;
+  background: linear-gradient(to right, rgb(var(--c-black-rgb) / 0.18), transparent);
+}
+.tabs-wrap::after {
+  right: 0;
+  background: linear-gradient(to left, rgb(var(--c-black-rgb) / 0.18), transparent);
+}
+.tabs-wrap.has-more-left::before {
+  opacity: 1;
+}
+.tabs-wrap.has-more-right::after {
+  opacity: 1;
+}
 .tab-spacer {
   flex: 1 1 auto;
   min-width: 12px;
@@ -733,6 +813,12 @@ button {
   width: 68px;
   min-width: 68px;
   max-width: 68px;
+  /* ★ 绝不允许被压缩 ★
+   *
+   * flex 容器挤满后，默认 flex-shrink:1 会把每个标签等比压扁。
+   * 开十几个窗口时标签全部变形、文字挤成一团，看起来就像"界面被拉长了"。
+   * 标签必须保持固定尺寸，溢出交给容器的横向滚动。 */
+  flex: 0 0 auto;
   height: 62px;
   padding: 6px 4px 4px;
   border-radius: 10px;
