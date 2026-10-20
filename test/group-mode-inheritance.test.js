@@ -97,6 +97,11 @@ function makeOpenAppsSandbox(seed) {
     openAppsFile: () => 'open-apps.json',
     readJson: (file, def) => (store.file === undefined ? def : JSON.parse(JSON.stringify(store.file))),
     writeJson: (file, data) => { store.file = JSON.parse(JSON.stringify(data)) },
+    // saveOpenApps 通过 openAppsStore().get() 读、writeJson 写。
+    // 这里让 store 的读也走同一份内存文件，保持"读到的就是上一次写下的"语义。
+    openAppsStore: () => ({
+      get: def => (store.file === undefined ? def : JSON.parse(JSON.stringify(store.file)))
+    }),
     sealSettings: s => Object.assign({}, s || {}),
     tabs: [],
     usedCount: {},

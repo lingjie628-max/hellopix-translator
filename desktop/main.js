@@ -12,6 +12,8 @@ const fallbackPlatforms = require('./platforms')
 const builtinLines = require('./lines')
 const proxyPresets = require('./proxy-presets')
 const proxyIsolation = require('./proxy-isolation')
+// 热路径上的状态文件改走异步 + 原子写（见下方 asyncJson 的说明）。
+const { createStore } = require('./async-store')
 const { stripProxyFields } = proxyIsolation
 // 代理的构建与应用抽到独立模块：产品、单元测试、机制测试共用**同一份实现**。
 // 这几个函数原先内联在 main.js 里，而 main.js 一 require 就会加载 electron，
@@ -83,6 +85,45 @@ const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/5
  * 这个常量留着是为了"想强行限死"的场景（设成 >0 即生效），默认 0 = 不限。
  */
 const MAX_TABS_PER_WINDOW = 0
+
+/**
+ * 实际生效的实例上限。
+ *
+ * 常态是 `MAX_TABS_PER_WINDOW`（0 = 按内存水位动态判断）。
+ * 但崩溃循环进入安全模式后，stability-boot 会把建议值放在
+ * `global.__pixGuard.policy().maxTabs` 上 —— 以前这个值**只写进日志、
+ * 从未被读取**，等于安全模式只关了 GPU，实例数照样不受限。
+ *
+ * 安全模式的判据来自「5 分钟内启动 3 次」：那种情况下最大的嫌疑就是
+ * 实例太多，把它压到 2 个能让用户立刻验证这个假设，而不是继续崩。
+ */
+function effectiveMaxTabs() {
+  try {
+    const guard = global.__pixGuard
+    if (guard && typeof guard.policy === 'function') {
+      const max = Number(guard.policy().maxTabs) || 0
+      if (max > 0) return max
+    }
+  } catch (e) {}
+  return MAX_TABS_PER_WINDOW
+}
+
+/**
+ * 安全模式下停掉翻译桥。
+ *
+ * `guest-inject.js` 有 4300 行，注入到每一个实例页面里，是崩溃嫌疑面里
+ * 最难在真机二分的一块。安全模式的首要目标是"先让它能开起来"，所以
+ * 这里把它摘掉：用户暂时没有翻译，但至少不会一开就崩。
+ *
+ * 只在崩溃循环（5 分钟内启动 3 次）时触发，正常使用完全不受影响。
+ */
+function safeModeDisablesBridge() {
+  try {
+    const guard = global.__pixGuard
+    if (guard && typeof guard.policy === 'function') return !!guard.policy().disableBridge
+  } catch (e) {}
+  return false
+}
 // 顶部标签栏高度。含 6px 横向滚动条 —— 标签本身 62px + 上下 padding 10px = 72px，
 // 多出的 6px 给滚动条，否则开多窗口滚动条会把标签压扁。与 styles.css 的 .tabs 同步。
 const TABS_HEIGHT = 80
@@ -160,7 +201,54 @@ function readJson(file, fallback) {
 }
 
 function writeJson(file, data) {
+  const store = syncStores.get(file)
+  // 已交给异步存储的文件走异步通道，不能再同步写 —— 两条通道各写各的会互相覆盖。
+  if (store) return store.set(data)
   fs.writeFileSync(file, JSON.stringify(data, null, 2))
+}
+
+/**
+ * 热路径上的 JSON 文件改用异步存储。
+ *
+ * ## 为什么只挑这两个文件
+ *
+ * `writeJson` 的调用点里，只有这两个在**主线程热路径**上：
+ *
+ *   · open-apps.json    ← saveOpenApps()，被 did-stop-loading / switchTab /
+ *                           goHome / updateTabSettings 调用，开多窗口时每次
+ *                           切标签都触发一轮「同步读 + 同步整份重写」；
+ *   · window-bounds.json ← 拖动窗口（500ms 防抖），拖一下就是一次同步写。
+ *
+ * 其余（config / auth / web-apps / presets / proxy-history）都在用户主动
+ * 操作时写一次，频率极低，保持同步反而更简单 —— 把启动期就需要读到的
+ * 配置改成异步只会增加时序复杂度，收益为零。
+ *
+ * ## 用异步存储顺带修掉的数据风险
+ *
+ * `writeFileSync` 直接覆盖：写到一半断电或被杀进程，文件会变成半截 JSON，
+ * 下次读取走 fallback，**用户的窗口列表静默丢失**。async-store 走
+ * 「写临时文件 → rename」，同一分区上 rename 是原子的，结果只有
+ * 「旧的完整文件」或「新的完整文件」。
+ */
+const syncStores = new Map()
+
+function asyncJson(file) {
+  const cached = syncStores.get(file)
+  if (cached) return cached
+  const store = createStore(file, {
+    onError: error => {
+      try { console.error('[store] 写入失败 ' + file + '：' + (error && error.message)) } catch (e) {}
+    }
+  })
+  syncStores.set(file, store)
+  return store
+}
+
+/** 退出前把异步队列里的数据同步落盘。 */
+function flushSyncStores() {
+  for (const store of syncStores.values()) {
+    try { store.flushSync() } catch (e) {}
+  }
 }
 
 /* ---------------------------------------------------------------- 日志落盘 */
@@ -395,6 +483,23 @@ function openAppsFile() {
   return userFile('open-apps.json')
 }
 
+/**
+ * 打开的应用列表 → 异步存储。
+ *
+ * 这是全仓最热的一份状态：did-stop-loading / switchTab / goHome /
+ * updateTabSettings 都会调 saveOpenApps()，而它每次都是
+ * 「同步读盘 → 合并所有标签 → 整份同步重写」。开十几个窗口时，
+ * 每切一次标签就在主线程上做一轮全量磁盘 IO。
+ *
+ * 注册走 asyncJson() 之后，saveOpenApps() 里的 readJson(openAppsFile())
+ * 变成读内存缓存，writeJson 变成 250ms 合并后的异步原子写。
+ *
+ * 幂等：asyncJson 自带缓存，重复调用返回同一个 store。
+ */
+function openAppsStore() {
+  return asyncJson(openAppsFile())
+}
+
 function currentPixUser() {
   return String((profile && profile.username) || loadStoredAuth().username || '').trim()
 }
@@ -476,7 +581,7 @@ const seededTabIds = new Set()
 function saveOpenApps() {
   const user = currentPixUser()
   if (!user) return
-  const all = readJson(openAppsFile(), {})
+  const all = openAppsStore().get({})
   if (!all.byUser || typeof all.byUser !== 'object') all.byUser = {}
   const previous = all.byUser[user] || {}
   const previousTabs = Array.isArray(previous.tabs) ? previous.tabs : []
@@ -659,7 +764,7 @@ function restoreOpenApps(username) {
   if (tabs.length) return
   const user = String(username || currentPixUser() || '').trim()
   if (!user) return
-  const all = readJson(openAppsFile(), {})
+  const all = openAppsStore().get({})
   const data = (all.byUser && all.byUser[user]) || (all.username === user ? all : null)
   if (!data || !Array.isArray(data.tabs) || !data.tabs.length) return
   nextTab = Math.max(1, Number(data.nextTab) || 1)
@@ -741,7 +846,7 @@ function scheduleSaveWindowBounds() {
   boundsSaveTimer = setTimeout(() => {
     boundsSaveTimer = null
     if (!win || win.isDestroyed() || win.isFullScreen() || win.isMaximized()) return
-    try { writeJson(userFile(WINDOW_BOUNDS_FILE), win.getBounds()) } catch (error) {}
+    try { asyncJson(userFile(WINDOW_BOUNDS_FILE)).set(win.getBounds()) } catch (error) {}
   }, 500)
 }
 
@@ -2978,7 +3083,7 @@ function createWebView(partition, settings, item, homeUrl, tabInfo) {
     const allowNotification = trusted && permission === 'notifications' && (!settings || settings.showNotify !== false)
     callback(!!allowNotification)
   })
-  const bridgeEnabled = bridgeEnabledFor(item)
+  const bridgeEnabled = bridgeEnabledFor(item) && !safeModeDisablesBridge()
   const view = new WebContentsView({
     webPreferences: {
       preload: bridgeEnabled ? path.join(__dirname, 'guest-inject.js') : undefined,
@@ -3150,7 +3255,7 @@ function openPlatform(payload) {
   // 而用户完全不知道是"开太多了"。
   const budget = tabBudget.canOpenAnotherTab({
     tabCount: tabs.length,
-    maxTabs: MAX_TABS_PER_WINDOW,
+    maxTabs: effectiveMaxTabs(),
     used: tabBudget.openHandleCount(),
     limit: tabBudget.handleLimit()
   })
@@ -4154,6 +4259,9 @@ app.on('before-quit', () => {
   // 宁可少上报一次，也不要把"正常退出"误报成崩溃。
   try { if (clientLog && clientLog.dir) crashReport.writeMarker(clientLog.dir) } catch (e) {}
   saveOpenApps()
+  // 异步存储的队列必须在这里同步落盘：process 退出后定时器不会再有下一次机会，
+  // 而 open-apps.json 决定用户下次打开看到哪些窗口。
+  flushSyncStores()
   // 关掉所有本地中继：它们是本进程内的监听端口，进程结束前清干净。
   try {
     relayPool.forEach(entry => { try { entry.relay.close() } catch (e) {} })

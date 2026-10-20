@@ -68,6 +68,7 @@
       "instance-slot.js",
       "background-mode.js",
       "hidden-tabs.js",
+      "async-store.js",
       "log-file.js",
       "bridge-warning.js",
       "native-composer.js",

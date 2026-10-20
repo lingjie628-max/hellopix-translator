@@ -1,53 +1,78 @@
 -- 从服务端崩溃上报里读出「到底在崩什么」。
--- 表来自 migration 046：client_crash_logs（device_id, crashed_at, 去重键）。
--- 列名以实际迁移为准，若不同请替换下面 4 个字段名再跑。
+--
+-- 表结构（实测，client_crash_logs）：
+--   lines jsonb  —— **对象数组** [{at, text, scope}]，不是字符串数组。
+--   所以必须 jsonb_array_elements() 再取 ->>'text'，不能 unnest(lines)。
+--   scope 取值：crash / memory。
+--
+-- 全部只读。
 
--- 1) 最近 7 天，按版本看崩溃率
---    判据：某版本「崩溃设备数 / 活跃设备数」明显高于上一版 → 该版有回归。
+\echo '=== 1) 近 7 天按版本看崩溃设备数 ==='
 SELECT
   version,
-  COUNT(DISTINCT device_id)              AS crash_devices,
-  COUNT(*)                               AS crash_rows,
-  MIN(crashed_at)                        AS first_at,
-  MAX(crashed_at)                        AS last_at
+  COUNT(DISTINCT device_id) AS crash_devices,
+  COUNT(*)                  AS crash_rows,
+  MAX(crashed_at)           AS last_at
 FROM client_crash_logs
 WHERE crashed_at >= NOW() - INTERVAL '7 days'
 GROUP BY version
 ORDER BY last_at DESC;
 
--- 2) 崩溃原文 top 20（把「同一个原因反复发生」挑出来，而不是逐个设备看）
---    看 reason / exitCode：oom 与 crashed 是两条完全不同的排查路径。
+\echo ''
+\echo '=== 2) 崩溃原文 Top 20（同一个原因反复发生） ==='
+-- 只看 scope=crash 的行：memory 行是水位采样，量大且不说明崩溃原因。
 SELECT
-  LEFT(payload_line, 160) AS line,
-  COUNT(*)                AS times,
-  COUNT(DISTINCT device_id) AS devices
-FROM client_crash_logs
-CROSS JOIN LATERAL unnest(lines) AS payload_line
-WHERE crashed_at >= NOW() - INTERVAL '7 days'
-GROUP BY LEFT(payload_line, 160)
+  LEFT(l->>'text', 120)       AS line,
+  COUNT(*)                    AS times,
+  COUNT(DISTINCT c.device_id) AS devices
+FROM client_crash_logs c
+CROSS JOIN LATERAL jsonb_array_elements(c.lines) AS l
+WHERE c.crashed_at >= NOW() - INTERVAL '7 days'
+  AND l->>'scope' = 'crash'
+GROUP BY LEFT(l->>'text', 120)
 ORDER BY times DESC
 LIMIT 20;
 
--- 3) 「启动后立刻崩」的比例（崩溃循环用户）。
---    这些用户最该走安全模式；判据：同一设备 24h 内 >=3 次崩溃。
-SELECT device_id, COUNT(*) AS crashes_24h, MIN(crashed_at) AS first_at, MAX(crashed_at) AS last_at
-FROM client_crash_logs
-WHERE crashed_at >= NOW() - INTERVAL '24 hours'
-GROUP BY device_id
-HAVING COUNT(*) >= 3
-ORDER BY crashes_24h DESC;
+\echo ''
+\echo '=== 3) 按 reason 统计（oom / crashed / killed 是三条不同排查路径） ==='
+SELECT
+  COALESCE(reason, '(无记录)') AS reason,
+  COUNT(*)                     AS reports,
+  COUNT(DISTINCT device_id)    AS devices
+FROM client_crash_logs c
+LEFT JOIN LATERAL unnest(c.reasons) AS reason ON TRUE
+WHERE crashed_at >= NOW() - INTERVAL '7 days'
+GROUP BY 1
+ORDER BY reports DESC;
 
--- 4) 内存峰值 vs 崩溃（验证「是内存还是代码」）
---    若多数崩溃的 memory_peak < 80%，那内存不是主因，别再调阈值。
+\echo ''
+\echo '=== 4) 内存水位分布 —— 判断到底是不是内存压爆 ==='
 SELECT
   CASE
-    WHEN raw::jsonb ->> 'memoryPeak' IS NULL THEN 'unknown'
-    WHEN (raw::jsonb ->> 'memoryPeak')::int < 60 THEN '<60%'
-    WHEN (raw::jsonb ->> 'memoryPeak')::int < 80 THEN '60-80%'
-    ELSE '>=80%'
-  END AS memory_band,
-  COUNT(*) AS crashes
+    WHEN memory_peak_pct IS NULL THEN '无数据'
+    WHEN memory_peak_pct >= 95 THEN '95%+  系统濒死'
+    WHEN memory_peak_pct >= 90 THEN '90-95% 严重'
+    WHEN memory_peak_pct >= 80 THEN '80-90% 高压'
+    WHEN memory_peak_pct >= 60 THEN '60-80% 正常偏高'
+    ELSE '<60% 内存充足'
+  END                AS bucket,
+  COUNT(*)           AS reports,
+  COUNT(DISTINCT device_id) AS devices,
+  ROUND(AVG(memory_peak_pct), 1) AS avg_pct
 FROM client_crash_logs
 WHERE crashed_at >= NOW() - INTERVAL '7 days'
 GROUP BY 1
-ORDER BY 2 DESC;
+ORDER BY avg_pct DESC NULLS LAST;
+
+\echo ''
+\echo '=== 5) 反复崩的设备（同一台机多次上报 = 结构性撑不住） ==='
+SELECT
+  device_id,
+  COUNT(*)            AS reports,
+  MAX(crash_count)    AS max_crash_in_report,
+  MAX(memory_peak_pct) AS peak_pct
+FROM client_crash_logs
+WHERE crashed_at >= NOW() - INTERVAL '7 days'
+GROUP BY device_id
+ORDER BY reports DESC, max_crash_in_report DESC
+LIMIT 10;

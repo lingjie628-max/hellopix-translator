@@ -88,11 +88,20 @@ function buildSandbox({ savedFile = null, displays = [] } = {}) {
     fs.writeFileSync(path.join(userData, 'window-bounds.json'), typeof savedFile === 'string' ? savedFile : JSON.stringify(savedFile))
   }
   const writes = []
+  // 真实的异步存储：scheduleSaveWindowBounds 现在走 asyncJson()。
+  // 用真模块而不是假对象 —— 这样"rename 原子写"也在测试覆盖里。
+  const { createStore } = require('../desktop/async-store')
+  const stores = new Map()
+  const asyncJson = file => {
+    if (!stores.has(file)) stores.set(file, createStore(file, { debounceMs: 0 }))
+    return stores.get(file)
+  }
   const sandbox = {
     console,
     setTimeout,
     clearTimeout,
     app: { getPath: () => userData },
+    asyncJson,
     require: id => {
       if (id === 'electron') return { screen: { getAllDisplays: () => displays } }
       return require(id)
