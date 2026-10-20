@@ -2,7 +2,7 @@
 
 const crypto = require('crypto')
 const defaultTranslator = require('./translation-provider')
-const platforms = require('../../desktop/src/config/platforms')
+const platforms = require('../../desktop/shared/platforms')
 const { ApiError } = require('../lib/http')
 const { toMilli, formatMilli } = require('../lib/money')
 const { estimateUpstreamCost } = require('../lib/upstream-pricing')

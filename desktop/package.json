@@ -56,6 +56,7 @@
       "line-ext-shim.js",
       "package.json",
       "src/**/*.js",
+    "shared/**/*.js",
       "renderer/**/*",
       "node_modules/undici/**/*",
       "!renderer/*.mp4",

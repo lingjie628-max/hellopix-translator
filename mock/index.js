@@ -529,7 +529,7 @@ module.exports = function registerMock(app, options) {
     }
   }
 
-  const clientPlatforms = require('../desktop/src/config/platforms')
+  const clientPlatforms = require('../desktop/shared/platforms')
 
   function findAccount(username, password) {
     const main = db.users.find(u => (u.username === username || (u.email && u.email === username)) && security.verifyPassword(u, password))

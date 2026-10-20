@@ -30,7 +30,7 @@ const MAX_FRAMES = 12
 
 app.setPath('userData', path.join(app.getPath('appData'), 'Hello Pix Probe'))
 
-const PLATFORMS = require('../src/config/platforms.js').filter((p) => !SKIP.has(p.id))
+const PLATFORMS = require('../shared/platforms.js').filter((p) => !SKIP.has(p.id))
 
 /** 在页面（每个 frame）里执行。必须自包含 —— 会被 toString() 注入。 */
 function probeSource () {
