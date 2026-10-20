@@ -2699,85 +2699,44 @@ function showResourceNotice(message, code) {
   }
 }
 
-function openPlatform(payload) {
-  const platforms = fallbackPlatforms
-  const item = platforms.find(p => p.id === payload.platformId)
-  if (!item) return { success: false, msg: '不支持该平台' }
+/**
+ * 打开实例（实现见 src/window/open-platform.js）。
+ *
+ * 顺序：资源预算 → 地址安全策略 → 建视图 → 入列 → 看门狗 → 加载 → 落盘。
+ * 预算判断必须在创建任何 Chromium 对象之前，理由见该文件头。
+ */
+const openPlatformApi = require('./src/window/open-platform').createOpenPlatform({
+  state: {
+    get tabs () { return tabs },
+    get usedCount () { return usedCount },
+    get nextTab () { return nextTab },
+    set nextTab (v) { nextTab = v },
+    get activeId () { return activeId },
+    set activeId (v) { activeId = v },
+    get showHome () { return showHome },
+    set showHome (v) { showHome = v }
+  },
+  libs: {
+    tabBudget,
+    effectiveMaxTabs,
+    makePartition,
+    normalizeTabSettings,
+    safePlatformHomeUrl,
+    createWebView,
+    accountSlug,
+    bindTabLoading,
+    watchdogBridge,
+    startTabLoad,
+    layoutViews,
+    sendTabs,
+    saveOpenApps,
+    showResourceNotice,
+    logWarn: (channel, msg) => { if (clientLog) clientLog.warn(channel, msg) }
+  },
+  env: { platforms: fallbackPlatforms }
+})
 
-  // ★ 资源预算：在创建任何 Chromium 对象**之前**先问"还能不能开"。
-  //
-  // 主判据是**系统内存水位**（见 tab-budget.js 顶部）：
-  // 实测 80 个重型实例约吃 8GB、句柄只用了 1886 个（离上限极远），
-  // 所以"能不能再开"取决于内存，而不是窗口数或句柄。
-  // 不判断的后果：内存吃满后系统开始换页，应用表现为卡死甚至闪退，
-  // 而用户完全不知道是"开太多了"。
-  const budget = tabBudget.canOpenAnotherTab({
-    tabCount: tabs.length,
-    maxTabs: effectiveMaxTabs(),
-    used: tabBudget.openHandleCount(),
-    limit: tabBudget.handleLimit()
-  })
-  if (!budget.ok) {
-    if (clientLog) {
-      const m = budget.memory || {}
-      clientLog.warn('resource', '拒绝新增实例（' + budget.code + '）：' + budget.reason +
-        ' · 当前窗口 ' + tabs.length + ' 个' +
-        ' · 内存 ' + Math.round((m.used || 0) / 1048576) + '/' + Math.round((m.total || 0) / 1048576) + 'MB' +
-        (m.ratio === undefined ? '' : '（已用 ' + Math.round(m.ratio * 100) + '%）') +
-        ' · 句柄 ' + budget.used + '/' + budget.limit)
-    }
-    // 必须让用户**看见**。渲染层的弹窗会被 WebContentsView 盖住，
-    // 而这里恰恰是"窗口已经很多"的场景 —— 原生对话框是唯一稳的通道。
-    showResourceNotice(budget.reason, budget.code)
-    return { success: false, code: budget.code, msg: budget.reason }
-  }
-
-  usedCount[item.id] = Number(usedCount[item.id] || 0) + 1
-  const index = usedCount[item.id]
-  const id = item.id + '-' + nextTab++
-  const partition = makePartition(item.id, index)
-  const settings = normalizeTabSettings(payload.settings || {})
-  if (item.id === 'whatsapp-pro' && settings.antiRevoke === undefined) settings.antiRevoke = true
-  const homeUrl = safePlatformHomeUrl(item, settings)
-  if (!homeUrl) return { success: false, msg: '应用地址不符合安全策略' }
-  const displayName = String(payload.name || item.name).trim() || item.name
-  const view = createWebView(partition, settings, item, homeUrl,
-    { platform: item.id, account: accountSlug(), id: '' })
-  const tab = {
-    id: id,
-    platform: item.id,
-    name: displayName,
-    title: displayName,
-    index: index,
-    icon: item.icon || item.id,
-    view: view,
-    item: item,
-    homeUrl: homeUrl,
-    settings: settings,
-    partition: partition
-  }
-  if (settings.muteAll) view.webContents.setAudioMuted(true)
-  if (settings.disableAutoLoad) {
-    view.webContents.on('did-fail-load', (_e, _code, _desc, _url, isMain) => {
-      if (isMain) {
-        try { view.webContents.stop() } catch (e) {}
-      }
-    })
-  }
-  tab.url = homeUrl
-  tab.loading = true
-  bindTabLoading(tab)
-  tabs.push(tab)
-  // 只有在 preload 真的跑起来之后，guest 才会来问 prefs；到点没来就是桥没起来。
-  watchdogBridge(tab)
-  startTabLoad(tab)
-  activeId = id
-  showHome = false
-  layoutViews()
-  sendTabs()
-  saveOpenApps()
-  return { success: true, id: id }
-}
+const openPlatform = openPlatformApi.openPlatform
 
 /**
  * 后台运行状态。
