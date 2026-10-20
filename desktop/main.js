@@ -2969,7 +2969,8 @@ require('./src/ipc/tabs').registerTabsIpc({
     switchTab,
     hideTab,
     showHiddenTab,
-    popupTabContextMenu,
+    // 惰性取：这个工厂的 const 声明在下面，直接引用会撞 TDZ
+    popupTabContextMenu: payload => popupTabContextMenu(payload),
     goHome,
     readPresets: () => readJson(userFile('app-presets.json'), {}),
     writePresets: all => writeJson(userFile('app-presets.json'), all),
@@ -3097,69 +3098,22 @@ function openProxySettingsFor(id) {
   if (win && !win.isDestroyed()) win.webContents.send('context:proxySettings', String(id || ''))
 }
 
-function popupTabContextMenu(payload) {
-  const id = String((payload && payload.id) || '')
-  const home = !!(payload && payload.home)
-  const tab = tabs.find(t => t.id === id)
-  const wc = tab && tab.view && tab.view.webContents
-  const sendCommand = command => {
-    if (win && !win.isDestroyed()) win.webContents.send('context:command', command)
-  }
-  const restart = () => {
-    app.relaunch()
-    app.exit(0)
-  }
-  let template
-  if (home || !tab || !wc || wc.isDestroyed()) {
-    template = [
-      { label: '个人中心', click: () => sendCommand('account') },
-      { label: '检查软件更新', click: () => sendCommand('softwareUpdate') },
-      { type: 'separator' },
-      { label: '打开日志目录', click: () => openLogDir() },
-      { label: '重启软件', click: restart }
-    ]
-  } else {
-    const changeZoom = delta => {
-      const current = Number(wc.getZoomFactor()) || 1
-      wc.setZoomFactor(Number(Math.min(2, Math.max(0.5, current + delta)).toFixed(2)))
-    }
-    template = [
-      { label: '重命名窗口…', click: () => sendCommand({ action: 'rename', id: tab.id }) },
-      {
-        // 隐藏而不是关闭：网页版进程原地保留，登录态与设置一点不丢。
-        // 不能放进"关闭应用"那一组 —— 那里离手指太近，误点会把正在
-        // 收消息的窗口藏掉，用户会以为被关了。
-        label: '隐藏该窗口（后台运行）',
-        click: () => hideTab(tab.id)
-      },
-      { type: 'separator' },
-      { label: '放大页面', accelerator: 'CmdOrCtrl+Plus', click: () => changeZoom(0.1) },
-      { label: '缩小页面', accelerator: 'CmdOrCtrl+-', click: () => changeZoom(-0.1) },
-      { label: '还原缩放', accelerator: 'CmdOrCtrl+0', click: () => wc.setZoomFactor(1) },
-      { type: 'separator' },
-      { label: '刷新当前应用', accelerator: 'CmdOrCtrl+R', click: () => wc.reload() },
-      { label: '代理设置', click: () => openProxySettingsFor(tab.id) },
-      { label: '检查应用更新', click: () => updatePlatformWeb(tab.platform) },
-      {
-        label: '清理当前应用缓存',
-        click: async () => {
-          try {
-            await wc.session.clearCache()
-            wc.reloadIgnoringCache()
-          } catch (e) {}
-        }
-      },
-      { type: 'separator' },
-      { label: '个人中心', click: () => sendCommand('account') },
-      { label: '打开日志目录', click: () => openLogDir() },
-      // 关闭走二次确认：交给渲染层弹框，确认后才真正 closeTab。
-      // 主进程直接关会绕过确认 —— 两条路径的语义必须一致。
-      { label: '关闭应用', click: () => sendCommand({ action: 'closeAsk', id: tab.id }) }
-    ]
-  }
-  Menu.buildFromTemplate(template).popup({ window: win })
-  return { success: true }
-}
+/**
+ * 标签栏右键菜单（实现见 src/window/tab-context-menu.js）。
+ *
+ * 隐藏和关闭必须分开 —— "关闭"那一组离手指太近，
+ * 把"隐藏"放进去，误点会把正在收消息的窗口藏掉。
+ */
+const tabContextMenu = require('./src/window/tab-context-menu').createTabContextMenu({
+  electron: { Menu, app },
+  state: {
+    get win () { return win },
+    get tabs () { return tabs }
+  },
+  libs: { openLogDir, hideTab, openProxySettingsFor, updatePlatformWeb }
+})
+
+const popupTabContextMenu = tabContextMenu.popupTabContextMenu
 
 /**
  * 读取一条线路当前的代理配置，供「代理设置」弹窗回填。

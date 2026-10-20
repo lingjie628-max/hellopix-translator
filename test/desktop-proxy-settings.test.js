@@ -415,9 +415,11 @@ test('proxy-settings.js 不 require electron（否则测试又加载不了）', 
 // ───────────────────────────────────────── 第 1 项的入口：右键菜单
 
 test('【1】右键菜单里有「代理设置」，且只把线路 id 发给渲染层', () => {
-  const body = fnBody(mainSrc, 'popupTabContextMenu')
-  assert.ok(body.includes('代理设置'), '右键菜单缺少「代理设置」入口')
-  assert.ok(body.includes('openProxySettingsFor'), '菜单项应调用 openProxySettingsFor')
+  // 菜单模板已迁到 src/window/tab-context-menu.js
+  const menuSrc = fs.readFileSync(
+    path.join(root, 'desktop', 'src', 'window', 'tab-context-menu.js'), 'utf8')
+  assert.ok(menuSrc.includes('代理设置'), '右键菜单缺少「代理设置」入口')
+  assert.ok(menuSrc.includes('openProxySettingsFor'), '菜单项应调用 openProxySettingsFor')
   const open = fnBody(mainSrc, 'openProxySettingsFor')
   assert.ok(open.includes("'context:proxySettings'"), '应通过专用通道把线路 id 发给渲染层')
   assert.ok(open.includes('String(id'), '只传 id，弹窗自己去读当前配置')

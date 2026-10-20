@@ -249,7 +249,9 @@ test('隐藏状态要落盘并可恢复，否则重启后全部复活', () => {
 })
 
 test('右键菜单有「隐藏该窗口」且接的是 hideTab', () => {
-  const menu = extract(mainSrc, 'popupTabContextMenu')
+  // 菜单模板已迁到 src/window/tab-context-menu.js
+  const menu = fs.readFileSync(
+    path.join(root, 'desktop', 'src', 'window', 'tab-context-menu.js'), 'utf8')
   assert.ok(/隐藏该窗口/.test(menu))
   assert.ok(/hideTab\(tab\.id\)/.test(menu))
 })
@@ -309,7 +311,9 @@ test('标签上的 × 必须先确认才关', () => {
 })
 
 test('右键「关闭应用」也要确认，不能由主进程直接关', () => {
-  const menu = extract(mainSrc, 'popupTabContextMenu')
+  // 菜单模板已迁到 src/window/tab-context-menu.js
+  const menu = fs.readFileSync(
+    path.join(root, 'desktop', 'src', 'window', 'tab-context-menu.js'), 'utf8')
   assert.ok(/closeAsk/.test(menu), '右键关闭应回传给渲染层弹确认')
   assert.ok(!/label: '关闭应用', click: \(\) => closeTab/.test(menu),
     '主进程直接 closeTab 会绕过确认')
