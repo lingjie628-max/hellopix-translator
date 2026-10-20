@@ -2859,119 +2859,39 @@ function setLoginItem(enabled) {
   refreshTrayMenu()
 }
 
-function createWindow() {
-  // 按屏幕可用区域自适应开窗：此前固定 1280x820，小屏尚可、大屏浪费，
-  // 而窄屏下顶部翻译设置区会被挤压换行。取下 92% 并设上下限，保证完整显示。
-  const { screen: electronScreen } = require('electron')
-  const { workAreaSize } = electronScreen.getPrimaryDisplay()
-  // 高度优先：顶部设置区两行需要空间，因此尽量吃满可用高度（只留 16px 余量），
-  // 而不是按比例缩。1280x800 这类逻辑分辨率下可用高度约 775px，这就是物理上限。
-  // 最小尺寸见 WINDOW_MIN_WIDTH / WINDOW_MIN_HEIGHT 的注释（含实测依据）。
-  const fallback = {
-    width: Math.max(WINDOW_MIN_WIDTH, Math.min(1920, workAreaSize.width - 16)),
-    height: Math.max(WINDOW_MIN_HEIGHT, Math.min(1600, workAreaSize.height - 16))
-  }
-  const saved = restoreWindowBounds(fallback)
-  const width = saved.width
-  const height = saved.height
-  win = new BrowserWindow({
-    width,
-    height,
-    center: true,
-    minWidth: WINDOW_MIN_WIDTH,
-    minHeight: WINDOW_MIN_HEIGHT,
-    title: 'Hello Pix',
-    icon: APP_ICON,
-    backgroundColor: '#070b14',
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true
-    }
-  })
-  win.setMenuBarVisibility(false)
-  // 渲染进程的报错与崩溃要留痕：此前"界面白屏""翻译没反应"这类问题在客户端
-  // 没有任何记录，只能靠用户复述当时点了什么。
-  if (clientLog) {
-    const wcLog = win.webContents
-    wcLog.on('console-message', (...args) => {
-      // Electron 33 是老签名 (event, level, message, line, sourceId)，
-      // 新版本改成单个对象。两种都兼容 —— 否则升级后日志会静默消失。
-      let level, message, line, source
-      if (args.length === 1 && args[0] && typeof args[0] === 'object') {
-        level = args[0].level
-        message = args[0].message
-        line = args[0].lineNumber
-        source = args[0].sourceId
-      } else {
-        level = args[1]
-        message = args[2]
-        line = args[3]
-        source = args[4]
-      }
-      // 只收警告与错误：渲染层的 info 量大且几乎没有诊断价值
-      if (level === 2 || level === 3 || level === 'warning' || level === 'error') {
-        clientLog.warn('renderer', String(message) + ' @' + (source || '') + ':' + line)
-      }
-    })
-    wcLog.on('render-process-gone', (_event, details) => {
-      clientLog.error('crash', '主窗口渲染进程退出：reason=' +
-        ((details && details.reason) || '?') + ' exitCode=' +
-        ((details && details.exitCode) == null ? '?' : details.exitCode))
-    })
-    wcLog.on('unresponsive', () => clientLog.warn('renderer', '主窗口无响应'))
-  }
-  // macOS 会恢复上次的窗口框架，覆盖构造时的 width/height。
-  // 这里显式再设一次并居中，确保"吃满可用区域"的尺寸真正生效。
-  const hasSavedPosition = Number.isFinite(saved.x) && Number.isFinite(saved.y)
-  win.setBounds({
-    x: hasSavedPosition ? saved.x : win.getBounds().x,
-    y: hasSavedPosition ? saved.y : win.getBounds().y,
-    width,
-    height
-  })
-  if (!hasSavedPosition) win.center()
-  /**
-   * 关闭窗口 → 隐藏到托盘（后台继续跑），而不是退出。
-   *
-   * 翻译靠的是各个 webview 里注入的脚本，窗口一旦真关掉、webContents 被销毁，
-   * 翻译就停了。用户点右上角的 ×，多数时候意思是"先收起来"，
-   * 不是"别翻了" —— 尤其是这个产品的多开窗口本来就要一直挂着。
-   *
-   * 但**不是无条件拦截**：托盘没建出来时必须放行退出，
-   * 否则窗口藏了、又没有任何入口能找回来，进程就成了用户看不见也关不掉的僵尸。
-   * 判定集中放在 background-mode.js，那里有单测。
-   */
-  win.on('close', event => {
-    if (!backgroundMode.shouldHideOnClose({
-      isQuitting,
-      backgroundEnabled: backgroundEnabled(),
-      hasTray: !!tray
-    })) return
-    event.preventDefault()
-    win.hide()
-    // 只提示一次，避免每次关窗都弹一下惹人烦
-    if (!backgroundTipShown && tray && process.platform === 'win32') {
-      backgroundTipShown = true
-      try {
-        tray.displayBalloon({
-          title: 'Hello Pix 仍在后台运行',
-          content: '翻译会继续工作。要完全退出，请右键托盘图标选择「退出」。'
-        })
-      } catch (e) { /* 某些系统不支持气泡，忽略即可 */ }
-    }
-  })
-  win.on('resize', layoutViews)
-  win.on('resized', layoutViews)
-  win.on('resize', scheduleSaveWindowBounds)
-  win.on('move', scheduleSaveWindowBounds)
-  win.on('enter-full-screen', layoutViews)
-  win.on('leave-full-screen', layoutViews)
-  win.webContents.on('did-finish-load', layoutViews)
-  win.webContents.on('will-navigate', event => event.preventDefault())
-  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-  win.loadFile(path.join(__dirname, 'renderer', 'index.html'))
+/**
+ * 主窗口（实现见 src/window/main-window.js）。
+ *
+ * 关闭 = 隐藏到托盘，但托盘没建出来时必须放行退出 ——
+ * 否则窗口藏了又没有任何入口找回来，进程就成了关不掉的僵尸。
+ */
+const mainWindowApi = require('./src/window/main-window').createWindowModule({
+  electron: {
+    get BrowserWindow () { return electron.BrowserWindow },
+    // 延迟到调用时才取 —— app ready 之前 screen 是 undefined
+    getScreen: () => electron.screen
+  },
+  state: {
+    get isQuitting () { return isQuitting },
+    get tray () { return tray },
+    get backgroundTipShown () { return backgroundTipShown },
+    set backgroundTipShown (v) { backgroundTipShown = v }
+  },
+  libs: {
+    restoreWindowBounds,
+    scheduleSaveWindowBounds,
+    layoutViews,
+    backgroundMode,
+    backgroundEnabled,
+    logWarn: (channel, msg) => { if (clientLog) clientLog.warn(channel, msg) },
+    logError: (channel, msg) => { if (clientLog) clientLog.error(channel, msg) }
+  },
+  env: { dirname: __dirname, path, WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT, APP_ICON }
+})
+
+function createWindow () {
+  win = mainWindowApi.createWindow()
+  return win
 }
 
 function isMainSender(event) {

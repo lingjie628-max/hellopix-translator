@@ -156,9 +156,15 @@ test('main.js 在创建窗口之前建好托盘（关窗判定依赖它）', () 
 })
 
 test('main.js 用 background-mode 的判定，而不是自己写 if', () => {
+  // 关窗判定已迁到 src/window/main-window.js
+  const winSrc = fs.readFileSync(path.join(root, 'desktop', 'src', 'window', 'main-window.js'), 'utf8')
+  assert.match(winSrc, /backgroundMode\.shouldHideOnClose\(/, '关窗判定没有走统一逻辑')
+  // 托盘没建出来必须放行退出，否则进程成了关不掉的僵尸
+  assert.match(winSrc, /hasTray: !!state\.tray/, '关窗判定必须把 hasTray 传进去')
+
   const main = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
-  assert.match(main, /backgroundMode\.shouldHideOnClose\(/, '关窗判定没有走统一逻辑')
   assert.match(main, /backgroundMode\.shouldQuitOnAllClosed\(/, 'window-all-closed 没有走统一逻辑')
+  assert.ok(!/backgroundMode\.shouldHideOnClose\(/.test(main), 'main.js 不该再有第二份关窗判定')
 })
 
 test('★ before-quit 第一件事就是立 isQuitting', () => {
