@@ -21,7 +21,9 @@ const path = require('node:path')
 const test = require('node:test')
 
 const root = path.join(__dirname, '..')
-const app = fs.readFileSync(path.join(root, 'desktop', 'renderer', 'app.js'), 'utf8')
+// 渲染层已拆成多个脚本，规则要在**全部源码**上校验，不能只看 app.js
+const rendererSrc = require('./helpers/renderer-src')
+const app = rendererSrc.all()
 
 test('enterShell：套餐锁定时必须采用服务端解析出的通道', () => {
   // 文件里有多处 translateEngines()，这里锁定 enterShell 里那一段
