@@ -54,6 +54,7 @@ const { spawnSync } = require('node:child_process')
 const { JSDOM } = require('jsdom')
 
 const root = path.join(__dirname, '..')
+const rendererSrc = require('./helpers/renderer-src')
 const guestSrc = fs.readFileSync(path.join(root, 'desktop', 'guest-inject.js'), 'utf8')
 const preloadSrc = fs.readFileSync(path.join(root, 'desktop', 'preload.js'), 'utf8')
 
@@ -925,7 +926,7 @@ test('侧边栏必须能标出「翻译桥未启动」的窗口', () => {
   // main.js 必须真的把 bridgeHealth 接进工厂，否则字段永远是 false
   const main = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
   assert.match(main, /bridgeHealth:\s*\{\s*get:/, 'main.js 必须把 bridgeHealth 接进 tabPayload 工厂')
-  const app = fs.readFileSync(path.join(root, 'desktop', 'renderer', 'app.js'), 'utf8')
+  const app = rendererSrc.all()
   assert.match(app, /tab\.bridgeDown/, '侧边栏必须据此打标记')
 })
 

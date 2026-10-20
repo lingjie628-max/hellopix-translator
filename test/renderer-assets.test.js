@@ -29,6 +29,7 @@ const appSrc = read('app.js')
 const themeSrc = read('theme.js')
 const pureSrc = read('pure.js')
 const proxyPanelSrc = read('proxy-panel.js')
+const tabsSrc = read('tabs.js')
 
 /** 按出现顺序取出 <script src="..."> */
 function scriptOrder (src) {
@@ -41,14 +42,14 @@ function topConsts (src) {
 
 test('★ 脚本顺序：依赖必须全部在 app.js 之前', () => {
   const order = scriptOrder(html)
-  assert.deepEqual(order, ['theme.js', 'dom.js', 'pure.js', 'proxy-panel.js', 'app.js'],
+  assert.deepEqual(order, ['theme.js', 'dom.js', 'pure.js', 'proxy-panel.js', 'tabs.js', 'app.js'],
     '顺序错了就是白屏：各模块的顶层声明必须在 app.js 执行前就位')
   // app.js 必须放在最后 —— 它是唯一会引用其它模块符号的脚本
   assert.equal(order[order.length - 1], 'app.js')
 })
 
 test('★ 文件之间不能有重复的顶层 const（重复声明 = SyntaxError = 白屏）', () => {
-  const files = { 'dom.js': domSrc, 'pure.js': pureSrc, 'proxy-panel.js': proxyPanelSrc, 'app.js': appSrc, 'theme.js': themeSrc }
+  const files = { 'dom.js': domSrc, 'pure.js': pureSrc, 'proxy-panel.js': proxyPanelSrc, 'tabs.js': tabsSrc, 'app.js': appSrc, 'theme.js': themeSrc }
   const seen = new Map()
   const dup = []
   for (const [name, src] of Object.entries(files)) {

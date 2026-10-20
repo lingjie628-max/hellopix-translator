@@ -65,7 +65,7 @@ if (!process.versions.electron) {
 // ------------------------------------------------------------ 内层：Electron
 const { app, BrowserWindow } = require('electron')
 
-const EXPECTED_SCRIPTS = ['theme.js', 'dom.js', 'pure.js', 'proxy-panel.js', 'app.js']
+const EXPECTED_SCRIPTS = ['theme.js', 'dom.js', 'pure.js', 'proxy-panel.js', 'tabs.js', 'app.js']
 
 app.disableHardwareAcceleration()
 app.whenReady().then(async () => {
@@ -97,6 +97,8 @@ app.whenReady().then(async () => {
       parseProxyLine: typeof parseProxyLine,
       syncProxyFields: typeof syncProxyFields,
       openProxySettings: typeof openProxySettings,
+      renderTabs: typeof renderTabs,
+      attachTabsWheel: typeof attachTabsWheel,
       bodyLen: document.body.innerText.length,
       text: document.body.innerText.replace(/\\s+/g, ' ').slice(0, 80)
     })`))
@@ -117,6 +119,9 @@ app.whenReady().then(async () => {
   }
   for (const name of ['syncProxyFields', 'openProxySettings']) {
     if (report[name] !== 'function') problems.push('proxy-panel.js 的 ' + name + ' 不可用')
+  }
+  for (const name of ['renderTabs', 'attachTabsWheel']) {
+    if (report[name] !== 'function') problems.push('tabs.js 的 ' + name + ' 不可用')
   }
   if (report.bodyLen < 50) problems.push('页面是白的（bodyLen=' + report.bodyLen + '）')
 

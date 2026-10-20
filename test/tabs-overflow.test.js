@@ -28,7 +28,8 @@ const path = require('node:path')
 
 const root = path.join(__dirname, '..')
 const css = fs.readFileSync(path.join(root, 'desktop', 'renderer', 'styles.css'), 'utf8')
-const app = fs.readFileSync(path.join(root, 'desktop', 'renderer', 'app.js'), 'utf8')
+const rendererSrc = require('./helpers/renderer-src')
+const app = rendererSrc.all()
 const main = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
 
 /** 取出某个选择器的规则体。必须**行首精确匹配** ——

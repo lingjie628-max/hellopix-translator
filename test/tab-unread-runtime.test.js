@@ -7,7 +7,8 @@ const { JSDOM } = require('jsdom')
 
 const root = path.join(__dirname, '..')
 const mainSrc = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
-const appSrc = fs.readFileSync(path.join(root, 'desktop', 'renderer', 'app.js'), 'utf8')
+const rendererSrc = require('./helpers/renderer-src')
+const appSrc = rendererSrc.all()
 
 function extract(src, name) {
   const at = src.indexOf('function ' + name + '(')
