@@ -3336,8 +3336,6 @@ const ipcReg = require('./src/ipc/registrar').createIpcRegistrar({
   ipcMain, isMainSender, rejectUntrustedSender
 })
 
-ipcMain.handle('auth:get', event => isMainSender(event) ? publicAuth() : rejectUntrustedSender())
-ipcMain.handle('auth:save', (event, payload) => isMainSender(event) ? saveAuth(payload || {}) : rejectUntrustedSender())
 async function loginWithCredentials(username, password) {
   const previousCookies = cookieJar
   cookieJar = {}
@@ -3357,56 +3355,6 @@ async function loginWithCredentials(username, password) {
   restoreOpenApps(profile && profile.username)
   return data
 }
-
-ipcMain.handle('auth:login', async (event, payload) => {
-  if (!isMainSender(event)) return rejectUntrustedSender()
-  const value = payload || {}
-  return loginWithCredentials(String(value.username || ''), String(value.password || ''))
-})
-
-ipcMain.handle('auth:autoLogin', async event => {
-  if (!isMainSender(event)) return rejectUntrustedSender()
-  const auth = loadStoredAuth()
-  if (!auth.remember || !auth.autoLogin || !auth.username || !auth.password) {
-    return { success: false, msg: '未启用自动登录' }
-  }
-  return loginWithCredentials(auth.username, auth.password)
-})
-
-ipcMain.handle('auth:verifyLock', async (event, password) => {
-  if (!isMainSender(event)) return rejectUntrustedSender()
-  const entered = String(password || '')
-  if (!entered) return { success: false, msg: '请输入密码' }
-  const auth = loadStoredAuth()
-  if (auth.password && (!profile || !auth.username || auth.username === profile.username)) {
-    return { success: timingEqual(auth.password, entered), msg: '密码不正确' }
-  }
-  if (!profile || !profile.username) return { success: false, msg: '登录状态已失效' }
-  const result = await loginWithCredentials(profile.username, entered)
-  return result && result.success ? { success: true } : { success: false, msg: '密码不正确' }
-})
-
-ipcMain.handle('auth:logout', async event => {
-  if (!isMainSender(event)) return rejectUntrustedSender()
-  try {
-    await api('/client/logout', { method: 'POST' })
-  } catch (e) {}
-  cookieJar = {}
-  profile = null
-  clearTabs({ keepSaved: true })
-  return { success: true }
-})
-
-ipcMain.handle('auth:session', async () => {
-  const data = await api('/client/session')
-  if (!data || !data.obj) {
-    sendKicked((data && data.msg) || '登录状态已失效，请重新登录')
-    return data
-  }
-  profile = data.obj
-  sendSession()
-  return data
-})
 
 ipcMain.handle('app:platforms', async () => {
   try {
@@ -3444,6 +3392,31 @@ ipcMain.handle('app:savePreset', (event, payload) => {
 })
 
 ipcMain.handle('app:tabs', () => tabPayload())
+
+/**
+ * 账号相关 IPC（实现见 src/ipc/auth.js）。
+ *
+ * profile / cookieJar 必须 setter 直连：写错就是掉号或串号。
+ */
+require('./src/ipc/auth').registerAuthIpc({
+  reg: ipcReg,
+  state: {
+    get profile () { return profile },
+    set profile (v) { profile = v },
+    set cookieJar (v) { cookieJar = v }
+  },
+  actions: {
+    publicAuth,
+    saveAuth,
+    loadStoredAuth,
+    loginWithCredentials,
+    clearTabs,
+    sendKicked,
+    sendSession,
+    api
+  },
+  env: { timingEqual }
+})
 
 /**
  * 配置 / 线路 / 站点相关 IPC（实现见 src/ipc/config.js）。

@@ -50,7 +50,22 @@ test('remote pages have no page-world IPC bridge or dynamic code injection', () 
   assert.equal(guest.includes('window.helloPix'), false)
   assert.equal(main.includes('executeJavaScript('), false)
   assert.equal(main.includes('else cb(true)'), false)
-  assert.match(main, /ipcMain\.handle\('auth:get'.*publicAuth/)
+
+  // auth:get 已迁到 src/ipc/auth.js，但"不泄露敏感字段"的要求不变。
+  // 而且守卫要覆盖**所有** IPC 实现文件 —— 以后新加的也不能绕过去。
+  const ipcDir = path.join(root, 'desktop', 'src', 'ipc')
+  const ipcFiles = fs.readdirSync(ipcDir).filter(f => f.endsWith('.js'))
+  for (const f of ipcFiles) {
+    const src = fs.readFileSync(path.join(ipcDir, f), 'utf8')
+    // 远端网页能在页面世界里拿到的东西，一条都不能出现在主进程 IPC 里
+    assert.equal(src.includes('exposeInMainWorld'), false, f + ' 不能往页面世界暴露桥')
+    assert.equal(src.includes('executeJavaScript('), false, f + ' 不能执行动态代码')
+  }
+  const authSrc = fs.readFileSync(path.join(ipcDir, 'auth.js'), 'utf8')
+  assert.match(authSrc, /'auth:get'[\s\S]{0,60}publicAuth/)
+  // 全仓库只能有一条 auth:get 注册
+  const allSrc = [main, ...ipcFiles.map(f => fs.readFileSync(path.join(ipcDir, f), 'utf8'))].join('\n')
+  assert.equal((allSrc.match(/handle\('auth:get'/g) || []).length, 1, 'auth:get 只能注册一次')
 })
 
 test('Vue dialogs do not enable raw HTML rendering', () => {
