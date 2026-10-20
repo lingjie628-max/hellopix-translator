@@ -1251,50 +1251,6 @@ async function pingAllLines() {
   }
 }
 
-function settingOn(settings, key) {
-  const s = settings || {}
-  if (s[key] !== undefined) return !!s[key]
-  return s.enableTranslate !== false
-}
-
-/**
- * 群组翻译的**三态**。同一个概念有两个开关，必须说清谁说了算：
- *
- *   · 账号级「群聊自动翻译」—— 服务端 `users / sub_accounts.trans_group`，
- *     在「全局设置」里，登录后随 profile 下发；
- *   · 实例级「群组翻译」—— 顶部翻译栏那个下拉，存在 `tab.settings.groupMode`。
- *
- * 老实现只有两态（`auto` / `manual`），且让实例级**无条件覆盖**账号级
- * （`hasTab ? s.groupMode === 'auto' : g.transGroup`），而新建实例又被硬编码成
- * `manual` —— 于是"账号里/界面上开了自动、这个实例却永远不自动"，且毫无提示。
- * 真机上就表现为「群组翻译 = 自动，消息却一直不翻」，很容易被误判成
- * "自动翻译坏了"。
- *
- *   'inherit'  跟随账号级（**新建实例的默认**）
- *   'auto'     本实例强制自动
- *   'manual'   本实例强制手动
- *
- * ⚠️ **存量实例一律按 `manual` 处理（字段缺失也当 `manual`）**，绝不自动改成
- * `inherit`：账号级 `trans_group` 的库默认是 `true`（migration 003），
- * 把"没有显式选择"解释成"跟随账号"就等于给所有存量实例**打开自动扣费**。
- * 拿别人的钱做默认值是不可接受的 —— 所以只有**新建**实例才拿到 `inherit`。
- */
-const GROUP_MODES = ['inherit', 'auto', 'manual']
-
-function groupModeOf(settings) {
-  const mode = settings && settings.groupMode
-  return GROUP_MODES.indexOf(mode) >= 0 ? mode : 'manual'
-}
-
-/** 实例级 + 账号级 → 这个实例最终要不要自动翻群聊。 */
-function resolveGroupEnabled(settings, accountPrefs) {
-  const mode = groupModeOf(settings)
-  if (mode === 'auto') return true
-  if (mode === 'manual') return false
-  // 'inherit'：交给账号级。账号级也拿不到就按"不自动"，宁可不翻也不误扣。
-  return !!(accountPrefs && accountPrefs.transGroup)
-}
-
 function normalizeTabSettings(settings) {
   const s = Object.assign({}, settings || {})
   if (s.showTransBar === undefined) s.showTransBar = true
@@ -1825,16 +1781,42 @@ function closeTab(id) {
   return { success: true }
 }
 
+/**
+ * 实例翻译偏好（解析实现在 src/window/instance-prefs.js）。
+ *
+ * 这些默认值关系到两件事，都不容出错，所以搬成纯函数单测：
+ *   · 群组三态缺省是 manual —— 算错等于给老用户打开自动扣费；
+ *   · 沉降窗默认 60ms 是**最短**确认窗 —— 算错等于每次发送凭空多等几百毫秒。
+ */
+const instancePrefs = require('./src/window/instance-prefs')
+
+function settingOn(settings, key) {
+  return instancePrefs.settingOn(settings, key)
+}
+
+const GROUP_MODES = instancePrefs.GROUP_MODES
+
+function groupModeOf(settings) {
+  return instancePrefs.groupModeOf(settings)
+}
+
+function resolveGroupEnabled(settings, accountPrefs) {
+  return instancePrefs.resolveGroupEnabled(settings, accountPrefs)
+}
+
+function pickLang(value, fallback) {
+  return instancePrefs.pickLang(value, fallback)
+}
+
 function guestPrefs() {
-  const p = profile || {}
-  return {
-    transRecv: p.transRecv !== 0,
-    transSend: p.transSend !== 0,
-    transGroup: !!Number(p.transGroup),
-    langMine: p.langMine || 'zh',
-    langOther: p.langOther || 'auto',
-    includeZh: Number(p.includeZh) === 1
-  }
+  return instancePrefs.accountPrefs(profile)
+}
+
+const SEND_SETTLE_FLOOR_MS = instancePrefs.SEND_SETTLE_FLOOR_MS
+const SEND_SETTLE_CEILING_MS = instancePrefs.SEND_SETTLE_CEILING_MS
+
+function tabPrefs(tab) {
+  return instancePrefs.tabPrefs(tab, profile)
 }
 
 function findTabByWc(wc) {
@@ -1849,60 +1831,6 @@ function trustedTabSender(wc) {
   return isAllowedPlatformUrl(tab.item, current, tab.homeUrl) ? tab : null
 }
 
-function pickLang(value, fallback) {
-  const v = String(value || '').trim()
-  if (!v || v === 'auto') return fallback
-  return v
-}
-
-// 原生输入后的沉降确认窗默认值（毫秒）。
-// 下限 60ms：给编辑器留一拍，连续确认正文稳定且等于译文就立刻发送。
-// 上限 400ms：到点仍不稳定就换插入方式重试，再不行 fail-closed。
-// （0.1.19 性能专项：原实现是固定 500ms 观察窗，实测占满整条发送链的客户端开销。）
-const SEND_SETTLE_FLOOR_MS = 60
-const SEND_SETTLE_CEILING_MS = 400
-
-function tabPrefs(tab) {
-  const g = guestPrefs()
-  const s = (tab && tab.settings) || {}
-  const hasTab = !!(tab && tab.settings && (s.enableTranslate !== undefined || s.enableSendTranslate !== undefined || s.sendTo || s.recvTo))
-  return {
-    transRecv: hasTab ? settingOn(s, 'enableRecvTranslate') : g.transRecv,
-    transSend: hasTab ? settingOn(s, 'enableSendTranslate') : g.transSend,
-    transGroup: hasTab ? resolveGroupEnabled(s, g) : g.transGroup,
-    langMine: pickLang(s.recvTo, g.langMine || 'zh'),
-    langOther: s.recvFrom || g.langOther || 'auto',
-    sendFrom: s.sendFrom || 'auto',
-    sendTo: pickLang(s.sendTo, 'en'),
-    includeZh: s.includeZh !== undefined
-      ? !!(s.includeZh && s.includeZh !== '0' && s.includeZh !== false)
-      : g.includeZh,
-    fontSize: Number(s.fontSize) || 15,
-    fontColor: s.fontColor || '#22c55e',
-    antiRevoke: !!s.antiRevoke,
-    // 取证用：真机 trace 必须能回答"哪个窗口、哪个 partition、哪条通道"。
-    // 少了这三项，一条 MANUAL_TRANSLATE_CLICK 没法定位到具体实例。
-    tabId: (tab && tab.id) || '',
-    partition: (tab && tab.partition) || '',
-    engine: s.engine || g.engine || '',
-    // 原生输入的沉降确认窗（毫秒）。0.1.19 性能专项起语义为**最短确认窗**：
-    // 连续确认正文已稳定且等于译文就立刻发送，不再无条件等满一个固定值
-    // （实测固定 500ms 占满整条发送链 100% 的客户端开销）。
-    // 需要完整 0/100/300/500 漂移时间线的取证模式：把实例设置的 sendSettleMs 调到 500。
-    sendSettleMs: Number.isFinite(Number(s.sendSettleMs)) ? Number(s.sendSettleMs) : SEND_SETTLE_FLOOR_MS,
-    // 等待上限：到点仍不稳定 → 换插入方式重试 → 仍不行就 fail-closed。
-    sendSettleCeilingMs: Number.isFinite(Number(s.sendSettleCeilingMs)) ? Number(s.sendSettleCeilingMs) : SEND_SETTLE_CEILING_MS
-  }
-}
-
-/**
- * 只 reload 目标线路自己的 webContents。
- *
- * 为什么必须 reload：`setProxy` 只影响**之后新建的连接**，已经建立的
- * socket 会继续走旧代理。不 reload 的话用户会看到"保存成功但出口没变"，
- * 正是本次要修的用户可感知症状。
- * 只碰这一条线路的 webContents，其他 partition 完全不受影响。
- */
 function reloadTabContents(tab) {
   const wc = tab && tab.view && tab.view.webContents
   if (!wc || wc.isDestroyed()) return

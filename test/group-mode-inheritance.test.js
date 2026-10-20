@@ -73,15 +73,20 @@ function sliceBlock(src, header) {
  * 这两个是纯函数，直接执行比断言源码里"有没有那几个词"强得多 ——
  * 源码断言在改名、抽公共函数这类重构时会误报。
  */
-function loadGroupModeHelpers() {
-  const ctx = vm.createContext({})
-  const src = [
-    sliceBlock(mainSrc, "const GROUP_MODES = ['inherit', 'auto', 'manual']"),
-    sliceBlock(mainSrc, 'function groupModeOf(settings)'),
-    sliceBlock(mainSrc, 'function resolveGroupEnabled(settings, accountPrefs)')
-  ].join('\n\n')
-  vm.runInContext(src + '\n\nglobalThis.__api = { groupModeOf, resolveGroupEnabled, GROUP_MODES }', ctx)
-  return ctx.__api
+/**
+ * 加载群组三态的**真身**。
+ *
+ * 原先从 main.js 切 3 个源码块塞进 VM。这块逻辑已经搬进
+ * desktop/src/window/instance-prefs.js（纯函数、零依赖），直接 require 即可 ——
+ * 测的是产品实际调用的实现，不再是一份复制出来的源码。
+ */
+function loadGroupModeHelpers () {
+  const mod = require('../desktop/src/window/instance-prefs')
+  return {
+    GROUP_MODES: mod.GROUP_MODES,
+    groupModeOf: mod.groupModeOf,
+    resolveGroupEnabled: mod.resolveGroupEnabled
+  }
 }
 
 /**
