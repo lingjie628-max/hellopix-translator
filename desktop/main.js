@@ -49,6 +49,9 @@ const {
 } = require('./src/config/security-policy')
 const logFile = require('./src/stability/log-file')
 const crashReport = require('./src/stability/crash-report')
+// 日志 / 崩溃上报 / 内存采样。三段都是"拿到 logger 就能自己工作"的装配代码，
+// 启动路径上曾经缠成一团，见该文件顶部的三条硬约束。
+const diagnostics = require('./src/stability/client-diagnostics')
 // 翻译桥警告条：preload 死了以后，唯一还能把警告画到用户眼前的手段
 // （隔离世界注入，见该文件顶部注释）。
 const bridgeWarning = require('./src/stability/bridge-warning')
@@ -291,53 +294,22 @@ let clientLog = null
  *   4. 在「系统操作」菜单里给出「打开日志目录」，方便用户把日志发回来
  */
 function initClientLog() {
-  let dir
-  try {
-    dir = path.join(app.getPath('userData'), 'logs')
-  } catch (e) {
-    try {
-      dir = path.join(app.getPath('temp'), 'hello-pix-logs')
-    } catch (e2) {
-      return null
-    }
-  }
-  const log = logFile.createLogger(dir, {
-    // 刻意走 stderr 而不是 console.error：console 已被下面桥接到本 logger，
-    // 用它上报"日志写入失败"会和自身形成回环。
-    onError: error => {
+  const log = diagnostics.createClientLog({
+    app,
+    logFile,
+    // 日志写入失败时走 stderr —— 不能走 console.error（已桥接到 logger，会回环）
+    onFatalError: error => {
       try {
         process.stderr.write('[hello-pix] 日志写入失败：' + (error && error.message) + '\n')
       } catch (e) {}
     }
   })
-  logFile.installConsoleBridge(console, log)
-  logFile.attachProcessHandlers(process, log, {
-    flush: () => log.flush(),
-    exit: code => app.exit(code)
-  })
   clientLog = log
+  if (!log) return null
   // 内存采样要在所有窗口创建之前就起来，才能覆盖"从启动到崩溃"的完整爬升过程。
   startMemorySampling(log)
-
-  // ★ 子进程崩溃必须留痕（GPU / utility / 网络进程）★
-  //
-  // 用户反馈"开很多窗口时闪退"。以往只挂了主窗口的 render-process-gone，
-  // **GPU 进程、utility 进程崩溃在日志里完全看不到**。而这类崩溃正是
-  // "界面突然白屏/软件整个消失、连个错误提示都没有"的常见成因。
-  //
-  // 只记 error 级别、事件很短，不会把日志写大。type 要记清楚：
-  // gpu 崩了 → 渲染/合成问题；utility 崩了 → 网络或杂活进程问题。
-  app.on('child-process-gone', (_event, details) => {
-    try {
-      const reason = (details && details.reason) || '?'
-      clientLog.error('crash', '子进程退出：type=' + ((details && details.type) || '?') +
-        ' name=' + ((details && details.name) || '?') +
-        ' reason=' + reason +
-        ' exitCode=' + ((details && details.exitCode) == null ? '?' : details.exitCode) +
-        (reason === 'oom' ? ' ★内存不足' : ''))
-    } catch (ignore) {}
-  })
-
+  // 子进程（GPU / utility / 网络）崩溃必须留痕，见 client-diagnostics 里的论证
+  diagnostics.attachChildProcessWatch({ app, getLog: () => clientLog })
   return log
 }
 
@@ -360,52 +332,7 @@ function initClientLog() {
  *   · **传完就写标记**：防止同一次崩溃在下一次启动时重复上报。
  */
 function reportCrashIfNeeded(log) {
-  if (!log || !log.dir) return
-  let found
-  try {
-    found = crashReport.detectAbnormalExit(log.dir)
-  } catch (e) {
-    return
-  }
-  // 正常退出、首次安装、没有任何日志 —— 都不上报。
-  if (!found) return
-  const picked = found.picked
-  if (!picked || !picked.lines.length) return
-
-  const payload = {
-    version: app.getVersion(),
-    platform: process.platform,
-    arch: process.arch,
-    lines: picked.lines
-  }
-  const summary = crashReport.summarize(picked.lines)
-
-  // 不 await：调用方继续往下走，启动不受影响。
-  setImmediate(() => {
-    api('/client/crash-report', {
-      method: 'POST',
-      // 用 form 而不是 JSON：api() 只实现了 urlencoded 提交，
-      // lines 作为 JSON 字符串放进单个字段，服务端再 parse。
-      form: {
-        version: payload.version,
-        platform: payload.platform,
-        arch: payload.arch,
-        lines: JSON.stringify(payload.lines)
-      },
-      // 诊断流量不该和用户操作抢带宽，超时也给短一点。
-      totalTimeoutMs: 20000
-    }).then(() => {
-      // 传成功 → 写标记，避免重复上报。
-      crashReport.writeMarker(log.dir)
-      try {
-        log.info('crash', '崩溃日志已上报：' + summary.crashCount + ' 条崩溃' +
-          (summary.memoryPeak == null ? '' : '，内存峰值 ' + summary.memoryPeak + '%'))
-      } catch (e) {}
-    }).catch(() => {
-      // 失败就什么都不做：下次启动会再试。
-      // 刻意不写 WARN —— 线路不通时每个用户都会看到这条，纯属噪音。
-    })
-  })
+  diagnostics.reportCrashIfNeeded({ app, crashReport, api }, log)
 }
 
 /**
@@ -424,44 +351,10 @@ function reportCrashIfNeeded(log) {
  * 平时安静，一旦开始吃紧，日志里就有一串爬升曲线。
  */
 function startMemorySampling(log) {
-  if (!log) return null
-  const MB = 1024 * 1024
-  let lastBucket = -1
-  let lastAt = 0
-
-  const tick = () => {
-    try {
-      // 节流：距上次记录不足 30 秒就跳过，避免窗口抖动导致重复写。
-      if (Date.now() - lastAt < 30000) return
-      const mem = tabBudget.memoryPressure()
-      if (!mem || !Number.isFinite(mem.ratio) || mem.total <= 0) return
-      const pct = Math.round(mem.ratio * 100)
-      // 70% 以下每 10 个百分点一档；70% 以上每 5 个一档（越接近上限越要密）。
-      const bucket = pct >= 90 ? 90 + Math.floor((pct - 90) / 2) * 2
-        : pct >= 70 ? 70 + Math.floor((pct - 70) / 5) * 5
-          : Math.floor(pct / 10) * 10
-      if (bucket === lastBucket) return
-      lastBucket = bucket
-      lastAt = Date.now()
-      // 同时记实例数与本进程 RSS：后者能看出"是不是我们自己在涨"。
-      const rss = Math.round(process.memoryUsage().rss / MB)
-      log.info('memory', '整机已用 ' + pct + '%（' +
-        Math.round(mem.used / MB) + '/' + Math.round(mem.total / MB) + 'MB，口径 ' + mem.source +
-        '）  实例 ' + tabs.length + ' 个  主进程 RSS ' + rss + 'MB')
-    } catch (ignore) {}
-  }
-
-  // ★ 首次采样必须异步，不能在这里同步跑 ★
-  //
-  // tick() 在 macOS 上会走 tab-budget 的 vm_stat 分支，那是 execSync ——
-  // 平时 5ms，但系统繁忙时最长卡 3 秒（timeout: 3000）。而本函数在
-  // app.whenReady 的启动路径上被同步调用，卡住的就是用户眼里的
-  // "双击了没反应"。采样是诊断，绝不能拖慢启动。
-  const primed = setTimeout(tick, 1000)
-  if (primed && typeof primed.unref === 'function') primed.unref()
-  const timer = setInterval(tick, 15000)
-  if (timer && typeof timer.unref === 'function') timer.unref()
-  return timer
+  return diagnostics.startMemorySampling({
+    memoryPressure: () => tabBudget.memoryPressure(),
+    tabCount: () => tabs.length
+  }, log)
 }
 
 function timingEqual(left, right) {
