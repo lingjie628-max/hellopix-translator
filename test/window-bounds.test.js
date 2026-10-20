@@ -90,7 +90,7 @@ function buildSandbox({ savedFile = null, displays = [] } = {}) {
   const writes = []
   // 真实的异步存储：scheduleSaveWindowBounds 现在走 asyncJson()。
   // 用真模块而不是假对象 —— 这样"rename 原子写"也在测试覆盖里。
-  const { createStore } = require('../desktop/async-store')
+  const { createStore } = require('../desktop/src/storage/async-store')
   const stores = new Map()
   const asyncJson = file => {
     if (!stores.has(file)) stores.set(file, createStore(file, { debounceMs: 0 }))

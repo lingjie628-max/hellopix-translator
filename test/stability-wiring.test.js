@@ -13,7 +13,7 @@
 const test = require('node:test')
 const assert = require('node:assert')
 
-const wiring = require('../desktop/stability-wiring')
+const wiring = require('../desktop/src/stability/stability-wiring')
 
 function fakeGuard() {
   return {

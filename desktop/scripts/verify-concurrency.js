@@ -26,7 +26,7 @@ const fs = require('fs')
 const os = require('os')
 const path = require('path')
 
-const nativeComposer = require('../native-composer')
+const nativeComposer = require('../src/translate/native-composer')
 
 function arg (name, dflt) {
   const i = process.argv.indexOf('--' + name)

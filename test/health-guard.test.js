@@ -20,7 +20,7 @@ const os = require('node:os')
 const path = require('node:path')
 const { EventEmitter } = require('node:events')
 
-const { createHealthGuard, isFatal, isRecoverable } = require('../desktop/health-guard')
+const { createHealthGuard, isFatal, isRecoverable } = require('../desktop/src/stability/health-guard')
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'pix-guard-'))

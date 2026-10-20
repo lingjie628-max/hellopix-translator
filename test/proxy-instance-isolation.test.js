@@ -37,8 +37,8 @@ const path = require('node:path')
 const test = require('node:test')
 
 const root = path.join(__dirname, '..')
-const isolation = require(path.join(root, 'desktop', 'proxy-isolation.js'))
-const proxySettings = require(path.join(root, 'desktop', 'proxy-settings.js'))
+const isolation = require(path.join(root, 'desktop', 'src/proxy/proxy-isolation.js'))
+const proxySettings = require(path.join(root, 'desktop', 'src/proxy/proxy-settings.js'))
 
 const mainSrc = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
 const appSrc = fs.readFileSync(path.join(root, 'desktop', 'renderer', 'app.js'), 'utf8')

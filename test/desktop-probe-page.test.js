@@ -1,3 +1,4 @@
+const { coversFile } = require('./helpers/whitelist')
 'use strict'
 
 /**
@@ -14,11 +15,11 @@ const fs = require('node:fs')
 const path = require('node:path')
 const test = require('node:test')
 
-const { readPageText, PROBE_WORLD_ID } = require('../desktop/probe-page')
+const { readPageText, PROBE_WORLD_ID } = require('../desktop/src/translate/probe-page')
 
 const root = path.join(__dirname, '..')
 const mainSrc = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
-const probeSrc = fs.readFileSync(path.join(root, 'desktop', 'probe-page.js'), 'utf8')
+const probeSrc = fs.readFileSync(path.join(root, 'desktop', 'src/translate/probe-page.js'), 'utf8')
 const scriptSrc = fs.readFileSync(path.join(root, 'desktop', 'scripts', 'proxy-mechanism-electron.js'), 'utf8')
 
 function fakeWebContents(result) {
@@ -64,19 +65,19 @@ test('【安全】probe-page.js 不用 page world 的 executeJavaScript，只用
 test('【安全】main.js 里没有任何 page world 的 executeJavaScript（远程页面不注入脚本）', () => {
   // 这条与 desktop-security.test.js 的守卫同源，这里再钉一次，避免以后手滑加回来
   assert.ok(!mainSrc.includes('executeJavaScript('), 'main.js 出现了 page world 的 executeJavaScript')
-  assert.ok(mainSrc.includes("require('./probe-page')"), 'main.js 必须复用隔离世界读取实现')
+  assert.ok(mainSrc.includes("require('./src/translate/probe-page')"), 'main.js 必须复用隔离世界读取实现')
   assert.ok(mainSrc.includes('readPageText('), '节点探测必须用 readPageText 读远程页面')
 })
 
 test('【验收一致性】真机脚本用的是产品同一份读取实现（否则验收证明不了产品路径）', () => {
-  assert.ok(scriptSrc.includes("require('../probe-page')"), '验收脚本必须复用 probe-page.js')
+  assert.ok(scriptSrc.includes("require('../src/translate/probe-page')"), '验收脚本必须复用 probe-page.js')
   assert.ok(scriptSrc.includes('readPageText('), '验收脚本必须调用同一实现')
   assert.ok(!scriptSrc.includes('executeJavaScript('), '验收脚本里同样不得出现 page world 执行')
 })
 
 test('【打包】新增的本地模块都在 electron-builder 白名单里', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'desktop', 'package.json'), 'utf8'))
-  for (const f of ['socks-relay.js', 'probe-page.js', 'proxy-settings.js']) {
-    assert.ok(pkg.build.files.includes(f), f + ' 不在 build.files 里，打包后会缺失导致启动即崩')
+  for (const f of ['src/proxy/socks-relay.js', 'src/translate/probe-page.js', 'src/proxy/proxy-settings.js']) {
+    assert.ok(coversFile(pkg.build.files, f), f + ' 不在 build.files 覆盖范围内，打包后会缺失导致启动即崩')
   }
 })

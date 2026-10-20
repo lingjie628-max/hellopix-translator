@@ -40,7 +40,7 @@ const {
   proxyFieldsChanged,
   applySessionProxy,
   applyTabProxy
-} = require('../desktop/proxy-settings')
+} = require('../desktop/src/proxy/proxy-settings')
 
 const root = path.join(__dirname, '..')
 const mainSrc = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
@@ -373,7 +373,7 @@ test('main.js 里不再保留第二份代理实现', () => {
   assert.ok(!/function applySessionProxy\s*\(/.test(mainSrc), 'applySessionProxy 只应存在于 proxy-settings.js')
   assert.ok(!/function proxyRulesOf\s*\(/.test(mainSrc), 'proxyRulesOf 只应存在于 proxy-settings.js')
   assert.ok(!/function proxyPresetOf\s*\(/.test(mainSrc), 'proxyPresetOf 只应存在于 proxy-settings.js')
-  assert.ok(mainSrc.includes("require('./proxy-settings')"), 'main.js 应引用共享模块')
+  assert.ok(mainSrc.includes("require('./src/proxy/proxy-settings')"), 'main.js 应引用共享模块')
 })
 
 // ───────────────────────────────────────── P0：认证接线（只认代理、按线路匹配）
@@ -402,13 +402,13 @@ test('【P0】关闭线路 / 退出应用都要释放中继（不留无主监听
 })
 
 test('【P0】中继是纯 Node 模块，产品与测试共用同一份实现', () => {
-  const src = fs.readFileSync(path.join(root, 'desktop', 'socks-relay.js'), 'utf8')
+  const src = fs.readFileSync(path.join(root, 'desktop', 'src/proxy/socks-relay.js'), 'utf8')
   assert.ok(!/require\(['"]electron['"]\)/.test(src), 'socks-relay.js 一旦依赖 electron 就测不了')
-  assert.ok(mainSrc.includes("require('./socks-relay')"), 'main.js 必须复用这份中继')
+  assert.ok(mainSrc.includes("require('./src/proxy/socks-relay')"), 'main.js 必须复用这份中继')
 })
 
 test('proxy-settings.js 不 require electron（否则测试又加载不了）', () => {
-  const src = fs.readFileSync(path.join(root, 'desktop', 'proxy-settings.js'), 'utf8')
+  const src = fs.readFileSync(path.join(root, 'desktop', 'src/proxy/proxy-settings.js'), 'utf8')
   assert.ok(!/require\(['"]electron['"]\)/.test(src), 'proxy-settings.js 一旦依赖 electron 就再也测不了')
 })
 

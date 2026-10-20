@@ -38,7 +38,7 @@ const fs = require('fs')
 const os = require('os')
 const path = require('path')
 
-const nativeComposer = require('../native-composer')
+const nativeComposer = require('../src/translate/native-composer')
 
 const EN = 'Test translation information.'
 const ZH = '测试翻译信息'

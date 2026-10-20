@@ -29,7 +29,7 @@
  * 我们只要求它有一个 `setProxy()` 方法。
  */
 
-const proxyPresets = require('./proxy-presets')
+const proxyPresets = require('../../src/proxy/proxy-presets')
 
 /**
  * 代理字段白名单。

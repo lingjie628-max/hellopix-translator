@@ -28,7 +28,7 @@ const {
   describeConnectReply,
   pickWorstOutcome,
   PRECHECK_TARGETS
-} = require(path.join(root, 'desktop', 'socks-relay.js'))
+} = require(path.join(root, 'desktop', 'src/proxy/socks-relay.js'))
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 

@@ -324,12 +324,26 @@ async function main () {
   // 模块齐全性：主进程 require 的本地模块少一个，app 启动就崩（比装不上更糟：
   // 装上了但打不开窗口，用户只能看到闪退）。这些文件都是相对 require，
   // asar 里没有同名文件就直接抛 MODULE_NOT_FOUND。
-  const REQUIRED_MODULES = [
-    'main.js', 'preload.js', 'guest-inject.js', 'bridge-warning.js', 'log-file.js',
-    'instance-slot.js', 'proxy-isolation.js', 'probe-page.js', 'socks-relay.js',
-    'proxy-settings.js', 'platforms.js', 'lines.js', 'security-policy.js',
-    'background-mode.js', 'api-default.js', 'proxy-presets.js'
-  ]
+  // ★ 清单不能手工维护 ★
+  //
+  // 这里原先是一份手写数组，每次移动/新增模块都得记得改。本次把文件
+  // 整理进 src/ 子目录后，闸门立刻报出 13 个"缺失" —— 但那 13 个文件
+  // 一个都没少，只是路径变了。手写清单本质上是一份会过期的副本。
+  //
+  // 改为：直接从 main.js 源码里抓 require，逐个到 asar 里核对。
+  // 这样"main.js 要什么"与"包里有什么"永远同源，移动文件不会误报，
+  // 真正漏打包也照样拦得住。
+  const mainSrcForModules = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
+  const required = ['main.js', 'preload.js', 'guest-inject.js']
+  const reReq = /require\('(\.\/[\w./-]+)'\)/g
+  let mReq
+  while ((mReq = reReq.exec(mainSrcForModules))) {
+    const rel = mReq[1].replace(/^\.\//, '')
+    if (!rel.endsWith('.js')) continue
+    if (!fs.existsSync(path.join(root, 'desktop', rel))) continue   // 目录型 require 跳过
+    required.push(rel)
+  }
+  const REQUIRED_MODULES = [...new Set(required)]
   const all = asar.list()
   const missing = REQUIRED_MODULES.filter(f => all.indexOf('/' + f) < 0)
   check('产物内含全部本地模块', missing.length === 0, missing.length ? '缺失：' + missing.join('、') : REQUIRED_MODULES.length + ' 个')

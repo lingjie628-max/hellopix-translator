@@ -34,7 +34,7 @@ const {
   createSocksRelay,
   precheckSocks5,
   HANDSHAKE_TIMEOUT_MS
-} = require(path.join(__dirname, '..', 'desktop', 'socks-relay.js'))
+} = require(path.join(__dirname, '..', 'desktop', 'src/proxy/socks-relay.js'))
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 

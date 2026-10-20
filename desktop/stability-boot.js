@@ -37,8 +37,8 @@ if (!app) {
   process.exit(1)
 }
 
-const { createHealthGuard } = require('./health-guard')
-const wiring = require('./stability-wiring')
+const { createHealthGuard } = require('./src/stability/health-guard')
+const wiring = require('./src/stability/stability-wiring')
 
 const GUARD_OFF = String(process.env.PIX_GUARD_OFF || '') === '1'
 const SAFE_MODE_OFF = String(process.env.PIX_DISABLE_SAFE_MODE || '') === '1'
@@ -107,7 +107,7 @@ if (!GUARD_OFF) {
 
   // ---- 3) 换掉 log-file 的退出出口（必须在 require main.js 之前）----
   try {
-    wiring.wrapAttachProcessHandlers(require('./log-file'), guard)
+    wiring.wrapAttachProcessHandlers(require('./src/stability/log-file'), guard)
   } catch (e) {
     console.error('[boot] 包装 log-file 失败，退化为原生行为：' + (e && e.message))
   }

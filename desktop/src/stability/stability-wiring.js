@@ -36,7 +36,7 @@
  *
  * 重复调用只包一次（`__pixGuardWrapped` 标记），避免热重启后越包越深。
  *
- * @param {object} logFile  require('./log-file') 的返回值
+ * @param {object} logFile  require('../../src/stability/log-file') 的返回值
  * @param {object} guard    createHealthGuard() 的返回值
  * @returns {boolean} 是否处于「已包装」状态
  */

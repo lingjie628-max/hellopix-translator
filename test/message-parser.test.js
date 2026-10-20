@@ -580,7 +580,7 @@ test('0.1.19：发送链上不允许再出现任何「页面内改 DOM」的写�
 })
 
 test('0.1.19：主进程必须提供原生输入通道（Chromium 编辑命令），且不碰 DOM', () => {
-  assert.ok(main.indexOf("require('./native-composer')") > 0, '主进程没有引入 native-composer')
+  assert.ok(main.indexOf("require('./src/translate/native-composer')") > 0, '主进程没有引入 native-composer')
   assert.ok(main.indexOf("ipcMain.handle('translate:composerSelectAllDelete'") > 0,
     '缺少原生清空通道')
   assert.ok(main.indexOf("ipcMain.handle('translate:composerInsertText'") > 0,

@@ -17,7 +17,7 @@ const DEV_FALLBACK = 'http://127.0.0.1:3000'
 
 function packagedPublicUrl() {
   try {
-    const value = require('./package.json').pixPublicUrl
+    const value = require('../../package.json').pixPublicUrl
     return typeof value === 'string' ? value.trim() : ''
   } catch (e) {
     return ''

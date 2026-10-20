@@ -21,7 +21,7 @@ const {
   findLatestLog,
   detectAbnormalExit,
   writeMarker
-} = require('../desktop/crash-report')
+} = require('../desktop/src/stability/crash-report')
 
 const L = (ts, level, scope, text) => `${ts} [${level}] [${scope}] ${text}`
 

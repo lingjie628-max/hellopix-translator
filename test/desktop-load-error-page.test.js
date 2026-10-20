@@ -1,3 +1,4 @@
+const { coversFile, missingFromWhitelist } = require('./helpers/whitelist')
 'use strict'
 
 /**
@@ -38,7 +39,7 @@ const {
   describeLoadError,
   buildLoadErrorPage,
   shouldShowErrorPage
-} = require(path.join(__dirname, '..', 'desktop', 'load-error-page.js'))
+} = require(path.join(__dirname, '..', 'desktop', 'src/stability/load-error-page.js'))
 
 const root = path.join(__dirname, '..')
 const MAIN = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
@@ -198,27 +199,19 @@ test('加载失败要留日志（真机排障的唯一线索）', () => {
 // ---------------------------------------------------------------- 打包白名单
 
 test('★ load-error-page.js 必须在打包白名单里（漏了会启动即崩）', () => {
-  // main.js 顶部 require('./load-error-page')。打包后 app.asar 里若没这个文件，
+  // main.js 顶部 require('./src/stability/load-error-page')。打包后 app.asar 里若没这个文件，
   // require 会抛 MODULE_NOT_FOUND —— 窗口都建不出来。
   // tab-budget.js 当初就踩过这个坑，这里加护栏。
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'desktop', 'package.json'), 'utf8'))
   const files = (pkg.build && pkg.build.files) || []
-  assert.ok(files.includes('load-error-page.js'), 'load-error-page.js 不在 build.files 里')
+  assert.ok(coversFile(files, 'src/stability/load-error-page.js'), 'load-error-page.js 不在 build.files 覆盖范围内')
 })
 
 test('★ 白名单必须覆盖 main.js 直接 require 的本地模块', () => {
-  // 通用的护栏：把 main.js 里所有 require('./x') 抓出来，逐个核对白名单。
+  // 通用的护栏：把 main.js 里所有本地 require 抓出来，逐个核对白名单。
   // 这样以后再新增模块、忘了加白名单，会在这里被拦下 —— 而不是等安装包发布后崩。
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'desktop', 'package.json'), 'utf8'))
-  const listed = new Set((pkg.build && pkg.build.files) || [])
-  const re = /require\('\.\/([\w.-]+)'\)/g
-  const missing = new Set()
-  let m
-  while ((m = re.exec(MAIN))) {
-    const file = m[1].endsWith('.js') ? m[1] : m[1] + '.js'
-    if (!/\.js$/.test(file)) continue
-    if (!fs.existsSync(path.join(root, 'desktop', file))) continue   // 目录型 require 跳过
-    if (!listed.has(file)) missing.add(file)
-  }
-  assert.deepEqual([...missing], [], '这些本地模块被 main.js require 但不在打包白名单里')
+  const files = (pkg.build && pkg.build.files) || []
+  const missing = missingFromWhitelist(MAIN, files, rel => fs.existsSync(path.join(root, 'desktop', rel)))
+  assert.deepEqual(missing, [], '这些本地模块被 main.js require 但不在打包白名单覆盖范围内')
 })

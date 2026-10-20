@@ -44,7 +44,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms))
 const fs = require('fs')
 const root = path.join(__dirname, '..')
 const mainSrc = fs.readFileSync(path.join(root, 'main.js'), 'utf8')
-const relaySrc = fs.readFileSync(path.join(root, 'socks-relay.js'), 'utf8')
+const relaySrc = fs.readFileSync(path.join(root, 'src/proxy/socks-relay.js'), 'utf8')
 
 /** 按花括号配对切出函数/对象字面量的真身。 */
 function sliceBlock (src, header) {
@@ -65,10 +65,10 @@ function sliceBlock (src, header) {
 /** 在**真 Electron 主进程**里装配一份可调用的 detectProxyNode。 */
 function buildDetect () {
   // 真依赖
-  const { createSocksRelay } = require(path.join(root, 'socks-relay.js'))
-  const { proxyTargetOf, proxyAuthOf } = require(path.join(root, 'proxy-settings.js'))
-  const { proxyRulesOf } = require(path.join(root, 'proxy-settings.js'))
-  const { readPageText } = require(path.join(root, 'probe-page.js'))
+  const { createSocksRelay } = require(path.join(root, 'src/proxy/socks-relay.js'))
+  const { proxyTargetOf, proxyAuthOf } = require(path.join(root, 'src/proxy/proxy-settings.js'))
+  const { proxyRulesOf } = require(path.join(root, 'src/proxy/proxy-settings.js'))
+  const { readPageText } = require(path.join(root, 'src/translate/probe-page.js'))
 
   const PROBE_TIMEOUT_MS = Number(
     (mainSrc.match(/const PROBE_TIMEOUT_MS\s*=\s*(\d+)/) || [])[1] || 15000
@@ -93,7 +93,7 @@ function buildDetect () {
     `${probeFnSrc}\n${detectFnSrc}\nreturn { detectProxyNode, probeTextWithProxy, PROBE_TIMEOUT_MS }`
   )
 
-  const { precheckSocks5 } = require(path.join(root, 'socks-relay.js'))
+  const { precheckSocks5 } = require(path.join(root, 'src/proxy/socks-relay.js'))
 
   return factory(
     BrowserWindow, session, createSocksRelay, precheckSocks5, proxyTargetOf, proxyAuthOf,
@@ -257,7 +257,7 @@ async function main () {
 
   // ---- 场景 5：中继自己不能无限挂着（直接压 socks-relay）----
   {
-    const { createSocksRelay } = require(path.join(root, 'socks-relay.js'))
+    const { createSocksRelay } = require(path.join(root, 'src/proxy/socks-relay.js'))
     const up = await startFakeUpstream('silent')
     const relay = createSocksRelay({
       host: '127.0.0.1', port: up.port, user: 'u', pass: 'p', onError: () => {}

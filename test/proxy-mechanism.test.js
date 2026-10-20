@@ -30,8 +30,8 @@ const http = require('node:http')
 const net = require('node:net')
 const test = require('node:test')
 
-const { proxyRulesOf, proxyAuthOf, applySessionProxy } = require('../desktop/proxy-settings')
-const { createSocksRelay } = require('../desktop/socks-relay')
+const { proxyRulesOf, proxyAuthOf, applySessionProxy } = require('../desktop/src/proxy/proxy-settings')
+const { createSocksRelay } = require('../desktop/src/proxy/socks-relay')
 
 // ─────────────────────────────────────────────────────────── 真实目标站
 

@@ -32,8 +32,8 @@ const test = require('node:test')
 const net = require('node:net')
 const { EventEmitter } = require('node:events')
 
-const { attachProcessHandlers } = require('../desktop/log-file')
-const socksRelay = require('../desktop/socks-relay')
+const { attachProcessHandlers } = require('../desktop/src/stability/log-file')
+const socksRelay = require('../desktop/src/proxy/socks-relay')
 
 // ---------------------------------------------------------------------------
 // 1. 未捕获异常分类：网络错误不该杀进程，其他必须杀

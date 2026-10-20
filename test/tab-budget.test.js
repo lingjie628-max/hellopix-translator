@@ -1,3 +1,4 @@
+const { coversFile } = require('./helpers/whitelist')
 'use strict'
 
 /**
@@ -54,7 +55,7 @@ const {
   FD_SAFETY_MARGIN,
   MEMORY_PRESSURE_RATIO,
   BYTES_PER_INSTANCE
-} = require(path.join(__dirname, '..', 'desktop', 'tab-budget.js'))
+} = require(path.join(__dirname, '..', 'desktop', 'src/window/tab-budget.js'))
 
 const root = path.join(__dirname, '..')
 const GB = 1024 * 1024 * 1024
@@ -67,7 +68,7 @@ test('tab-budget.js 在打包白名单里（漏了会让安装包启动即崩）
   // instance-slot.js / background-mode.js 都踩过同一个坑，这条是护栏。
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'desktop', 'package.json'), 'utf8'))
   const files = (pkg.build && pkg.build.files) || []
-  assert.ok(files.includes('tab-budget.js'), 'tab-budget.js 不在 build.files 里')
+  assert.ok(coversFile(files, 'src/window/tab-budget.js'), 'tab-budget.js 不在 build.files 覆盖范围内')
 })
 
 // ---------------------------------------------------------------- 内存水位（主判据）

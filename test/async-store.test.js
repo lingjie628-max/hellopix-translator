@@ -16,7 +16,7 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 
-const { createStore } = require('../desktop/async-store')
+const { createStore } = require('../desktop/src/storage/async-store')
 
 function tmpFile() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pix-store-'))

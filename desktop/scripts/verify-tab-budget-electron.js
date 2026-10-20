@@ -25,7 +25,7 @@ const { app, BrowserWindow, WebContentsView } = require('electron')
 const path = require('path')
 
 const root = path.join(__dirname, '..')
-const budget = require(path.join(root, 'tab-budget.js'))
+const budget = require(path.join(root, 'src/window/tab-budget.js'))
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const rows = []

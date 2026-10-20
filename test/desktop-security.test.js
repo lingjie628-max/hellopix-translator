@@ -1,3 +1,4 @@
+const { coversFile, missingFromWhitelist } = require('./helpers/whitelist')
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('fs')
@@ -8,7 +9,7 @@ const {
   validateApiUrl,
   isAllowedPlatformUrl,
   isAllowedExternalUrl
-} = require('../desktop/security-policy')
+} = require('../desktop/src/config/security-policy')
 
 test('API policy rejects unsafe schemes, credentials, private targets and unlisted hosts', () => {
   const options = { development: false, allowedHosts: ['api.hello-pix.example'] }

@@ -1,3 +1,4 @@
+const { coversFile } = require('./helpers/whitelist')
 'use strict'
 
 /**
@@ -881,13 +882,13 @@ test('main.js 必须有看门狗：到点没通信就判桥未启动', () => {
 
 test('主进程必须能在 guest 页面里画警告条（渲染层 DOM 会被原生视图盖住）', () => {
   const main = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
-  assert.match(main, /require\('\.\/bridge-warning'\)/,
+  assert.match(main, /require\('\.\/src\/stability\/bridge-warning'\)/,
     '渲染层弹窗会被 WebContentsView 挡住，警告必须从主进程注入 guest 页面')
   assert.match(main, /showBridgeWarning\(/, '必须调用注入实现')
   assert.ok(!main.includes('executeJavaScript('),
     'main.js 里不得出现 page world 的 executeJavaScript（见 desktop-security 测试）')
 
-  const mod = fs.readFileSync(path.join(root, 'desktop', 'bridge-warning.js'), 'utf8')
+  const mod = fs.readFileSync(path.join(root, 'desktop', 'src/stability/bridge-warning.js'), 'utf8')
   assert.match(mod, /executeJavaScriptInIsolatedWorld/, '必须走隔离世界')
   assert.ok(!/\.executeJavaScript\s*\(/.test(mod), '不得使用 page world 的 executeJavaScript')
   assert.match(mod, /pix-bridge-down/, '警告条要有固定 id 才能幂等')
@@ -896,12 +897,12 @@ test('主进程必须能在 guest 页面里画警告条（渲染层 DOM 会被�
   assert.match(mod, /__pixBridgeWarnShown/, '必须幂等，不能重复叠一堆警告条')
 
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'desktop', 'package.json'), 'utf8'))
-  assert.ok(pkg.build.files.includes('bridge-warning.js'),
+  assert.ok(coversFile(pkg.build.files, 'src/stability/bridge-warning.js'),
     'bridge-warning.js 不在 build.files 里，打包后会缺失导致启动即崩')
 })
 
 test('警告条文案必须转义实例名与原因（不能被页面数据带进注入）', () => {
-  const mod = require(path.join(root, 'desktop', 'bridge-warning.js'))
+  const mod = require(path.join(root, 'desktop', 'src/stability/bridge-warning.js'))
   const script = mod.buildScript({ name: "a');alert(1);//", reason: 'x</script>' })
   assert.ok(!script.includes("alert(1)'),"),
     '实例名必须经 JSON.stringify 转义，不能原样拼进脚本')

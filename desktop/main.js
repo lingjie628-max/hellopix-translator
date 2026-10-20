@@ -8,17 +8,17 @@ const path = require('path')
 const fs = require('fs')
 const crypto = require('crypto')
 const { spawn } = require('child_process')
-const fallbackPlatforms = require('./platforms')
-const builtinLines = require('./lines')
-const proxyPresets = require('./proxy-presets')
-const proxyIsolation = require('./proxy-isolation')
+const fallbackPlatforms = require('./src/config/platforms')
+const builtinLines = require('./src/config/lines')
+const proxyPresets = require('./src/proxy/proxy-presets')
+const proxyIsolation = require('./src/proxy/proxy-isolation')
 // 热路径上的状态文件改走异步 + 原子写（见下方 asyncJson 的说明）。
-const { createStore } = require('./async-store')
+const { createStore } = require('./src/storage/async-store')
 const { stripProxyFields } = proxyIsolation
 // 代理的构建与应用抽到独立模块：产品、单元测试、机制测试共用**同一份实现**。
 // 这几个函数原先内联在 main.js 里，而 main.js 一 require 就会加载 electron，
 // 普通 Node 加载不了 —— 于是最需要回归保护的代理逻辑一个测试都没有。
-const proxySettings = require('./proxy-settings')
+const proxySettings = require('./src/proxy/proxy-settings')
 const {
   sanitizeProxyPart,
   parseProxyHostLine,
@@ -31,14 +31,14 @@ const {
 } = proxySettings
 // 带认证的 SOCKS5 只能走本地中继（Chromium 不会为 SOCKS5 触发 login 事件，
 // 详见 socks-relay.js 顶部注释）。它是纯 Node 模块，产品与测试共用同一份。
-const { createSocksRelay, precheckSocks5 } = require('./socks-relay')
+const { createSocksRelay, precheckSocks5 } = require('./src/proxy/socks-relay')
 // 读远程页面文本走隔离世界（不是 page world）—— 见 probe-page.js 顶部注释。
-const { readPageText } = require('./probe-page')
+const { readPageText } = require('./src/translate/probe-page')
 // 实例页面加载失败时的错误页（见该文件顶部：真机上"网络不通"表现为黑屏）。
-const loadErrorPage = require('./load-error-page')
-const instanceSlot = require('./instance-slot')
-const backgroundMode = require('./background-mode')
-const hiddenTabs = require('./hidden-tabs')
+const loadErrorPage = require('./src/stability/load-error-page')
+const instanceSlot = require('./src/window/instance-slot')
+const backgroundMode = require('./src/window/background-mode')
+const hiddenTabs = require('./src/window/hidden-tabs')
 const {
   csvHosts,
   trustedApiHosts,
@@ -46,17 +46,17 @@ const {
   isAllowedPlatformUrl,
   isAllowedExternalUrl,
   PLATFORM_EXTENSION_IDS
-} = require('./security-policy')
-const logFile = require('./log-file')
-const crashReport = require('./crash-report')
+} = require('./src/config/security-policy')
+const logFile = require('./src/stability/log-file')
+const crashReport = require('./src/stability/crash-report')
 // 翻译桥警告条：preload 死了以后，唯一还能把警告画到用户眼前的手段
 // （隔离世界注入，见该文件顶部注释）。
-const bridgeWarning = require('./bridge-warning')
+const bridgeWarning = require('./src/stability/bridge-warning')
 // composer 的原生输入（Chromium 编辑命令）—— 见 desktop/native-composer.js 顶部
 // 的根因说明：页面内直接改 DOM 的写入进不了 WhatsApp 编辑器的输入管线。
-const nativeComposer = require('./native-composer')
+const nativeComposer = require('./src/translate/native-composer')
 // 实例资源预算：防止"开太多窗口把应用撑崩"（句柄耗尽 → 闪退，见该文件顶部）。
-const tabBudget = require('./tab-budget')
+const tabBudget = require('./src/window/tab-budget')
 
 const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 
@@ -137,7 +137,7 @@ let measuredChromeHeight = 0
 let hasMeasuredChrome = false
 const STATUS_HEIGHT = 22
 const FOOTER_HEIGHT = 30
-const DEFAULT_API = require('./api-default').PUBLIC_URL
+const DEFAULT_API = require('./src/config/api-default').PUBLIC_URL
 const DEVELOPMENT = !app.isPackaged && process.env.NODE_ENV !== 'production'
 const API_HOSTS = trustedApiHosts(DEFAULT_API, process.env.PIX_ALLOWED_API_HOSTS)
 const DOWNLOAD_HOSTS = Array.from(new Set(API_HOSTS.concat(csvHosts(process.env.PIX_ALLOWED_DOWNLOAD_HOSTS))))

@@ -36,7 +36,7 @@ const {
   createLogger,
   installConsoleBridge,
   attachProcessHandlers
-} = require('../desktop/log-file')
+} = require('../desktop/src/stability/log-file')
 
 function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'hello-pix-log-'))

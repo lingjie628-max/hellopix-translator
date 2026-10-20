@@ -30,9 +30,9 @@ function sliceBlock (src, header) {
 }
 
 const mainSrc = fs.readFileSync(path.join(root, 'main.js'), 'utf8')
-const { createSocksRelay, precheckSocks5 } = require(path.join(root, 'socks-relay.js'))
-const { proxyTargetOf, proxyAuthOf, proxyRulesOf } = require(path.join(root, 'proxy-settings.js'))
-const { readPageText } = require(path.join(root, 'probe-page.js'))
+const { createSocksRelay, precheckSocks5 } = require(path.join(root, 'src/proxy/socks-relay.js'))
+const { proxyTargetOf, proxyAuthOf, proxyRulesOf } = require(path.join(root, 'src/proxy/proxy-settings.js'))
+const { readPageText } = require(path.join(root, 'src/translate/probe-page.js'))
 
 const proxyAuthByWebContents = new Map()
 const probeWindows = new Set()

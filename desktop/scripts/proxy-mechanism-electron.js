@@ -78,10 +78,10 @@ const {
   proxyAuthOf,
   proxyFieldsChanged,
   proxySettingsOf
-} = require('../proxy-settings')
-const { createSocksRelay } = require('../socks-relay')
+} = require('../src/proxy/proxy-settings')
+const { createSocksRelay } = require('../src/proxy/socks-relay')
 // 与产品同一个读取实现：验收跑的就是 main.js 的路径
-const { readPageText } = require('../probe-page')
+const { readPageText } = require('../src/translate/probe-page')
 
 // 与 main.js 同款的代理认证投递：只认 isProxy，凭据按 webContents 精确匹配。
 // （产品里由 main.js 负责；这里是验收脚本，需要自己装一份同样的处理器。）
@@ -379,7 +379,7 @@ app.whenReady().then(async () => {
   //    根因是**代理被当成模板内容**存进了 app-presets.json，
   //    而不是哪里复制了一个变量。所以这里走的必须是真实的模板链路。
   {
-    const { PROXY_FIELDS, DIRECT_PROXY, stripProxyFields, isDirectProxy } = require('../proxy-isolation')
+    const { PROXY_FIELDS, DIRECT_PROXY, stripProxyFields, isDirectProxy } = require('../src/proxy/proxy-isolation')
 
     // A 配了代理，然后系统把这条线路的设置存成模板。
     // main.js 的 app:savePreset 语义 = sealSettings(stripProxyFields(settings))

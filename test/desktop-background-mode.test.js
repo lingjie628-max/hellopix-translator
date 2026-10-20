@@ -1,3 +1,4 @@
+const { coversFile, missingFromWhitelist } = require('./helpers/whitelist')
 'use strict'
 
 /**
@@ -25,7 +26,7 @@ const {
   shouldQuitOnAllClosed,
   trayIconSize,
   trayTooltip
-} = require('../desktop/background-mode')
+} = require('../desktop/src/window/background-mode')
 
 const root = path.join(__dirname, '..')
 
@@ -143,14 +144,11 @@ test('托盘创建失败会退化为"关闭即退出"，而不是静默留个空
 
 test('background-mode.js 在打包白名单里（漏了会让安装包启动即崩）', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'desktop', 'package.json'), 'utf8'))
-  assert.ok(pkg.build.files.includes('background-mode.js'), 'background-mode.js 不在 build.files 里')
+  assert.ok(coversFile(pkg.build.files, 'src/window/background-mode.js'), 'background-mode.js 不在 build.files 覆盖范围内')
 
   const main = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
-  const deps = [...new Set([...main.matchAll(/require\('\.\/([^']+)'\)/g)].map(m => m[1]))]
-  for (const dep of deps) {
-    const ok = pkg.build.files.includes(dep) || pkg.build.files.includes(dep + '.js')
-    assert.ok(ok, `main.js 依赖的 ${dep} 不在 build.files 里，打包后会缺失`)
-  }
+  const missing = missingFromWhitelist(main, pkg.build.files, rel => fs.existsSync(path.join(root, 'desktop', rel)))
+  assert.deepEqual(missing, [], '这些本地模块被 main.js require 但不在白名单覆盖范围内')
 })
 
 test('关闭窗口时后台运行是默认开（老用户升级也直接获得新行为）', () => {

@@ -1,3 +1,4 @@
+const { coversFile, missingFromWhitelist } = require('./helpers/whitelist')
 'use strict'
 
 /**
@@ -29,7 +30,7 @@ const {
   lockIsStale,
   partitionBelongsTo,
   SLOT_MAX
-} = require('../desktop/instance-slot')
+} = require('../desktop/src/window/instance-slot')
 
 const root = path.join(__dirname, '..')
 
@@ -226,20 +227,16 @@ test('main.js 在创建窗口之前就拿到槽位', () => {
 })
 
 test('instance-slot.js 在打包白名单里（漏了会让安装包启动即崩）', () => {
-  // electron-builder 的 files 是白名单，逐个文件列。main.js require 了它，
-  // 但没列进 files 的话打包产物里根本没有这个文件。
+  // main.js require 了它，白名单没覆盖的话打包产物里根本没有这个文件。
+  // 白名单现在允许目录通配（src/**/*.js），所以用 coversFile 判断而不是 includes。
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'desktop', 'package.json'), 'utf8'))
   assert.ok(pkg.build && Array.isArray(pkg.build.files), 'package.json 缺少 build.files')
-  assert.ok(pkg.build.files.includes('instance-slot.js'), 'instance-slot.js 不在打包白名单里')
+  assert.ok(coversFile(pkg.build.files, 'src/window/instance-slot.js'), 'instance-slot.js 不在打包白名单覆盖范围内')
 
   // 顺带保证：main.js 直接 require 的每个本地模块都在白名单里
   const main = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
-  // require('./platforms') 对应文件 platforms.js —— 白名单里写的是带后缀的名字
-  const deps = [...new Set([...main.matchAll(/require\('\.\/([^']+)'\)/g)].map(m => m[1]))]
-  for (const dep of deps) {
-    const ok = pkg.build.files.includes(dep) || pkg.build.files.includes(dep + '.js')
-    assert.ok(ok, `main.js 依赖的 ${dep} 不在 build.files 里，打包后会缺失`)
-  }
+  const missing = missingFromWhitelist(main, pkg.build.files, rel => fs.existsSync(path.join(root, 'desktop', rel)))
+  assert.deepEqual(missing, [], '这些本地模块被 main.js require 但不在白名单覆盖范围内')
 })
 
 test('打包白名单里的模块全部真实存在', () => {
