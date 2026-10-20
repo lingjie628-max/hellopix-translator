@@ -2244,66 +2244,22 @@ function parseJsonSafe(text) {
   try { return JSON.parse(text) } catch (e) { return null }
 }
 
-async function lookupIpGeo(ip, channel) {
-  const empty = { ip: ip, country: '', region: '', city: '', loc: '', timezone: '', zip: '' }
-  if (!ip) return empty
-  try {
-    if (channel === 'ipapi') {
-      const data = parseJsonSafe(await sessionGetText(session.defaultSession, 'http://ip-api.com/json/' + encodeURIComponent(ip) + '?lang=zh-CN&fields=status,country,countryCode,regionName,city,lat,lon,timezone,zip,query'))
-      if (!data || data.status !== 'success') return empty
-      return {
-        ip: data.query || ip,
-        country: (data.country || '') + (data.countryCode ? '(' + data.countryCode + ')' : ''),
-        region: data.regionName || '',
-        city: data.city || '',
-        loc: (data.lon != null && data.lat != null) ? (data.lon + '/' + data.lat) : '',
-        timezone: data.timezone || '',
-        zip: data.zip || ''
-      }
-    }
-    if (channel === 'ipinfo') {
-      const data = parseJsonSafe(await sessionGetText(session.defaultSession, 'https://ipinfo.io/' + encodeURIComponent(ip) + '/json'))
-      if (!data) return empty
-      const loc = String(data.loc || '')
-      const parts = loc.split(',')
-      return {
-        ip: data.ip || ip,
-        country: data.country || '',
-        region: data.region || '',
-        city: data.city || '',
-        loc: parts.length === 2 ? (parts[1] + '/' + parts[0]) : loc,
-        timezone: data.timezone || '',
-        zip: data.postal || ''
-      }
-    }
-    if (channel === 'ipwhois') {
-      const data = parseJsonSafe(await sessionGetText(session.defaultSession, 'https://ipwho.is/' + encodeURIComponent(ip)))
-      if (!data || data.success === false) return empty
-      return {
-        ip: data.ip || ip,
-        country: (data.country || '') + (data.country_code ? '(' + data.country_code + ')' : ''),
-        region: data.region || '',
-        city: data.city || '',
-        loc: (data.longitude != null && data.latitude != null) ? (data.longitude + '/' + data.latitude) : '',
-        timezone: (data.timezone && data.timezone.id) || '',
-        zip: data.postal || ''
-      }
-    }
-    const data = parseJsonSafe(await sessionGetText(session.defaultSession, 'https://api.db-ip.com/v2/free/' + encodeURIComponent(ip)))
-    if (!data) return empty
-    return {
-      ip: data.ipAddress || ip,
-      country: (data.countryName || '') + (data.countryCode ? '(' + data.countryCode + ')' : ''),
-      region: data.stateProv || '',
-      city: data.city || '',
-      loc: '',
-      timezone: '',
-      zip: ''
-    }
-  } catch (e) {
-    return empty
+/**
+ * IP 归属地查询（实现见 src/proxy/ip-geo.js）。
+ *
+ * 四个通道字段名各不相同，以前只能靠真机点一次"节点检测"验证。
+ * 拆出来之后每个通道的解析都能单独测。
+ */
+const ipGeo = require('./src/proxy/ip-geo').createIpGeo({
+  sessionGetText,
+  getDefaultSession: () => session.defaultSession,
+  parseJsonSafe,
+  onError: (channel, e) => {
+    if (clientLog) clientLog.warn('proxy', '归属地查询失败（' + channel + '）：' + ((e && e.message) || String(e)))
   }
-}
+})
+
+const lookupIpGeo = ipGeo.lookupIpGeo
 
 function proxyHistoryFile() {
   return userFile('proxy-ip-history.json')
