@@ -3326,78 +3326,18 @@ ipcMain.on('chrome:barHeight', (event, height) => {
     layoutViews()
   }
 })
-
-ipcMain.handle('config:get', () => ({
-  apiBase: apiBase,
-  theme: theme,
-  // 后台运行开关：渲染层的「系统操作」菜单要显示当前状态，托盘菜单之外的
-  // 第二个入口 —— 不能指望用户去右键托盘图标找设置。
-  backgroundRunning: backgroundRunning,
-  lineId: currentLine().id,
-  lines: lines
-}))
-
-// 主题切换：只接受两个合法值，落盘后回执，渲染层据此更新 data-theme
-ipcMain.handle('config:setTheme', (event, value) => {
-  if (!isMainSender(event)) return rejectUntrustedSender()
-  const next = value === 'dark' ? 'dark' : 'light'
-  theme = next
-  saveConfig()
-  return { success: true, theme: theme }
-})
-
-// 后台运行开关（关闭窗口时隐藏到托盘，而不是退出）。
-// 只接受布尔值语义：任何非 false 的输入都按开启处理，与 loadConfig 的
-// `!== false` 默认值保持一致 —— 免得 renderer 传个 undefined 把开关关掉。
-ipcMain.handle('config:setBackgroundRunning', (event, value) => {
-  if (!isMainSender(event)) return rejectUntrustedSender()
-  setBackgroundRunning(value !== false)
-  return { success: true, backgroundRunning: backgroundRunning }
+/**
+ * IPC 注册器（实现见 src/ipc/registrar.js）。
+ *
+ * 所有 handler 都过这一层：来源校验收进注册器，就再也写不出
+ * "忘了 isMainSender" 的越权入口。
+ */
+const ipcReg = require('./src/ipc/registrar').createIpcRegistrar({
+  ipcMain, isMainSender, rejectUntrustedSender
 })
 
 ipcMain.handle('auth:get', event => isMainSender(event) ? publicAuth() : rejectUntrustedSender())
 ipcMain.handle('auth:save', (event, payload) => isMainSender(event) ? saveAuth(payload || {}) : rejectUntrustedSender())
-
-ipcMain.handle('config:setApiBase', (event, url) => {
-  if (!isMainSender(event)) return rejectUntrustedSender()
-  const nextBase = safeApiUrl(url || DEFAULT_API)
-  if (!nextBase) return { success: false, msg: '线路地址不符合安全策略' }
-  apiBase = nextBase
-  const matched = lines.find(l => l.url === apiBase)
-  if (matched) lineId = matched.id
-  saveConfig()
-  return { apiBase: apiBase, lineId: lineId }
-})
-
-ipcMain.handle('lines:list', async () => refreshLines())
-
-ipcMain.handle('lines:select', (_event, id) => {
-  const line = applyLine(id)
-  return { success: true, lineId: line.id, apiBase: line.url, line: line }
-})
-
-ipcMain.handle('lines:ping', async (_event, id) => pingLine(id))
-ipcMain.handle('lines:pingAll', async () => pingAllLines())
-  ipcMain.handle('site:info', async () => {
-    try {
-      // 带上 process.arch，服务端才能给对应架构的安装包。
-      // 不带的话 macOS 会固定下发 x64 —— Apple 芯片用户点「苹果电脑版」
-      // 拿到的是 Intel 包。
-      return await fetchFrom(apiBase, '/site/info?arch=' + encodeURIComponent(process.arch), 2500)
-    } catch (e) {
-      return {}
-    }
-  })
-ipcMain.handle('shell:open', async (event, url) => {
-  if (!isMainSender(event)) return rejectUntrustedSender()
-  const href = String(url || '')
-  if (isAllowedExternalUrl(href, EXTERNAL_HOSTS)) {
-    await shell.openExternal(href)
-    return { success: true }
-  }
-  return { success: false, msg: '外部链接不在信任列表' }
-})
-
 async function loginWithCredentials(username, password) {
   const previousCookies = cookieJar
   cookieJar = {}
@@ -3478,8 +3418,6 @@ ipcMain.handle('app:platforms', async () => {
   return { success: true, rows: rows }
 })
 ipcMain.handle('app:updatePlatform', async (_event, id) => updatePlatformWeb(id))
-ipcMain.handle('app:proxyPresets', () => ({ success: true, rows: proxyPresets }))
-ipcMain.handle('proxy:detect', (event, payload) => isMainSender(event) ? detectProxyNode(payload || {}) : rejectUntrustedSender())
 ipcMain.handle('app:preset', (_event, id) => {
   const all = readJson(userFile('app-presets.json'), {})
   const key = String(id || '')
@@ -3506,6 +3444,39 @@ ipcMain.handle('app:savePreset', (event, payload) => {
 })
 
 ipcMain.handle('app:tabs', () => tabPayload())
+
+/**
+ * 配置 / 线路 / 站点相关 IPC（实现见 src/ipc/config.js）。
+ *
+ * state 是实时代理：getter/setter 直连下面的模块级变量。
+ * 传快照会出事 —— 切完主题 main.js 里那份没变，下次 config:get 又读回旧值。
+ */
+require('./src/ipc/config').registerConfigIpc({
+  reg: ipcReg,
+  state: {
+    get apiBase () { return apiBase },
+    set apiBase (v) { apiBase = v },
+    get theme () { return theme },
+    set theme (v) { theme = v },
+    get lineId () { return lineId },
+    set lineId (v) { lineId = v },
+    get backgroundRunning () { return backgroundRunning },
+    get lines () { return lines },
+    get proxyPresets () { return proxyPresets }
+  },
+  env: { safeApiUrl, DEFAULT_API, fetchFrom, isAllowedExternalUrl, EXTERNAL_HOSTS },
+  actions: {
+    saveConfig,
+    setBackgroundRunning,
+    currentLine,
+    refreshLines,
+    applyLine,
+    pingLine,
+    pingAllLines,
+    openExternal: url => shell.openExternal(url),
+    detectProxyNode
+  }
+})
 
 /**
  * 打开日志目录。

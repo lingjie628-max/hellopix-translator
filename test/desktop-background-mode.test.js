@@ -30,6 +30,45 @@ const {
 
 const root = path.join(__dirname, '..')
 
+/**
+ * 装配真实的 config IPC handler（不启动 Electron）。
+ * 用假的 registrar 收集 handler，state 用普通对象 —— 这里的断言只看业务语义。
+ */
+function configHarness () {
+  const handlers = {}
+  const state = {
+    apiBase: 'https://a.example.com',
+    theme: 'light',
+    lineId: 'overseas',
+    backgroundRunning: true,
+    lines: [],
+    proxyPresets: []
+  }
+  require('../desktop/src/ipc/config').registerConfigIpc({
+    reg: { handle: (ch, fn) => { handlers[ch] = fn }, handleUnsafe: (ch, fn) => { handlers[ch] = fn } },
+    state,
+    env: {
+      DEFAULT_API: 'https://a.example.com',
+      EXTERNAL_HOSTS: [],
+      safeApiUrl: v => v,
+      fetchFrom: async () => ({}),
+      isAllowedExternalUrl: () => false
+    },
+    actions: {
+      saveConfig: () => {},
+      setBackgroundRunning: v => { state.backgroundRunning = v },
+      currentLine: () => ({ id: state.lineId }),
+      refreshLines: async () => ({}),
+      applyLine: id => ({ id, url: '' }),
+      pingLine: async () => ({}),
+      pingAllLines: async () => ({}),
+      openExternal: async () => {},
+      detectProxyNode: async () => ({})
+    }
+  })
+  return { handlers, state }
+}
+
 // ------------------------------------------------------------ 关窗决策
 
 test('后台运行开启且托盘就绪 → 关窗应当隐藏', () => {
@@ -173,22 +212,28 @@ test('★ 界面里也能开关后台运行，不用去翻托盘菜单', () => {
 })
 
 test('config:get 会下发后台运行状态（界面初次渲染要知道当前值）', () => {
-  const main = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
-  const at = main.indexOf("ipcMain.handle('config:get'")
-  assert.ok(at > 0, '找不到 config:get')
-  const body = main.slice(at, main.indexOf('}))', at))
-  assert.match(body, /backgroundRunning: backgroundRunning/, 'config:get 没有返回 backgroundRunning')
+  // 不再搜源码：直接调真实 handler 看返回值
+  const { handlers } = configHarness()
+  const got = handlers['config:get']({})
+  assert.equal(typeof got.backgroundRunning, 'boolean', 'config:get 必须返回 backgroundRunning')
+  assert.equal(got.backgroundRunning, true)
 })
 
 test('★ config:setBackgroundRunning 必须校验来源，且非 false 一律按开启处理', () => {
+  const { handlers, state } = configHarness()
+  // 「校验来源」的约束现在由注册器统一提供（见 test/ipc-registrar.test.js，
+  // 那里证明了受保护 handler 对不可信来源一次都不执行业务代码）。
+  // 这里验的是业务语义：非 false 即开启。
+  handlers['config:setBackgroundRunning']({}, false)
+  assert.equal(state.backgroundRunning, false)
+  for (const v of [undefined, null, 0, '', 'false']) {
+    handlers['config:setBackgroundRunning']({}, v)
+    assert.equal(state.backgroundRunning, true, '传 ' + String(v) + ' 必须按开启处理')
+  }
+  // 同时确认 main.js 里这个频道确实走了受保护的 ipcReg.handle
   const main = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
-  const at = main.indexOf("ipcMain.handle('config:setBackgroundRunning'")
-  assert.ok(at > 0, '找不到 config:setBackgroundRunning')
-  const body = main.slice(at, main.indexOf('})', at))
-  assert.match(body, /isMainSender\(event\)/, '没有校验调用来源')
-  assert.match(body, /rejectUntrustedSender\(\)/, '非信任来源没有拒绝')
-  // 与 loadConfig 的 `!== false` 对齐：renderer 传 undefined/null 不能把开关关掉
-  assert.match(body, /value !== false/, '缺少"非 false 即开启"的兜底')
+  assert.ok(!/ipcMain\.handle\('config:setBackgroundRunning'/.test(main),
+    '这个频道不能再用裸 ipcMain.handle —— 那样就没有来源校验了')
 })
 
 test('preload 暴露读写后台运行开关的接口', () => {

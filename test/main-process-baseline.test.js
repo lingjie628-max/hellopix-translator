@@ -60,11 +60,10 @@ test('IPC 频道集合与基线一致（拆分时漏搬一个就会红）', asyn
   try {
     await app.ready()
     const channels = [...app.ipcHandlers.keys()].sort()
-    // 只锁频道名的**集合**，不锁顺序与实现。新增频道要在这里同步补上，
-    // 这是有意的 —— 新增对外接口本来就应该被人看见。
-    assert.ok(channels.length >= 50, '频道数明显变少：' + channels.length)
-    const missing = REQUIRED_CHANNELS.filter(c => !channels.includes(c))
-    assert.deepEqual(missing, [], '缺少关键 IPC 频道：' + missing.join(', '))
+    // 锁定频道名的**完整集合**，不锁顺序与实现。
+    // 重构把 handler 搬进 src/ipc/ 时，只要漏搬一个这里立刻红。
+    // 新增对外接口是有意行为，必须在同一 commit 里补进 BASELINE_CHANNELS。
+    assert.deepEqual(channels, BASELINE_CHANNELS)
   } finally {
     app.dispose()
   }
@@ -74,12 +73,30 @@ test('IPC 频道集合与基线一致（拆分时漏搬一个就会红）', asyn
  * 关键频道清单 —— 每个域至少一个，漏掉就能立刻发现。
  * 完整清单有 53 个，只钉住"没有它整个域都不可用"的那些。
  */
-const REQUIRED_CHANNELS = [
-  'auth:autoLogin', 'auth:login', 'auth:session',
-  'app:open', 'app:close', 'app:tabs', 'app:switch',
-  'translate:guestPrefs', 'translate:run', 'translate:savePrefs',
-  'proxy:detect', 'lines:list', 'config:get', 'config:setTheme',
-  'shell:open', 'site:info'
+/**
+ * 全部 IPC 频道的**精确基线**（重构前实测采集，共 51 个）。
+ *
+ * 用精确集合而不是"至少 N 个"：拆分 handler 最大的风险就是漏搬某一个，
+ * 而漏掉的那个往往正好是低频路径（比如 customer:reminders），
+ * 数量阈值拦不住。宁可每次新增频道都来这里补一行。
+ */
+const BASELINE_CHANNELS = [
+  'app:checkUpdate', 'app:clearActiveCache', 'app:close', 'app:contextAction',
+  'app:hide', 'app:home', 'app:open', 'app:overlay', 'app:platforms', 'app:preset',
+  'app:proxyPresets', 'app:proxySettings', 'app:reloadActive', 'app:rename',
+  'app:reorder', 'app:restart', 'app:savePreset', 'app:showContextMenu',
+  'app:showHidden', 'app:switch', 'app:tabs', 'app:updatePlatform',
+  'app:updateSettings', 'app:version',
+  'auth:autoLogin', 'auth:get', 'auth:login', 'auth:logout', 'auth:save',
+  'auth:session', 'auth:verifyLock',
+  'chrome:barHeight', 'chrome:height',
+  'config:get', 'config:setApiBase', 'config:setBackgroundRunning', 'config:setTheme',
+  'customer:ingest', 'customer:reminders',
+  'lines:list', 'lines:ping', 'lines:pingAll', 'lines:select',
+  'proxy:detect', 'shell:open', 'site:info',
+  'translate:bridgeStatus', 'translate:composerInsertText',
+  'translate:composerSelectAllDelete', 'translate:engines', 'translate:guestPrefs',
+  'translate:run', 'translate:savePrefs'
 ]
 
 test('纯函数行为不变（真身直接调用，不复制源码）', async () => {

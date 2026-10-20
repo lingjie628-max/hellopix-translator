@@ -218,6 +218,10 @@ test('arch 从请求一路传到 siteInfo —— 路由透传 + 客户端真的�
   assert.match(route, /core\.siteInfo\(input\(req\)\)/, '路由必须把 input(req) 传给 siteInfo，否则 arch 永远是空的')
 
   const main = fs.readFileSync(path.join(root, 'desktop/main.js'), 'utf8')
-  assert.ok(main.includes('/site/info?arch='), '客户端 site:info 必须带 arch 查询参数')
-  assert.ok(/site:info[\s\S]{0,400}process\.arch/.test(main), 'site:info 的 arch 必须取自 process.arch')
+  // site:info 的 handler 已搬进 src/ipc/config.js，main.js 里不该再有实现
+  assert.ok(!/ipcMain\.handle\('site:info'/.test(main), 'site:info 必须走 src/ipc/config.js')
+
+  const impl = fs.readFileSync(path.join(root, 'desktop/src/ipc/config.js'), 'utf8')
+  assert.ok(impl.includes('/site/info?arch='), '客户端 site:info 必须带 arch 查询参数')
+  assert.ok(/site:info[\s\S]{0,400}process\.arch/.test(impl), 'site:info 的 arch 必须取自 process.arch')
 })
