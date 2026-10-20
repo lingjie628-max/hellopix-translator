@@ -638,15 +638,30 @@ class CoreService {
             `UPDATE ${table} SET char_used=char_used+$2,translate_count=translate_count+1,updated_at=NOW() WHERE id=$1`,
             [session.account.id, chars], client
           )
-          const logged = await this.repo.query(
-            `INSERT INTO translate_logs(user_id,sub_account_id,engine_id,reservation_id,
-             source_language,target_language,chars,cost_amount,sell_amount,source_hash,snippet,cached,duration_ms,trigger)
-             VALUES($1,$2,$3,$4,$5,$6,$7,$8,0,$9,$10,$11,$12,$13) RETURNING id`,
-            [session.parent.id, session.kind === 'sub' ? session.account.id : null, engineId, reservation.id,
-              response.from, to, chars, number(engine.costPerMillion) * chars / 1000000, sourceHash,
-              text.slice(0, 300), Boolean(result.cached), durationMs, trigger], client
-          )
-          translateLogId = logged.rows[0] && number(logged.rows[0].id) || null
+          // 日志字段要过表上的 CHECK 约束，逐条对齐后再落库。
+          //
+          // 踩过的坑（线上 500，客户端显示 TRANSLATE_FAILED，翻译其实**已经成功**）：
+          //   1. `source_language <> target_language` —— 请求带 `auto` 时这里记检测语言，
+          //      原文本身就是目标语言（中文→中文）时两边相等，整条 INSERT 被拒；
+          //   2. `source_hash ~ '^[0-9a-f]{64}$'` —— 哈希来源不同则长度/大小写不符；
+          //   3. `trigger = ANY(白名单)` —— 新增触发场景没同步迁移就会炸。
+          // 日志是账务旁路，不该有能力把一次成功的翻译打成 500。
+          // 上面的字段对齐只是第一道；这里再用 SAVEPOINT 兜底 —— 约束/列/枚举
+          // 任何一处对不上，最多丢一条日志，绝不让用户的译文跟着回滚。
+          const logLang = String(response.from || '').trim() || 'auto'
+          const logTarget = String(to || '').trim() || 'auto'
+          const logSourceLanguage = logLang === logTarget ? 'auto' : logLang
+          const logSourceHash = /^[0-9a-fA-F]{64}$/.test(String(sourceHash || ''))
+            ? String(sourceHash).toLowerCase()
+            : null
+          translateLogId = await this.logTranslateRow(client, {
+            userId: session.parent.id,
+            subAccountId: session.kind === 'sub' ? session.account.id : null,
+            engineId, reservationId: reservation.id, sourceLanguage: logSourceLanguage, targetLanguage: logTarget,
+            chars, costAmount: number(engine.costPerMillion) * chars / 1000000, sourceHash: logSourceHash,
+            snippet: String(text || '').slice(0, 300), cached: Boolean(result.cached), durationMs, trigger,
+            fallbackSource: String(text || '')
+          })
         }
         // 上游真实消耗：**不管这次是否退款给客户都要记**。
         //
@@ -709,6 +724,44 @@ class CoreService {
    * 整条记录不参与任何扣费逻辑，写失败也不该让翻译失败：它是对账用的旁路，
    * 不是主流程的一部分。所以这里吞掉异常并打日志。
    */
+  /**
+   * 写一条对客翻译流水。**绝不向外抛异常。**
+   *
+   * `translate_logs` 上一堆 CHECK 约束（语言不能相同、哈希 64 位小写十六进制、
+   * trigger 白名单、chars > 0……）。约束本身是对的，但流水是旁路账：
+   * 约束一旦因为新的输入组合没被满足，正确的结果是**丢一条流水并告警**，
+   * 而不是把一次已经拿到译文、已经扣过字符的调用打成 500 再回滚
+   * —— 用户看到的是"翻译失败"，实际上翻译早就成功了（线上真实故障）。
+   *
+   * 用 SAVEPOINT 而不是 try/catch：Postgres 里语句报错会让整个事务进入
+   * aborted 状态，光 catch 住 JS 异常没用，后续语句仍然会全部失败。
+   */
+  async logTranslateRow(client, row) {
+    try {
+      await this.repo.query('SAVEPOINT translate_log', [], client)
+      const logged = await this.repo.query(
+        `INSERT INTO translate_logs(user_id,sub_account_id,engine_id,reservation_id,
+         source_language,target_language,chars,cost_amount,sell_amount,source_hash,snippet,cached,duration_ms,trigger)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,0,COALESCE($9,encode(sha256(convert_to($14,'UTF8')),'hex')),$10,$11,$12,$13) RETURNING id`,
+        [row.userId, row.subAccountId, row.engineId, row.reservationId,
+          row.sourceLanguage, row.targetLanguage, row.chars, row.costAmount, row.sourceHash,
+          row.snippet, row.cached, row.durationMs, row.trigger, row.fallbackSource], client
+      )
+      await this.repo.query('RELEASE SAVEPOINT translate_log', [], client)
+      return logged.rows[0] && number(logged.rows[0].id) || null
+    } catch (error) {
+      try { await this.repo.query('ROLLBACK TO SAVEPOINT translate_log', [], client) } catch (_) { /* 事务已坏 */ }
+      console.error(
+        `translate_logs insert skipped (translation still served): ${error.message}`,
+        JSON.stringify({
+          reservationId: row.reservationId, engineId: row.engineId, from: row.sourceLanguage,
+          to: row.targetLanguage, chars: row.chars, trigger: row.trigger, cached: row.cached
+        })
+      )
+      return null
+    }
+  }
+
   async recordUpstreamUsage(client, { reservation, engine, result, session, translateLogId, from, to, durationMs }) {
     try {
       const usage = (result && result.usage) || {}

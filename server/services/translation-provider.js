@@ -472,7 +472,7 @@ async function deepseekTranslate(engine, payload, options) {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`
       },
-      body: JSON.stringify({
+      body: JSON.stringify(Object.assign({
         model,
         messages: built.messages,
         // 关闭思考模式：翻译不需要思维链，开着会显著变慢并让 token 翻倍，
@@ -480,7 +480,11 @@ async function deepseekTranslate(engine, payload, options) {
         thinking: { type: 'disabled' },
         temperature: 0,        // 翻译要稳定，不要发挥
         stream: false
-      }),
+      },
+      // 通道表里的 extraBody 可以覆盖上面任何一条（比如想试 thinking:auto）。
+      // 放在默认值之后合并 —— 后台改完立刻生效，不必发版。
+      (engine.callParams && engine.callParams.extraBody) || {}
+      )),
       signal: AbortSignal.timeout(options.timeoutMs)
     })
   } catch (error) {

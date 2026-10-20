@@ -92,6 +92,47 @@ function clampLimit(name, value) {
 }
 
 /**
+ * 该模型用哪个字段限制输出长度。
+ *
+ * GPT-5 系列、o 系列等新模型**只认 `max_completion_tokens`**，传 `max_tokens`
+ * 会 400：`Unsupported parameter: 'max_tokens' is not supported with this model`。
+ *
+ * ## 为什么必须在这里判断，而不是靠下面的"被拒再重试"
+ *
+ * 那套自愈式降级是对的，但它有代价：**每次翻译都要先白打一趟**。
+ * 2026-10-19 在生产上量到的是 —— 24 小时内 1311 次调用，`retries` **全部为 1**，
+ * 即每一次翻译都被 400 拒掉再重发。用户感知到的就是白白多出来的往返延迟。
+ *
+ * 判错了也不会坏：字段名只是"猜"，猜错仍然会走下面的降级重试兜底。
+ * 所以这里给的是**最常见的那条**，而不是一份要长期维护的模型清单。
+ */
+function maxTokensFieldFor(model) {
+  const name = String(model || '').toLowerCase()
+  // o1/o3/o4 系列与 gpt-5 及以后的推理模型
+  if (/^(o\d|gpt-5)/.test(name)) return 'max_completion_tokens'
+  return 'max_tokens'
+}
+
+/**
+ * 该模型是否接受 `temperature`。
+ *
+ * 推理类模型（gpt-5 系、o 系）把采样参数固定在默认值，传 0 会被直接拒：
+ * `Unsupported value: 'temperature' does not support 0 with this model.`
+ *
+ * ## 为什么必须预判
+ *
+ * 下面那套"被拒再降级"是兜底，但兜底**每次都要先白打一趟**。
+ * 2026-10-19 生产实测：把温度也预判掉之前，GPT 通道的 retries 仍然全是 1 ——
+ * 修好了 max_tokens 却漏了 temperature，延迟只从 2.9s 降到 1.6s。
+ *
+ * 判错也不坏：下面仍会按厂商点名降级兜底。
+ */
+function acceptsTemperature(model) {
+  const name = String(model || '').toLowerCase()
+  return !/^(o\d|gpt-5)/.test(name)
+}
+
+/**
  * 合并"代码默认参数"与"通道表里配的参数"。
  *
  * 通道表（`engines.call_params`）优先 —— 那条要求「每个渠道必须配置明确的
@@ -260,7 +301,10 @@ function openAiCompatible(cfg) {
       )
       const extraKeys = Object.keys(extraBody)
       // null = 这个模型不能收 temperature（如 Kimi K3 把采样参数固定在服务端）
-      const withTemperatureAllowed = params.temperature !== null && params.temperature !== undefined
+      const temperatureAllowed = params.temperature !== null && params.temperature !== undefined
+      // 推理模型连 temperature=0 都不接受（官方只认默认值）—— 预判掉，
+      // 否则每次翻译都要先被 400 拒一次再重试。
+      const withTemperatureAllowed = temperatureAllowed && acceptsTemperature(model)
 
       // temperature 与厂商专属参数都只在需要时带上（见下方重试说明）
       const buildBody = (withTemperature, withExtra, withMaxTokens) => {
@@ -274,8 +318,12 @@ function openAiCompatible(cfg) {
         }
         if (withTemperature && withTemperatureAllowed) body.temperature = Number(params.temperature)
         if (withExtra && extraKeys.length) Object.assign(body, extraBody)
-        // 输出上限：不设的话模型可能把翻译写成一篇解释文，按输出 token 全额计费
-        if (withMaxTokens && params.maxOutputTokens) body.max_tokens = params.maxOutputTokens
+        // 输出上限：不设的话模型可能把翻译写成一篇解释文，按输出 token 全额计费。
+        // 字段名按模型区分（见 maxTokensFieldFor）—— 传错会被 400 拒绝，
+        // 而那条重试是**每次翻译都白打一趟**，正是 2.9s 延迟的元凶之一。
+        if (withMaxTokens && params.maxOutputTokens) {
+          body[maxTokensFieldFor(model)] = params.maxOutputTokens
+        }
         return body
       }
 
@@ -428,6 +476,18 @@ const gptAdapter = openAiCompatible({
   envKey: 'PIX_OPENAI_API_KEY',
   defaultUrl: 'https://api.openai.com/v1',
   defaultModel: 'gpt-4o-mini',
+  // 推理强度：翻译**不需要**思维链。
+  //
+  // 2026-10-19 实测（gpt-5.6-luna，5 条真实语料）：
+  //   不设      2.0~3.0s，线上平均 110 个推理 token
+  //   low       0.97~1.6s，推理 token 归零
+  // 用户在等的是译文，不是模型的推理过程 —— 思考那几秒纯粹是白等，
+  // 还按 token 全额计费。所以默认压到 low，而不是留给模型自己决定。
+  //
+  // 用 extraBody 而不是写进 callParams：extraBody 已经在自愈降级的名单里，
+  // 万一某个模型不认这个参数（明确点名拒绝），会被自动去掉重试，
+  // 而不是把整条通道打死。
+  extraBody: { reasoning_effort: 'low' },
   languages: LLM_LANGUAGES
 })
 

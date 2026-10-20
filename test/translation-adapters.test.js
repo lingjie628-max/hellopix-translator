@@ -178,8 +178,12 @@ function sequence(responses) {
   }
 }
 
-test('GPT：模型拒绝 temperature 时去掉它重试一次（GPT-5 系列只接受默认温度）', async () => {
+test('GPT：模型拒绝某个参数时去掉它重试一次（自愈降级仍然保留）', async () => {
   // 真实报文：400 "Unsupported value: 'temperature' does not support 0 with this model"
+  //
+  // 注：gpt-5.6-luna 现在**已经预判**不发 temperature（见下面的用例），
+  // 所以这条改成验证"预判漏了的时候兜底还在"——用 gpt-4o-mini 这种本该
+  // 接受 temperature 的模型去模拟厂商突然拒绝，确认降级链路没被改坏。
   const seq = sequence([
     {
       status: 400,
@@ -192,13 +196,13 @@ test('GPT：模型拒绝 temperature 时去掉它重试一次（GPT-5 系列只�
     },
     { status: 200, body: { choices: [{ message: { content: '你好' } }] } }
   ])
-  const r = await provider.translate({ id: 'gpt', enabled: true, model: 'gpt-5.6-luna' }, payload,
+  const r = await provider.translate({ id: 'gpt', enabled: true, model: 'gpt-4o-mini' }, payload,
     opts(seq.fetch, { apiKey: 'k' }))
 
   assert.equal(r.ok, true, '去掉 temperature 后应当成功')
   assert.equal(r.text, '你好')
   assert.equal(seq.calls.length, 2, '应当正好重试一次')
-  assert.equal(JSON.parse(seq.calls[0].init.body).temperature, 0, '第一次仍按常规带上 temperature')
+  assert.equal(JSON.parse(seq.calls[0].init.body).temperature, 0, '预判之外的模型第一次仍按常规带上')
   assert.ok(!('temperature' in JSON.parse(seq.calls[1].init.body)), '重试必须去掉 temperature')
 })
 
@@ -231,4 +235,123 @@ test('Grok：正常返回时不应产生多余的第二次请求', async () => {
   const r = await provider.translate({ id: 'grok', enabled: true }, payload, opts(cap.fetch, { apiKey: 'k' }))
   assert.equal(r.ok, true)
   assert.equal(cap.calls.length, 1, '成功路径不该因为重试逻辑多一次调用')
+})
+
+// ===========================================================================
+// 翻译延迟：不许"先被拒、再重试"地白跑一趟
+// ===========================================================================
+//
+// 2026-10-19 生产数据：24 小时内 1311 次翻译，`translation_usage.retries`
+// **全部为 1**，P50 耗时 2.85s。根因是 gpt-5.6-luna 不认 `max_tokens`，
+// 每次请求都先被 400 拒掉、再降级重发 —— 用户白等一整趟往返。
+//
+// 那套"被拒再降级"的自愈逻辑本身是对的（不该维护会过期的模型清单），
+// 但它**不该成为常态**。下面锁住：参数一开始就要传对。
+
+test('GPT-5 系：输出上限用 max_completion_tokens，不许先发 max_tokens 被拒', async () => {
+  const cap = capture({ choices: [{ message: { content: 'Hello' } }] })
+  const r = await provider.translate(
+    { id: 'gpt', enabled: true, model: 'gpt-5.6-luna', callParams: { maxOutputTokens: 512 } },
+    payload, opts(cap.fetch, { apiKey: 'k' }))
+
+  assert.equal(r.ok, true)
+  const body = JSON.parse(cap.calls[0].init.body)
+  assert.equal(body.max_completion_tokens, 512)
+  assert.equal(body.max_tokens, undefined, '新模型收到 max_tokens 会 400，等于每次翻译白跑一趟')
+  assert.equal(cap.calls.length, 1, '成功路径必须一次打中')
+  assert.equal(r.retries, 0, 'retries 必须为 0 —— 线上全是 1 就是这条坏掉的信号')
+})
+
+test('o 系列同理（o1/o3）用 max_completion_tokens', async () => {
+  const cap = capture({ choices: [{ message: { content: 'Hello' } }] })
+  await provider.translate(
+    { id: 'gpt', enabled: true, model: 'o3-mini', callParams: { maxOutputTokens: 256 } },
+    payload, opts(cap.fetch, { apiKey: 'k' }))
+  const body = JSON.parse(cap.calls[0].init.body)
+  assert.equal(body.max_completion_tokens, 256)
+  assert.equal(body.max_tokens, undefined)
+})
+
+test('老模型（gpt-4o-mini）仍然用 max_tokens，不能一刀切', async () => {
+  const cap = capture({ choices: [{ message: { content: 'Hello' } }] })
+  await provider.translate(
+    { id: 'gpt', enabled: true, model: 'gpt-4o-mini', callParams: { maxOutputTokens: 256 } },
+    payload, opts(cap.fetch, { apiKey: 'k' }))
+  const body = JSON.parse(cap.calls[0].init.body)
+  assert.equal(body.max_tokens, 256, 'gpt-4o 系不认识 max_completion_tokens')
+  assert.equal(body.max_completion_tokens, undefined)
+})
+
+test('GPT 默认压推理强度：翻译不需要思维链，思考那几秒是白等', async () => {
+  const cap = capture({ choices: [{ message: { content: 'Hello' } }] })
+  await provider.translate({ id: 'gpt', enabled: true, model: 'gpt-5.6-luna' },
+    payload, opts(cap.fetch, { apiKey: 'k' }))
+  assert.equal(JSON.parse(cap.calls[0].init.body).reasoning_effort, 'low')
+})
+
+test('通道表里的 extraBody 能覆盖推理强度（后台改完立刻生效，不用发版）', async () => {
+  const cap = capture({ choices: [{ message: { content: 'Hello' } }] })
+  await provider.translate(
+    { id: 'gpt', enabled: true, model: 'gpt-5.6-luna', callParams: { extraBody: { reasoning_effort: 'medium' } } },
+    payload, opts(cap.fetch, { apiKey: 'k' }))
+  assert.equal(JSON.parse(cap.calls[0].init.body).reasoning_effort, 'medium')
+})
+
+test('模型不认 reasoning_effort 时自动去掉重试，而不是把通道打死', async () => {
+  const seq = sequence([
+    { status: 400, body: { error: { message: "Unsupported parameter: 'reasoning_effort'" } } },
+    { status: 200, body: { choices: [{ message: { content: 'Hello' } }] } }
+  ])
+  const r = await provider.translate({ id: 'gpt', enabled: true, model: 'gpt-5.6-luna' },
+    payload, opts(seq.fetch, { apiKey: 'k' }))
+  assert.equal(r.ok, true)
+  assert.equal(JSON.parse(seq.calls[0].init.body).reasoning_effort, 'low')
+  assert.equal(JSON.parse(seq.calls[1].init.body).reasoning_effort, undefined,
+    '第二次必须剥掉被点名的参数')
+})
+
+test('DeepSeek 默认关思考，且通道表 extraBody 可覆盖', async () => {
+  const cap = capture({ choices: [{ message: { content: 'Hello' } }] })
+  await provider.translate({ id: 'deepseek', enabled: true, model: 'deepseek-flash' },
+    payload, opts(cap.fetch, { apiKey: 'k' }))
+  assert.deepEqual(JSON.parse(cap.calls[0].init.body).thinking, { type: 'disabled' })
+
+  const cap2 = capture({ choices: [{ message: { content: 'Hello' } }] })
+  await provider.translate(
+    { id: 'deepseek', enabled: true, model: 'deepseek-flash', callParams: { extraBody: { thinking: { type: 'auto' } } } },
+    payload, opts(cap2.fetch, { apiKey: 'k' }))
+  assert.deepEqual(JSON.parse(cap2.calls[0].init.body).thinking, { type: 'auto' })
+})
+
+test('GPT-5 系：不传 temperature，否则每次翻译先被 400 拒一次再重试', async () => {
+  const cap = capture({ choices: [{ message: { content: 'Hello' } }] })
+  const r = await provider.translate({ id: 'gpt', enabled: true, model: 'gpt-5.6-luna' },
+    payload, opts(cap.fetch, { apiKey: 'k' }))
+  const body = JSON.parse(cap.calls[0].init.body)
+  assert.equal(body.temperature, undefined,
+    'gpt-5.6-luna 只接受默认温度，传 0 会被 400 拒掉 —— 修了 max_tokens 也还是每次白跑一趟')
+  assert.equal(cap.calls.length, 1)
+  assert.equal(r.retries, 0)
+})
+
+test('老模型仍然带 temperature=0（翻译要稳定，不要发挥）', async () => {
+  const cap = capture({ choices: [{ message: { content: 'Hello' } }] })
+  await provider.translate({ id: 'gpt', enabled: true, model: 'gpt-4o-mini' },
+    payload, opts(cap.fetch, { apiKey: 'k' }))
+  assert.equal(JSON.parse(cap.calls[0].init.body).temperature, 0)
+})
+
+test('推理模型一次打中：max_tokens/temperature 都不发错，retries 必须是 0', async () => {
+  // 这条是上面两条的合并断言 —— 线上 retries 全为 1 时，这一个数字就能看出来。
+  const cap = capture({ choices: [{ message: { content: 'Hello' } }], usage: {} })
+  const r = await provider.translate(
+    { id: 'gpt', enabled: true, model: 'gpt-5.6-luna', callParams: { maxOutputTokens: 512 } },
+    payload, opts(cap.fetch, { apiKey: 'k' }))
+  const body = JSON.parse(cap.calls[0].init.body)
+  assert.equal(body.temperature, undefined)
+  assert.equal(body.max_tokens, undefined)
+  assert.equal(body.max_completion_tokens, 512)
+  assert.equal(body.reasoning_effort, 'low')
+  assert.equal(cap.calls.length, 1)
+  assert.equal(r.retries, 0)
 })

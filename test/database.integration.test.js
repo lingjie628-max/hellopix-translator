@@ -239,6 +239,39 @@ test('PostgreSQL and Redis preserve billing under concurrency', {
       'SELECT count(*)::int AS n FROM translation_usage WHERE user_id=$1', [userId]
     )).rows[0].n, 1)
 
+    // --- 对客流水不该有能力把成功的翻译打成 500 ------------------------------
+    //
+    // 线上真实故障（2026-10）：`translate_logs_check` 要求
+    // `source_language <> target_language`，而请求带 `auto` 时流水写的是
+    // **检测出来的语言**。原文本身就是目标语言（中文→中文）时两边相等，
+    // INSERT 被约束拒绝 → 整个事务回滚 → 接口 500 → 客户端显示
+    // `TRANSLATE_FAILED`，可译文其实早就拿到了、字符也早就扣了。
+    const sameLanguage = await core.translate(session, {
+      text: '你好，这是一条测试翻译消息。', from: 'auto', to: 'zh', engine: 'deepseek'
+    }, `translate_same_lang_${suffix}`)
+    assert.equal(sameLanguage.success, true, '原文语言等于目标语言时，翻译仍必须成功')
+    const sameLangLog = await pool.query(
+      `SELECT source_language,target_language,source_hash FROM translate_logs
+       WHERE user_id=$1 AND target_language='zh' ORDER BY id DESC LIMIT 1`, [userId])
+    assert.equal(sameLangLog.rowCount, 1, '流水仍要落库，只是语言不能违反约束')
+    assert.notEqual(sameLangLog.rows[0].source_language, sameLangLog.rows[0].target_language)
+    assert.match(sameLangLog.rows[0].source_hash, /^[0-9a-f]{64}$/)
+
+    // 即使约束实在对不上（比如以后又加了新枚举，代码没同步），
+    // 也只能丢流水，译文必须照常返回 —— 这是 SAVEPOINT 兜底的意义。
+    const beforeLogCount = (await pool.query(
+      'SELECT count(*)::int AS n FROM translate_logs WHERE user_id=$1', [userId])).rows[0].n
+    const logged = await repo.transaction(client => core.logTranslateRow(client, {
+      userId, subAccountId: null, engineId: 'deepseek', reservationId: null,
+      sourceLanguage: 'zh', targetLanguage: 'zh', // 故意违反 CHECK
+      chars: 1, costAmount: 0, sourceHash: null, snippet: 'x',
+      cached: false, durationMs: 1, trigger: '', fallbackSource: 'x'
+    }))
+    assert.equal(logged, null, '约束冲突时流水应被丢弃并返回 null，而不是抛异常')
+    assert.equal((await pool.query(
+      'SELECT count(*)::int AS n FROM translate_logs WHERE user_id=$1', [userId])).rows[0].n,
+    beforeLogCount, '丢弃流水不应留下半条脏数据')
+
     // --- 套餐权益版本化：同一个套餐，版本不同 → 通道组合不同 ------------------
     //
     // 这是"不擅自改变已售权益"的执行点：老客户钉在购买时的版本，
@@ -290,7 +323,7 @@ test('PostgreSQL and Redis preserve billing under concurrency', {
     )
     assert.equal(
       Number(balances.rows[0].parent_balance) + Number(balances.rows[0].sub_balance),
-      990
+      976, // 1000 − 5（首次）− 5（缓存命中）− 14（中文→中文那次）—— 余额守恒
     )
 
     // --- 自由切换 + 余额共享 + 套餐准入 ---------------------------------------

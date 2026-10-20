@@ -139,6 +139,9 @@ test('冒烟：真实 makeTabEl 渲染 —— 0 不出角标、有数出数字�
     esc: s => String(s),
     showPixContextMenu: () => {},
     startTabRename: () => {},
+    // 拖拽排序：这个测试只关心角标，拖拽桩成空实现即可。
+    // 拖拽本身由 desktop/scripts/verify-tab-drag.js 覆盖。
+    attachTabDrag: () => {},
     window: { pix: { switchTab: () => {}, close: () => {} } }
   }
   // eslint-disable-next-line no-new-func
