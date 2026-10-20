@@ -487,6 +487,8 @@
     </div>
   </dialog>
 
+  <!-- 元素句柄必须在 app.js 之前：app.js 顶层会直接引用这些常量 -->
+  <script src="dom.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
