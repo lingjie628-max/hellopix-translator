@@ -803,6 +803,186 @@ button {
   flex: 1 1 auto;
   min-width: 12px;
 }
+/* 二次确认弹窗。
+ *
+ * 用原生 dialog：自动进 top-layer，能盖住原生 WebContentsView；
+ * 这也是不能用普通 div 的原因（会被视图遮住，用户看不见弹框）。
+ * 宽度压在 400px 以内 —— 确认框只需要一眼读完，不需要大卡片。 */
+.confirm-dialog {
+  width: 392px;
+  max-width: calc(100vw - 40px);
+  padding: 20px 20px 16px;
+  border: 1px solid rgb(255 255 255 / 0.12);
+  border-radius: 16px;
+  background: rgb(14 26 42 / 0.99);
+  box-shadow: 0 24px 60px rgb(0 0 0 / 0.55);
+  color: var(--c-text-9);
+}
+.confirm-dialog::backdrop {
+  background: rgb(4 8 14 / 0.62);
+}
+.confirm-dialog h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  /* 名字可能很长（用户自定义的账号备注），必须允许换行而不是撑破弹窗 */
+  overflow-wrap: anywhere;
+}
+.confirm-text {
+  margin: 0 0 18px;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--c-label);
+}
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.confirm-actions button {
+  min-width: 84px;
+  padding: 8px 14px;
+  border-radius: 9px;
+  border: 1px solid rgb(255 255 255 / 0.12);
+  background: rgb(255 255 255 / 0.06);
+  color: var(--c-text-9);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.confirm-actions button:hover {
+  background: rgb(255 255 255 / 0.12);
+}
+/* 危险动作用红色，与「取消」形成明确的视觉差异（默认焦点在取消上）。 */
+.confirm-actions .danger {
+  border-color: rgb(232 90 90 / 0.55);
+  background: rgb(232 90 90 / 0.16);
+  color: rgb(255 160 160);
+}
+.confirm-actions .danger:hover {
+  background: rgb(232 90 90 / 0.28);
+}
+.confirm-actions button:focus-visible {
+  outline: 2px solid rgb(var(--c-accent-rgb) / 0.8);
+  outline-offset: 2px;
+}
+/* 轻提示：必须走 popover 顶层，否则会被页面上方的原生视图盖住看不见。 */
+.pix-toast {
+  position: fixed;
+  top: 76px;
+  left: 50%;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 9px 16px;
+  border-radius: 999px;
+  border: 1px solid rgb(255 255 255 / 0.12);
+  background: rgb(18 32 50 / 0.98);
+  box-shadow: 0 12px 30px rgb(0 0 0 / 0.45);
+  color: var(--c-text-9);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.pix-toast.warn {
+  border-color: rgb(240 170 60 / 0.55);
+  color: rgb(255 205 120);
+}
+.pix-toast::backdrop {
+  background: transparent;
+}
+/* ── 后台运行入口 ────────────────────────────────────────────────────
+ *
+ * 尺寸跟标签完全一致（68×62）：它是标签栏里的一员，不是漂浮的角标。
+ * 用虚线边框 + 收起状态的图标区分"这不是一个窗口"，
+ * 否则用户会以为点它又是一个新窗口。
+ *
+ * 必须**常驻可见**：隐藏窗口没有其它入口能找回来（见 makeHiddenTrayEl）。 */
+.tab-hidden-tray {
+  justify-content: center;
+  gap: 3px;
+  background: rgb(255 255 255 / 0.03);
+  border: 1px dashed rgb(var(--c-accent-rgb) / 0.35);
+  color: var(--c-label);
+}
+.tab-hidden-tray:hover {
+  background: rgb(var(--c-accent-rgb) / 0.12);
+  border-color: rgb(var(--c-accent-rgb) / 0.7);
+  color: var(--c-text-9);
+}
+.tab-tray-icon {
+  font-size: 17px;
+  line-height: 1;
+}
+.tab-tray-count {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgb(var(--c-accent-rgb) / 0.22);
+  color: var(--c-text-9);
+}
+/* popover 面板：原生 top-layer，天然盖在原生视图之上，不用调 z-index。 */
+.hidden-tray-panel {
+  margin: 0;
+  padding: 10px;
+  width: 244px;
+  border-radius: 14px;
+  border: 1px solid rgb(255 255 255 / 0.1);
+  background: rgb(14 26 42 / 0.98);
+  box-shadow: 0 18px 42px rgb(0 0 0 / 0.5);
+  color: var(--c-text-9);
+  font-size: 12px;
+}
+.hidden-tray-panel::backdrop {
+  background: transparent;
+}
+.hidden-tray-head {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 3px;
+}
+.hidden-tray-hint {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--c-label);
+  margin-bottom: 8px;
+}
+.hidden-tray-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--c-text-9);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.hidden-tray-row:hover {
+  background: rgb(var(--c-accent-rgb) / 0.16);
+}
+.hidden-tray-icon {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  flex: 0 0 auto;
+}
+.hidden-tray-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hidden-tray-open {
+  font-size: 11px;
+  color: rgb(var(--c-accent-rgb) / 1);
+}
 .tab {
   position: relative;
   display: flex;
@@ -839,6 +1019,29 @@ button {
   color: var(--c-text-9);
   transform: translateY(-1px);
 }
+/* ── 拖拽排序的视觉反馈 ──────────────────────────────────────────────
+ *
+ * 插入位置用**竖线**而不是"让占位符滑开"：标签是固定宽度等宽格子，
+ * 滑开动画会让整排跳动，反而看不清会落到哪儿。一条 2px 竖线足够精确。
+ * 被拖起的那个半透明，明确指出"正在搬动的是它"。 */
+.tab.dragging {
+  opacity: 0.4;
+  transform: scale(0.96);
+}
+.tab.drop-before::before,
+.tab.drop-after::before {
+  content: '';
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  border-radius: 2px;
+  background: rgb(var(--c-accent-rgb));
+  box-shadow: 0 0 6px rgb(var(--c-accent-rgb) / 0.8);
+  pointer-events: none;
+}
+.tab.drop-before::before { left: -2px; }
+.tab.drop-after::before { right: -2px; }
 .tab.active {
   background:
     linear-gradient(180deg, rgb(var(--c-accent-rgb) / 0.16), rgba(14, 116, 144, 0.09));

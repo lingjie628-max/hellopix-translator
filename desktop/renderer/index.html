@@ -475,6 +475,18 @@
     </div>
   </div>
 
+  <!-- 关闭窗口的二次确认。
+       用原生 <dialog>：进 top-layer，天然盖在原生 WebContentsView 之上，
+       而且自带 ESC 关闭与焦点圈定（不写这些也能正确工作）。 -->
+  <dialog id="closeConfirm" class="confirm-dialog">
+    <h3 id="closeConfirmTitle">关闭这个窗口？</h3>
+    <p id="closeConfirmText" class="confirm-text"></p>
+    <div class="confirm-actions">
+      <button id="closeConfirmCancel" type="button" class="ghost" autofocus>取消</button>
+      <button id="closeConfirmOk" type="button" class="danger">关闭窗口</button>
+    </div>
+  </dialog>
+
   <script src="app.js"></script>
 </body>
 </html>

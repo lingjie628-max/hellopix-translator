@@ -1393,7 +1393,11 @@ function startRename(tab, label) {
 
 function fillEnabled(rows) {
   lastTabs = rows || []
-  const list = lastTabs
+  // "已启用的应用"只列**在标签栏里能看见的**窗口。
+  // 隐藏的窗口进程还活着，但它是"后台运行"，不属于"已启用"这个列表 ——
+  // 混进来会让计数虚高（明明只开着 2 个窗口却显示 3 个），
+  // 而且点它会把窗口叫回来，与"隐藏"的语义冲突。
+  const list = lastTabs.filter(tab => !tab.hidden)
   enabledMeta.textContent = list.length ? list.length + ' 个应用' : '暂无启用'
   if (editingEnabledId && enabledList.querySelector('.enabled-name-input')) return
   enabledList.innerHTML = ''
@@ -1676,6 +1680,13 @@ function showPixContextMenu(event, tab) {
 }
 
 async function runPixContextAction(action, tab) {
+  if (action === 'rename') {
+    if (tab && !editingTabId) {
+      const el = tabsEl.querySelector('[data-tab-id="' + tab.id + '"]')
+      if (el) startTabRename(tab, el)
+    }
+    return
+  }
   if (action === 'account') {
     userBox.click()
     return
@@ -1707,8 +1718,15 @@ async function runPixContextAction(action, tab) {
 let editingTabId = ''
 
 function startTabRename(tab, el) {
-  const span = el.querySelector('.tab-name')
-  if (!span || editingTabId) return
+  if (editingTabId) return
+  let span = el.querySelector('.tab-name')
+  if (!span) {
+    // 「不在标签上显示名称」时本来没有名字节点。重命名是明确的操作意图，
+    // 这里临时补一个输入框 —— 否则用户右键点了重命名，界面毫无反应。
+    span = document.createElement('span')
+    span.className = 'tab-name'
+    el.appendChild(span)
+  }
   editingTabId = tab.id
   const input = document.createElement('input')
   input.type = 'text'
@@ -1745,9 +1763,98 @@ function startTabRename(tab, el) {
   input.ondblclick = event => event.stopPropagation()
 }
 
+/**
+ * 关闭窗口前的二次确认。
+ *
+ * ## 为什么必须有
+ *
+ * 标签上的「×」紧贴着账号名称，鼠标一滑就点到；一关，那个号的窗口连同
+ * 登录状态当场消失，而且**没有任何撤销手段** —— 用户只能重新扫码登录。
+ * 误点一次的代价远大于多确认一次的成本。
+ *
+ * ## 实现要点
+ *
+ * - 用原生 `<dialog>`：进 top-layer，能盖住原生视图（普通 div 会被遮挡）。
+ * - **默认焦点在「取消」**：手快的人直接回车 / 空格，结果是"没关"，
+ *   而不是"关了"。危险操作永远不该是默认选项。
+ * - 返回 Promise 而不是回调：调用方 `await` 之后才知道到底关不关，
+ *   批量关闭时能逐个确认，逻辑不会乱。
+ * - 同一时刻只允许一个确认框（连点两次 × 不能让两个框叠起来）。
+ */
+let closeConfirmResolve = null
+
+/**
+ * 通用二次确认。
+ *
+ * @param {string} title  标题，例如「关闭这个窗口？」
+ * @param {string} text   后果说明
+ * @param {string} okText 确认按钮文案
+ * @returns {Promise<boolean>} 只有明确点了确认按钮才为 true
+ */
+function confirmAction(title, text, okText) {
+  const dialog = document.getElementById('closeConfirm')
+  const titleEl = document.getElementById('closeConfirmTitle')
+  const textEl = document.getElementById('closeConfirmText')
+  const okBtn = document.getElementById('closeConfirmOk')
+  const cancelBtn = document.getElementById('closeConfirmCancel')
+  if (!dialog || typeof dialog.showModal !== 'function') {
+    // 环境不支持 dialog（极老内核）：宁可放行也不能把关闭功能卡死。
+    return Promise.resolve(true)
+  }
+  titleEl.textContent = title || '确认操作？'
+  textEl.textContent = text || ''
+  okBtn.textContent = okText || '确认'
+
+  // 上一个还开着就先按"取消"结掉，避免两个 Promise 悬着。
+  if (closeConfirmResolve) {
+    const prev = closeConfirmResolve
+    closeConfirmResolve = null
+    prev(false)
+  }
+
+  return new Promise(resolve => {
+    const finish = answer => {
+      if (closeConfirmResolve !== finish) return
+      closeConfirmResolve = null
+      okBtn.onclick = null
+      cancelBtn.onclick = null
+      dialog.oncancel = null
+      dialog.onclose = null
+      try { if (dialog.open) dialog.close() } catch (e) {}
+      resolve(answer)
+    }
+    closeConfirmResolve = finish
+    okBtn.onclick = () => finish(true)
+    cancelBtn.onclick = () => finish(false)
+    // ESC / 点遮罩：一律当作取消。对话框关掉的任何非明确确认路径都必须
+    // 落到"不关"，否则就等于绕过确认。
+    dialog.oncancel = event => { event.preventDefault(); finish(false) }
+    dialog.onclose = () => finish(false)
+    try {
+      if (dialog.open) dialog.close()
+      dialog.showModal()
+      // 焦点显式落到取消上（autofocus 在某些内核对 dialog 不生效）
+      cancelBtn.focus()
+    } catch (e) {
+      finish(false)
+    }
+  })
+}
+
+function confirmCloseTab(tab) {
+  const name = String((tab && (tab.name || tab.title)) || '这个窗口')
+  return confirmAction(
+    '关闭「' + name + '」？',
+    '窗口将停止运行，需要重新登录才能再次打开。若只是想让它歇着，可以用右键菜单里的「隐藏该窗口」，登录状态会保留。',
+    '关闭窗口'
+  )
+}
+
 function makeTabEl(tab, active) {
   const el = document.createElement('div')
   el.className = 'tab' + (active ? ' active' : '')
+  // 右键「重命名」由主进程菜单发起，回到渲染层要按 id 找回这个节点。
+  el.dataset.tabId = tab.id
   // 翻译桥没起来 = 这个窗口的翻译整体失效。侧边栏必须一眼能看出来 ——
   // 让它长得和正常窗口一样，正是 0.1.12 能把用户坑到底的原因。
   if (tab.bridgeDown) {
@@ -1773,17 +1880,192 @@ function makeTabEl(tab, active) {
       startTabRename(tab, el)
     }
   }
-  el.querySelector('.x').onclick = (event) => {
+  el.querySelector('.x').onclick = async (event) => {
     event.stopPropagation()
+    // 二次确认：× 紧贴账号名，误点一次就要重新扫码，代价太大。
+    if (!(await confirmCloseTab(tab))) return
     window.pix.close(tab.id)
   }
+  attachTabDrag(el, tab)
   return el
+}
+
+/**
+ * 「后台运行中」入口：标签栏最右边的抽屉按钮。
+ *
+ * ## 为什么必须有这个入口
+ *
+ * 隐藏窗口最大的风险是**藏完找不回来**（见 background-mode.js 里对
+ * "僵尸进程"的论证）。所以隐藏功能配一个常驻、显眼的恢复入口是硬要求，
+ * 不能指望用户记得"要在右键菜单里找"。
+ *
+ * 用原生 popover：点击外面任意处自动关闭，不用手写外部点击监听
+ * （手写的那种很容易在切标签、窗口缩放时漏关，留下一个浮着的面板）。
+ */
+function makeHiddenTrayEl(hiddenRows) {
+  const wrap = document.createElement('div')
+  wrap.className = 'tab tab-hidden-tray'
+  wrap.title = hiddenRows.length + ' 个窗口在后台运行（收消息但不会提醒）'
+  wrap.innerHTML = '<span class="tab-tray-icon">▤</span><span class="tab-tray-count">' + hiddenRows.length + '</span>'
+  wrap.oncontextmenu = event => event.preventDefault()
+  wrap.id = 'hiddenTrayBtn'
+
+  let panel = document.getElementById('hiddenTrayPanel')
+  if (!panel) {
+    panel = document.createElement('div')
+    panel.id = 'hiddenTrayPanel'
+    panel.className = 'hidden-tray-panel'
+    panel.popover = 'manual'
+    document.body.appendChild(panel)
+  }
+  panel.innerHTML = '<div class="hidden-tray-head">后台运行中</div>' +
+    '<div class="hidden-tray-hint">这些窗口仍在后台挂着，不会提醒新消息，点一下即可恢复</div>' +
+    hiddenRows.map(tab =>
+      '<button type="button" class="hidden-tray-row" data-show-id="' + esc(tab.id) + '">' +
+      iconTag(tab.platform, 'hidden-tray-icon', tab.icon) +
+      '<span class="hidden-tray-name">' + esc(enabledName(tab)) + '</span>' +
+      '<span class="hidden-tray-open">显示</span>' +
+      '</button>').join('')
+
+  wrap.onclick = event => {
+    event.stopPropagation()
+    if (!panel || typeof panel.showPopover !== 'function') return
+    try {
+      if (panel.matches(':popover-open')) panel.hidePopover()
+      else panel.showPopover()
+    } catch (e) {}
+  }
+  panel.querySelectorAll('[data-show-id]').forEach(button => {
+    button.onclick = async event => {
+      event.stopPropagation()
+      const id = button.dataset.showId
+      // 先收面板再恢复：恢复会重建标签栏，面板留着会挡在新窗口上。
+      try { if (panel.matches(':popover-open')) panel.hidePopover() } catch (e) {}
+      await window.pix.showHiddenTab(id)
+    }
+  })
+  return wrap
+}
+
+/**
+ * 标签拖拽排序。
+ *
+ * ## 为什么只做"相邻插入"而不是自由拖放到任意像素位置
+ *
+ * 标签是等宽固定宽度、没有层级关系的平铺列表，插入语义就够用了：
+ * 拖到某个标签的左/右半边 → 插到它前面/后面。自由定位还要处理空隙动画、
+ * 滚动跟随、跨行，成本高而收益为零。
+ *
+ * ## 三个必须处理的坑
+ *
+ * 1. **dragover 必须 preventDefault**，否则 drop 根本不会触发（HTML5 规定）。
+ * 2. **不能把 home / 右侧分组当作普通目标**：左侧分组拖到右侧会打乱
+ *    `alignRight` 的语义（右侧组本身是靠 settings 渲染出来的，不参与顺序）。
+ *    所以只在同一个分组内允许互换。
+ * 3. **拖动过程中重渲染会把 DOM 换掉**，drag 事件链就断了。所以拖动期间
+ *    只改 class 做视觉提示，松手（drop/dragend）才真正提交并重渲染。
+ */
+let dragTabId = ''
+
+function attachTabDrag(el, tab) {
+  el.draggable = true
+  el.addEventListener('dragstart', event => {
+    if (editingTabId) { event.preventDefault(); return }
+    dragTabId = tab.id
+    el.classList.add('dragging')
+    try {
+      event.dataTransfer.effectAllowed = 'move'
+      // Firefox/Safari 没有 setData 就不会真正开始拖动。
+      event.dataTransfer.setData('text/plain', tab.id)
+    } catch (e) {}
+  })
+  el.addEventListener('dragend', () => {
+    dragTabId = ''
+    clearTabDropHint()
+    tabsEl.querySelectorAll('.tab.dragging').forEach(node => node.classList.remove('dragging'))
+  })
+  el.addEventListener('dragover', event => {
+    if (!dragTabId || dragTabId === tab.id) return
+    const source = findTabRow(dragTabId)
+    if (!source || !!source.alignRight !== !!tab.alignRight) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'move'
+    const rect = el.getBoundingClientRect()
+    const before = event.clientX < rect.left + rect.width / 2
+    clearTabDropHint()
+    el.classList.add(before ? 'drop-before' : 'drop-after')
+  })
+  el.addEventListener('dragleave', () => el.classList.remove('drop-before', 'drop-after'))
+  el.addEventListener('drop', async event => {
+    if (!dragTabId || dragTabId === tab.id) return
+    event.preventDefault()
+    event.stopPropagation()
+    // dragover 已经拒绝过跨分组（不发 preventDefault），但某些环境下
+    // drop 仍会触发 —— 这里必须再校验一次，否则会提交一个本来被拒的排序。
+    const source = findTabRow(dragTabId)
+    if (!source || !!source.alignRight !== !!tab.alignRight) { dragTabId = ''; clearTabDropHint(); return }
+    const rect = el.getBoundingClientRect()
+    const before = event.clientX < rect.left + rect.width / 2
+    const moved = dragTabId
+    dragTabId = ''
+    clearTabDropHint()
+    try { await window.pix.reorderTabs(moved, tab.id, before) } catch (e) {}
+  })
+}
+
+function findTabRow(id) {
+  const state = window.__lastTabState
+  const rows = (state && state.rows) || []
+  return rows.find(row => row.id === id) || null
+}
+
+/** 当前激活窗口那一行；主页态返回 null（主页没有可改的名字）。 */
+function activeTabRow() {
+  const state = window.__lastTabState
+  if (!state || state.home || !state.activeId) return null
+  return findTabRow(state.activeId)
+}
+
+function clearTabDropHint() {
+  if (!tabsEl) return
+  tabsEl.querySelectorAll('.tab.drop-before, .tab.drop-after')
+    .forEach(node => node.classList.remove('drop-before', 'drop-after'))
+}
+
+/**
+ * 拖到主页上 = 挪到最前面。
+ *
+ * 主页固定在首位、不参与排序，所以它天然是最稳的"拖到开头"落点：
+ * 比拖到第一个标签的左半边更好命中（第一个标签太窄，手一抖就掉到右半边）。
+ */
+function attachHomeDropTarget(homeTab) {
+  homeTab.addEventListener('dragover', event => {
+    if (!dragTabId) return
+    const source = findTabRow(dragTabId)
+    if (!source || source.alignRight) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'move'
+    clearTabDropHint()
+    homeTab.classList.add('drop-after')
+  })
+  homeTab.addEventListener('dragleave', () => homeTab.classList.remove('drop-after'))
+  homeTab.addEventListener('drop', async event => {
+    if (!dragTabId) return
+    event.preventDefault()
+    event.stopPropagation()
+    const moved = dragTabId
+    dragTabId = ''
+    homeTab.classList.remove('drop-after')
+    try { await window.pix.reorderTabs(moved, 'home', false) } catch (e) {}
+  })
 }
 
 function renderTabs(state) {
   window.__lastTabState = state
   const rows = (state && state.rows) || []
-  const home = !rows.length || !!(state && state.home)
+  // 全部窗口都被隐藏时也是"没有可见窗口"，应回主页 —— 否则界面停在一块空视图上。
+  const anyVisible = rows.some(tab => !tab.hidden)
+  const home = !anyVisible || !!(state && state.home)
   if (editingTabId && tabsEl.querySelector('.tab-name-input')) {
     show(emptyEl, home)
     paintStatus(state, home, rows)
@@ -1799,9 +2081,13 @@ function renderTabs(state) {
   homeTab.innerHTML = '<img class="tab-home-logo" src="icon.png" alt=""><span class="tab-name">主页</span>'
   homeTab.onclick = () => window.pix.home()
   homeTab.oncontextmenu = event => showPixContextMenu(event, null)
+  attachHomeDropTarget(homeTab)
   tabsEl.appendChild(homeTab)
-  const left = rows.filter(tab => !tab.alignRight)
-  const right = rows.filter(tab => tab.alignRight)
+  // 隐藏的窗口不渲染成标签（它已经"不在标签栏上"了），单独挂一个入口。
+  const visibleRows = rows.filter(tab => !tab.hidden)
+  const hiddenRows = rows.filter(tab => tab.hidden)
+  const left = visibleRows.filter(tab => !tab.alignRight)
+  const right = visibleRows.filter(tab => tab.alignRight)
   left.forEach(tab => tabsEl.appendChild(makeTabEl(tab, !home && tab.id === state.activeId)))
   if (right.length) {
     const spacer = document.createElement('div')
@@ -1809,6 +2095,7 @@ function renderTabs(state) {
     tabsEl.appendChild(spacer)
     right.forEach(tab => tabsEl.appendChild(makeTabEl(tab, !home && tab.id === state.activeId)))
   }
+  if (hiddenRows.length) tabsEl.appendChild(makeHiddenTrayEl(hiddenRows))
   show(emptyEl, home)
   paintStatus(state, home, rows)
   paintTransBar(state, home, rows)
@@ -1874,6 +2161,64 @@ function syncTabsOverflowHint() {
   // 1px 容差：缩放/小数像素下 scrollLeft 常是 1399 而非 1400。
   tabsWrapEl.classList.toggle('has-more-left', maxScroll > 1 && x > 1)
   tabsWrapEl.classList.toggle('has-more-right', maxScroll > 1 && x < maxScroll - 1)
+}
+
+/**
+ * 让鼠标滚轮能横向滚动标签栏。
+ *
+ * ## 为什么要自己接
+ *
+ * `.tabs` 是 `overflow-x: auto` 的横向容器。浏览器**只有在容器纵向也溢出时**
+ * 才会把垂直滚轮映射到横向；这里纵向根本不溢出，于是滚轮完全无效 ——
+ * 用户只能去拖那条细滚动条。真实反馈就是"滚轮没用，必须手动拉"。
+ *
+ * ## 规则
+ *
+ * - 垂直滚轮（鼠标最常见）→ 转成横向滚动。
+ * - 触控板横向滑动（deltaX 为主）→ 原样放行，别干预，否则手感会打架。
+ * - 已经滚到两端 → **不拦**，把滚动让给外层（否则会出现"滚到底了
+ *   整页也卡住"的死手感）。
+ * - 按住 Shift 时浏览器本来就会横向滚，交给默认行为。
+ *
+ * 用非 passive 监听：必须 preventDefault 才能阻止页面跟着上下抖。
+ */
+function attachTabsWheel() {
+  if (!tabsEl || tabsEl._wheelBound) return
+  tabsEl._wheelBound = true
+
+  // 触控板会连续发大量 wheel 事件，且带惯性。直接 1:1 映射会"嗖"地滚过去，
+  // 找不到想点的标签。这里做两件事：
+  //   1. 按 deltaMode 归一化成像素（Firefox 用行模式，一次 deltaY=3 行）；
+  //   2. 保留原始增量但乘一个系数 —— 手感要接近"滚一下动一格标签"（约 76px）。
+  const LINE_HEIGHT = 16
+  const multiplier = event => {
+    const mode = event.deltaMode
+    // DOM_DELTA_LINE = 1（行），DOM_DELTA_PAGE = 2（页）
+    if (mode === 1) return LINE_HEIGHT
+    if (mode === 2) return tabsEl.clientWidth
+    return 1
+  }
+
+  tabsEl.addEventListener('wheel', event => {
+    // Shift + 滚轮 = 浏览器默认的横向滚动，别抢。
+    if (event.shiftKey) return
+    // 有横向增量说明是触控板横向手势，放行给默认行为。
+    if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return
+
+    const maxScroll = tabsEl.scrollWidth - tabsEl.clientWidth
+    // 没有溢出：完全不拦，让外层去处理（比如主页的滚轮）。
+    if (maxScroll <= 1) return
+
+    const step = event.deltaY * multiplier(event)
+    const next = Math.max(0, Math.min(maxScroll, tabsEl.scrollLeft + step))
+    // 已经贴边且继续往同方向滚：放行，不做无意义的 preventDefault。
+    if (next === tabsEl.scrollLeft) return
+
+    event.preventDefault()
+    tabsEl.scrollLeft = next
+    // 滚动后立刻刷新两侧渐隐，否则提示图标要等到下一次渲染才更新。
+    syncTabsOverflowHint()
+  }, { passive: false })
 }
 
 if (tabsEl) {
@@ -2201,11 +2546,58 @@ unlockBtn.onclick = async () => {
 lockPwd.addEventListener('keydown', (event) => {
   if (event.key === 'Enter') unlockBtn.click()
 })
-clearEnabled.onclick = () => {
-  const selected = lastTabs.filter(tab => checkedIds[tab.id]).map(tab => tab.id)
-  const ids = selected.length ? selected : lastTabs.map(tab => tab.id)
+/**
+ * 轻提示（toast）。
+ *
+ * 用 popover 而不是普通 div 是必须的：页面里有一大块**原生视图**盖在 DOM 之上，
+ * 普通定位的提示会被它彻底遮住 —— 用户点了垃圾桶却什么都没看见，
+ * 只会以为"点了没反应"，然后反复点。
+ * popover 进 top-layer，天然盖在原生视图之上。
+ */
+function toast(text, tone) {
+  let el = document.getElementById('pixToast')
+  if (!el) {
+    el = document.createElement('div')
+    el.id = 'pixToast'
+    el.className = 'pix-toast'
+    el.setAttribute('popover', 'manual')
+    document.body.appendChild(el)
+  }
+  el.textContent = text
+  el.classList.toggle('warn', tone === 'warn')
+  try {
+    if (!el.matches(':popover-open')) el.showPopover()
+  } catch (e) {}
+  clearTimeout(el._timer)
+  el._timer = setTimeout(() => {
+    try { if (el.matches(':popover-open')) el.hidePopover() } catch (e) {}
+  }, 2200)
+}
+
+clearEnabled.onclick = async () => {
+  // 只处理可见窗口：后台运行的窗口不在这里展示，绝不能被"清空"一起关掉 ——
+  // 那等于用户毫不知情地丢了一个挂着收消息的号。
+  const visible = lastTabs.filter(tab => !tab.hidden)
+  const ids = visible.filter(tab => checkedIds[tab.id]).map(tab => tab.id)
+  // ★ 没有勾选就什么都不做 ★
+  //
+  // 以前这里是 `selected.length ? selected : visible.map(...)` —— 没勾选时
+  // 直接**全关**。那是个极危险的默认值：用户点一下垃圾桶，所有号当场关掉，
+  // 而且没法撤销。现在的规则是：垃圾桶只删你明确勾了的，没勾就提示。
+  if (!ids.length) {
+    toast('请选择需要关闭的窗口应用', 'warn')
+    return
+  }
+  // 批量关闭只确认一次（不是逐个弹），文案要说清数量。
+  // 逐个确认会让"关 5 个"需要点 10 次，用户反而会去乱点。
+  const label = ids.length > 1
+    ? '将关闭 ' + ids.length + ' 个窗口'
+    : '将关闭「' + enabledName(lastTabs.find(t => t.id === ids[0])) + '」'
+  if (!(await confirmAction(label, '关闭后需要重新登录才能再次打开。'))) return
+  const count = ids.length
   ids.forEach(id => window.pix.close(id))
   checkedIds = {}
+  toast(count > 1 ? '已关闭 ' + count + ' 个窗口' : '已关闭 1 个窗口')
 }
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
@@ -2504,6 +2896,9 @@ logoutBtn.onclick = async () => {
 }
 
 window.pix.onTabs(renderTabs)
+// 滚轮横向滚动标签栏。只绑一次（函数内部有幂等保护），
+// 不能放进 renderTabs —— 那里每次重渲染都会跑，会叠出多个监听器。
+attachTabsWheel()
 // 翻译桥坏掉（或恢复）时主进程会推一条：立刻刷新侧边栏标记。
 // 不能只在打开窗口时检查一次 —— 装包重载后桥可能才坏。
 if (window.pix.onBridgeDown) {
@@ -2521,6 +2916,22 @@ window.pix.onKicked((msg) => {
 })
 if (window.pix.onContextCommand) {
   window.pix.onContextCommand(command => {
+    if (command && typeof command === 'object') {
+      if (command.action === 'rename') {
+        // 必须带 id：右键的可能是**非激活**标签，用激活项会改错窗口。
+        const row = findTabRow(command.id) || activeTabRow()
+        if (row) runPixContextAction('rename', row)
+        return
+      }
+      if (command.action === 'closeAsk') {
+        // 右键「关闭应用」也要二次确认，与标签上的 × 一致。
+        const row = findTabRow(command.id)
+        if (!row) return
+        confirmCloseTab(row).then(ok => { if (ok) window.pix.close(row.id) })
+        return
+      }
+      return
+    }
     if (command === 'account') userBox.click()
     if (command === 'softwareUpdate') systemUpdateBtn.click()
   })
