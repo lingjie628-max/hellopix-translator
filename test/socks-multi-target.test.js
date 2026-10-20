@@ -176,12 +176,17 @@ test('0x08 的文案必须回到 RFC1928 原意：地址类型不受支持', () 
 })
 
 test('main.js：预检不得拥有否决权（0.1.29~0.1.33 回归的护栏）', () => {
-  const src = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
+  // 实现已迁到 src/proxy/detect.js，护栏必须跟着走，否则等于没有
+  const src = fs.readFileSync(path.join(root, 'desktop', 'src', 'proxy', 'detect.js'), 'utf8')
   // 只有"节点没回话"允许短路返回；其他任何预检结论都必须继续走真实网页探测。
   assert.match(src, /const hardBlock = pre && pre\.code === 'TIMEOUT'/,
     '预检只允许 TIMEOUT 直接返回')
   assert.doesNotMatch(src, /if \(!pre\.ok\)\s*\{\s*return \{ success: false/,
     '不许再用 !pre.ok 直接判死 —— 那正是"以前能过、修完就过不了"的原因')
+  // main.js 里不该再有第二份实现
+  const main = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
+  assert.doesNotMatch(main, /const hardBlock = pre/, 'main.js 不该再有第二份预检判定')
+  assert.match(main, /createProxyDetect\(/, 'main.js 必须把探测接到 src/proxy/detect.js')
 })
 
 test('0x01 / 未知码 都要给出可行动的下一步，而不是裸数字', () => {

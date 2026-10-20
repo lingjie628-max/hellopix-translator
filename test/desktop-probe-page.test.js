@@ -63,10 +63,17 @@ test('【安全】probe-page.js 不用 page world 的 executeJavaScript，只用
 })
 
 test('【安全】main.js 里没有任何 page world 的 executeJavaScript（远程页面不注入脚本）', () => {
-  // 这条与 desktop-security.test.js 的守卫同源，这里再钉一次，避免以后手滑加回来
-  assert.ok(!mainSrc.includes('executeJavaScript('), 'main.js 出现了 page world 的 executeJavaScript')
+  // 这条与 desktop-security.test.js 的守卫同源，这里再钉一次，避免以后手滑加回来。
+  // 探测实现已迁到 src/proxy/detect.js —— 守卫必须覆盖它，否则搬走就等于失守。
+  const detectSrc = fs.readFileSync(
+    path.join(root, 'desktop', 'src', 'proxy', 'detect.js'), 'utf8')
+  for (const [name, src] of [['main.js', mainSrc], ['src/proxy/detect.js', detectSrc]]) {
+    assert.ok(!src.includes('executeJavaScript('), name + ' 出现了 page world 的 executeJavaScript')
+  }
   assert.ok(mainSrc.includes("require('./src/translate/probe-page')"), 'main.js 必须复用隔离世界读取实现')
-  assert.ok(mainSrc.includes('readPageText('), '节点探测必须用 readPageText 读远程页面')
+  // 调用点在 detect.js（main.js 只把 readPageText 注入进去）
+  assert.ok(detectSrc.includes('libs.readPageText('), '节点探测必须用 readPageText 读远程页面')
+  assert.ok(mainSrc.includes('readPageText,'), 'main.js 必须把 readPageText 注入探测模块')
 })
 
 test('【验收一致性】真机脚本用的是产品同一份读取实现（否则验收证明不了产品路径）', () => {
