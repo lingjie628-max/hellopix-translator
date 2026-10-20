@@ -1,11 +1,11 @@
 {
   "name": "hello-pix-desktop",
   "productName": "Hello Pix",
-  "version": "0.1.43",
+  "version": "0.1.44",
   "private": true,
   "description": "Hello Pix 桌面客户端",
   "author": "Hello Pix",
-  "main": "main.js",
+  "main": "stability-boot.js",
   "dependencies": {
     "undici": "^6.29.0"
   },
@@ -24,6 +24,7 @@
     "verify:copy": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-copy-paste-electron.js",
     "verify:hidden-tabs": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-hidden-tabs-electron.js",
     "verify:send-intercept": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-send-intercept-electron.js",
+    "verify:stability": "node --test test/health-guard.test.js test/async-store.test.js test/stability-wiring.test.js",
     "probe:dom": "env -u ELECTRON_RUN_AS_NODE electron scripts/probe-platform-dom.js",
     "bench:send": "env -u ELECTRON_RUN_AS_NODE electron scripts/bench-send-timing.js",
     "bench:translate:live": "env -u ELECTRON_RUN_AS_NODE electron scripts/bench-translate-live.js",
@@ -49,6 +50,9 @@
     "afterSign": "scripts/after-sign.js",
     "files": [
       "main.js",
+      "stability-boot.js",
+      "stability-wiring.js",
+      "health-guard.js",
       "preload.js",
       "guest-inject.js",
       "lines.js",

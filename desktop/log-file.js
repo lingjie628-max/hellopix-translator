@@ -372,7 +372,19 @@ function attachProcessHandlers(proc, logger, options) {
     //     由具体的连接逻辑自行收尾。
     // 归到第二类的前提是 socket 层已经补齐 error 监听与安全写入
     // （见 socks-relay.js），否则会退化成"异常被吞、但功能已坏"。
-    if (isFatalError(error)) exit(1)
+    //
+    // ★ 判据可注入（0.1.44）★
+    //
+    // 内置白名单只覆盖 6 个网络码。真机上同样常见的还有一类：
+    // 对象生命周期竞态（`Object has been destroyed`、`Render frame was disposed`）
+    // —— 它们来自「关标签 / 切代理 / 重启实例时，一个排队回调晚了一拍」，
+    // 重试一次就恢复正常，却因为不在白名单里而把整个应用打死。
+    //
+    // 所以把判定开放给调用方（见 stability-boot.js → health-guard.isFatal），
+    // 默认行为保持不变：不传 `isFatal` 时仍是上面那套白名单，
+    // 本模块可以独立使用、也能被原样单测。
+    const fatal = typeof opts.isFatal === 'function' ? !!opts.isFatal(error) : isFatalError(error)
+    if (fatal) exit(1)
   })
 
   proc.on('unhandledRejection', reason => {
