@@ -122,4 +122,19 @@ function nextActiveAfterHide(tabs, hiddenId) {
   return ''
 }
 
-module.exports = { shouldNotifyWhenHidden, hidePlan, showPlan, canHide, nextActiveAfterHide }
+/**
+ * 从窗口标题里解析未读数。
+ *
+ * 网页版把未读数写进 title（"(3) WhatsApp"、"3 • WhatsApp"、末尾"(3)"），
+ * 格式因平台而异，所以三种都要认。判不出来一律返回 0 ——
+ * 宁可少一个角标，也不能凭猜测弹一个假的未读数。
+ */
+function unreadFromTitle(title) {
+  const s = String(title || '')
+  const m = s.match(/^\s*[(\[]\s*(\d{1,5})\+?\s*[)\]]/) ||
+    s.match(/^\s*(\d{1,4})\+?\s*[•·]\s*\S/) ||
+    s.match(/[(\[]\s*(\d{1,5})\+?\s*[)\]]\s*$/)
+  return m ? Number(m[1]) : 0
+}
+
+module.exports = { shouldNotifyWhenHidden, hidePlan, showPlan, canHide, nextActiveAfterHide, unreadFromTitle }

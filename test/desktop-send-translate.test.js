@@ -910,8 +910,12 @@ test('警告条文案必须转义实例名与原因（不能被页面数据带�
 })
 
 test('侧边栏必须能标出「翻译桥未启动」的窗口', () => {
+  // 装配代码已搬进 src/window/tab-payload.js
+  const payloadSrc = fs.readFileSync(path.join(root, 'desktop', 'src', 'window', 'tab-payload.js'), 'utf8')
+  assert.match(payloadSrc, /bridgeDown:\s*bridge/, 'tabPayload 必须带上 bridgeDown')
+  // main.js 必须真的把 bridgeHealth 接进工厂，否则字段永远是 false
   const main = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
-  assert.match(main, /bridgeDown:\s*bridgeHealth/, 'tabPayload 必须带上 bridgeDown')
+  assert.match(main, /bridgeHealth:\s*\{\s*get:/, 'main.js 必须把 bridgeHealth 接进 tabPayload 工厂')
   const app = fs.readFileSync(path.join(root, 'desktop', 'renderer', 'app.js'), 'utf8')
   assert.match(app, /tab\.bridgeDown/, '侧边栏必须据此打标记')
 })

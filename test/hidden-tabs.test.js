@@ -78,45 +78,28 @@ test('藏掉当前窗口：优先切右边，没有就切左边，且不选隐�
 })
 
 /**
- * 装配 main.js 里**真实的** hideTab / showHiddenTab，
- * 只把原生 Electron 调用换成可观测的桩。
+ * 装配**真实**的 hideTab / showHiddenTab，只把原生 Electron 调用换成可观测的桩。
  *
- * 这两个函数读写模块级的 activeId / showHome，所以把它们放进同一个
- * 闭包里，通过 state 对象把结果回传给断言。
+ * 这两个函数已经搬进 desktop/src/window/hidden-tab-ops.js，依赖全部参数化。
+ * 所以这里直接调工厂，不再从 main.js 抠函数体拼进 new Function ——
+ * 测的是产品实际调用的那份实现，改内部写法不会误报。
  */
-function makeRuntime() {
+function makeRuntime () {
   const tabs = []
   const calls = []
-  const body = [
-    hiddenSrc.slice(hiddenSrc.indexOf('function shouldNotifyWhenHidden'), hiddenSrc.lastIndexOf('module.exports')),
-    extract(mainSrc, 'unreadFromTitle'),
-    extract(mainSrc, 'hideTab'),
-    extract(mainSrc, 'showHiddenTab'),
-    // 暴露读口：闭包里的 activeId / showHome 才是真实状态，
-    // 从外面 copy 一份回来会在"中途 return"的路径上失同步。
-    'return { hideTab, showHiddenTab, snapshot: () => ({ activeId, showHome }), setActive: v => { activeId = v }, setHome: v => { showHome = v } }'
-  ].join('\n')
-  const fake = new Function('tabs', 'calls', 'hiddenTabs', `
-    let activeId = ''
-    let showHome = false
-    const detachView = () => calls.push('detach')
-    const layoutViews = () => calls.push('layout')
-    const sendTabs = () => calls.push('send')
-    const saveOpenApps = () => {}
-    const animateChromeTo = () => calls.push('chrome')
-    const chromeOffset = () => 0
-    const switchTab = id => { calls.push('switch:' + id); return { success: true } }
-    ${body}
-  `)
-  const api = fake(tabs, calls, hidden)
-  // state 用 getter 直连 snapshot，断言永远读最新值。
-  const state = {
-    get activeId() { return api.snapshot().activeId },
-    get showHome() { return api.snapshot().showHome },
-    set activeId(v) { api.setActive(v) },
-    set showHome(v) { api.setHome(v) }
-  }
-  return { api, tabs, state, calls }
+  const state = { tabs: tabs, activeId: '', showHome: false }
+  const ops = require('../desktop/src/window/hidden-tab-ops').createHiddenTabOps({
+    state: state,
+    detachView: () => calls.push('detach'),
+    layoutViews: () => calls.push('layout'),
+    sendTabs: () => calls.push('send'),
+    saveOpenApps: () => {},
+    animateChromeTo: () => calls.push('chrome'),
+    chromeOffset: () => 0,
+    switchTab: id => { calls.push('switch:' + id); return { success: true } },
+    unreadFromTitle: title => hidden.unreadFromTitle(title)
+  })
+  return { api: ops, tabs, state, calls }
 }
 
 function addTab(tabs, id, extra) {
@@ -244,8 +227,18 @@ test('未读上报与全局角标都要跳过隐藏窗口', () => {
 })
 
 test('隐藏状态要落盘并可恢复，否则重启后全部复活', () => {
-  const payload = extract(mainSrc, 'tabPayload')
-  assert.ok(/hidden: !!t\.hidden/.test(payload))
+  // tabPayload 已经参数化（src/window/tab-payload.js），直接跑真身看输出。
+  const { createTabPayload } = require('../desktop/src/window/tab-payload')
+  const api = createTabPayload({
+    state: { tabs: [{ id: 'a', hidden: true }, { id: 'b' }], activeId: 'b', showHome: false },
+    profileOf: () => null,
+    bridgeHealth: { get: () => null }
+  })
+  const rows = api.payload().rows
+  assert.equal(rows[0].hidden, true, '隐藏标记必须进载荷，否则渲染层会让它重新出现在标签栏')
+  assert.equal(rows[1].hidden, false)
+
+  // 落盘与恢复仍走 saveOpenApps / restoreOneApp，用源码守卫即可
   assert.ok(/hidden: !!t\.hidden/.test(mainSrc), 'saveOpenApps 必须带上 hidden')
   assert.ok(/hidden: !!row\.hidden/.test(mainSrc), 'restoreOneApp 必须读回 hidden')
 })

@@ -91,10 +91,8 @@ test('垫片：LINE 报的未读数写成标题前缀，宿主按标题读取', 
   s.chrome.action.setBadgeText({ text: 'NEW' })
   assert.equal(doc.title, 'LINE', '非数字不写')
 
-  // 与 main.js 的 unreadFromTitle 同一口径
-  const src = MAIN.slice(MAIN.indexOf('function unreadFromTitle('))
-  const fnSrc = src.slice(0, src.indexOf('\n}\n') + 2)
-  const unreadFromTitle = new Function(fnSrc + '\nreturn unreadFromTitle')()
+  // 与 main.js 的 unreadFromTitle 同一口径 —— 现在两者共用 hidden-tabs.js 的实现
+  const unreadFromTitle = require('../desktop/src/window/hidden-tabs').unreadFromTitle
   assert.equal(unreadFromTitle('(3) LINE'), 3)
   assert.equal(unreadFromTitle('(99+) LINE'), 99)
   assert.equal(unreadFromTitle('LINE'), 0)

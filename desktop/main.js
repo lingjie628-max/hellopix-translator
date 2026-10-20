@@ -188,6 +188,25 @@ let overlayOpen = false
 let nextTab = 1
 let usedCount = {}
 
+/**
+ * 隐藏窗口（后台保活）。
+ *
+ * 实现见 src/window/hidden-tab-ops.js —— 依赖全部参数化，
+ * 测试可以直接喂一份 state 跑真身，不必再从源码里抠函数体。
+ *
+ * 这里的 state 是**实时代理**：读写的仍是 main.js 的模块级变量，
+ * 所以 hideTab 里改 activeId 会真实生效，不是改了一份副本。
+ */
+const tabState = {
+  get tabs () { return tabs },
+  set tabs (v) { tabs = v },
+  get activeId () { return activeId },
+  set activeId (v) { activeId = v },
+  get showHome () { return showHome },
+  set showHome (v) { showHome = v }
+}
+
+
 function userFile(name) {
   return path.join(app.getPath('userData'), name)
 }
@@ -657,11 +676,7 @@ function safePlatformHomeUrl(item, settings) {
  * 读不到数字一律视为 0（宁可不显示，也不显示错的数）。
  */
 function unreadFromTitle(title) {
-  const s = String(title || '')
-  const m = s.match(/^\s*[(\[]\s*(\d{1,5})\+?\s*[)\]]/) ||
-    s.match(/^\s*(\d{1,4})\+?\s*[•·]\s*\S/) ||
-    s.match(/[(\[]\s*(\d{1,5})\+?\s*[)\]]\s*$/)
-  return m ? Number(m[1]) : 0
+  return hiddenTabs.unreadFromTitle(title)
 }
 
 /** 未读数清零要延迟确认的时长：Messenger 等会在 `(1) Messenger` 与「某某发来消息」之间来回闪标题。 */
@@ -1260,53 +1275,27 @@ function normalizeTabSettings(settings) {
   return s
 }
 
+/**
+ * 渲染层的实例列表载荷（实现见 src/window/tab-payload.js）。
+ *
+ * 每个字段都对应渲染层的一处展示，算错不会抛错、只会让界面静默失准：
+ * hidden 漏了 → 隐藏窗口重新出现在标签栏；bridgeDown 漏了 → 翻译桥断了
+ * 但看起来一切正常（0.1.12 就这样坑过）。
+ */
+const tabPayloadApi = require('./src/window/tab-payload').createTabPayload({
+  state: tabState,
+  profileOf: () => profile,
+  // 惰性取：bridgeHealth 在文件更靠后的位置才初始化（且是 Map），
+  // 这里直接传值会踩 TDZ。用 getter 把"什么时候取"推迟到真正调用时。
+  bridgeHealth: { get: id => bridgeHealth.get(id) }
+})
+
 function tabTransPayload(tab) {
-  const s = (tab && tab.settings) || {}
-  return {
-    show: s.showTransBar !== false,
-    enableSend: settingOn(s, 'enableSendTranslate'),
-    enableRecv: settingOn(s, 'enableRecvTranslate'),
-    sendFrom: s.sendFrom || 'auto',
-    sendTo: s.sendTo || 'en',
-    recvFrom: s.recvFrom || 'auto',
-    recvTo: s.recvTo || 'zh',
-    server: s.server || '',
-    // 不再写死通道名：留空时由渲染进程从后台下发的通道列表里选
-    engine: s.engine || (profile && profile.activeEngine) || '',
-    groupMode: groupModeOf(s),
-    includeZh: !!(s.includeZh && s.includeZh !== '0'),
-    fontSize: Number(s.fontSize) || 15,
-    fontColor: s.fontColor || '#22c55e',
-    quickReply: !!s.enableQuickReply
-  }
+  return tabPayloadApi.tabTransPayload(tab)
 }
 
 function tabPayload() {
-  return {
-    home: showHome || tabs.length === 0,
-    activeId: activeId,
-    rows: tabs.map(t => ({
-      id: t.id,
-      platform: t.platform,
-      name: t.name,
-      title: t.title,
-      index: t.index,
-      icon: t.icon,
-      url: t.url || '',
-      loading: !!t.loading,
-      showTabName: !t.settings || t.settings.showTabName !== false,
-      alignRight: !!(t.settings && t.settings.alignRight),
-      alwaysStatusBar: !!(t.settings && t.settings.alwaysStatusBar),
-      // 翻译桥没起来 = 这个窗口的翻译整体失效。侧边栏必须打标记，
-      // 不能让它看起来和正常窗口一样（0.1.12 就是这样静默坑人的）。
-      bridgeDown: bridgeHealth.get(t.id) ? bridgeHealth.get(t.id).ok === false : false,
-      unread: (t.settings && t.settings.tabUnread === false) ? 0 : (t.unread || 0),
-      // 隐藏的窗口仍在 tabs 里（进程活着），但不能出现在标签栏。
-      // 渲染层据此分两处展示：可见的进标签栏，隐藏的进"后台运行中"。
-      hidden: !!t.hidden,
-      trans: tabTransPayload(t)
-    }))
-  }
+  return tabPayloadApi.payload()
 }
 
 function sendTabs() {
@@ -1683,102 +1672,17 @@ function switchTab(id) {
   return { success: true }
 }
 
-/**
- * ★ 隐藏窗口（后台保活）★
- *
- * 语义：窗口从标签栏消失、不再提醒新消息、但网页版会话**完全保留**，
- * 随时点一下就能回来。用户原话是"不掉号、不丢设置、挂着但不占资源"。
- *
- * 实现上最关键的一条：**绝不 destroy webContents**。
- * 网页版的登录态有一部分活在内核内存里，销毁进程 = 必然重新扫码，
- * 那就直接违背了"不掉号"。所以只是从视图树上摘下来 + 静音 + 停未读。
- *
- * ## 资源占用（实测，见 desktop/scripts/bench-hidden-memory.js）
- *
- *   - 内存：每个窗口约 60-70MB，隐藏只省 15MB 左右。
- *     剩下的全是渲染进程本身的开销 —— 这是"不掉号"的代价，省不掉。
- *   - CPU：帧率 60 → 1，且配合 backgroundThrottling 后定时器降 90%。
- *     这部分才是用户能感知到的"不卡了"。
- *
- * 所以不能对用户承诺"隐藏后几乎不占内存"。真实的承诺是：
- * **隐藏后不再抢 CPU/GPU，内存占用不变。**
- *
- * 注意 hidden 标记必须落盘（saveOpenApps 会带上），否则重启软件后
- * 隐藏窗口会全部"复活"到标签栏 —— 用户会以为设置丢了。
- */
-function hideTab(id) {
-  const tab = tabs.find(t => t.id === id)
-  const verdict = hiddenTabs.canHide(tab, tabs.filter(t => !t.hidden).length)
-  if (!verdict.ok) return { success: false, msg: verdict.msg }
-
-  const plan = hiddenTabs.hidePlan(tab)
-  tab.hidden = true
-  // 隐藏前先把未读清零，避免角标停在旧数字上不再更新（看起来像卡死）。
-  tab.unread = 0
-  plan.forEach(step => {
-    try {
-      // 节流由创建时的 backgroundThrottling:true 保证，摘掉视图即生效。
-      // 这里再兜一次：老版本创建的 view 可能带着 false，能改就改。
-      if (step === 'throttle' && typeof tab.view.webContents.setBackgroundThrottling === 'function') {
-        tab.view.webContents.setBackgroundThrottling(true)
-      }
-      if (step === 'detach') detachView(tab.view)
-      if (step === 'mute') tab.view.webContents.setAudioMuted(true)
-      if (step === 'stopLoading') tab.view.webContents.stop()
-    } catch (e) {}
-  })
-
-  // 藏掉的正好是当前窗口 → 必须切走，否则界面会停在空视图上。
-  if (activeId === id) {
-    const next = hiddenTabs.nextActiveAfterHide(tabs, id)
-    if (next) {
-      activeId = next
-      showHome = false
-    } else {
-      activeId = ''
-      showHome = true
-    }
-  }
-  layoutViews()
-  sendTabs()
-  saveOpenApps()
-  return { success: true, msg: '已隐藏，后台继续运行' }
-}
-
-/**
- * 把隐藏的窗口重新展示出来。
- *
- * 不需要重新加载页面 —— 进程一直活着，直接挂回视图树即可，
- * 用户重新看到的是他离开时那一帧、那些登录状态。
- */
-function showHiddenTab(id) {
-  const tab = tabs.find(t => t.id === id)
-  if (!tab) return { success: false, msg: '窗口不存在' }
-  if (!tab.hidden) {
-    // 点的是已经在标签栏里的窗口：等价于切换，不能再走一遍 attach。
-    return switchTab(id)
-  }
-
-  hiddenTabs.showPlan(tab).forEach(step => {
-    try {
-      if (step === 'clearHidden') tab.hidden = false
-      // unmute 必须在清掉 hidden 之后 —— 否则若此时有一条迟到的标题事件，
-      // 会被当成"隐藏中"吞掉，导致恢复后首条未读丢失。
-      if (step === 'unmute') tab.view.webContents.setAudioMuted(false)
-    } catch (e) {}
-  })
-  // 恢复后刷新一次真实未读：隐藏期间标题数一直在变，我们只是没上报。
-  try {
-    tab.unread = unreadFromTitle(tab.view.webContents.getTitle())
-  } catch (e) {}
-
-  activeId = id
-  showHome = false
-  animateChromeTo(chromeOffset())
-  sendTabs()
-  saveOpenApps()
-  return { success: true }
-}
+const { hideTab, showHiddenTab } = require('./src/window/hidden-tab-ops').createHiddenTabOps({
+  state: tabState,
+  detachView: view => detachView(view),
+  layoutViews: () => layoutViews(),
+  sendTabs: () => sendTabs(),
+  saveOpenApps: () => saveOpenApps(),
+  animateChromeTo: y => animateChromeTo(y),
+  chromeOffset: () => chromeOffset(),
+  switchTab: id => switchTab(id),
+  unreadFromTitle: title => unreadFromTitle(title)
+})
 
 function closeTab(id) {
   const index = tabs.findIndex(t => t.id === id)

@@ -185,6 +185,10 @@ test('既有的告警文案仍然保留（用户要能看懂后果）', () => {
 })
 
 test('侧边栏 bridgeDown 通路未被破坏', () => {
-  assert.match(MAIN, /bridgeDown:\s*bridgeHealth/)
+  // 装配已搬进 src/window/tab-payload.js，这里同时验实现与 main.js 的接线
+  const payloadSrc = fs.readFileSync(
+    path.join(root, 'desktop', 'src', 'window', 'tab-payload.js'), 'utf8')
+  assert.match(payloadSrc, /bridgeDown:\s*bridge/)
+  assert.match(MAIN, /bridgeHealth:\s*\{\s*get:/, 'main.js 必须把 bridgeHealth 接进工厂')
   assert.match(MAIN, /translate:bridgeDown/)
 })

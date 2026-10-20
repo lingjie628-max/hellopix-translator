@@ -18,8 +18,9 @@ function extract(src, name) {
   throw new Error('未闭合：' + name)
 }
 
-// eslint-disable-next-line no-new-func
-const unreadFromTitle = new Function(extract(mainSrc, 'unreadFromTitle') + '; return unreadFromTitle')()
+// unreadFromTitle 已搬进 desktop/src/window/hidden-tabs.js（纯函数，便于单测）。
+// 直接引用真身，不必再从 main.js 源码里抠函数体。
+const unreadFromTitle = require('../desktop/src/window/hidden-tabs').unreadFromTitle
 
 test('标题里的未读数：各家常见格式都能读出来', () => {
   assert.equal(unreadFromTitle('(3) WhatsApp'), 3)
@@ -41,7 +42,10 @@ test('没有未读 / 标题里只是普通数字 → 0（不显示错的数）',
 })
 
 test('选项卡开关关闭时不下发未读数；全局角标只算开了全局提示的标签', () => {
-  assert.match(mainSrc, /unread: \(t\.settings && t\.settings\.tabUnread === false\) \? 0 : \(t\.unread \|\| 0\)/)
+  // 未读数的裁剪逻辑在 src/window/tab-payload.js
+  const payloadSrc = fs.readFileSync(
+    path.join(root, 'desktop', 'src', 'window', 'tab-payload.js'), 'utf8')
+  assert.match(payloadSrc, /unread: \(t\.settings && t\.settings\.tabUnread === false\) \? 0 : \(t\.unread \|\| 0\)/)
   assert.match(extract(mainSrc, 'syncGlobalUnread'), /globalUnread === false/)
   assert.match(extract(mainSrc, 'sendTabs'), /syncGlobalUnread\(\)/)
 })

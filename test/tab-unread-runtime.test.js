@@ -35,15 +35,17 @@ function harness() {
   const api = {}
   const sendTabs = () => { sends++; api.syncGlobalUnread() }
   const body = [
-    extract(mainSrc, 'unreadFromTitle'),
     'const UNREAD_CLEAR_DELAY_MS = ' + DELAY,
     extract(mainSrc, 'bindTabUnread'),
     'let lastGlobalUnread = -1',
     extract(mainSrc, 'syncGlobalUnread'),
     'return { unreadFromTitle, bindTabUnread, syncGlobalUnread }'
   ].join('\n')
+  // unreadFromTitle 已搬进 src/window/hidden-tabs.js，直接注入真身，
+  // 不再从 main.js 切片（那里只剩一行转发）。
+  const { unreadFromTitle } = require('../desktop/src/window/hidden-tabs')
   // eslint-disable-next-line no-new-func
-  Object.assign(api, new Function('tabs', 'sendTabs', 'app', body)(tabs, sendTabs, app))
+  Object.assign(api, new Function('tabs', 'sendTabs', 'app', 'unreadFromTitle', body)(tabs, sendTabs, app, unreadFromTitle))
 
   function addTab(settings) {
     const wc = new EventEmitter()
@@ -157,8 +159,10 @@ test('冒烟：真实 makeTabEl 渲染 —— 0 不出角标、有数出数字�
   assert.equal(badge({ unread: 99 }), '99')
   assert.equal(badge({ unread: 150 }), '99+')
   assert.equal(badge({ unread: 'abc' }), null)
-  // 主进程在开关关掉时下发 0，界面就不出角标
-  assert.match(mainSrc, /unread: \(t\.settings && t\.settings\.tabUnread === false\) \? 0 : \(t\.unread \|\| 0\)/)
+  // 主进程在开关关掉时下发 0，界面就不出角标（实现在 src/window/tab-payload.js）
+  const payloadSrc = fs.readFileSync(
+    path.join(root, 'desktop', 'src', 'window', 'tab-payload.js'), 'utf8')
+  assert.match(payloadSrc, /unread: \(t\.settings && t\.settings\.tabUnread === false\) \? 0 : \(t\.unread \|\| 0\)/)
 })
 
 // ---------------------------------------------------------------------------
