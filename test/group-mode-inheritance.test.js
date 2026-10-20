@@ -276,9 +276,12 @@ test('paintTransBar 的 transBarSilent 闸门必须有 try/finally', () => {
 })
 
 test('渲染进程的 groupModeUiValue 认三态，且缺省回落 manual', () => {
+  // 实现已迁到 renderer/pure.js
+  const pureSrc = fs.readFileSync(
+    path.join(root, 'desktop', 'renderer', 'pure.js'), 'utf8')
   const ctx = vm.createContext({})
   vm.runInContext(
-    sliceBlock(appSrc, 'function groupModeUiValue(mode)') + '\n\nglobalThis.__f = groupModeUiValue',
+    sliceBlock(pureSrc, 'function groupModeUiValue(mode)') + '\n\nglobalThis.__f = groupModeUiValue',
     ctx
   )
   assert.equal(ctx.__f('inherit'), 'inherit')

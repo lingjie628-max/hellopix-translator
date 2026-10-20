@@ -27,6 +27,7 @@ const html = read('index.html')
 const domSrc = read('dom.js')
 const appSrc = read('app.js')
 const themeSrc = read('theme.js')
+const pureSrc = read('pure.js')
 
 /** 按出现顺序取出 <script src="..."> */
 function scriptOrder (src) {
@@ -37,17 +38,22 @@ function topConsts (src) {
   return [...src.matchAll(/^const (\w+)/gm)].map(m => m[1])
 }
 
-test('★ 脚本顺序：theme → dom → app（dom 必须在 app 之前）', () => {
+test('★ 脚本顺序：theme → dom → pure → app（依赖必须全部在前）', () => {
   const order = scriptOrder(html)
-  assert.deepEqual(order, ['theme.js', 'dom.js', 'app.js'],
-    '顺序错了就是白屏：dom.js 的 166 个 const 必须在 app.js 顶层执行前就位')
+  assert.deepEqual(order, ['theme.js', 'dom.js', 'pure.js', 'app.js'],
+    '顺序错了就是白屏：dom.js 与 pure.js 的顶层声明必须在 app.js 执行前就位')
 })
 
-test('★ 两个文件之间不能有重复的顶层 const（重复声明 = SyntaxError = 白屏）', () => {
-  const dom = new Set(topConsts(domSrc))
-  const app = new Set(topConsts(appSrc))
-  const theme = new Set(topConsts(themeSrc))
-  const dup = [...dom].filter(n => app.has(n) || theme.has(n))
+test('★ 文件之间不能有重复的顶层 const（重复声明 = SyntaxError = 白屏）', () => {
+  const files = { 'dom.js': domSrc, 'pure.js': pureSrc, 'app.js': appSrc, 'theme.js': themeSrc }
+  const seen = new Map()
+  const dup = []
+  for (const [name, src] of Object.entries(files)) {
+    for (const id of topConsts(src)) {
+      if (seen.has(id)) dup.push(id + '（' + seen.get(id) + ' 与 ' + name + '）')
+      else seen.set(id, name)
+    }
+  }
   assert.deepEqual(dup, [], '重复声明会让整个渲染层起不来')
 })
 
