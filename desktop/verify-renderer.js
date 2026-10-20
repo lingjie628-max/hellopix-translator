@@ -65,7 +65,7 @@ if (!process.versions.electron) {
 // ------------------------------------------------------------ 内层：Electron
 const { app, BrowserWindow } = require('electron')
 
-const EXPECTED_SCRIPTS = ['theme.js', 'dom.js', 'pure.js', 'proxy-panel.js', 'tabs.js', 'trans-bar.js', 'app.js']
+const EXPECTED_SCRIPTS = ['theme.js', 'dom.js', 'pure.js', 'proxy-panel.js', 'tabs.js', 'add-app.js', 'trans-bar.js', 'app.js']
 
 app.disableHardwareAcceleration()
 app.whenReady().then(async () => {
@@ -100,6 +100,7 @@ app.whenReady().then(async () => {
       renderTabs: typeof renderTabs,
       attachTabsWheel: typeof attachTabsWheel,
       paintTransBar: typeof paintTransBar,
+      fillAddForm: typeof fillAddForm,
       bodyLen: document.body.innerText.length,
       text: document.body.innerText.replace(/\\s+/g, ' ').slice(0, 80)
     })`))
@@ -124,6 +125,7 @@ app.whenReady().then(async () => {
   for (const name of ['renderTabs', 'attachTabsWheel']) {
     if (report[name] !== 'function') problems.push('tabs.js 的 ' + name + ' 不可用')
   }
+  if (report.fillAddForm !== 'function') problems.push('add-app.js 的 fillAddForm 不可用')
   if (report.paintTransBar !== 'function') problems.push('trans-bar.js 的 paintTransBar 不可用')
   if (report.bodyLen < 50) problems.push('页面是白的（bodyLen=' + report.bodyLen + '）')
 

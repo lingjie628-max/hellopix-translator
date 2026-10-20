@@ -41,7 +41,9 @@ const isolation = require(path.join(root, 'desktop', 'src/proxy/proxy-isolation.
 const proxySettings = require(path.join(root, 'desktop', 'src/proxy/proxy-settings.js'))
 
 const mainSrc = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
-const appSrc = fs.readFileSync(path.join(root, 'desktop', 'renderer', 'app.js'), 'utf8')
+// 渲染层已拆成多个脚本，这里在**全部源码**上校验，覆盖面不小于原来只看 app.js
+const rendererSrc = require('./helpers/renderer-src')
+const appSrc = rendererSrc.all()
 
 const { PROXY_FIELDS, DIRECT_PROXY, stripProxyFields, isDirectProxy } = isolation
 
