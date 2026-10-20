@@ -141,6 +141,10 @@ const TRACKER_CPP = [
 
 function makeTdesktopTree(version = '7.2.8') {
   const tree = fs.mkdtempSync(path.join(os.tmpdir(), 'pix-tdesktop-'))
+  // 登记下来统一在 after 里清。以前从不清理，跑几次全量后 TMPDIR 里
+  // 会堆几百个 pix-tdesktop-* 目录 —— 目录一多，git init 就会偶发变慢/失败，
+  // 表现是一条与本功能无关的测试间歇性变红。
+  createdTrees.push(tree)
   const lang = path.join(tree, 'Telegram', 'SourceFiles', 'lang')
   const view = path.join(tree, 'Telegram', 'SourceFiles', 'history', 'view')
   const core = path.join(tree, 'Telegram', 'SourceFiles', 'core')
@@ -158,6 +162,15 @@ function makeTdesktopTree(version = '7.2.8') {
   fs.writeFileSync(path.join(view, 'history_view_translate_tracker.cpp'), TRACKER_CPP)
   return { tree, lang, view }
 }
+
+// 夹具树必须清理：否则跑几次全量后 TMPDIR 里会堆几百个目录，
+// 反过来让 git init 偶发失败（见 makeTdesktopTree 的注释）。
+const createdTrees = []
+test.after(() => {
+  for (const dir of createdTrees) {
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch (e) {}
+  }
+})
 
 // 测试必须走"非 CI"分支，否则 apply.py 会尝试 git checkout 固定 tag。
 function applyEnv() {
