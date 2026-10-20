@@ -803,6 +803,147 @@ button {
   flex: 1 1 auto;
   min-width: 12px;
 }
+
+/* ★ 侧面布局：标签栏变成左侧竖栏 ★
+ *
+ * 顶部一行在账号多的时候放不下：25 个标签实测 1912px，只能来回拖滚动条。
+ * 竖栏一屏能看到十几个，滚动方向也随之从"横向"变成"纵向"。
+ *
+ * 布局手法：.stage 是 flex-column，侧面模式下改成 flex-row，标签栏与其余
+ * 内容并排。标签栏之外的顶栏（工具行 / 工具条）会被 .stage-side 包成一个
+ * 纵向列 —— 这样顶栏仍然横跨内容区，不会被塞进竖栏里。
+ *
+ * ★ 宽度必须和 main.js 的 TABS_SIDE_WIDTH 一致 ★
+ * 原生实例视图是盖在渲染层之上的实心方块，左边要让开这个宽度；
+ * 两处对不上就会出现"标签栏被盖住"或"中间一条黑缝"。
+ */
+/* 标签栏之外的内容列。
+ *
+ * 顶部布局下必须是 display:contents —— 让子元素（工具行 / 哨兵 / 工作区 /
+ * 底栏）像没这层壳一样直接参与 .stage 的纵向布局。用 flex:1 之类的写法会
+ * 多出一层格式化上下文，绝对定位的 .workspace / .pix-footer 会以它为参照，
+ * 位置全变。侧面布局再把它切成真正的列（见 .stage.tabs-side）。
+ */
+.stage-side-main {
+  display: contents;
+}
+.tabs-side > .stage-side-main {
+  display: flex;
+}
+.stage.tabs-side {
+  flex-direction: row;
+  /* 200px 而不是更窄：标签是"图标 + 名字 + 关闭"横排，168px 时三样挤在一起，
+   * 实测名字只剩 60px 左右，中英文混排直接看不出是谁。
+   * ★ 改这里必须同步改 main.js 的 TABS_SIDE_WIDTH ★ */
+  --tabs-side-w: 200px;
+}
+/* ★ 用后代选择器而不是子选择器 ★
+ *
+ * 标签栏不是 .stage 的直接子元素 —— 它被 .stage-side-main 这一层隔开了
+ * （见 index.html）。写成 `.tabs-side > .tabs-wrap` 会**一条都不生效**：
+ * 实测侧栏宽度仍是 auto、背景透明、direction 还是 row，整块布局塌回顶部模式。
+ * 用后代选择器即可，且 `.tabs-side` 作用域内不存在第二个 .tabs-wrap。 */
+.tabs-side .tabs-wrap {
+  order: 0;
+  width: var(--tabs-side-w);
+  min-width: var(--tabs-side-w);
+  flex: 0 0 var(--tabs-side-w);
+  height: auto;
+  /* 竖栏自己撑满高度：底部工具行/状态栏在右侧那一列里，不影响这里。 */
+  align-self: stretch;
+  border-right: 1px solid rgb(var(--c-accent-rgb) / 0.1);
+  background: var(--bg-tabs);
+  box-shadow: 8px 0 24px rgba(2, 8, 18, 0.12);
+  z-index: 4;
+}
+/* 竖栏模式下两侧渐隐是横向用的，没意义且有 bug（会盖住标签），直接关掉。 */
+.tabs-side .tabs-wrap::before,
+.tabs-side .tabs-wrap::after {
+  display: none;
+}
+.tabs-side .tabs {
+  /* 从"一行高 80px"变成"一列，撑满可用高度" */
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  align-items: stretch;
+  align-content: flex-start;
+  gap: 4px;
+  padding: 8px 6px 10px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border-bottom: 0;
+  box-shadow: none;
+}
+.tabs-side .tab {
+  /* 横向 68×62 的方块 → 整行：图标 + 名字 + 关闭 */
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  height: 44px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 0 6px 0 8px;
+  border-radius: 8px;
+}
+.tabs-side .tab .tab-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  /* ★ 必须解除顶部布局的 max-width: 62px ★
+   * 那个 62px 是为"68px 宽的方块标签"定的；竖栏里标签是 190px 的整行，
+   * 继承下来会让名字永远只显示 4 个汉字，右边留出一大块空白。 */
+  max-width: none;
+  text-align: left;
+  /* 顶部模式是单行居中，这里左对齐并省略尾部 */
+  -webkit-mask-image: none;
+  mask-image: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 竖栏里给 × 留出固定位置，别压在名字上 */
+.tabs-side .tab {
+  padding-right: 26px;
+}
+.tabs-side .tab .x {
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  flex: 0 0 auto;
+  /* 竖栏里关闭键常驻太吵，悬停才显形 */
+  opacity: 0;
+  display: flex;
+}
+.tabs-side .tab:hover .x,
+.tabs-side .tab.active .x {
+  opacity: 1;
+}
+/* 竖排时"右侧分组"没有横向位置可言，分隔线改成一条横向的 */
+.tabs-side .tab-spacer {
+  flex: 0 0 auto;
+  min-width: 0;
+  height: 1px;
+  margin: 4px 6px;
+  background: rgb(var(--c-accent-rgb) / 0.18);
+}
+.tabs-side .tab-hidden-tray {
+  margin-top: auto;
+}
+/* 标签栏右侧的内容列：顶栏 + 实例区 + 底部工具行 */
+.stage-side-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+.tabs-side .workspace {
+  /* 主页工作区要和实例视图一样让开左侧竖栏 */
+  left: var(--tabs-side-w, 200px);
+}
 /* 二次确认弹窗。
  *
  * 用原生 dialog：自动进 top-layer，能盖住原生 WebContentsView；

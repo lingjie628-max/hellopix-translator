@@ -190,5 +190,7 @@ const lockError = document.getElementById('lockError')
 const unlockBtn = document.getElementById('unlockBtn')
 const toolbarLogo = document.querySelector('.toolbar-logo')
 const themeBtn = document.getElementById('themeBtn')
+// 标签栏布局切换（顶部 / 侧面）。按钮文案由 tab-layout.js 的 applyTabLayout 维护。
+const tabLayoutBtn = document.getElementById('tabLayoutBtn')
 const themeIco = document.getElementById('themeIco')
 const themeText = document.getElementById('themeText')

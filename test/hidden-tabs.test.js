@@ -249,11 +249,12 @@ test('隐藏状态要落盘并可恢复，否则重启后全部复活', () => {
   assert.ok(/hidden: !!row\.hidden/.test(mainSrc), 'restoreOneApp 必须读回 hidden')
 })
 
-test('右键菜单有「隐藏该窗口」且接的是 hideTab', () => {
+test('右键菜单有「挂起」（隐藏）且接的是 hideTab', () => {
   // 菜单模板已迁到 src/window/tab-context-menu.js
+  // 文案与产品稿对齐："隐藏该窗口（后台运行）" 改名为「挂起」，语义不变。
   const menu = fs.readFileSync(
     path.join(root, 'desktop', 'src', 'window', 'tab-context-menu.js'), 'utf8')
-  assert.ok(/隐藏该窗口/.test(menu))
+  assert.ok(/label: '挂起'/.test(menu))
   assert.ok(/hideTab\(tab\.id\)/.test(menu))
 })
 
@@ -368,13 +369,21 @@ function wheelHarness (opts) {
       listeners[type] = { fn, options }
     }
   }
-  const tabsWrapEl = { classList: { toggle () {} } }
+  const tabsWrapEl = { classList: {
+    toggle (name) { (hints.toggled = hints.toggled || []).push(name) },
+    remove () {}
+  } }
+  // isSideLayout 来自 tab-layout.js，滚轮逻辑靠它决定"要不要接管滚动"。
+  // 真实页面里它是全局的；这里按布局注入一个等价实现。
+  const side = !!o.side
   const body = [
+    'const isSideLayout = () => ' + (side ? 'true' : 'false'),
     extract(appSrc, 'syncTabsOverflowHint'),
     extract(appSrc, 'attachTabsWheel'),
-    'return { attachTabsWheel }'
+    'return { attachTabsWheel, syncTabsOverflowHint }'
   ].join('\n')
   const api = new Function('tabsEl', 'tabsWrapEl', body)(tabsEl, tabsWrapEl)
+  api.toggled = () => hints.toggled || []
 
   let prevented = false
   const fire = extra => {
@@ -406,6 +415,22 @@ test('滚轮事件必须是非 passive 的，否则 preventDefault 无效', () =
   h.api.attachTabsWheel()
   assert.equal(h.listeners.wheel.options && h.listeners.wheel.options.passive, false,
     'passive:true 会让 preventDefault 被忽略，滚动时会带动整页')
+})
+
+test('★ 侧面布局下不接管滚轮：容器本来就是纵向滚动，接管会变成"滚一下跳两格"', () => {
+  // 竖栏里 scrollWidth == clientWidth（没有横向溢出），若不按布局判断，
+  // maxScroll 会算出 0 而放行 —— 这条测的是"即使有横向残留也不许映射"。
+  const h = wheelHarness({ side: true, scrollLeft: 200 })
+  h.api.attachTabsWheel()
+  const prevented = h.fire({ deltaY: 120 })
+  assert.equal(prevented, false, '竖栏必须让浏览器按纵轴滚动')
+  assert.equal(h.scrollLeft(), 200, '不能改动横向位置')
+})
+
+test('★ 侧面布局下不显示左右渐隐（那是横向溢出用的提示）', () => {
+  const h = wheelHarness({ side: true })
+  h.api.syncTabsOverflowHint()
+  assert.deepEqual(h.api.toggled(), [], '竖栏不该出现左右渐隐类')
 })
 
 test('滚到两端就放行，不制造"滚不动也不让页面滚"的死手感', () => {

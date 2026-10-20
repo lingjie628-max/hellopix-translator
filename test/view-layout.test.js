@@ -140,3 +140,40 @@ test('easeOutCubic：端点精确，单调递增', () => {
     prev = v
   }
 })
+
+// ---------------------------------------------------------------------------
+// 侧面布局：标签栏在左侧，原生视图必须让开
+// ---------------------------------------------------------------------------
+
+test('viewBounds：侧面布局下 x 右移，宽度同步扣减（否则标签栏被实例视图盖住）', () => {
+  const b = viewBounds({ y: 40, x: 168, width: 1200, height: 800, footerHeight: 30 })
+  assert.equal(b.x, 168)
+  assert.equal(b.width, 1200 - 168, '右边缘必须仍贴着窗口右边')
+  assert.equal(b.height, 800 - 40 - 30)
+})
+
+test('viewBounds：顶部布局 x 为 0，与加侧栏之前完全一致', () => {
+  const withSide = viewBounds({ y: 40, x: 0, width: 1200, height: 800, footerHeight: 30 })
+  const legacy = viewBounds({ y: 40, width: 1200, height: 800, footerHeight: 30 })
+  assert.deepEqual(withSide, legacy)
+})
+
+test('viewBounds：侧栏比窗口还宽时不产生负宽度', () => {
+  const b = viewBounds({ y: 0, x: 900, width: 500, height: 400, footerHeight: 0 })
+  assert.equal(b.width, 0)
+  assert.ok(b.x >= 0)
+})
+
+test('chromeOffset：侧面布局的首帧兜底不能把 TABS_HEIGHT 算进顶部（否则顶部空一条 80px）', () => {
+  const sizes = { tabs: 0, utility: 40, transBar: 88, status: 30 }
+  const side = chromeOffset({
+    hasMeasuredChrome: false,
+    measuredChromeHeight: 999,
+    wantsTransBar: false,
+    hasMeasuredBarHeight: false,
+    measuredTransBarHeight: 0,
+    wantsStatus: true,
+    sizes
+  })
+  assert.equal(side, 40 + 30, '标签栏在侧面，不该出现在顶部高度里')
+})

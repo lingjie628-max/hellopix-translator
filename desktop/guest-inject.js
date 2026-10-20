@@ -1362,7 +1362,8 @@ const pixBridge = {
    *  · 第 1 条 `data-id` 含 `@c.us`/`@g.us` —— **假设错误**。
    *    真机 `data-id` 是**纯消息哈希**（如 `3EB0F866490405692F3C`），
    *    真机实测：整个 document 里 `@c.us`/`@g.us` 出现 **0 次**
-   *    （探针 `desktop/scripts/_probe-wa-dom2.js`，`jidHitCount=0`）。
+   *    （真机探针 `_probe-wa-dom2.js` 的实测输出，`jidHitCount=0`；探针已随
+   *    调试期结束移除，结论保留在这里作为依据）。
    *    左侧会话列表的行也没有 `data-id`（`sidebarDataId.count=0`）。
    *    → 这一条永远不会命中。
    *  · 第 2 条 header 文案含 `群组/成员` —— 真机是**英文界面**，永不命中。

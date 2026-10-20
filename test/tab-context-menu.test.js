@@ -29,6 +29,9 @@ function ctx (opts) {
   return {
     home: !!o.home,
     tab: o.noTab ? null : tab,
+    // 默认按"选中的窗口"出菜单（精细操作那套）。要测未选中态就显式传
+    // selected:false —— 两种菜单来自同一个模板，只是分组不同。
+    selected: o.selected !== false,
     wc: o.destroyed ? Object.assign(wc, { isDestroyed: () => true }) : wc,
     sendCommand: c => calls.push(['send', c]),
     restart: () => calls.push(['restart']),
@@ -36,7 +39,9 @@ function ctx (opts) {
       openLogDir: () => calls.push(['logDir']),
       hideTab: id => calls.push(['hide', id]),
       openProxySettingsFor: id => calls.push(['proxy', id]),
-      updatePlatformWeb: p => calls.push(['update', p])
+      updatePlatformWeb: p => calls.push(['update', p]),
+      refreshTabsOfPlatform: p => calls.push(['refreshAll', p]),
+      platformLabel: p => p === 'wa' ? 'WhatsApp' : p
     },
     calls,
     wcRef: wc
@@ -61,19 +66,21 @@ test('找不到 tab / view 已销毁时回落成主页菜单（不能抛）', ()
     ['个人中心', '检查软件更新', '打开日志目录', '重启软件'])
 })
 
-test('★ 隐藏必须是独立菜单项，且不在"关闭"附近', () => {
+test('★ 挂起（隐藏）必须是独立菜单项，且不在"关闭"附近', () => {
   const tpl = menuTemplate(ctx())
   const l = labels(tpl)
-  const hideAt = l.findIndex(x => /隐藏该窗口/.test(x))
+  // "挂起"就是原来的"隐藏该窗口"：进程保留、登录态不丢。
+  // 菜单文案与产品稿对齐后测试跟着改名，但**约束没变** —— 它必须离关闭足够远。
+  const hideAt = l.findIndex(x => x === '挂起')
   const closeAt = l.findIndex(x => x === '关闭应用')
-  assert.ok(hideAt >= 0, '实例菜单必须有"隐藏该窗口"')
+  assert.ok(hideAt >= 0, '实例菜单必须有"挂起"')
+  assert.equal(hideAt, 0, '挂起放在第一项：它是最常用、也最安全的"收拾窗口"方式')
   assert.ok(closeAt >= 0)
-  assert.ok(closeAt - hideAt > 3, '隐藏离关闭太近，误点会把收消息的窗口藏掉')
-  // 隐藏和关闭之间必须有分隔线，视觉上也要分开
-  const rawHide = tpl.findIndex(i => /隐藏该窗口/.test(i.label || ''))
+  assert.ok(closeAt - hideAt > 3, '挂起离关闭太近，误点会把收消息的窗口藏掉')
+  // 挂起和关闭之间必须有分隔线，视觉上也要分开
   const rawClose = tpl.findIndex(i => i.label === '关闭应用')
-  const between = tpl.slice(rawHide + 1, rawClose)
-  assert.ok(between.some(i => i.type === 'separator'), '隐藏与关闭之间必须有分隔')
+  const between = tpl.slice(0, rawClose)
+  assert.ok(between.some(i => i.type === 'separator'), '挂起与关闭之间必须有分隔')
 })
 
 test('★ 关闭走 closeAsk（渲染层二次确认），不能直接关', () => {
@@ -85,9 +92,9 @@ test('★ 关闭走 closeAsk（渲染层二次确认），不能直接关', () =
     '主进程直接关会绕过确认')
 })
 
-test('隐藏点下去是隐藏而不是关闭', () => {
+test('挂起点下去是隐藏而不是关闭', () => {
   const h = ctx()
-  menuTemplate(h).find(i => /隐藏该窗口/.test(i.label)).click()
+  menuTemplate(h).find(i => i.label === '挂起').click()
   assert.deepEqual(h.calls[0], ['hide', 'wa-1'])
 })
 
@@ -173,4 +180,103 @@ test('窗口已销毁时 sendCommand 不抛', () => {
   })
   assert.doesNotThrow(() => api.popupTabContextMenu({ home: true }))
   assert.equal(sent, 0)
+})
+
+// ---------------------------------------------------------------------------
+// 选中 / 未选中两套菜单
+// ---------------------------------------------------------------------------
+
+test('★ 未选中菜单：产品稿那 5 项，顺序固定', () => {
+  const tpl = menuTemplate(ctx({ selected: false }))
+  assert.deepEqual(labels(tpl), [
+    '挂起',
+    '刷新全部WhatsApp',
+    '关闭应用',
+    '关闭全部WhatsApp',
+    '开发者工具'
+  ])
+})
+
+test('★ 选中菜单：保留精细操作，同时也有批量项', () => {
+  const l = labels(menuTemplate(ctx()))
+  for (const need of ['挂起', '刷新全部WhatsApp', '关闭应用', '关闭全部WhatsApp', '开发者工具',
+    '重命名窗口…', '上一页', '下一页', '放大页面', '缩小页面', '还原缩放',
+    '代理设置', '检查应用更新', '清理当前应用缓存']) {
+    assert.ok(l.includes(need), '选中菜单缺少：' + need)
+  }
+})
+
+test('★ 平台名为空时标题不能退化成"关闭全部"（看不出关的是谁）', () => {
+  const h = ctx({ selected: false })
+  h.tab.platform = ''
+  h.libs.platformLabel = () => ''
+  const l = labels(menuTemplate(h))
+  assert.ok(!l.includes('关闭全部'), '不能出现没有范围说明的"关闭全部"')
+  assert.ok(l.includes('关闭全部该平台'))
+})
+
+test('★「关闭全部同平台」必须走渲染层确认，不能在主进程直接关', () => {
+  const h = ctx({ selected: false })
+  menuTemplate(h).find(i => i.label === '关闭全部WhatsApp').click()
+  assert.deepEqual(h.calls[0], ['send', { action: 'closePlatformAsk', id: 'wa-1', platform: 'wa' }])
+})
+
+test('「刷新全部同平台」直接在主进程执行（没有破坏性，不需要确认）', () => {
+  const h = ctx({ selected: false })
+  menuTemplate(h).find(i => i.label === '刷新全部WhatsApp').click()
+  assert.deepEqual(h.calls[0], ['refreshAll', 'wa'])
+})
+
+test('上一页 / 下一页走命令通道，与 app:contextAction 的 back/forward 对齐', () => {
+  const h = ctx()
+  const tpl = menuTemplate(h)
+  tpl.find(i => i.label === '上一页').click()
+  tpl.find(i => i.label === '下一页').click()
+  assert.deepEqual(h.calls, [
+    ['send', { action: 'back', id: 'wa-1' }],
+    ['send', { action: 'forward', id: 'wa-1' }]
+  ])
+})
+
+test('开发者工具：没开就开（detach），开着就关', () => {
+  const h = ctx()
+  let opened = false
+  h.wcRef.isDevToolsOpened = () => opened
+  h.wcRef.openDevTools = opts => { opened = true; h.calls.push(['openDevTools', opts]) }
+  h.wcRef.closeDevTools = () => { opened = false; h.calls.push(['closeDevTools']) }
+
+  menuTemplate(h).find(i => i.label === '开发者工具').click()
+  menuTemplate(h).find(i => i.label === '开发者工具').click()
+  assert.deepEqual(h.calls, [
+    ['openDevTools', { mode: 'detach' }],
+    ['closeDevTools']
+  ])
+})
+
+test('★ popup：只有 id 命中的那一个才是 selected，别的窗口右键走未选中菜单', () => {
+  const seen = []
+  const tab = id => ({ id, platform: 'wa', view: { webContents: {
+    isDestroyed: () => false,
+    getZoomFactor: () => 1,
+    setZoomFactor() {},
+    reload() {}
+  } } })
+  const state = {
+    win: { isDestroyed: () => false, webContents: { send: () => {} } },
+    tabs: [tab('wa-1'), tab('wa-2')],
+    activeId: 'wa-1'
+  }
+  const api = createTabContextMenu({
+    electron: { Menu: { buildFromTemplate: tpl => ({ popup: () => seen.push(labels(tpl)) }) }, app: {} },
+    state,
+    libs: {
+      openLogDir() {}, hideTab() {}, openProxySettingsFor() {}, updatePlatformWeb() {},
+      refreshTabsOfPlatform() {}, platformLabel: () => 'WhatsApp'
+    }
+  })
+  api.popupTabContextMenu({ id: 'wa-1' })
+  api.popupTabContextMenu({ id: 'wa-2' })
+  assert.ok(seen[0].includes('重命名窗口…'), '激活窗口应拿到完整菜单')
+  assert.deepEqual(seen[1], ['挂起', '刷新全部WhatsApp', '关闭应用', '关闭全部WhatsApp', '开发者工具'],
+    '非激活窗口应拿到精简菜单')
 })

@@ -23,6 +23,7 @@
  *
  * @param {object} p
  * @param {number} p.y           视图顶边（通常是 chromeOffset()）
+ * @param {number} p.x           视图左边（侧面布局时为标签栏宽度，否则 0）
  * @param {number} p.width       窗口内容区宽
  * @param {number} p.height      窗口内容区高
  * @param {number} p.footerHeight 底部状态栏高度（必须从视图高度里扣掉）
@@ -30,13 +31,16 @@
  */
 function viewBounds (p) {
   const top = Math.max(0, Math.round(Number(p.y) || 0))
+  // 侧面布局：原生视图是盖在渲染层之上的实心方块，左边缘必须让开竖排标签栏，
+  // 否则标签栏会被整块盖住 —— 用户点不到，看起来像"标签栏消失了"。
+  const left = Math.max(0, Math.round(Number(p.x) || 0))
   const width = Math.max(0, Number(p.width) || 0)
   const height = Math.max(0, Number(p.height) || 0)
   const footer = Math.max(0, Number(p.footerHeight) || 0)
   return {
-    x: 0,
+    x: left,
     y: top,
-    width: width,
+    width: Math.max(0, width - left),
     // 底部状态栏是窗口 chrome，不属于实例视图；不扣掉就会被实例页面盖住。
     height: Math.max(0, height - top - footer)
   }

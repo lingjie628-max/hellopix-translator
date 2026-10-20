@@ -26,6 +26,8 @@ function registerConfigIpc (deps) {
   reg.handle('config:get', () => ({
     apiBase: state.apiBase,
     theme: state.theme,
+    // 标签栏布局：顶部一行 / 左侧竖栏
+    tabLayout: state.tabLayout,
     // 后台运行开关：渲染层的「系统操作」菜单要显示当前状态，托盘菜单之外的
     // 第二个入口 —— 不能指望用户去右键托盘图标找设置。
     backgroundRunning: state.backgroundRunning,
@@ -39,6 +41,19 @@ function registerConfigIpc (deps) {
     state.theme = next
     actions.saveConfig()
     return { success: true, theme: state.theme }
+  })
+
+  // 标签栏布局：'top' | 'side'。和主题一样只收两个合法值，
+  // 别让渲染层传个拼错的值把布局弄成"既不是顶部也不是侧面"。
+  reg.handle('config:setTabLayout', (event, value) => {
+    const next = value === 'side' ? 'side' : 'top'
+    if (next === state.tabLayout) return { success: true, tabLayout: next }
+    state.tabLayout = next
+    actions.saveConfig()
+    // 侧栏宽度变了，原生视图必须立刻跟着挪：晚一帧就是标签栏被盖住。
+    // 这里不走缓动 —— 布局切换是离散跳变，缓动反而像卡了一下。
+    if (actions.relayoutViews) actions.relayoutViews()
+    return { success: true, tabLayout: state.tabLayout }
   })
 
   // 后台运行开关（关闭窗口时隐藏到托盘，而不是退出）。

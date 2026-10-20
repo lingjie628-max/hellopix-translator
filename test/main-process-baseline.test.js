@@ -90,7 +90,7 @@ const BASELINE_CHANNELS = [
   'auth:autoLogin', 'auth:get', 'auth:login', 'auth:logout', 'auth:save',
   'auth:session', 'auth:verifyLock',
   'chrome:barHeight', 'chrome:height',
-  'config:get', 'config:setApiBase', 'config:setBackgroundRunning', 'config:setTheme',
+  'config:get', 'config:setApiBase', 'config:setBackgroundRunning', 'config:setTabLayout', 'config:setTheme',
   'customer:ingest', 'customer:reminders',
   'lines:list', 'lines:ping', 'lines:pingAll', 'lines:select',
   'proxy:detect', 'shell:open', 'site:info',

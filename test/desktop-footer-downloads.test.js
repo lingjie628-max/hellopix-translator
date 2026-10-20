@@ -31,7 +31,8 @@ const path = require('node:path')
 const test = require('node:test')
 
 const root = path.join(__dirname, '..')
-const appSource = fs.readFileSync(path.join(root, 'desktop', 'renderer', 'app.js'), 'utf8')
+// footerDownloadVisible 已拆到 site-info.js —— 下载入口的显隐判定跟着它搬家了
+const siteInfoSource = fs.readFileSync(path.join(root, 'desktop', 'renderer', 'site-info.js'), 'utf8')
 const htmlSource = fs.readFileSync(path.join(root, 'desktop', 'renderer', 'index.html'), 'utf8')
 
 /** 按大括号配平切出一个具名函数的源码 —— 比正则可靠，也比在源码里埋标记干净。 */
@@ -51,7 +52,7 @@ function extractFunction(source, name) {
 
 // 把纯函数从渲染层源码里取出来执行。它不碰 DOM / window，所以能直接跑。
 const footerDownloadVisible = new Function(
-  `${extractFunction(appSource, 'footerDownloadVisible')}; return footerDownloadVisible`
+  `${extractFunction(siteInfoSource, 'footerDownloadVisible')}; return footerDownloadVisible`
 )()
 
 // ------------------------------------------------------------ 判定语义
@@ -111,14 +112,14 @@ test('用排除法而非白名单：新加入口默认按 URL 判断（不会又
 // ------------------------------------------------------------ 接线
 
 test('★ applySupport 必须调用显隐同步（否则逻辑存在但不生效）', () => {
-  const at = appSource.indexOf('function applySupport(')
+  const at = siteInfoSource.indexOf('function applySupport(')
   assert.ok(at > 0, '找不到 applySupport')
-  const body = appSource.slice(at, appSource.indexOf('\n}', at))
+  const body = siteInfoSource.slice(at, siteInfoSource.indexOf('\n}', at))
   assert.match(body, /syncFooterDownloads\(/, 'applySupport 没有调用 syncFooterDownloads —— 按钮仍然恒显')
 })
 
 test('syncFooterDownloads 遍历的正是底部的下载按钮', () => {
-  const body = extractFunction(appSource, 'syncFooterDownloads')
+  const body = extractFunction(siteInfoSource, 'syncFooterDownloads')
   assert.match(body, /data-footer-action="download"/, '选择器没对上底部的下载按钮')
   assert.match(body, /dataset\.downloadKey/, '没有读取按钮的 downloadKey')
 })
@@ -138,9 +139,9 @@ test('index.html 里移动端入口仍以 data-download-key 标注（才能被�
 test('⚠️ 空 URL 的下载入口在 runFooterAction 里是静默返回（本缺陷的根因）', () => {
   // 这条不是要求改 runFooterAction，而是把"为什么必须靠显隐兜住"钉在测试里：
   // 只要它还是静默 return，任何没有地址的入口出现在界面上就一定是死按钮。
-  const at = appSource.indexOf('async function runFooterAction(')
+  const at = siteInfoSource.indexOf('async function runFooterAction(')
   assert.ok(at > 0, '找不到 runFooterAction')
-  const body = appSource.slice(at, appSource.indexOf('\n}', at))
+  const body = siteInfoSource.slice(at, siteInfoSource.indexOf('\n}', at))
   assert.match(body, /if \(downloadKey !== 'app'\) return/,
     'runFooterAction 的空 URL 处理变了 —— 请重新确认"死按钮"这个结论是否还成立')
 })

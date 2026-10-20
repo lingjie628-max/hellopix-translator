@@ -20,9 +20,51 @@ function confirmCloseTab(tab) {
   const name = String((tab && (tab.name || tab.title)) || '这个窗口')
   return confirmAction(
     '关闭「' + name + '」？',
-    '窗口将停止运行，需要重新登录才能再次打开。若只是想让它歇着，可以用右键菜单里的「隐藏该窗口」，登录状态会保留。',
+    '窗口将停止运行，需要重新登录才能再次打开。若只是想让它歇着，可以用右键菜单里的「挂起」，登录状态会保留。',
     '关闭窗口'
   )
+}
+
+/**
+ * 右键菜单「关闭全部 <平台>」的落地：先确认，再逐个关。
+ *
+ * ## 为什么确认必须在这里做
+ *
+ * 原生菜单弹不出我们自己的确认框（`Menu.popup` 只认 Electron 的菜单项），
+ * 所以主进程只能把「用户点了这一项」当成一条命令发回来，真正的二次确认
+ * 由渲染层完成。**这一步不能省**：一次误点同时关掉五个号，比关错一个还糟。
+ *
+ * ## 范围必须和主进程一致
+ *
+ * 只数**可见**窗口。隐藏的窗口在后台收消息，用户在标签栏上看不到它们，
+ * 却被「关闭全部」连带杀掉 —— 这属于"我什么都没点它怎么就没了"。
+ * 主进程的 closeTabsOfPlatform 也只关可见的，两边的过滤条件必须一样。
+ */
+/**
+ * 平台 id → 显示名（例如 `whatsapp-green` → `WhatsApp绿色版`）。
+ * 平台表由 add-app.js 的 fillAppLists 填进 platformCache；没拿到时退回 id 本身，
+ * 菜单/提示里至少还能看出是哪个平台，而不是空字符串。
+ */
+function platformLabelOf(id) {
+  const row = (typeof platformCache !== 'undefined' ? platformCache : [])
+    .find(item => item && item.id === id)
+  return (row && row.name) || String(id || '')
+}
+
+async function closePlatformTabs(command) {
+  const platform = String((command && command.platform) || '')
+  const visible = lastTabs.filter(tab => !tab.hidden && tab.platform === platform)
+  if (!visible.length) {
+    toast('该平台没有正在打开的窗口', 'warn')
+    return
+  }  const platformName = platformLabelOf(platform) || platform
+  const label = '将关闭 ' + visible.length + ' 个「' + platformName + '」窗口'
+  // 数量写进文案：用户点之前就得知道会关掉几个，而不是点完才后悔。
+  if (!(await confirmAction(label, '关闭后需要重新登录才能再次打开。'))) return
+  const ids = visible.map(tab => tab.id)
+  ids.forEach(id => window.pix.close(id))
+  ids.forEach(id => { delete checkedIds[id] })
+  toast('已关闭 ' + ids.length + ' 个窗口')
 }
 
 function makeTabEl(tab, active) {
@@ -303,6 +345,20 @@ function keepActiveTabVisible(state, home) {
   const target = home
     ? tabsEl.querySelector('.tab-home')
     : (state && state.activeId ? tabsEl.querySelector('.tab.active') : null)
+  // 侧面布局滚的是纵轴。竖向不做平滑滚动：竖栏每次切标签都平滑一次会晕，
+  // 而且 close→open 的连续切换会让滚动队列积压，最后停在错误位置。
+  if (isSideLayout()) {
+    if (target && typeof target.offsetTop === 'number') {
+      const top = target.offsetTop
+      const bottom = top + target.offsetHeight
+      const viewTop = tabsEl.scrollTop
+      const viewBottom = viewTop + tabsEl.clientHeight
+      if (top < viewTop) tabsEl.scrollTop = Math.max(0, top - 6)
+      else if (bottom > viewBottom) tabsEl.scrollTop = bottom - tabsEl.clientHeight + 6
+    }
+    syncTabsOverflowHint()
+    return
+  }
   if (target && typeof target.offsetLeft === 'number') {
     const left = target.offsetLeft
     const right = left + target.offsetWidth
@@ -331,6 +387,12 @@ function keepActiveTabVisible(state, home) {
  */
 function syncTabsOverflowHint() {
   if (!tabsEl || !tabsWrapEl) return
+  // 侧面布局是竖向滚动：左右渐隐没有意义，且这两块渐变会压在窄竖栏上。
+  // 这里按轴判断，CSS 里也把 ::before/::after 关掉了，双保险。
+  if (isSideLayout()) {
+    tabsWrapEl.classList.remove('has-more-left', 'has-more-right')
+    return
+  }
   const maxScroll = tabsEl.scrollWidth - tabsEl.clientWidth
   const x = tabsEl.scrollLeft
   // 1px 容差：缩放/小数像素下 scrollLeft 常是 1399 而非 1400。
@@ -377,6 +439,9 @@ function attachTabsWheel() {
   tabsEl.addEventListener('wheel', event => {
     // Shift + 滚轮 = 浏览器默认的横向滚动，别抢。
     if (event.shiftKey) return
+    // 侧面布局：容器本身就是纵向滚动，原生滚动本来就是对的 ——
+    // 这里再映射一次就成了"滚一下跳两格"，而且会跟触控板惯性打架。
+    if (isSideLayout()) return
     // 有横向增量说明是触控板横向手势，放行给默认行为。
     if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return
 

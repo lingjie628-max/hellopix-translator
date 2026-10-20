@@ -1,173 +1,42 @@
 /**
- * 把异常转成能直接给用户看的一句话。
+ * app.js —— 启动装配层。
  *
- * 为什么需要：ipcRenderer.invoke 抛出的错误会被 Electron 包一层，
- * 原样显示出来是
- *   Error invoking remote method 'auth:login': Error: API 线路不符合安全策略
- * 既泄漏内部实现（方法名、错误分层），又不是用户能处理的措辞。
- * 这里剥掉包装，并把几个已知原因换成可执行的提示。
+ * 这里只留"还来不及拆、或需要跨模块协调"的东西：登录流程、线路选择、
+ * 代理面板、主题、翻译设置、背景运行、账号面板、启动时序。
+ *
+ * 已经拆出去的（按加载顺序）：
+ *   ui-kit.js            显隐 / 浮层 / 确认框 / 提示条
+ *   pure.js              esc / cmpVer 等纯函数
+ *   proxy-panel.js       代理设置面板
+ *   tab-layout.js        顶部 / 侧面标签栏布局
+ *   collision-update.js  撞单提醒 + 版本更新
+ *   ops-menu.js          应用/系统操作下拉
+ *   site-info.js         客服 / 页脚下载 / 独立应用
+ *   tabs.js              标签栏渲染与交互
+ *   add-app.js           添加应用窗口面板
+ *   trans-bar.js         翻译悬浮条与引擎
+ *
+ * 这里定义的 `current` / `appVersion` / 线路状态是本文件的权威值，
+ * 其它模块只读或通过函数写，不要在外面各自留一份。
  */
 
 let proxyPresetRows = []
 let proxyDetectTimer = 0
 let geoManual = false
 
+// ★ 这些是本文件的权威状态，被别的模块读取 ★
+//   current / skipAutoLogin   → site-info.js（套餐是否含独立应用）、启动自动登录
+//   appVersion                → collision-update.js 按服务端权威值刷新
+//   （线路状态 lineRows / preferAuto / selectedId / fastest 归 lines.js 所有）
 let current = null
+// 版本号：collision-update.js 的 checkUpdate 也要按权威值刷新它。
+// 用函数对读写，不在 window 上挂同名属性 —— `let appVersion` 已经在全局词法
+// 环境里建了绑定，再 defineProperty 同名属性会静默失败（实测 app.js 整份
+// 不执行，后续所有函数都变成 "is not defined"）。
 let appVersion = '-'
+
 let refreshTimer = null
-let speedTimer = null
-let lineRows = []
-let preferAuto = true
-let selectedId = 'auto'
-let fastest = null
 let skipAutoLogin = false
-let supportUrl = ''
-let supportNote = ''
-let footerOfficialUrl = ''
-let footerGuideUrl = ''
-let footerDownloads = {}
-
-function siteSupport(info) {
-  const d = (info && (info.data || info)) || {}
-  const url = String(d.telegramUrl || '').trim()
-  const account = String(d.telegram || '').trim()
-  return {
-    url: url || (account ? 'https://t.me/' + account.replace(/^@/, '') : ''),
-    note: String(d.supportNote || ''),
-    btnText: d.supportBtnText || '联系客服',
-    show: Number(d.supportShow) !== 0,
-    officialUrl: String(d.officialUrl || d.websiteUrl || ''),
-    guideUrl: String(d.guideUrl || ''),
-    downloads: Object.assign({ app: String(d.clientDownloadUrl || '') }, d.clientDownloads || {})
-  }
-}
-
-function applySupport(info) {
-  const s = siteSupport(info)
-  supportUrl = s.url
-  supportNote = s.note
-  footerOfficialUrl = s.officialUrl
-  footerGuideUrl = s.guideUrl
-  footerDownloads = s.downloads
-  supportBtn.textContent = s.btnText
-  supportBtn.style.display = s.show ? '' : 'none'
-  syncFooterDownloads(s.downloads)
-}
-
-/**
- * 纯函数：某个下载入口在当前下发数据下是否该显示。
- *
- * 刻意与 DOM 操作分开，是为了能被测试**直接执行** —— 渲染层没有 DOM 环境
- * （仓库里没有 jsdom），抽不出纯逻辑的话就只能退化成正则匹配源码，那测不出
- * "点击是否真的会失效"这种语义。
- */
-function footerDownloadVisible(key, downloads) {
-  // app 走 checkUpdate()，不依赖 downloads.app，因此不能按 URL 判断。
-  if (key === 'app') return true
-  // standalone 走 standaloneApps：**只有真有在架独立应用时才显示**。
-  // 曾经写死返回 true，于是"套餐承诺了独立应用版、实际一条 standalone 发布记录
-  // 都没有"时按钮照样出现 —— 用户点下去只得到「独立应用尚未上架」。那正是迁移
-  // 036 要摘掉的那类"有权益、没东西"。改成按数据显隐之后，将来登记了发布记录
-  // 就会自动重新出现，不必再发一次客户端。
-  if (key === 'standalone') {
-    const apps = (downloads || {}).standaloneApps
-    return Array.isArray(apps) && apps.some(item => item && item.url)
-  }
-  return Boolean(String((downloads || {})[key] || ''))
-}
-
-/**
- * 让底部下载入口按**真实上架情况**显隐。
- *
- * 背景：index.html 里「安卓手机版」「苹果手机版」是静态写死的按钮，而产品
- * 没有任何移动端 —— 服务端 `clientDownloads.android` / `.ios` 下发的是空字符串
- * （core-service.js 的 `download()` 在 client_releases 里找不到记录就返回 ''，
- * 2026-09-27 在生产 /apis/site/info 上实测确实为空）。
- *
- * 于是用户点下去**毫无反应**：`runFooterAction` 对空 URL 直接 `return`，
- * 既不打开链接也不报错，看起来就是"软件坏了"。这与迁移 035 的结论也直接冲突 ——
- * 035 刚把「手机版」这个兑现不了的权益承诺从套餐文案里摘掉，客户端底部却还在
- * 暗示有两个手机版可以下载。（「独立应用版」是同一种病，见迁移 036。）
- *
- * 三点讲究：
- *
- *   1. 用**排除法**而不是白名单：除了 app 这一个特例（它走 checkUpdate），其余
- *      一律"没东西可下就不显示"。这样以后新增任何下载入口都自动安全，不会又冒
- *      出一个死按钮 —— 白名单会让新入口默认可见。
- *   2. standalone **也**按数据显隐（见 footerDownloadVisible）：它曾经是第二个
- *      特例、恒显。恒显的代价是"有权益、没东西"时按钮还在，点下去只得到
- *      「独立应用尚未上架」—— 与迁移 036 摘「独立应用版」的理由直接冲突。
- *   3. 是**显隐**而不是删按钮：哪天移动端 / 独立应用真上架、后台配了发布记录，
- *      按钮自动出现，不需要再改客户端代码、也就不必再发一次版。
- */
-function syncFooterDownloads(downloads) {
-  document.querySelectorAll('[data-footer-action="download"]').forEach(btn => {
-    const key = btn.dataset.downloadKey || ''
-    btn.style.display = footerDownloadVisible(key, downloads) ? '' : 'none'
-  })
-}
-
-async function loadSupport() {
-  try {
-    applySupport(await window.pix.siteInfo())
-  } catch (e) {}
-}
-
-async function openSupport() {
-  await loadSupport()
-  if (supportUrl) window.pix.openUrl(supportUrl)
-}
-
-async function runFooterAction(action, downloadKey) {
-  await loadSupport()
-  if (action === 'support') return openSupport()
-  if (action === 'official' && footerOfficialUrl) return window.pix.openUrl(footerOfficialUrl)
-  if (action === 'guide') {
-    if (footerGuideUrl) return window.pix.openUrl(footerGuideUrl)
-    return openSupport()
-  }
-  if (action === 'download') {
-    if (downloadKey === 'standalone') return openStandaloneDownload()
-    const url = String(footerDownloads[downloadKey] || '')
-    if (url) return window.pix.openUrl(url)
-    if (downloadKey !== 'app') return
-    const resp = await window.pix.checkUpdate()
-    if (resp && resp.url) return window.pix.openUrl(resp.url)
-    if (resp && resp.remote && cmpVer(resp.remote, resp.local) > 0) showUpdateNotice(resp)
-  }
-}
-
-function standaloneApps() {
-  return (footerDownloads.standaloneApps || []).filter(item => item && item.url)
-}
-
-function showStandaloneNotice(message) {
-  standaloneTitle.textContent = '独立应用版'
-  standaloneMsg.textContent = message
-  standaloneList.innerHTML = ''
-  showOverlay(standalonePanel, true)
-}
-
-function showStandalonePicker(apps) {
-  standaloneTitle.textContent = '选择独立应用'
-  standaloneMsg.textContent = '请选择要下载的单应用翻译客户端。'
-  standaloneList.innerHTML = apps.map(item => {
-    const name = esc(item.title || item.app || '独立应用')
-    const meta = esc([item.version, item.os].filter(Boolean).join(' · '))
-    return '<button type="button" data-url="' + esc(item.url) + '"><b>' + name + '</b><span>' + meta + '</span></button>'
-  }).join('')
-  showOverlay(standalonePanel, true)
-}
-
-function openStandaloneDownload() {
-  if (!current || Number(current.standaloneClient) !== 1) {
-    return showStandaloneNotice('当前套餐未包含独立应用版')
-  }
-  const apps = standaloneApps()
-  if (!apps.length) return showStandaloneNotice('独立应用尚未上架')
-  if (apps.length === 1) return window.pix.openUrl(apps[0].url)
-  return showStandalonePicker(apps)
-}
 
 async function persistAuth() {
   await window.pix.saveAuth({
@@ -189,139 +58,11 @@ function bindAuthToggles() {
   }
 }
 
-function isActive(id) {
-  return (preferAuto && id === 'auto') || (!preferAuto && id === selectedId)
-}
+// 线路选择与测速（lineRows / preferAuto / selectedId / fastest / speedTimer）→ lines.js
 
-function addLineRow(id, name, extra, extraClass) {
-  const row = document.createElement('button')
-  row.type = 'button'
-  row.className = 'line-item' + (isActive(id) ? ' active' : '')
-  row.innerHTML = '<span>' + esc(name) + '</span>' + (extra ? '<span class="' + extraClass + '">' + esc(extra) + '</span>' : '')
-  row.onclick = (event) => {
-    event.stopPropagation()
-    chooseLine(id)
-  }
-  lineMenu.appendChild(row)
-}
+// 显隐 / 浮层 / 确认框 / 提示条 → 已迁到 ui-kit.js（它们被所有业务模块调用，
+// 必须排在 app.js 之前，否则谁都只能等最后一个脚本加载完）
 
-function renderTrigger() {
-  if (preferAuto) {
-    lineTriggerName.textContent = '自动选择'
-    lineTriggerMs.textContent = ''
-    return
-  }
-  const line = lineRows.find(l => l.id === selectedId)
-  lineTriggerName.textContent = (line && line.name) || '自动选择'
-  lineTriggerMs.textContent = line ? speedText(line) : ''
-  lineTriggerMs.className = line ? speedClass(line) : 'ms'
-}
-
-function renderLines() {
-  lineMenu.innerHTML = ''
-  // 只有一条线路时不展示选择器：既没有可选项，"自动选择"也没有意义。
-  // 多线路（服务器部署了分区节点）时自动恢复显示，不需要改代码。
-  const single = lineRows.length === 1
-  const dd = lineDd
-  // 连"线路"标签所在的外层 field 一起隐藏，否则会留下一个空标签
-  const field = dd && dd.closest ? dd.closest('.field') : null
-  if (field) field.classList.toggle('hidden', single)
-  else if (dd) dd.classList.toggle('hidden', single)
-  if (single) {
-    // 只有一条就固定用它，跳过测速与"自动选择"逻辑
-    preferAuto = false
-    selectedId = lineRows[0].id
-    renderTrigger()
-    return
-  }
-  addLineRow('auto', '自动选择', '', '')
-  lineRows.forEach(line => {
-    addLineRow(line.id, line.name || '线路', speedText(line), speedClass(line))
-  })
-  renderTrigger()
-}
-
-function chooseLine(id) {
-  preferAuto = id === 'auto'
-  selectedId = id
-  lineDd.classList.remove('open')
-  renderLines()
-  if (!preferAuto) window.pix.selectLine(id)
-}
-
-async function pingAll(silent) {
-  if (!silent) {
-    lineRows.forEach(line => { line.pending = true })
-    renderLines()
-  }
-  const result = await window.pix.pingAll()
-  if (result && result.rows) {
-    lineRows = result.rows.map(row => Object.assign({}, row, { pending: false }))
-  } else {
-    lineRows.forEach(line => { line.pending = false })
-  }
-  fastest = result && result.best
-  renderLines()
-  return fastest
-}
-
-function startSpeedWatch() {
-  stopSpeedWatch()
-  pingAll(false)
-  speedTimer = setInterval(() => {
-    if (!loginScreen.classList.contains('hidden')) pingAll(true)
-  }, 8000)
-}
-
-function stopSpeedWatch() {
-  if (speedTimer) {
-    clearInterval(speedTimer)
-    speedTimer = null
-  }
-}
-
-async function pickLine() {
-  if (!preferAuto) {
-    await window.pix.selectLine(selectedId)
-    return
-  }
-  const best = fastest || await pingAll(true)
-  if (!best) throw new Error('线路暂时连不上，请确认后台已启动')
-  await window.pix.selectLine(best.id)
-}
-
-function show(el, on) {
-  el.classList.toggle('hidden', !on)
-}
-
-function overlayVisible() {
-  return !profile.classList.contains('hidden') || !transPanel.classList.contains('hidden') || !lockScreen.classList.contains('hidden') || !addApp.classList.contains('hidden') || !proxySettings.classList.contains('hidden') || !updatePanel.classList.contains('hidden') || !standalonePanel.classList.contains('hidden')
-}
-
-function syncOverlay() {
-  if (window.pix && window.pix.setOverlay) window.pix.setOverlay(overlayVisible())
-}
-
-function showOverlay(el, on) {
-  if (on) {
-    show(profile, el === profile)
-    show(transPanel, el === transPanel)
-    show(lockScreen, el === lockScreen)
-    show(addApp, el === addApp)
-    show(proxySettings, el === proxySettings)
-    show(updatePanel, el === updatePanel)
-    show(standalonePanel, el === standalonePanel)
-  } else {
-    show(el, false)
-  }
-  syncOverlay()
-}
-
-function bindModalDismiss(el) {
-  el.addEventListener('click', (event) => {
-    if (event.target === el) showOverlay(el, false)
-  })
-}
 
 let dndOn = false
 let checkedIds = {}
@@ -342,101 +83,12 @@ function setProfile(data) {
 }
 
 
-let pendingUpdateUrl = ''
-
 // ---------------------------------------------------------------------------
-// 撞单提醒
+// 撞单提醒 + 软件更新检测 → 已迁到 collision-update.js
 //
-// 按产品要求先做 warn（只提醒、不阻止操作）—— 误报时不会挡住正常工作，
-// 等真实数据出来再决定哪些场景需要升级为 block。
-//
-// 跨商户撞单是**匿名**的：服务端只给一句提示，客户端不要试图渲染姓名或账号
-// （返回体里根本没有，也刻意不查）。
+// 两者都是"服务端推一件事、客户端弹一次"的同一类流程，放在一起比留在
+// app.js 里更清楚。版本号的唯一持有者仍是本文件的 appVersion。
 // ---------------------------------------------------------------------------
-const seenCollisions = new Set()
-
-function showCollisionBanner(items) {
-  const box = document.getElementById('pixCollision')
-  if (!box) return
-  const fresh = items.filter(it => !seenCollisions.has(String(it.id)))
-  if (!fresh.length) { if (!items.length) box.classList.remove('on'); return }
-  fresh.forEach(it => seenCollisions.add(String(it.id)))
-
-  const it = fresh[0]
-  const who = it.kind === 'cross_merchant'
-    ? ''
-    : (it.colleagueEmployeeId ? '（同事 ID ' + it.colleagueEmployeeId + '）' : '')
-  box.innerHTML = ''
-  const title = document.createElement('b')
-  title.textContent = '⚠ ' + (it.title || '检测到客户撞单')
-  const body = document.createElement('span')
-  body.textContent = '客户 ' + it.customerId + ' — ' + it.message + who
-  const close = document.createElement('button')
-  close.type = 'button'
-  close.textContent = '知道了'
-  close.onclick = () => { box.classList.remove('on'); box.innerHTML = '' }
-  box.appendChild(title); box.appendChild(body); box.appendChild(close)
-  box.classList.add('on')
-}
-
-async function checkCollisions() {
-  if (!window.pix || !window.pix.customerReminders) return
-  try {
-    const items = await window.pix.customerReminders()
-    if (Array.isArray(items) && items.length) showCollisionBanner(items)
-  } catch (e) {}
-}
-
-function showUpdateNotice(resp) {
-  const local = String((resp && resp.local) || appVersion || '-')
-  const remote = String((resp && resp.remote) || '-')
-  pendingUpdateUrl = String((resp && resp.url) || '')
-  updateVersionText.textContent = '当前版本 ' + local + '  →  最新版本 ' + remote
-  if (pendingUpdateUrl) {
-    updateDesc.textContent = '新版本已经准备好，建议更新以获得更稳定的使用体验。'
-    updateDownloadBtn.disabled = false
-    updateDownloadBtn.textContent = '立即更新'
-  } else {
-    updateDesc.textContent = '已检测到新版本，但安装包尚未发布。发布后可在这里直接下载。'
-    updateDownloadBtn.disabled = true
-    updateDownloadBtn.textContent = '暂未发布'
-  }
-  closeOperationMenus()
-  showOverlay(updatePanel, true)
-}
-
-updateDownloadBtn.onclick = () => {
-  if (!pendingUpdateUrl) return
-  window.pix.openUrl(pendingUpdateUrl)
-  showOverlay(updatePanel, false)
-}
-
-async function checkUpdate() {
-  const hint = document.getElementById('updateHint')
-  const btn = document.getElementById('checkUpdateBtn')
-  if (hint) hint.textContent = '正在检查…'
-  if (btn) btn.disabled = true
-  try {
-    const resp = await window.pix.checkUpdate()
-    if (!resp || !resp.success) {
-      if (hint) hint.textContent = (resp && resp.msg) || '暂时无法检查更新'
-      return
-    }
-    if (resp.local) appVersion = resp.local
-    if (!resp.remote) {
-      if (hint) hint.textContent = '当前已是最新版本'
-      return
-    }
-    if (cmpVer(resp.remote, resp.local) > 0) {
-      if (hint) hint.textContent = '发现新版本 ' + resp.remote
-      showUpdateNotice(resp)
-    } else if (hint) hint.textContent = '当前已是最新版本'
-  } catch (e) {
-    if (hint) hint.textContent = friendlyError(e, '暂时无法检查更新')
-  } finally {
-    if (btn) btn.disabled = false
-  }
-}
 
 
 let platformCache = []
@@ -572,62 +224,7 @@ function fillEnabled(rows) {
   })
 }
 
-function paintStatus(state, home, rows) {
-  show(appStatus, false)
-  appStatusText.textContent = ''
-}
-
-function closeOperationMenus(except) {
-  ;[appOpsWrap, systemOpsWrap].forEach(el => {
-    if (el && el !== except) el.classList.remove('open')
-  })
-}
-
-function activeTabState() {
-  const state = window.__lastTabState || {}
-  return ((state.rows || []).find(tab => tab.id === state.activeId)) || null
-}
-
-function paintOperationMenus(home, rows) {
-  const hasActiveApp = !home && !!activeTabState()
-  // 应用内：工具行清空，只在正中留翻译开关；主页按钮全部保留
-  const utilityEl = document.querySelector('.utility')
-  if (utilityEl) utilityEl.classList.toggle('in-app', hasActiveApp)
-  if (appOpsWrap) appOpsWrap.classList.toggle('hidden', !hasActiveApp)
-  // 进/出应用时把两个下拉都收掉：此前只清 appOpsWrap 的 open，systemOpsWrap
-  // 从不清理，实测"主页打开系统操作 → 进应用 → 回主页"后菜单自己还开着
-  // （wrapOpen=true、opacity=1）。closeOperationMenus() 不带参数即关全部。
-  if (!hasActiveApp) closeOperationMenus()
-  if (!rows || !rows.length) closeOperationMenus()
-}
-
-function flashMenuButton(button, text, delay) {
-  if (!button) return
-  const label = button.querySelector('b')
-  if (!label) return
-  const original = button.dataset.originalLabel || label.textContent
-  button.dataset.originalLabel = original
-  label.textContent = text
-  clearTimeout(button._labelTimer)
-  button._labelTimer = setTimeout(() => {
-    label.textContent = original
-    button.classList.remove('busy', 'danger-confirm')
-  }, delay || 1800)
-}
-
-async function runMenuAction(button, busyText, action) {
-  if (!button || button.classList.contains('busy')) return
-  button.classList.add('busy')
-  flashMenuButton(button, busyText, 10000)
-  try {
-    const result = await action()
-    flashMenuButton(button, (result && result.msg) || '操作完成', 1800)
-  } catch (e) {
-    flashMenuButton(button, (e && e.message) || '操作失败', 2200)
-  }
-}
-
-
+// 操作菜单（activeTabState / paintOperationMenus / runMenuAction 等）→ ops-menu.js
 let contextPoint = { x: 0, y: 0 }
 
 function hidePixContextMenu() {
@@ -757,83 +354,7 @@ function startTabRename(tab, el) {
   input.ondblclick = event => event.stopPropagation()
 }
 
-/**
- * 关闭窗口前的二次确认。
- *
- * ## 为什么必须有
- *
- * 标签上的「×」紧贴着账号名称，鼠标一滑就点到；一关，那个号的窗口连同
- * 登录状态当场消失，而且**没有任何撤销手段** —— 用户只能重新扫码登录。
- * 误点一次的代价远大于多确认一次的成本。
- *
- * ## 实现要点
- *
- * - 用原生 `<dialog>`：进 top-layer，能盖住原生视图（普通 div 会被遮挡）。
- * - **默认焦点在「取消」**：手快的人直接回车 / 空格，结果是"没关"，
- *   而不是"关了"。危险操作永远不该是默认选项。
- * - 返回 Promise 而不是回调：调用方 `await` 之后才知道到底关不关，
- *   批量关闭时能逐个确认，逻辑不会乱。
- * - 同一时刻只允许一个确认框（连点两次 × 不能让两个框叠起来）。
- */
-let closeConfirmResolve = null
-
-/**
- * 通用二次确认。
- *
- * @param {string} title  标题，例如「关闭这个窗口？」
- * @param {string} text   后果说明
- * @param {string} okText 确认按钮文案
- * @returns {Promise<boolean>} 只有明确点了确认按钮才为 true
- */
-function confirmAction(title, text, okText) {
-  const dialog = document.getElementById('closeConfirm')
-  const titleEl = document.getElementById('closeConfirmTitle')
-  const textEl = document.getElementById('closeConfirmText')
-  const okBtn = document.getElementById('closeConfirmOk')
-  const cancelBtn = document.getElementById('closeConfirmCancel')
-  if (!dialog || typeof dialog.showModal !== 'function') {
-    // 环境不支持 dialog（极老内核）：宁可放行也不能把关闭功能卡死。
-    return Promise.resolve(true)
-  }
-  titleEl.textContent = title || '确认操作？'
-  textEl.textContent = text || ''
-  okBtn.textContent = okText || '确认'
-
-  // 上一个还开着就先按"取消"结掉，避免两个 Promise 悬着。
-  if (closeConfirmResolve) {
-    const prev = closeConfirmResolve
-    closeConfirmResolve = null
-    prev(false)
-  }
-
-  return new Promise(resolve => {
-    const finish = answer => {
-      if (closeConfirmResolve !== finish) return
-      closeConfirmResolve = null
-      okBtn.onclick = null
-      cancelBtn.onclick = null
-      dialog.oncancel = null
-      dialog.onclose = null
-      try { if (dialog.open) dialog.close() } catch (e) {}
-      resolve(answer)
-    }
-    closeConfirmResolve = finish
-    okBtn.onclick = () => finish(true)
-    cancelBtn.onclick = () => finish(false)
-    // ESC / 点遮罩：一律当作取消。对话框关掉的任何非明确确认路径都必须
-    // 落到"不关"，否则就等于绕过确认。
-    dialog.oncancel = event => { event.preventDefault(); finish(false) }
-    dialog.onclose = () => finish(false)
-    try {
-      if (dialog.open) dialog.close()
-      dialog.showModal()
-      // 焦点显式落到取消上（autofocus 在某些内核对 dialog 不生效）
-      cancelBtn.focus()
-    } catch (e) {
-      finish(false)
-    }
-  })
-}
+// 二次确认 → 已迁到 ui-kit.js 的 confirmAction（默认焦点在取消，ESC=取消）
 
 
 function syncHomeVideo(home) {
@@ -1089,46 +610,20 @@ lockBtn.onclick = () => {
   lockPwd.focus()
 }
 
-// --- 主题切换（日间 / 夜间）---------------------------------------------------
-// 主题只做一件事：给 <html> 加/去 data-theme="light"，剩下全靠 CSS 变量覆盖。
-// 持久化在主进程（config.json），所以重启、换窗口都记得住。
-
-function paintThemeButton(mode) {
-  const light = mode === 'light'
-  // 图标表示"当前模式"，文字也跟随；title 说明点下去会切到哪边
-  themeIco.textContent = light ? '☀️' : '🌙'
-  themeText.textContent = light ? '日间' : '夜间'
-  themeBtn.title = light ? '当前：日间模式，点击切换到夜间' : '当前：夜间模式，点击切换到日间'
-}
-
-function applyTheme(mode) {
-  const next = mode === 'light' ? 'light' : 'dark'
-  if (next === 'light') document.documentElement.setAttribute('data-theme', 'light')
-  else document.documentElement.removeAttribute('data-theme')
-  paintThemeButton(next)
-  return next
-}
-
-// 启动时按主进程存的偏好应用（拿不到就保持深色）。
-// 注意 theme.js 已在首帧前用 localStorage 预热过一次；这里用主进程的权威值
-// 校正（换机/清缓存后仍正确），并把结果回写缓存供下次首帧使用。
-if (themeBtn) {
+// 主题切换（paintThemeButton / applyTheme + 启动校正）→ theme-switch.js
+// 标签栏布局：和主题同样的套路 —— tab-layout.js 已在首帧前用缓存预热过，
+// 这里用主进程的权威值校正（换机/清缓存后仍正确），并回写缓存。
+// 校正必须走 applyTabLayout：它会同时刷新滚轮轴、渐隐和按钮文案，
+// 只改类名的话主进程那边不会重排视图，标签栏会被实例视图盖住。
+if (tabLayoutBtn) {
   ;(async () => {
-    let saved = 'light'
+    let saved = 'top'
     try {
       const cfg = await window.pix.getConfig()
-      saved = (cfg && cfg.theme) || 'light'
+      saved = (cfg && cfg.tabLayout) || 'top'
     } catch (e) {}
-    applyTheme(saved)
-    try { localStorage.setItem('pix-theme', saved) } catch (e) {}
-
-    themeBtn.onclick = async () => {
-      const current = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark'
-      const next = current === 'light' ? 'dark' : 'light'
-      applyTheme(next)                                      // 先切，界面立刻响应
-      try { localStorage.setItem('pix-theme', next) } catch (e) {}   // 供下次首帧预热
-      try { await window.pix.setTheme(next) } catch (e) {}  // 权威值落盘
-    }
+    applyTabLayout(saved)
+    try { localStorage.setItem('pix-tab-layout', saved) } catch (e) {}
   })()
 }
 
@@ -1151,33 +646,7 @@ unlockBtn.onclick = async () => {
 lockPwd.addEventListener('keydown', (event) => {
   if (event.key === 'Enter') unlockBtn.click()
 })
-/**
- * 轻提示（toast）。
- *
- * 用 popover 而不是普通 div 是必须的：页面里有一大块**原生视图**盖在 DOM 之上，
- * 普通定位的提示会被它彻底遮住 —— 用户点了垃圾桶却什么都没看见，
- * 只会以为"点了没反应"，然后反复点。
- * popover 进 top-layer，天然盖在原生视图之上。
- */
-function toast(text, tone) {
-  let el = document.getElementById('pixToast')
-  if (!el) {
-    el = document.createElement('div')
-    el.id = 'pixToast'
-    el.className = 'pix-toast'
-    el.setAttribute('popover', 'manual')
-    document.body.appendChild(el)
-  }
-  el.textContent = text
-  el.classList.toggle('warn', tone === 'warn')
-  try {
-    if (!el.matches(':popover-open')) el.showPopover()
-  } catch (e) {}
-  clearTimeout(el._timer)
-  el._timer = setTimeout(() => {
-    try { if (el.matches(':popover-open')) el.hidePopover() } catch (e) {}
-  }, 2200)
-}
+// 底部提示条 → 已迁到 ui-kit.js 的 toast（popover 进 top-layer，才能盖住原生视图）
 
 clearEnabled.onclick = async () => {
   // 只处理可见窗口：后台运行的窗口不在这里展示，绝不能被"清空"一起关掉 ——
@@ -1231,68 +700,7 @@ document.addEventListener('keydown', (event) => {
 // 以及无官方地位的部落语言。
 // 能否真正翻译取决于所选通道是否支持该语种（不支持会返回厂商错误码，不扣费）。
 
-function fillLangs() {
-  langMine.innerHTML = langOptionHtml(LANGS.filter(l => l.id !== 'auto'))
-  langOther.innerHTML = langOptionHtml()
-}
-
-function applyTransPrefs(data) {
-  if (!data) return
-  transRecv.checked = data.transRecv !== 0
-  transSend.checked = data.transSend !== 0
-  transGroup.checked = !!data.transGroup
-  includeZh.checked = !!Number(data.includeZh)
-  if (data.langMine) langMine.value = data.langMine
-  if (data.langOther) langOther.value = data.langOther
-  if (data.activeEngine) transEngine.value = engineToShow(data.activeEngine)
-}
-
-async function openTransPanel() {
-  fillLangs()
-  applyTransPrefs(current)
-  transMsg.textContent = ''
-  try {
-    const resp = await window.pix.translateEngines()
-    const rows = (resp && resp.rows) || []
-    transEngine.innerHTML = rows.filter(e => e.allowed !== false).map(e => {
-      return '<option value="' + esc(e.id) + '">' + esc(e.name) + (e.wired ? '' : '') + '</option>'
-    }).join('') || '<option value="">无可用通道</option>'
-      transEngine.disabled = !canSwitchEngine
-      transEngine.title = canSwitchEngine ? '' : '当前套餐的翻译通道由系统指定'
-    applyTransPrefs(current)
-  } catch (e) {
-    transEngine.innerHTML = '<option value="">通道加载失败</option>'
-  }
-  showOverlay(transPanel, true)
-}
-
-async function saveTransPrefs() {
-  const payload = {
-    transRecv: transRecv.checked ? 1 : 0,
-    transSend: transSend.checked ? 1 : 0,
-    transGroup: transGroup.checked ? 1 : 0,
-    includeZh: includeZh.checked ? 1 : 0,
-    langMine: langMine.value,
-    langOther: langOther.value,
-    engine: transEngine.value
-  }
-  if (current) {
-    current.transRecv = payload.transRecv
-    current.transSend = payload.transSend
-    current.transGroup = payload.transGroup
-    current.includeZh = payload.includeZh
-    current.langMine = payload.langMine
-    current.langOther = payload.langOther
-    current.activeEngine = payload.engine
-  }
-  try {
-    const resp = await window.pix.saveTranslatePrefs(payload)
-    transMsg.textContent = (resp && resp.msg) || '已保存'
-  } catch (e) {
-    transMsg.textContent = friendlyError(e, '保存失败')
-  }
-}
-
+// 翻译设置面板（fillLangs / applyTransPrefs / openTransPanel / saveTransPrefs）→ trans-settings.js
 ;[appOpsWrap, systemOpsWrap].forEach(el => {
   if (el) el.addEventListener('click', event => event.stopPropagation())
 })
@@ -1434,9 +842,7 @@ function backToLogin(msg) {
   authoritativeEngine = ''
   engineRows = []
   canSwitchEngine = true
-  preferAuto = true
-  selectedId = 'auto'
-  fastest = null
+  resetLines()
   showOverlay(profile, false)
   showOverlay(transPanel, false)
   showOverlay(addApp, false)
@@ -1451,7 +857,7 @@ function backToLogin(msg) {
   if (transBar) transBar.classList.add('is-collapsed')
   lineDd.classList.remove('open')
   loginError.textContent = msg || ''
-  renderLines()
+  refreshLinesView()
   startSpeedWatch()
 }
 
@@ -1495,6 +901,7 @@ if (window.pix.onContextCommand) {
         confirmCloseTab(row).then(ok => { if (ok) window.pix.close(row.id) })
         return
       }
+      if (command.action === 'closePlatformAsk') return closePlatformTabs(command)
       return
     }
     if (command === 'account') userBox.click()
@@ -1516,10 +923,9 @@ window.pix.getConfig().then(async cfg => {
     proxyPresetRows = (presets && presets.rows) || []
     syncProxyFields(false)
   } catch (e) {}
-  lineRows = (cfg && cfg.lines) || []
-  preferAuto = true
-  selectedId = 'auto'
-  renderLines()
+  // 先归零再落数据：setLineRows 内部会 renderLines，单线路时会自动锁定
+  resetLines()
+  setLineRows((cfg && cfg.lines) || [])
   bindAuthToggles()
   const auth = await window.pix.getAuth()
   if (auth && auth.remember) {
@@ -1529,9 +935,8 @@ window.pix.getConfig().then(async cfg => {
   }
   try {
     const remote = await window.pix.listLines()
-    if (remote && remote.rows && remote.rows.length) lineRows = remote.rows
+    if (remote && remote.rows && remote.rows.length) setLineRows(remote.rows)
   } catch (e) {}
-  renderLines()
   startSpeedWatch()
   loadSupport()
   if (loginBgVideo) loginBgVideo.play().catch(() => {})

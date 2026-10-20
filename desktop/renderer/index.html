@@ -72,16 +72,23 @@
 
   <div id="pixCollision" class="pix-collision" role="status" aria-live="polite"></div>
   <div id="shell" class="screen hidden">
-    <div class="stage">
+    <div id="stage" class="stage">
       <!-- 背景静态图同上；原 home-bg.mp4 已抽帧转 WebP 后移除 -->
       <div class="home-bg" aria-hidden="true"></div>
       <div id="tabsWrap" class="tabs-wrap">
         <div id="tabs" class="tabs"></div>
       </div>
+      <!-- ★ 侧面布局的内容列 ★
+           顶部布局：本层是透明壳（display: contents），子元素直接参与 .stage 的
+           纵向布局，与加这层之前的 DOM 结构完全等价 —— 不会影响任何既有样式。
+           侧面布局：.stage 转成横向，标签栏占左列，这一层占右列，顶栏/工作区/
+           底栏都留在右列里，不会被塞进竖栏。 -->
+      <div class="stage-side-main">
       <div class="utility">
         <button id="dndBtn" type="button" class="util-btn"><span class="util-ico">🔔</span>勿扰模式：<b id="dndText">关</b></button>
         <button id="lockBtn" type="button" class="util-btn"><span class="util-ico">🔒</span>锁屏 Hello Pix</button>
         <button id="themeBtn" type="button" class="util-btn" title="切换日间 / 夜间模式"><span class="util-ico" id="themeIco">🌙</span><span id="themeText">夜间</span></button>
+        <button id="tabLayoutBtn" type="button" class="util-btn" data-layout="top" title="标签栏：顶部（点击切换为侧面）"><span class="util-ico" id="tabLayoutIco">▤</span><span id="tabLayoutText">顶部</span></button>
         <div class="spacer"></div>
         <button id="userBox" type="button" class="util-btn accent">个人中心 <span class="caret">▾</span></button>
         <button id="transBarToggle" type="button" class="util-btn trans-toggle hidden">打开翻译设置</button>
@@ -177,6 +184,7 @@
           <button type="button" data-footer-action="download" data-download-key="standalone"><span>▥</span>独立应用版</button>
         </nav>
       </footer>
+      </div><!-- /.stage-side-main -->
     </div>
     <div id="lockScreen" class="lock-screen hidden">
       <div class="lock-card">
@@ -489,14 +497,37 @@
 
   <!-- 元素句柄必须在 app.js 之前：app.js 顶层会直接引用这些常量 -->
   <script src="dom.js"></script>
+
+  <!-- 界面基建（显隐/浮层/确认框/提示条）：被后面所有业务模块调用，必须最早 -->
+  <script src="ui-kit.js"></script>
   <!-- 纯函数与语种表同样必须先于 app.js -->
   <script src="pure.js"></script>
   <!-- 代理设置面板 -->
   <script src="proxy-panel.js"></script>
+  <!-- 标签栏布局（顶部/侧面）必须在 tabs.js 之前：后者按布局选滚动轴 -->
+  <script src="tab-layout.js"></script>
+  <!-- 撞单提醒 + 软件更新检测（app.js 启动时会调 checkCollisions） -->
+  <script src="collision-update.js"></script>
+
+  <!-- 站点信息（客服 / 页脚下载 / 独立应用）：与账号、标签栏无关的一整块 -->
+  <script src="site-info.js"></script>
+
+  <!-- 操作菜单（应用/系统下拉、按钮忙碌反馈） -->
+  <script src="ops-menu.js"></script>
   <!-- 顶部标签栏 -->
   <script src="tabs.js"></script>
+
+  <!-- 主题切换：启动校正 + 按钮绑定（app.js 之外单独负责） -->
+  <script src="theme-switch.js"></script>
+
+  <!-- 线路选择与测速：状态归它独占，add-app.js 建实例时只读 -->
+  <script src="lines.js"></script>
+
   <!-- 新增应用弹窗 -->
   <script src="add-app.js"></script>
+
+  <!-- 翻译设置面板：用到 add-app.js 的 engineToShow，必须排在它之后 -->
+  <script src="trans-settings.js"></script>
   <!-- 聊天翻译工具条 -->
   <script src="trans-bar.js"></script>
   <script src="app.js"></script>

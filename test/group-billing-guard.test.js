@@ -691,7 +691,7 @@ test('（真 DOM）切到自动后，手动留下的「译」必须被收掉；b
 // 0.1.23 的判据是 `main.querySelector('[data-testid*="group" i], [aria-label*="group" i]')`
 // —— 扫**整个 #main**，而 #main 里除了头部还装着**消息**。
 //
-// 真机探针（desktop/scripts/_probe-wa-dom2.js）在用户会话上抓到的实测结构：
+// 真机探针（已移除的 desktop/scripts/_probe-wa-dom2.js）在用户会话上抓到的实测结构：
 //   · data-id 是**纯消息哈希**（`3EB0F866490405692F3C`），不含 @c.us/@g.us；
 //     `jidHitCount = 0` —— 整个 document 里 @c.us/@g.us 出现 0 次。
 //   · 7 条消息带 WhatsApp **群邀请链接** → 渲染出链接预览卡片，内含

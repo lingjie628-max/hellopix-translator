@@ -114,8 +114,10 @@ test('上报体不包含 platform / accountKey —— 由主进程按 webContent
 })
 
 test('撞单横幅先做 warn（不阻止操作）且跨商户不渲染同事信息', () => {
-  const app = fs.readFileSync(path.join(__dirname, '..', 'desktop', 'renderer', 'app.js'), 'utf8')
-  const m = app.match(/function showCollisionBanner\([\s\S]*?\n\}/)
+  // showCollisionBanner 已迁到 collision-update.js（与更新检测同一类流程）
+  const src = fs.readFileSync(
+    path.join(__dirname, '..', 'desktop', 'renderer', 'collision-update.js'), 'utf8')
+  const m = src.match(/function showCollisionBanner\([\s\S]*?\n\}/)
   assert.ok(m, '找不到 showCollisionBanner')
   const body = m[0]
   // warn 模式：不能有 disable / preventDefault / 阻止发送之类

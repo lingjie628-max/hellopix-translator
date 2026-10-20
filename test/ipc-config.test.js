@@ -24,6 +24,7 @@ function harness (overrides) {
   const state = Object.assign({
     apiBase: 'https://a.example.com',
     theme: 'light',
+    tabLayout: 'top',
     lineId: 'overseas',
     backgroundRunning: true,
     lines: [
@@ -45,7 +46,7 @@ function harness (overrides) {
       fetchFrom: async (base, p) => { calls.push(['fetch', base, p]); return { ok: 1 } },
       isAllowedExternalUrl: (href, hosts) => hosts.some(h => String(href).includes(h))
     },
-    actions: {
+    actions: Object.assign({
       saveConfig: () => saved.push({ ...state }),
       setBackgroundRunning: v => { state.backgroundRunning = v },
       currentLine: () => state.lines.find(l => l.id === state.lineId),
@@ -59,8 +60,10 @@ function harness (overrides) {
       pingLine: async id => ({ id, ok: true }),
       pingAllLines: async () => ({ all: true }),
       openExternal: async url => { calls.push(['open', url]) },
-      detectProxyNode: async p => ({ detected: p })
-    }
+      detectProxyNode: async p => ({ detected: p }),
+      // 布局切换要重排原生视图；测试里换成计数桩
+      relayoutViews: () => ((global.__relayout = (global.__relayout || 0) + 1))
+    })
   })
   return { handlers, state, saved, calls }
 }
@@ -70,6 +73,7 @@ test('config:get 返回全部字段，含当前线路 id', () => {
   assert.deepEqual(handlers['config:get'](), {
     apiBase: 'https://a.example.com',
     theme: 'light',
+    tabLayout: 'top',
     backgroundRunning: true,
     lineId: 'overseas',
     lines: [{ id: 'overseas', url: 'https://a.example.com' }, { id: 'hk', url: 'https://b.example.com' }]
@@ -176,4 +180,35 @@ test('app:proxyPresets / proxy:detect 直接转发', async () => {
   const { handlers } = harness()
   assert.deepEqual(handlers['app:proxyPresets'](), { success: true, rows: [{ id: 'p1' }] })
   assert.deepEqual(await handlers['proxy:detect']({}, { node: 'x' }), { detected: { node: 'x' } })
+})
+
+// ---------------------------------------------------------------------------
+// 标签栏布局
+// ---------------------------------------------------------------------------
+
+test('config:setTabLayout 只认 top / side，其它值一律回落 top', () => {
+  const { handlers, state, saved } = harness()
+  assert.deepEqual(handlers['config:setTabLayout']({}, 'side'),
+    { success: true, tabLayout: 'side' })
+  assert.equal(state.tabLayout, 'side')
+  assert.equal(saved.length, 1, '必须落盘，否则重启后回到顶部')
+  // 拼错的/被篡改的值不能让界面处在"既不是顶部也不是侧面"的状态
+  assert.equal(handlers['config:setTabLayout']({}, 'sidebar').tabLayout, 'top')
+  assert.equal(handlers['config:setTabLayout']({}, undefined).tabLayout, 'top')
+})
+
+test('★ 切换布局必须让主进程重排原生视图（否则标签栏被实例视图盖住）', () => {
+  const { handlers } = harness()
+  global.__relayout = 0
+  handlers['config:setTabLayout']({}, 'side')
+  assert.equal(global.__relayout, 1)
+})
+
+test('★ 布局没变化时不重排：每次重排都会让原生视图闪一下', () => {
+  const { handlers } = harness()
+  global.__relayout = 0
+  handlers['config:setTabLayout']({}, 'top')   // 默认就是 top
+  assert.equal(global.__relayout, 0)
+  handlers['config:setTabLayout']({}, 'top')
+  assert.equal(global.__relayout, 0)
 })

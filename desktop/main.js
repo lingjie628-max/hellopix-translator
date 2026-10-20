@@ -181,6 +181,10 @@ let apiBase = DEFAULT_API
 // 默认日间（新用户首屏就是日间）；用户手动切到夜间后才记住用夜间。
 // 之所以不放 localStorage：渲染层每次都是新页面，靠 IPC 读主进程更可靠。
 let theme = 'light'
+// 标签栏布局：'top'（顶部一行，横向滚动）| 'side'（左侧竖栏）。
+// 账号一多，顶部一行放不下，25 个就得来回拖滚动条；侧面一屏能看十几个。
+// 存 config.json，与主题同样的理由：不在 localStorage 里各存一份。
+let tabLayout = 'top'
 let lineId = 'overseas'   // 内置首条线路的 id（见 desktop/lines.js）
 let lines = builtinLines.slice()
 let profile = null
@@ -832,6 +836,7 @@ function saveConfig() {
   writeJson(userFile('config.json'), {
     apiBase: apiBase,
     theme: theme,
+    tabLayout: tabLayout,
     backgroundRunning: backgroundRunning,
     lineId: lineId,
     lines: lines.map(l => ({
@@ -860,6 +865,8 @@ function loadConfig() {
   // （config.json 里压根没这个键）直接获得新行为，而不是被动保持旧的。
   backgroundRunning = cfg.backgroundRunning !== false
   theme = cfg.theme === 'dark' ? 'dark' : 'light'   // 默认日间
+  // 默认顶部：老用户升级上来看到的和以前一样，想换的自己换。
+  tabLayout = cfg.tabLayout === 'side' ? 'side' : 'top'
   const cached = Array.isArray(cfg.lines) ? cfg.lines.filter(l => !isLegacyLine(l)) : []
   lines = builtinLines.slice()
   if (cached.length) mergeLines(cached)
@@ -1397,6 +1404,10 @@ function activeWantsTransBar() {
 const viewLayout = require('./src/window/view-layout')
 
 function chromeOffset() {
+  // 侧面布局：标签栏不在顶部，顶部 chrome 里不能再算 TABS_HEIGHT，
+  // 否则视图顶部会凭空空出一条 80px 的横带。
+  // 这是首帧兜底值；哨兵上报之后一律以实测为准。
+  const side = tabLayout === 'side'
   return viewLayout.chromeOffset({
     hasMeasuredChrome: hasMeasuredChrome,
     measuredChromeHeight: measuredChromeHeight,
@@ -1405,12 +1416,22 @@ function chromeOffset() {
     measuredTransBarHeight: measuredTransBarHeight,
     wantsStatus: activeWantsStatus(),
     sizes: {
-      tabs: TABS_HEIGHT,
+      tabs: side ? 0 : TABS_HEIGHT,
       utility: UTILITY_HEIGHT,
       transBar: TRANS_BAR_HEIGHT,
       status: STATUS_HEIGHT
     }
   })
+}
+
+/**
+ * 侧面布局时左侧竖栏的宽度，顶部布局为 0。
+ * 与 styles.css 的 `--tabs-side-w` 保持一致 —— 改一边必须改另一边，
+ * 否则原生视图会盖住标签栏或中间留出一块黑缝。
+ */
+const TABS_SIDE_WIDTH = 200
+function chromeSideWidth() {
+  return tabLayout === 'side' ? TABS_SIDE_WIDTH : 0
 }
 
 let chromeAnim = null
@@ -1439,8 +1460,11 @@ function applyViewBounds(y, attach) {
     return
   }
   const size = win.getContentSize()
+  // 侧面布局下标签栏是左侧竖栏，视图必须整块右移；顶部模式侧栏宽为 0。
+  const side = chromeSideWidth()
   const bounds = viewLayout.viewBounds({
     y: y,
+    x: side,
     width: size[0],
     height: size[1],
     footerHeight: FOOTER_HEIGHT
@@ -2943,6 +2967,8 @@ require('./src/ipc/config').registerConfigIpc({
     set apiBase (v) { apiBase = v },
     get theme () { return theme },
     set theme (v) { theme = v },
+    get tabLayout () { return tabLayout },
+    set tabLayout (v) { tabLayout = v },
     get lineId () { return lineId },
     set lineId (v) { lineId = v },
     get backgroundRunning () { return backgroundRunning },
@@ -2952,6 +2978,7 @@ require('./src/ipc/config').registerConfigIpc({
   env: { safeApiUrl, DEFAULT_API, fetchFrom, isAllowedExternalUrl, EXTERNAL_HOSTS },
   actions: {
     saveConfig,
+    relayoutViews: layoutViews,
     setBackgroundRunning,
     currentLine,
     refreshLines,
@@ -3001,9 +3028,45 @@ const tabContextMenu = require('./src/window/tab-context-menu').createTabContext
   electron: { Menu, app },
   state: {
     get win () { return win },
-    get tabs () { return tabs }
+    get tabs () { return tabs },
+    get activeId () { return activeId }
   },
-  libs: { openLogDir, hideTab, openProxySettingsFor, updatePlatformWeb }
+  libs: {
+    openLogDir,
+    hideTab,
+    openProxySettingsFor,
+    updatePlatformWeb,
+    // 批量关同平台：逐个走 closeTab，复用它的"切走激活项 / 发标签 / 落盘"逻辑。
+    // 只关可见窗口 —— 隐藏的窗口在后台收消息，用户看不到它们，
+    // 在菜单里"关闭全部 WhatsApp"时被连带杀掉会非常意外。
+    closeTabsOfPlatform: platform => {
+      const ids = tabs
+        .filter(tab => tab.platform === platform && !tab.hidden)
+        .map(tab => tab.id)
+      if (!ids.length) return 0
+      ids.forEach(id => closeTab(id))
+      return ids.length
+    },
+    // 刷新全部同平台：隐藏的窗口不刷新 —— 它们正挂着收消息，
+    // 重新加载会打断登录/收信，而用户根本看不到它们在刷新。
+    refreshTabsOfPlatform: platform => {
+      let count = 0
+      tabs.forEach(tab => {
+        if (tab.platform !== platform || tab.hidden) return
+        try {
+          const wc = tab.view && tab.view.webContents
+          if (wc && !wc.isDestroyed()) { wc.reload(); count++ }
+        } catch (e) {}
+      })
+      return count
+    },
+    // 平台名：菜单标题要写"刷新全部WhatsApp"，而不是"刷新全部 whatsapp"。
+    // 平台行的标识字段是 id（不是 key），名字字段是 name。
+    platformLabel: platform => {
+      const row = fallbackPlatforms.find(p => p && p.id === platform)
+      return (row && row.name) || platform || ''
+    }
+  }
 })
 
 const popupTabContextMenu = tabContextMenu.popupTabContextMenu
