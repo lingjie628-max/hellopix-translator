@@ -861,9 +861,13 @@ test('源码守卫：兜底外壳必须同时盖住同步抛错与异步 reject'
 // 这类失效永远不会再"静默"。
 
 test('main.js 必须有 preload-error 监听（装载失败要进客户端日志）', () => {
+  // 监听已迁到 src/window/web-view.js
+  const impl = fs.readFileSync(path.join(root, 'desktop', 'src', 'window', 'web-view.js'), 'utf8')
+  assert.match(impl, /on\('preload-error'/, 'preload 装载失败必须留痕')
+  assert.match(impl, /logError\('preload'/, '必须以 error 级别写进客户端日志')
+  // main.js 必须真的把这个日志口接上，否则等于没写
   const main = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
-  assert.match(main, /on\('preload-error'/, 'preload 装载失败必须留痕')
-  assert.match(main, /clientLog\.error\('preload'/, '必须以 error 级别写进客户端日志')
+  assert.match(main, /logError:\s*\(channel, msg\)/, 'main.js 必须把 clientLog 接进工厂')
 })
 
 test('main.js 必须用「guest 是否来问 prefs」判断桥是否活着', () => {

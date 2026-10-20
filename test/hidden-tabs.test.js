@@ -44,11 +44,16 @@ test('隐藏计划：摘视图 + 节流 + 静音 + 停未读；正在加载才�
 test('backgroundThrottling 必须是 true —— 写 false 会让隐藏窗口后台空转', () => {
   // 实测：false 时隐藏窗口 2 秒触发定时器 20 次（跑满）；true 时只有 2 次。
   // 而可见时两者都是 20 次，所以 true 不牺牲任何可见窗口的响应。
-  const fn = extract(mainSrc, 'createWebView')
-  assert.ok(/backgroundThrottling:\s*true/.test(fn),
+  // createWebView 已迁到 src/window/web-view.js —— 守卫必须跟着走。
+  const impl = fs.readFileSync(
+    path.join(root, 'desktop', 'src', 'window', 'web-view.js'), 'utf8')
+  assert.ok(/backgroundThrottling:\s*true/.test(impl),
     'createWebView 必须用 true；这个开关只在创建时生效，事后改无效')
-  assert.ok(!/backgroundThrottling:\s*false/.test(fn),
+  assert.ok(!/backgroundThrottling:\s*false/.test(impl),
     '不能有任何一个实例创建时写死 false')
+  // 全仓库不能再有第二处创建 WebContentsView 的代码绕过这条
+  const main = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
+  assert.ok(!/new WebContentsView\(/.test(main), '实例视图只能由 web-view.js 工厂创建')
 })
 
 test('恢复计划：用户自己静音过就别替他开声音', () => {

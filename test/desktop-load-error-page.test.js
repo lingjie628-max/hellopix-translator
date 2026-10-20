@@ -163,12 +163,11 @@ test('★ startTabLoad 必须接住 loadURL 的失败', () => {
 })
 
 test('★ 必须挂 did-fail-load（promise 之外的到达通道）', () => {
-  // 精确取 createWebView 里的那一个 —— 文件里还有探针窗口/disableAutoLoad 的
-  // did-fail-load，用 indexOf 会抓错。
-  const idx = MAIN.indexOf("view.webContents.on('did-fail-load'")
+  // createWebView 已迁到 src/window/web-view.js
+  const src = fs.readFileSync(path.join(root, 'desktop', 'src', 'window', 'web-view.js'), 'utf8')
+  const idx = src.indexOf("view.webContents.on('did-fail-load'")
   assert.ok(idx > 0, 'createWebView 里必须挂 did-fail-load')
-  assert.match(MAIN, /on\('did-fail-load'/, '有些失败只走事件不走 promise')
-  const block = MAIN.slice(idx, idx + 600)
+  const block = src.slice(idx, idx + 600)
   assert.match(block, /isMainFrame|isMain/, 'iframe 失败不该顶掉整页（WhatsApp 里有第三方 iframe）')
   assert.match(block, /paintLoadError/, '必须接到错误页')
 })
@@ -187,7 +186,10 @@ test('paintLoadError 必须去重（promise 与事件会同时到达）', () => 
 })
 
 test('加载成功要清掉错误页标记，否则下次失败不再提示', () => {
-  assert.match(MAIN, /tab\.loadErrorUrl = ''/, '不清理会形成一个"点了没反应"的死角')
+  const src = fs.readFileSync(path.join(root, 'desktop', 'src', 'window', 'web-view.js'), 'utf8')
+  assert.match(src, /tab\.loadErrorUrl = ''/, '不清理会形成一个"点了没反应"的死角')
+  // 错误页自己加载完成时不能清 —— 否则持续失败会无限重画
+  assert.match(src, /data:text\/html/, '必须排除错误页自身触发的 did-finish-load')
 })
 
 test('加载失败要留日志（真机排障的唯一线索）', () => {

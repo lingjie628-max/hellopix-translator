@@ -70,9 +70,14 @@ test('第 2 层（主进程）：编辑快捷键在 WebContentsView 上被显式
 })
 
 test('第 2 层（主进程）：每个 WebContentsView 都装上了编辑支持', () => {
-  const src = (main.match(/function createWebView[\s\S]*?\n\}/) || [''])[0]
+  // createWebView 已迁到 src/window/web-view.js
+  const webViewSrc = fs.readFileSync(
+    path.join(root, 'desktop', 'src', 'window', 'web-view.js'), 'utf8')
+  const src = (webViewSrc.match(/function createWebView[\s\S]*?\n  \}/) || [''])[0]
   assert.ok(src.length > 0, '找不到 createWebView')
   assert.match(src, /installEditSupport\(view\)/, 'createWebView 没有给 view 装编辑支持')
+  // 实例创建必须来自这个工厂，不能有人在别处自己 new 一个
+  assert.match(main, /createWebViewFactory\.|createWebViewFactory\(/, 'main.js 必须走工厂创建实例')
 })
 
 test('第 2 层（主进程）：macOS 装了带编辑角色的应用菜单', () => {

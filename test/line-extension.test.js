@@ -137,7 +137,11 @@ test('main.js：先装扩展再打开页面；LINE 不挂翻译桥、不误报',
   assert.ok(load.indexOf('ensurePlatformExtension(tab)') >= 0 && load.indexOf('ensurePlatformExtension(tab)') < load.indexOf('loadURL(tab.url)'),
     'loadURL 之前必须先装扩展')
   assert.match(MAIN, /function bridgeEnabledFor\(item\) \{\s*return !!item && !item\.customUrl && item\.id !== 'tickets' && !item\.extension/)
-  assert.match(MAIN, /const bridgeEnabled = bridgeEnabledFor\(item\)/)
+  // bridgeEnabled 的使用点已迁到 src/window/web-view.js
+  const webViewSrc = fs.readFileSync(
+    path.join(__dirname, '..', 'desktop', 'src', 'window', 'web-view.js'), 'utf8')
+  assert.match(webViewSrc, /const bridgeEnabled = libs\.bridgeEnabledFor\(item\) && !libs\.safeModeDisablesBridge\(\)/,
+    '实例创建必须按 bridgeEnabledFor 决定挂不挂翻译桥')
   const wd = MAIN.slice(MAIN.indexOf('function watchdogBridge('))
   // 取整个函数体来断言，不要用固定字符数切片 —— 函数开头加几行注释/清理
   // 就会把目标断言挤出窗口，那是"测试写脆了"，不是功能坏了。
