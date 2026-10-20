@@ -225,10 +225,15 @@ test('恢复一个本来就没隐藏的窗口 = 切换，不能重复 attach', (
 })
 
 test('布局绝不能把隐藏窗口重新挂回视图树', () => {
-  const body = extract(mainSrc, 'layoutViews')
   const apply = extract(mainSrc, 'applyViewBounds')
-  assert.ok(/tab\.hidden/.test(apply), 'applyViewBounds 必须跳过隐藏窗口，否则它会盖住激活窗口')
-  void body
+  // applyViewBounds 现在只负责把 planLayout 的结论落到 Electron 上；
+  // 「跳过隐藏窗口」的判断搬进了 src/window/view-layout.js 的 planLayout。
+  // 这里同时验证接线和实现 —— 少任何一处，隐藏窗口都会盖住激活窗口。
+  assert.ok(/viewLayout\.planLayout\(/.test(apply),
+    'applyViewBounds 必须走 planLayout，否则隐藏窗口会盖住激活窗口')
+  const layoutSrc = fs.readFileSync(
+    path.join(root, 'desktop', 'src', 'window', 'view-layout.js'), 'utf8')
+  assert.ok(/tab\.hidden/.test(layoutSrc), 'planLayout 必须跳过隐藏窗口')
 })
 
 test('未读上报与全局角标都要跳过隐藏窗口', () => {

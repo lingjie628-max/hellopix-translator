@@ -1504,18 +1504,38 @@ function activeWantsTransBar() {
   return !tab.settings || tab.settings.showTransBar !== false
 }
 
+/**
+ * 视图几何与布局计划（实现见 src/window/view-layout.js）。
+ *
+ * 真正会算错的只有纯数据部分：y 从哪来、高度为什么扣 FOOTER、
+ * 什么时候全摘。它们算错了不抛错，只表现为"底部被截一条""切换后空白"，
+ * 真机上极难定位 —— 所以提成纯函数单独钉住。
+ * Electron 那一层（attach / detach / setBounds）仍留在这里。
+ */
+const viewLayout = require('./src/window/view-layout')
+
 function chromeOffset() {
-  // 首选哨兵实测值：标签栏/工具条/状态栏高度无论怎么变都自动生效
-  if (hasMeasuredChrome) return measuredChromeHeight
-  // 首帧（哨兵尚未上报）才按常量估算
-  return TABS_HEIGHT + UTILITY_HEIGHT + (activeWantsTransBar() ? (hasMeasuredBarHeight ? measuredTransBarHeight : TRANS_BAR_HEIGHT) : 0) + (activeWantsStatus() ? STATUS_HEIGHT : 0)
+  return viewLayout.chromeOffset({
+    hasMeasuredChrome: hasMeasuredChrome,
+    measuredChromeHeight: measuredChromeHeight,
+    wantsTransBar: activeWantsTransBar(),
+    hasMeasuredBarHeight: hasMeasuredBarHeight,
+    measuredTransBarHeight: measuredTransBarHeight,
+    wantsStatus: activeWantsStatus(),
+    sizes: {
+      tabs: TABS_HEIGHT,
+      utility: UTILITY_HEIGHT,
+      transBar: TRANS_BAR_HEIGHT,
+      status: STATUS_HEIGHT
+    }
+  })
 }
 
 let chromeAnim = null
 const CHROME_ANIM_MS = 420
 
 function easeOutCubic(t) {
-  return 1 - Math.pow(1 - t, 3)
+  return viewLayout.easeOutCubic(t)
 }
 
 function stopChromeAnim() {
@@ -1526,35 +1546,28 @@ function stopChromeAnim() {
 
 function applyViewBounds(y, attach) {
   if (!win || win.isDestroyed()) return
-  // destroyTab 会把 tab.view 置空（断开引用让 GC 能收）。这里必须容忍 null ——
-  // 关闭标签与重排是同一个事件循环里的连续动作，中间就会看到已被置空的 tab。
-  const live = tabs.filter(tab => tab && tab.view)
-  if (overlayOpen || showHome || !live.length) {
-    live.forEach(tab => detachView(tab.view))
+  const plan = viewLayout.planLayout({
+    tabs: tabs,
+    activeId: activeId,
+    overlayOpen: overlayOpen,
+    showHome: showHome
+  })
+  if (plan.detachAll) {
+    plan.detach.forEach(tab => detachView(tab.view))
     return
   }
   const size = win.getContentSize()
-  const top = Math.max(0, Math.round(y))
-  const bounds = {
-    x: 0,
-    y: top,
-    width: Math.max(0, size[0]),
-    height: Math.max(0, size[1] - top - FOOTER_HEIGHT)
-  }
-  live.forEach(tab => {
-    // 隐藏的窗口绝不能重新挂回去：它已经不在标签栏上了，
-    // 挂在视图树上就会盖住激活窗口（用户看到的是一块莫名其妙的画面）。
-    if (tab.hidden) {
-      detachView(tab.view)
-      return
-    }
-    if (tab.id === activeId) {
-      tab.view.setBounds(bounds)
-      if (attach) attachView(tab.view)
-    } else {
-      detachView(tab.view)
-    }
+  const bounds = viewLayout.viewBounds({
+    y: y,
+    width: size[0],
+    height: size[1],
+    footerHeight: FOOTER_HEIGHT
   })
+  plan.detach.forEach(tab => detachView(tab.view))
+  if (plan.active) {
+    plan.active.view.setBounds(bounds)
+    if (attach) attachView(plan.active.view)
+  }
 }
 
 function currentViewY() {
