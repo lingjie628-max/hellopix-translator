@@ -429,11 +429,19 @@ test('【1】preload 暴露了读取与订阅代理设置的通道', () => {
 })
 
 test('app:proxySettings 只回传代理字段，且只认主窗口来源', () => {
-  const idx = mainSrc.indexOf("ipcMain.handle('app:proxySettings'")
+  // handler 已迁到 src/ipc/tabs.js
+  const impl = fs.readFileSync(path.join(root, 'desktop', 'src', 'ipc', 'tabs.js'), 'utf8')
+  const idx = impl.indexOf("'app:proxySettings'")
   assert.ok(idx > 0, '缺少 app:proxySettings IPC')
-  const body = mainSrc.slice(idx, idx + 600)
-  assert.ok(body.includes('isMainSender(event)'), '必须校验来源是主窗口')
+  const body = impl.slice(idx, idx + 500)
   assert.ok(body.includes('proxySettingsOf'), '必须用 proxySettingsOf 只挑代理字段')
+  // 来源校验已由注册器统一提供：它必须是受保护的 handle()，不能是 handleUnsafe
+  assert.ok(!/handleUnsafe\('app:proxySettings'/.test(impl), '这个频道不能让客页调用')
+  assert.match(impl.slice(Math.max(0, idx - 100), idx), /reg\.handle\(/,
+    '必须走受保护的 reg.handle（注册器负责 isMainSender 校验）')
+  // 且 main.js 里不该再有这个频道的注册
+  assert.ok(!/ipcMain\.handle\('app:proxySettings'/.test(mainSrc),
+    'main.js 里不该再有这个频道的注册')
 })
 
 // ───────────────────────────────────────── 第 9 项：弹窗能加载当前配置

@@ -3391,8 +3391,6 @@ ipcMain.handle('app:savePreset', (event, payload) => {
   return { success: true }
 })
 
-ipcMain.handle('app:tabs', () => tabPayload())
-
 /**
  * 翻译相关 IPC（实现见 src/ipc/translate.js）。
  *
@@ -3420,6 +3418,39 @@ require('./src/ipc/translate').registerTranslateIpc({
     requestTranslate
   },
   env: { tabPrefs, stripEmoji, stripBusyMarks, pickLang }
+})
+
+/**
+ * 标签页操作 IPC（实现见 src/ipc/tabs.js）。
+ *
+ * 这组碰的最多：tabs / activeId / webContents / 原生菜单 / 落盘。
+ * 隐藏不是关闭 —— 隐藏要保留进程和登录态，从 tabs 里删掉才是关闭。
+ */
+require('./src/ipc/tabs').registerTabsIpc({
+  reg: ipcReg,
+  state: {
+    get tabs () { return tabs },
+    get activeId () { return activeId },
+    set overlayOpen (v) { overlayOpen = v }
+  },
+  actions: {
+    tabPayload,
+    openPlatform,
+    closeTab,
+    switchTab,
+    hideTab,
+    showHiddenTab,
+    popupTabContextMenu,
+    goHome,
+    readPresets: () => readJson(userFile('app-presets.json'), {}),
+    writePresets: all => writeJson(userFile('app-presets.json'), all),
+    sendTabs,
+    saveOpenApps,
+    updateTabSettings,
+    layoutViews,
+    relaunchAndExit: () => { app.relaunch(); app.exit(0) }
+  },
+  env: { sealSettings, stripProxyFields, proxySettingsOf }
 })
 
 /**
@@ -3572,141 +3603,6 @@ function popupTabContextMenu(payload) {
   return { success: true }
 }
 
-ipcMain.handle('app:rename', (_event, payload) => {
-  const id = String((payload && payload.id) || '')
-  const next = String((payload && payload.name) || '').trim()
-  const tab = tabs.find(t => t.id === id)
-  if (!tab) return { success: false, msg: '应用不存在' }
-  if (!next) return { success: false, msg: '名称不能为空' }
-  tab.name = next
-  tab.title = next
-  const all = readJson(userFile('app-presets.json'), {})
-  const prev = all[tab.platform] || {}
-  // 兜底值以前是 `tab.settings`，那会把这条线路**正在用的代理**写进模板，
-  // 于是"改个名字"就成了一次静默的代理泄漏：下一个新建实例会继承它。
-  // 模板永远不含代理，所以两个来源都要先摘干净。
-  all[tab.platform] = { name: next, settings: sealSettings(stripProxyFields(prev.settings || tab.settings || {})) }
-  writeJson(userFile('app-presets.json'), all)
-  sendTabs()
-  saveOpenApps()
-  return { success: true }
-})
-ipcMain.handle('app:reorder', (_event, payload) => {
-  // 拖拽排序：只接受"把 A 挪到 B 前面/后面"，不接受渲染层直接给整个数组 ——
-  // 渲染层的列表是**过滤后**的（主页、右侧分组都不在里面），整表覆盖会把
-  // 它看不见的窗口挤到未知位置。
-  const draggedId = String((payload && payload.id) || '')
-  const targetId = String((payload && payload.targetId) || '')
-  const before = payload && payload.before !== false
-  const from = tabs.findIndex(t => t.id === draggedId)
-  if (from < 0) return { success: false, msg: '窗口不存在' }
-  // 主页是固定的：把它当唯一基准时，就是"挪到最前/最后"。
-  if (!targetId || targetId === 'home') {
-    const [row] = tabs.splice(from, 1)
-    if (before) tabs.unshift(row)
-    else tabs.push(row)
-    sendTabs()
-    saveOpenApps()
-    return { success: true }
-  }
-  const to = tabs.findIndex(t => t.id === targetId)
-  if (to < 0) return { success: false, msg: '目标窗口不存在' }
-  if (from === to) return { success: false, msg: '位置未变化' }
-  const [row] = tabs.splice(from, 1)
-  // 摘掉之后目标下标会左移一格，所以"插到目标前"直接用新下标即可。
-  const insertAt = before ? tabs.findIndex(t => t.id === targetId) : tabs.findIndex(t => t.id === targetId) + 1
-  tabs.splice(insertAt < 0 ? tabs.length : insertAt, 0, row)
-  sendTabs()
-  saveOpenApps()
-  return { success: true }
-})
-ipcMain.handle('app:open', (event, payload) => isMainSender(event) ? openPlatform(payload || {}) : rejectUntrustedSender())
-ipcMain.handle('app:close', (_event, id) => closeTab(id))
-ipcMain.handle('app:switch', (_event, id) => switchTab(id))
-ipcMain.handle('app:hide', (_event, id) => hideTab(String(id || activeId || '')))
-ipcMain.handle('app:showHidden', (_event, id) => showHiddenTab(String(id || '')))
-ipcMain.handle('app:showContextMenu', (_event, payload) => popupTabContextMenu(payload || {}))
-ipcMain.handle('app:reloadActive', () => {
-  const tab = tabs.find(t => t.id === activeId)
-  const wc = tab && tab.view && tab.view.webContents
-  if (!wc || wc.isDestroyed()) return { success: false, msg: '当前没有打开的应用' }
-  wc.reload()
-  return { success: true, msg: '已刷新当前应用' }
-})
-ipcMain.handle('app:clearActiveCache', async () => {
-  const tab = tabs.find(t => t.id === activeId)
-  const wc = tab && tab.view && tab.view.webContents
-  if (!wc || wc.isDestroyed()) return { success: false, msg: '当前没有打开的应用' }
-  try {
-    await wc.session.clearCache()
-    wc.reloadIgnoringCache()
-    return { success: true, msg: '缓存已清理' }
-  } catch (e) {
-    return { success: false, msg: e.message || '缓存清理失败' }
-  }
-})
-ipcMain.handle('app:contextAction', async (_event, payload) => {
-  const id = String((payload && payload.id) || activeId || '')
-  const action = String((payload && payload.action) || '')
-  const tab = tabs.find(t => t.id === id)
-  if (action === 'close') {
-    // 关闭必须经过渲染层的二次确认。这里直接关会绕过确认 ——
-    // 而「误点一下就把号关了」正是要防的事，所以只回一句去走确认流程。
-    return { success: false, msg: '关闭窗口需二次确认', needConfirm: true }
-  }
-  if (!tab || !tab.view || !tab.view.webContents || tab.view.webContents.isDestroyed()) {
-    return { success: false, msg: '应用不存在' }
-  }
-  const wc = tab.view.webContents
-  const history = wc.navigationHistory
-  try {
-    if (action === 'back') {
-      const allowed = history && typeof history.canGoBack === 'function'
-        ? history.canGoBack()
-        : typeof wc.canGoBack === 'function' && wc.canGoBack()
-      if (!allowed) return { success: false, msg: '没有上一页' }
-      if (history && typeof history.goBack === 'function') history.goBack()
-      else wc.goBack()
-      return { success: true }
-    }
-    if (action === 'forward') {
-      const allowed = history && typeof history.canGoForward === 'function'
-        ? history.canGoForward()
-        : typeof wc.canGoForward === 'function' && wc.canGoForward()
-      if (!allowed) return { success: false, msg: '没有下一页' }
-      if (history && typeof history.goForward === 'function') history.goForward()
-      else wc.goForward()
-      return { success: true }
-    }
-    if (action === 'reload') {
-      wc.reload()
-      return { success: true }
-    }
-    if (action === 'zoomIn' || action === 'zoomOut' || action === 'zoomReset') {
-      const current = Number(wc.getZoomFactor()) || 1
-      const next = action === 'zoomReset'
-        ? 1
-        : Math.min(2, Math.max(0.5, current + (action === 'zoomIn' ? 0.1 : -0.1)))
-      wc.setZoomFactor(Number(next.toFixed(2)))
-      return { success: true, msg: Math.round(next * 100) + '%' }
-    }
-    if (action === 'clearCache') {
-      await wc.session.clearCache()
-      wc.reloadIgnoringCache()
-      return { success: true, msg: '缓存已清理' }
-    }
-  } catch (e) {
-    return { success: false, msg: e.message || '操作失败' }
-  }
-  return { success: false, msg: '不支持该操作' }
-})
-ipcMain.handle('app:restart', () => {
-  setTimeout(() => {
-    app.relaunch()
-    app.exit(0)
-  }, 120)
-  return { success: true }
-})
 /**
  * 读取一条线路当前的代理配置，供「代理设置」弹窗回填。
  *
@@ -3715,15 +3611,6 @@ ipcMain.handle('app:restart', () => {
  * 这与「新增应用」弹窗从预设回填密码的行为保持一致；
  * 落盘时仍由 saveOpenApps 走 sealSettings 加密。
  */
-ipcMain.handle('app:proxySettings', (event, payload) => {
-  if (!isMainSender(event)) return rejectUntrustedSender()
-  const id = String((payload && payload.id) || '')
-  const tab = tabs.find(t => t.id === id)
-  if (!tab) return { success: false, msg: '应用不存在' }
-  return { success: true, data: proxySettingsOf(tab.settings) }
-})
-ipcMain.handle('app:updateSettings', (_event, payload) => updateTabSettings((payload && payload.id) || '', (payload && payload.settings) || {}))
-ipcMain.handle('app:home', () => goHome())
 ipcMain.handle('app:version', () => APP_VERSION)
 ipcMain.handle('app:checkUpdate', async () => {
   const local = APP_VERSION
@@ -3777,13 +3664,6 @@ ipcMain.handle('customer:reminders', async () => {
 
 // 渲染层加载时主动查一次：警告条不能只在"刚变成坏"的那一刻出现 ——
 // 渲染层重载、切标签、重启后都要能恢复显示。
-ipcMain.handle('app:overlay', (event, on) => {
-  if (!isMainSender(event)) return rejectUntrustedSender()
-  overlayOpen = !!on
-  layoutViews()
-  return { success: true }
-})
-
 app.whenReady().then(() => {
   applyAppIdentity()
   // 必须在 applyAppIdentity() 之后：日志目录由 app name 推导（见 initClientLog）。

@@ -535,13 +535,16 @@ test('验收 14：不同实例不得共享代理认证凭据', () => {
 // ---------------------------------------------------------------------------
 
 test('模板的三个写入/读取口子都摘了代理', () => {
+  // app:rename 已迁到 src/ipc/tabs.js，另两个还在 main.js
+  const tabsSrc = fs.readFileSync(
+    path.join(__dirname, '..', 'desktop', 'src', 'ipc', 'tabs.js'), 'utf8')
   // app:preset —— 注意必须是 `unsealSettings(stripProxyFields(...))`：
   // 摘代理这一步要**嵌在解密里面**，模板里的密码连解密都不会走到。
   assert.match(mainSrc, /unsealSettings\(stripProxyFields\(row\.settings\)\)/,
     'app:preset 没有先摘代理再解密')
   assert.match(mainSrc, /settings: sealSettings\(stripProxyFields\(\(payload && payload\.settings\) \|\| \{\}\)\)/,
     'app:savePreset 没有摘代理')
-  assert.match(mainSrc, /settings: sealSettings\(stripProxyFields\(prev\.settings \|\| tab\.settings \|\| \{\}\)\)/,
+  assert.match(tabsSrc, /sealSettings\(env\.stripProxyFields\(prev\.settings \|\| tab\.settings \|\| \{\}\)\)/,
     'app:rename 的兜底值没有摘代理')
 })
 

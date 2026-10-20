@@ -330,10 +330,13 @@ test('垃圾桶批量关闭要确认一次，且文案给出数量', () => {
 })
 
 test('底层 close 通道不能无确认放行', () => {
-  const at = mainSrc.indexOf("if (action === 'close')")
-  assert.ok(at >= 0)
-  const block = mainSrc.slice(at, at + 300)
+  // contextAction 已迁到 src/ipc/tabs.js
+  const impl = fs.readFileSync(path.join(root, 'desktop', 'src', 'ipc', 'tabs.js'), 'utf8')
+  const at = impl.indexOf("if (action === 'close')")
+  assert.ok(at >= 0, '找不到 contextAction 的 close 分支')
+  const block = impl.slice(at, at + 300)
   assert.ok(/needConfirm/.test(block), 'contextAction 的 close 必须被拦下')
+  assert.ok(!/if \(action === 'close'\) return closeTab/.test(impl))
   assert.ok(!/if \(action === 'close'\) return closeTab/.test(mainSrc))
 })
 
