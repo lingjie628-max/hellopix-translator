@@ -4297,3 +4297,52 @@ app.on('window-all-closed', () => {
 // 与托盘左键单击走同一条路径；窗口被异常销毁时 showMainWindow 会重建，
 // 避免"图标点了没反应"。
 app.on('activate', () => showMainWindow())
+
+// ---------------------------------------------------------------------------
+// 测试钩子（仅非打包环境生效）
+//
+// 26 个测试文件靠 `extract(mainSrc, '函数名')` 从源码里抠函数体、手拼依赖塞进
+// VM —— 一旦把函数拆进独立模块，这套写法会成片误报，而误报会掩盖真回归。
+//
+// 这里挂一个只读导出：测试可以直接拿到「真身」，不必再复制一份源码。
+// 判据用 `!app.isPackaged`，打包产物里这段等于不存在。
+// ---------------------------------------------------------------------------
+if (!app.isPackaged) {
+  global.__pixMainTestExports = {
+    // 函数真身
+    effectiveMaxTabs, safeModeDisablesBridge, timingEqual, sealSettings, unsealSettings,
+    readJson, writeJson, asyncJson, flushSyncStores,
+    accountSlug, makePartition, platformHomeUrl, safeApiUrl, safePlatformHomeUrl,
+    unreadFromTitle, isLegacyLine, normalizeLine, mergeLines,
+    publicAuth, deviceId, isRetryableNetworkError, classifyTransportError,
+    settingOn, groupModeOf, resolveGroupEnabled, normalizeTabSettings,
+    tabTransPayload, platformRows, platformHasCache, fingerprintFromHtml,
+    activeWantsStatus, activeWantsTransBar, easeOutCubic,
+    guestPrefs, trustedTabSender, pickLang, tabPrefs,
+    stripBusyMarks, stripEmoji, transCacheKey, transFingerprint, transRequestId,
+    isDeadRequest, relayKeyOf, parseJsonSafe, proxyHistoryFile,
+    bridgeEnabledFor, rejectUntrustedSender, composerTargetOf,
+    unreadFromTitle, bindTabUnread, syncGlobalUnread, bindTabLoading,
+    tabPayload, sendTabs, layoutViews, applyViewBounds,
+    hideTab, showHiddenTab, createWebView, popupTabContextMenu,
+    // 状态读取器：拿的是**实时值**，不是快照
+    __state: {
+      theme: () => theme,
+      lineId: () => lineId,
+      lines: () => lines,
+      activeId: () => activeId,
+      showHome: () => showHome,
+      overlayOpen: () => overlayOpen,
+      nextTab: () => nextTab,
+      usedCount: () => usedCount,
+      profile: () => profile,
+      apiBase: () => apiBase,
+      tabs: () => tabs.map(t => ({ id: t.id, platformId: t.platformId, hidden: !!t.hidden, name: t.name })),
+      isQuitting: () => isQuitting,
+      backgroundRunning: () => backgroundRunning,
+      effectiveMaxTabs: () => effectiveMaxTabs(),
+      guestPrefs: () => guestPrefs(),
+      hasClientLog: () => !!clientLog
+    }
+  }
+}
