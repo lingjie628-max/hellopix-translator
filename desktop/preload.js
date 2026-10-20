@@ -32,9 +32,14 @@ contextBridge.exposeInMainWorld('pix', {
   savePreset: (payload) => ipcRenderer.invoke('app:savePreset', payload),
   tabs: () => ipcRenderer.invoke('app:tabs'),
   renameTab: (id, name) => ipcRenderer.invoke('app:rename', { id: id, name: name }),
+  reorderTabs: (id, targetId, before) => ipcRenderer.invoke('app:reorder', { id: id, targetId: targetId, before: before !== false }),
   open: (payload) => ipcRenderer.invoke('app:open', payload),
   close: (id) => ipcRenderer.invoke('app:close', id),
   switchTab: (id) => ipcRenderer.invoke('app:switch', id),
+  // 隐藏窗口 = 从标签栏移除但进程保留（不掉号、不丢设置），回到后台挂着
+  hideTab: (id) => ipcRenderer.invoke('app:hide', id),
+  // 把后台的窗口重新展示出来（不重新加载，直接回到原来的画面）
+  showHiddenTab: (id) => ipcRenderer.invoke('app:showHidden', id),
   reloadActiveApp: () => ipcRenderer.invoke('app:reloadActive'),
   clearActiveAppCache: () => ipcRenderer.invoke('app:clearActiveCache'),
   contextAction: (id, action) => ipcRenderer.invoke('app:contextAction', { id: id, action: action }),

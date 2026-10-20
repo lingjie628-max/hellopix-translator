@@ -36,6 +36,7 @@ const { readPageText } = require('./probe-page')
 const loadErrorPage = require('./load-error-page')
 const instanceSlot = require('./instance-slot')
 const backgroundMode = require('./background-mode')
+const hiddenTabs = require('./hidden-tabs')
 const {
   csvHosts,
   trustedApiHosts,
@@ -491,6 +492,9 @@ function saveOpenApps() {
       icon: t.icon,
       partition: t.partition,
       url: t.url || '',
+      // 隐藏状态必须落盘：否则重启软件后隐藏窗口全部回到标签栏，
+      // 用户会以为"隐藏"没记住。
+      hidden: !!t.hidden,
       settings: sealSettings(t.settings)
     })
   })
@@ -562,6 +566,9 @@ function bindTabUnread(tab) {
   let clearTimer = null
   const wc = tab.view.webContents
   const apply = n => {
+    // 隐藏的窗口不计未读：它的定义就是"静默地挂着"。
+    // 不看这个标记，隐藏窗口收到消息照样推角标 —— 用户会以为隐藏没生效。
+    if (tab.hidden && !hiddenTabs.shouldNotifyWhenHidden()) return
     if ((tab.unread || 0) === n) return
     tab.unread = n
     sendTabs()
@@ -587,8 +594,11 @@ let lastGlobalUnread = -1
 
 /** Dock / 任务栏角标：只统计开了「包含在全局未读消息提示中」的标签。 */
 function syncGlobalUnread() {
-  const total = tabs.reduce((sum, t) =>
-    sum + ((t.settings && t.settings.globalUnread === false) ? 0 : (t.unread || 0)), 0)
+  const total = tabs.reduce((sum, t) => {
+    // 隐藏的窗口一律不计入角标 —— 同理，隐藏 = 不提醒。
+    if (t.hidden) return sum
+    return sum + ((t.settings && t.settings.globalUnread === false) ? 0 : (t.unread || 0))
+  }, 0)
   if (total === lastGlobalUnread) return
   lastGlobalUnread = total
   try { app.setBadgeCount(total) } catch (e) {}
@@ -632,7 +642,9 @@ function restoreOneApp(row) {
     settings: settings,
     partition: partition,
     url: homeUrl,
-    loading: true
+    loading: true,
+    // 上次退出时处于隐藏状态的窗口，重启后继续保持隐藏（后台跑着）。
+    hidden: !!row.hidden
   }
   if (settings.muteAll) view.webContents.setAudioMuted(true)
   bindTabLoading(tab)
@@ -657,10 +669,16 @@ function restoreOpenApps(username) {
   })
   // 只有**真的建出 tab** 的才算本实例管理（见 seededTabIds 的说明）。
   tabs.forEach(t => seededTabIds.add(String(t.id)))
-  if (data.activeId && tabs.find(t => t.id === data.activeId)) activeId = data.activeId
-  else if (tabs.length) activeId = tabs[0].id
+  // 上次退出时激活的窗口现在可能是隐藏状态 —— 不能把隐藏窗口设为激活，
+  // 否则界面会停在空视图上（标签栏里没有任何高亮项）。
+  if (data.activeId && tabs.find(t => t.id === data.activeId && !t.hidden)) activeId = data.activeId
+  else {
+    const firstVisible = tabs.find(t => !t.hidden)
+    activeId = firstVisible ? firstVisible.id : ''
+  }
   showHome = data.showHome !== false
-  if (!tabs.length) showHome = true
+  // 全都被隐藏（或没有窗口）时回主页，不能留空视图。
+  if (!activeId) showHome = true
   layoutViews()
   sendTabs()
 }
@@ -1270,6 +1288,9 @@ function tabPayload() {
       // 不能让它看起来和正常窗口一样（0.1.12 就是这样静默坑人的）。
       bridgeDown: bridgeHealth.get(t.id) ? bridgeHealth.get(t.id).ok === false : false,
       unread: (t.settings && t.settings.tabUnread === false) ? 0 : (t.unread || 0),
+      // 隐藏的窗口仍在 tabs 里（进程活着），但不能出现在标签栏。
+      // 渲染层据此分两处展示：可见的进标签栏，隐藏的进"后台运行中"。
+      hidden: !!t.hidden,
       trans: tabTransPayload(t)
     }))
   }
@@ -1508,6 +1529,12 @@ function applyViewBounds(y, attach) {
     height: Math.max(0, size[1] - top - FOOTER_HEIGHT)
   }
   live.forEach(tab => {
+    // 隐藏的窗口绝不能重新挂回去：它已经不在标签栏上了，
+    // 挂在视图树上就会盖住激活窗口（用户看到的是一块莫名其妙的画面）。
+    if (tab.hidden) {
+      detachView(tab.view)
+      return
+    }
     if (tab.id === activeId) {
       tab.view.setBounds(bounds)
       if (attach) attachView(tab.view)
@@ -1616,11 +1643,111 @@ function goHome() {
 function switchTab(id) {
   const tab = tabs.find(t => t.id === id)
   if (!tab) return { success: false, msg: '窗口不存在' }
+  // 隐藏的窗口不在标签栏上，点它等于"把它叫回来"，必须先恢复再激活。
+  // 不这样处理的话会切到一个没挂在视图树上的窗口 —— 界面一片空白。
+  if (tab.hidden) return showHiddenTab(id)
   activeId = id
   showHome = false
   // 切换标签会改变顶部 chrome 高度（不同标签的工具条/状态栏偏好不同），
   // CSS 有 420ms 过渡动画，这里必须同样走动画，否则原生视图瞬间跳变造成错位。
   // animateChromeTo 在高度未变时会自行回退到 layoutViews。
+  animateChromeTo(chromeOffset())
+  sendTabs()
+  saveOpenApps()
+  return { success: true }
+}
+
+/**
+ * ★ 隐藏窗口（后台保活）★
+ *
+ * 语义：窗口从标签栏消失、不再提醒新消息、但网页版会话**完全保留**，
+ * 随时点一下就能回来。用户原话是"不掉号、不丢设置、挂着但不占资源"。
+ *
+ * 实现上最关键的一条：**绝不 destroy webContents**。
+ * 网页版的登录态有一部分活在内核内存里，销毁进程 = 必然重新扫码，
+ * 那就直接违背了"不掉号"。所以只是从视图树上摘下来 + 静音 + 停未读。
+ *
+ * ## 资源占用（实测，见 desktop/scripts/bench-hidden-memory.js）
+ *
+ *   - 内存：每个窗口约 60-70MB，隐藏只省 15MB 左右。
+ *     剩下的全是渲染进程本身的开销 —— 这是"不掉号"的代价，省不掉。
+ *   - CPU：帧率 60 → 1，且配合 backgroundThrottling 后定时器降 90%。
+ *     这部分才是用户能感知到的"不卡了"。
+ *
+ * 所以不能对用户承诺"隐藏后几乎不占内存"。真实的承诺是：
+ * **隐藏后不再抢 CPU/GPU，内存占用不变。**
+ *
+ * 注意 hidden 标记必须落盘（saveOpenApps 会带上），否则重启软件后
+ * 隐藏窗口会全部"复活"到标签栏 —— 用户会以为设置丢了。
+ */
+function hideTab(id) {
+  const tab = tabs.find(t => t.id === id)
+  const verdict = hiddenTabs.canHide(tab, tabs.filter(t => !t.hidden).length)
+  if (!verdict.ok) return { success: false, msg: verdict.msg }
+
+  const plan = hiddenTabs.hidePlan(tab)
+  tab.hidden = true
+  // 隐藏前先把未读清零，避免角标停在旧数字上不再更新（看起来像卡死）。
+  tab.unread = 0
+  plan.forEach(step => {
+    try {
+      // 节流由创建时的 backgroundThrottling:true 保证，摘掉视图即生效。
+      // 这里再兜一次：老版本创建的 view 可能带着 false，能改就改。
+      if (step === 'throttle' && typeof tab.view.webContents.setBackgroundThrottling === 'function') {
+        tab.view.webContents.setBackgroundThrottling(true)
+      }
+      if (step === 'detach') detachView(tab.view)
+      if (step === 'mute') tab.view.webContents.setAudioMuted(true)
+      if (step === 'stopLoading') tab.view.webContents.stop()
+    } catch (e) {}
+  })
+
+  // 藏掉的正好是当前窗口 → 必须切走，否则界面会停在空视图上。
+  if (activeId === id) {
+    const next = hiddenTabs.nextActiveAfterHide(tabs, id)
+    if (next) {
+      activeId = next
+      showHome = false
+    } else {
+      activeId = ''
+      showHome = true
+    }
+  }
+  layoutViews()
+  sendTabs()
+  saveOpenApps()
+  return { success: true, msg: '已隐藏，后台继续运行' }
+}
+
+/**
+ * 把隐藏的窗口重新展示出来。
+ *
+ * 不需要重新加载页面 —— 进程一直活着，直接挂回视图树即可，
+ * 用户重新看到的是他离开时那一帧、那些登录状态。
+ */
+function showHiddenTab(id) {
+  const tab = tabs.find(t => t.id === id)
+  if (!tab) return { success: false, msg: '窗口不存在' }
+  if (!tab.hidden) {
+    // 点的是已经在标签栏里的窗口：等价于切换，不能再走一遍 attach。
+    return switchTab(id)
+  }
+
+  hiddenTabs.showPlan(tab).forEach(step => {
+    try {
+      if (step === 'clearHidden') tab.hidden = false
+      // unmute 必须在清掉 hidden 之后 —— 否则若此时有一条迟到的标题事件，
+      // 会被当成"隐藏中"吞掉，导致恢复后首条未读丢失。
+      if (step === 'unmute') tab.view.webContents.setAudioMuted(false)
+    } catch (e) {}
+  })
+  // 恢复后刷新一次真实未读：隐藏期间标题数一直在变，我们只是没上报。
+  try {
+    tab.unread = unreadFromTitle(tab.view.webContents.getTitle())
+  } catch (e) {}
+
+  activeId = id
+  showHome = false
   animateChromeTo(chromeOffset())
   sendTabs()
   saveOpenApps()
@@ -2859,7 +2986,24 @@ function createWebView(partition, settings, item, homeUrl, tabInfo) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      backgroundThrottling: false
+      // ★ 必须是 true（默认值），不能写 false ★
+      //
+      // 写 false 的语义是"即使窗口在后台，也别节流定时器/渲染"。
+      // 实测代价（probe-hidden-throttling.js）：
+      //   隐藏窗口 2 秒内定时器触发 20 次（跑满），而 true 时只有 2-3 次。
+      // 用户反馈的"开多了就卡、内存压力大"里，很大一块就是这里的后台空转。
+      //
+      // 那为什么可以放心用 true？实测（probe-throttle-strategy.js）：
+      //   - 可见且聚焦：20/20 满速
+      //   - 可见但 App 失焦：20/20 满速（收消息不受影响）
+      //   - 隐藏（摘掉视图）：2/20，自动降到极低
+      //   - 重新展示：立刻回到 20/20，不"粘住"
+      // 也就是说 Chromium 是**按可见性**节流的，不是按 App 是否在前台，
+      // 所以把隐藏窗口压下去的同时，一点都没牺牲可见窗口的响应。
+      //
+      // 注意：这个开关只能在创建时设定，事后 setBackgroundThrottling(true) 无效
+      // （实测隐藏后仍跑满 20 次）—— 所以只能在这里一次写对。
+      backgroundThrottling: true
     }
   })
   if (typeof view.setBorderRadius === 'function') view.setBorderRadius(0)
@@ -3584,6 +3728,15 @@ function popupTabContextMenu(payload) {
       wc.setZoomFactor(Number(Math.min(2, Math.max(0.5, current + delta)).toFixed(2)))
     }
     template = [
+      { label: '重命名窗口…', click: () => sendCommand({ action: 'rename', id: tab.id }) },
+      {
+        // 隐藏而不是关闭：网页版进程原地保留，登录态与设置一点不丢。
+        // 不能放进"关闭应用"那一组 —— 那里离手指太近，误点会把正在
+        // 收消息的窗口藏掉，用户会以为被关了。
+        label: '隐藏该窗口（后台运行）',
+        click: () => hideTab(tab.id)
+      },
+      { type: 'separator' },
       { label: '放大页面', accelerator: 'CmdOrCtrl+Plus', click: () => changeZoom(0.1) },
       { label: '缩小页面', accelerator: 'CmdOrCtrl+-', click: () => changeZoom(-0.1) },
       { label: '还原缩放', accelerator: 'CmdOrCtrl+0', click: () => wc.setZoomFactor(1) },
@@ -3603,7 +3756,9 @@ function popupTabContextMenu(payload) {
       { type: 'separator' },
       { label: '个人中心', click: () => sendCommand('account') },
       { label: '打开日志目录', click: () => openLogDir() },
-      { label: '关闭应用', click: () => closeTab(tab.id) }
+      // 关闭走二次确认：交给渲染层弹框，确认后才真正 closeTab。
+      // 主进程直接关会绕过确认 —— 两条路径的语义必须一致。
+      { label: '关闭应用', click: () => sendCommand({ action: 'closeAsk', id: tab.id }) }
     ]
   }
   Menu.buildFromTemplate(template).popup({ window: win })
@@ -3629,9 +3784,40 @@ ipcMain.handle('app:rename', (_event, payload) => {
   saveOpenApps()
   return { success: true }
 })
+ipcMain.handle('app:reorder', (_event, payload) => {
+  // 拖拽排序：只接受"把 A 挪到 B 前面/后面"，不接受渲染层直接给整个数组 ——
+  // 渲染层的列表是**过滤后**的（主页、右侧分组都不在里面），整表覆盖会把
+  // 它看不见的窗口挤到未知位置。
+  const draggedId = String((payload && payload.id) || '')
+  const targetId = String((payload && payload.targetId) || '')
+  const before = payload && payload.before !== false
+  const from = tabs.findIndex(t => t.id === draggedId)
+  if (from < 0) return { success: false, msg: '窗口不存在' }
+  // 主页是固定的：把它当唯一基准时，就是"挪到最前/最后"。
+  if (!targetId || targetId === 'home') {
+    const [row] = tabs.splice(from, 1)
+    if (before) tabs.unshift(row)
+    else tabs.push(row)
+    sendTabs()
+    saveOpenApps()
+    return { success: true }
+  }
+  const to = tabs.findIndex(t => t.id === targetId)
+  if (to < 0) return { success: false, msg: '目标窗口不存在' }
+  if (from === to) return { success: false, msg: '位置未变化' }
+  const [row] = tabs.splice(from, 1)
+  // 摘掉之后目标下标会左移一格，所以"插到目标前"直接用新下标即可。
+  const insertAt = before ? tabs.findIndex(t => t.id === targetId) : tabs.findIndex(t => t.id === targetId) + 1
+  tabs.splice(insertAt < 0 ? tabs.length : insertAt, 0, row)
+  sendTabs()
+  saveOpenApps()
+  return { success: true }
+})
 ipcMain.handle('app:open', (event, payload) => isMainSender(event) ? openPlatform(payload || {}) : rejectUntrustedSender())
 ipcMain.handle('app:close', (_event, id) => closeTab(id))
 ipcMain.handle('app:switch', (_event, id) => switchTab(id))
+ipcMain.handle('app:hide', (_event, id) => hideTab(String(id || activeId || '')))
+ipcMain.handle('app:showHidden', (_event, id) => showHiddenTab(String(id || '')))
 ipcMain.handle('app:showContextMenu', (_event, payload) => popupTabContextMenu(payload || {}))
 ipcMain.handle('app:reloadActive', () => {
   const tab = tabs.find(t => t.id === activeId)
@@ -3656,7 +3842,11 @@ ipcMain.handle('app:contextAction', async (_event, payload) => {
   const id = String((payload && payload.id) || activeId || '')
   const action = String((payload && payload.action) || '')
   const tab = tabs.find(t => t.id === id)
-  if (action === 'close') return closeTab(id)
+  if (action === 'close') {
+    // 关闭必须经过渲染层的二次确认。这里直接关会绕过确认 ——
+    // 而「误点一下就把号关了」正是要防的事，所以只回一句去走确认流程。
+    return { success: false, msg: '关闭窗口需二次确认', needConfirm: true }
+  }
   if (!tab || !tab.view || !tab.view.webContents || tab.view.webContents.isDestroyed()) {
     return { success: false, msg: '应用不存在' }
   }
