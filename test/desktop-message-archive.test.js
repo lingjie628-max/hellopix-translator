@@ -27,6 +27,8 @@ const test = require('node:test')
 const root = path.join(__dirname, '..')
 const guest = fs.readFileSync(path.join(root, 'desktop', 'guest-inject.js'), 'utf8')
 const main = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
+// customer:ingest 等 handler 已迁到 src/ipc/app.js
+const ipcApp = fs.readFileSync(path.join(root, 'desktop', 'src', 'ipc', 'app.js'), 'utf8')
 const service = fs.readFileSync(path.join(root, 'server/services/customer-identity-service.js'), 'utf8')
 
 test('客户端确实上报了消息正文（不再是恒空的 body）', () => {
@@ -94,20 +96,21 @@ test('消息时间优先用 DOM 里的真实时间，解析不出才退回 now()
 test('出向消息的发送方由主进程补成本账号，而不是默认成客户', () => {
   // 服务端在 senderKey 缺失时拿 peerKey 兜底 —— 那是"接收"的语义。
   // 用在出向上会把"我方发了什么"记成"客户发了什么"。
-  assert.match(main, /if \(data\.direction === 'out' && !data\.senderKey\) data\.senderKey = data\.accountKey/,
+  assert.match(ipcApp, /if \(data\.direction === 'out' && !data\.senderKey\) data\.senderKey = data\.accountKey/,
     '主进程没有为出向消息补 senderKey')
 })
 
 test('主进程仍然不信任渲染进程自报的身份', () => {
   // platform / accountKey 必须由主进程按 webContents 反查后覆盖，
   // 不能被 payload 里带的值顶掉（渲染进程跑在网页上下文里）。
-  const ingestAt = main.indexOf("ipcMain.handle('customer:ingest'")
-  const block = main.slice(ingestAt, ingestAt + 900)
+  const ingestAt = ipcApp.indexOf("'customer:ingest'")
+  assert.ok(ingestAt > 0, '找不到 customer:ingest')
+  const block = ipcApp.slice(ingestAt, ingestAt + 900)
   const overwriteAt = block.indexOf('const data = Object.assign({}, payload || {}, {')
   assert.ok(overwriteAt > 0, 'platform/accountKey 的覆盖写法变了')
   assert.match(block.slice(overwriteAt, overwriteAt + 200), /platform: tab\.platform/,
     'platform 必须来自可信 tab')
-  assert.match(block.slice(overwriteAt, overwriteAt + 200), /accountKey: accountSlug\(\)/,
+  assert.match(block.slice(overwriteAt, overwriteAt + 200), /accountKey: actions\.accountSlug\(\)/,
     'accountKey 必须来自主进程')
 })
 

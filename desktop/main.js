@@ -3356,41 +3356,6 @@ async function loginWithCredentials(username, password) {
   return data
 }
 
-ipcMain.handle('app:platforms', async () => {
-  try {
-    const data = await api('/client/platforms')
-    if (data && data.kicked) sendKicked(data.msg)
-  } catch (e) {}
-  const rows = platformRows()
-  setTimeout(() => refreshPlatformUpdates(), 0)
-  return { success: true, rows: rows }
-})
-ipcMain.handle('app:updatePlatform', async (_event, id) => updatePlatformWeb(id))
-ipcMain.handle('app:preset', (_event, id) => {
-  const all = readJson(userFile('app-presets.json'), {})
-  const key = String(id || '')
-  const row = all[key]
-  if (!row) return { success: true, data: null }
-  // 先摘代理字段再解密：模板里本来就不该有代理，摘在前面连 proxyPass 都不会被解密。
-  // 这一步同时**自愈**旧版本已经写进磁盘的带代理模板 —— 用户不用清配置。
-  const settings = unsealSettings(stripProxyFields(row.settings))
-  return { success: true, data: Object.assign({}, row, { settings: settings }) }
-})
-ipcMain.handle('app:savePreset', (event, payload) => {
-  if (!isMainSender(event)) return rejectUntrustedSender()
-  const id = String((payload && payload.platformId) || '')
-  if (!id) return { success: false }
-  const all = readJson(userFile('app-presets.json'), {})
-  // 模板只存"可以跨实例继承的普通偏好"（字体、语言、通道…）。
-  // 代理是实例级敏感配置，**不进模板** —— 否则新建实例会继承上一个实例的代理。
-  all[id] = {
-    name: (payload && payload.name) || '',
-    settings: sealSettings(stripProxyFields((payload && payload.settings) || {}))
-  }
-  writeJson(userFile('app-presets.json'), all)
-  return { success: true }
-})
-
 /**
  * 翻译相关 IPC（实现见 src/ipc/translate.js）。
  *
@@ -3451,6 +3416,35 @@ require('./src/ipc/tabs').registerTabsIpc({
     relaunchAndExit: () => { app.relaunch(); app.exit(0) }
   },
   env: { sealSettings, stripProxyFields, proxySettingsOf }
+})
+
+/**
+ * 应用级 IPC（实现见 src/ipc/app.js）：平台、预设模板、版本更新、客户线索。
+ *
+ * 预设模板绝不能带代理 —— 那是实例级敏感配置，带进去就是下个实例
+ * 在别人的出口上聊。customer:* 归客页调用，走 handleUnsafe 自校验。
+ */
+require('./src/ipc/app').registerAppIpc({
+  reg: ipcReg,
+  actions: {
+    api,
+    sendKicked,
+    platformRows,
+    refreshPlatformUpdates,
+    updatePlatformWeb,
+    readPresets: () => readJson(userFile('app-presets.json'), {}),
+    writePresets: all => writeJson(userFile('app-presets.json'), all),
+    trustedTabSender,
+    accountSlug
+  },
+  env: {
+    APP_VERSION,
+    DOWNLOAD_HOSTS,
+    isAllowedExternalUrl,
+    unsealSettings,
+    sealSettings,
+    stripProxyFields
+  }
 })
 
 /**
@@ -3611,59 +3605,6 @@ function popupTabContextMenu(payload) {
  * 这与「新增应用」弹窗从预设回填密码的行为保持一致；
  * 落盘时仍由 saveOpenApps 走 sealSettings 加密。
  */
-ipcMain.handle('app:version', () => APP_VERSION)
-ipcMain.handle('app:checkUpdate', async () => {
-  const local = APP_VERSION
-  try {
-    const data = await api('/client/update?os=' + process.platform + '&arch=' + process.arch)
-    const remote = String((data && (data.version || (data.obj && data.obj.version))) || '')
-    const candidate = String((data && (data.url || (data.obj && data.obj.url))) || '')
-    const url = isAllowedExternalUrl(candidate, DOWNLOAD_HOSTS) ? candidate : ''
-    return { success: true, local: local, remote: remote, url: url }
-  } catch (e) {
-    return { success: false, local: local, msg: e.message || '无法检查更新' }
-  }
-})
-// 客户身份线索上报。
-//
-// platform 与 accountKey **由主进程填入，不接受渲染进程传值** ——
-// 渲染进程在网页上下文里，理论上可被页面脚本影响；由主进程按
-// webContents 反查到可信的 tab 再补上，才能保证"这条线索确实来自那个账号"。
-ipcMain.handle('customer:ingest', async (event, payload) => {
-  const tab = trustedTabSender(event.sender)
-  if (!tab) return { success: false, msg: '标签页未授权' }
-  const data = Object.assign({}, payload || {}, {
-    platform: tab.platform,
-    accountKey: accountSlug()
-  })
-  // 出向消息的发送方是**本账号**，不是对方。
-  // 服务端在缺失时拿 peerKey 兜底 —— 那是"接收"的语义，用在出向上会把
-  // 发送方记成客户，于是"我方发了什么"在归档里看起来像"客户发了什么"。
-  // 和 platform/accountKey 一样放在主进程补：渲染进程在网页上下文里，
-  // 让它自报"我是谁"等于把归属判断交给不可信的一侧。
-  if (data.direction === 'out' && !data.senderKey) data.senderKey = data.accountKey
-  try {
-    return await api('/customer/ingest', { method: 'POST', form: data })
-  } catch (e) {
-    // 采集失败不影响聊天，静默即可 —— 但不能吞掉到连排查线索都没有
-    return { success: false, msg: String((e && e.message) || '上报失败') }
-  }
-})
-
-// 撞单提醒查询。客户端每 8 秒的 session 轮询顺带拉一次，
-// 不另开定时器、也不上 WebSocket —— 撞单不是高频交易，
-// "8 秒内知道"和"立刻知道"对结果没有区别。
-ipcMain.handle('customer:reminders', async () => {
-  try {
-    const data = await api('/customer/reminders')
-    return data && data.items ? data.items : []
-  } catch (e) {
-    return []
-  }
-})
-
-// 渲染层加载时主动查一次：警告条不能只在"刚变成坏"的那一刻出现 ——
-// 渲染层重载、切标签、重启后都要能恢复显示。
 app.whenReady().then(() => {
   applyAppIdentity()
   // 必须在 applyAppIdentity() 之后：日志目录由 app name 推导（见 initClientLog）。
