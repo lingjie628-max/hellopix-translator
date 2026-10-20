@@ -1064,64 +1064,46 @@ const API_TOTAL_TIMEOUT_MS = 30000
 
 // 冷启动首次要现做 DNS 解析 + TLS 握手（还隔着 Cloudflare），4s 预算会误伤；
 // 首轮过后回到 4s。与 pingLine 的 PING_TIMEOUT_FIRST 是同一个道理。
-let apiNetWarm = false
-let apiAgents = null
-let apiLib = null
-let apiLibTried = false
+// 冷启动首次要现做 DNS 解析 + TLS 握手（还隔着 Cloudflare），4s 预算会误伤；
+// 首轮过后回到 4s。与 pingLine 的 PING_TIMEOUT_FIRST 是同一个道理。
+
+/**
+ * 出站 HTTP 传输层（连接池 / 超时 / 错误分类）—— 实现见 src/net/api-net.js。
+ *
+ * 它是纯 Node 模块，不依赖 electron，因此"连接超时到底算哪类错误"这种判断
+ * 可以直接单测，不必切片 main.js 源码。
+ */
+const apiNet = require('./src/net/api-net').createApiNet({
+  timeouts: {
+    connectFirstMs: API_CONNECT_TIMEOUT_FIRST,
+    connectMs: API_CONNECT_TIMEOUT_MS,
+    totalMs: API_TOTAL_TIMEOUT_MS
+  },
+  getLog: () => clientLog
+})
 
 /** 惰性取到自带的 undici；取不到则退回全局 fetch（连接超时退化为不可控，但绝不崩）。 */
 function apiTransport() {
-  if (!apiLibTried) {
-    apiLibTried = true
-    try { apiLib = require('undici') } catch (e) { apiLib = null }
-  }
-  return apiLib
+  return apiNet.transport()
 }
 
 /**
  * 取本进程共用的 dispatcher。
  *
- * 为什么分冷 / 热两个 Agent：`connect.timeout` 构造时就定死、没法按请求改，
- * 而"冷启动首次"必须给更宽预算；两个 Agent 各维护自己的连接池，互不干扰。
+ * 冷 / 热两个 Agent 的取舍见 src/net/api-net.js 顶部。
  */
 function apiDispatcher() {
-  const lib = apiTransport()
-  if (!lib || !lib.Agent) return undefined
-  if (!apiAgents) {
-    apiAgents = {
-      cold: new lib.Agent({
-        connect: { timeout: API_CONNECT_TIMEOUT_FIRST },
-        headersTimeout: API_TOTAL_TIMEOUT_MS,
-        bodyTimeout: API_TOTAL_TIMEOUT_MS
-      }),
-      warm: new lib.Agent({
-        connect: { timeout: API_CONNECT_TIMEOUT_MS },
-        headersTimeout: API_TOTAL_TIMEOUT_MS,
-        bodyTimeout: API_TOTAL_TIMEOUT_MS
-      })
-    }
-  }
-  return apiNetWarm ? apiAgents.warm : apiAgents.cold
+  return apiNet.dispatcher()
 }
 
 /** 退出时收掉连接池，别把 keep-alive 的 socket 留在进程里。 */
 function closeApiAgents() {
-  const agents = apiAgents
-  apiAgents = null
-  if (!agents) return
-  for (const key of ['cold', 'warm']) {
-    try { if (agents[key] && agents[key].close) agents[key].close() } catch (e) {}
-  }
+  apiNet.close()
 }
 
 /** 真正发一次请求：优先自带 undici（连接超时可控），否则退回全局 fetch。 */
 function apiRaw(url, init) {
-  const lib = apiTransport()
-  const dispatcher = apiDispatcher()
-  if (lib && lib.fetch && dispatcher) {
-    return lib.fetch(url, Object.assign({ dispatcher: dispatcher }, init))
-  }
-  return fetch(url, init)
+  return apiNet.raw(url, init)
 }
 
 /**
@@ -1130,50 +1112,20 @@ function apiRaw(url, init) {
  * 只收"请求还没发出去"的那几种：DNS 解析失败、TCP 连接被拒 / 不可达 / 连接建立超时。
  * 故意**不收** ECONNRESET / EPIPE / UND_ERR_SOCKET —— 它们发生在连接建立之后，
  * 请求可能已经到服务端了，属于"是否送达不确定"，不允许盲目重发。
+ *
+ * 实现见 src/translate/translation-cache.js 的 isRetryableNetworkError（同一份实现，
+ * 纯 Node 可单测）。
  */
-function isRetryableNetworkError(err) {
-  const pix = err && err.pix
-  if (!err || err.code !== 'NETWORK_UNREACHABLE' || !pix || pix.gotResponse) return false
-  const cause = String(pix.causeCode || '')
-  return ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH',
-    'UND_ERR_CONNECT_TIMEOUT'].indexOf(cause) >= 0
-}
 
 /** 造一个带错误码 + 取证信息的异常，并落一条日志（只含非敏感字段）。 */
+/** 造一个带错误码 + 取证信息的异常，并落一条日志（只含非敏感字段）。 */
 function apiFailure(code, message, info) {
-  if (clientLog) {
-    try { clientLog.warn('api', code + ' ' + JSON.stringify(info)) } catch (e) {}
-  }
-  const err = new Error(message)
-  err.code = code
-  err.pix = info
-  return err
+  return apiNet.failure(code, message, info)
 }
 
 /** 分类一次**没拿到 HTTP 响应**的传输失败：整体超时 vs 连接不可达。 */
 function classifyTransportError(err, baseInfo) {
-  const cause = err && err.cause
-  const causeCode = String((cause && cause.code) || err.code || '')
-  const causeMessage = String((cause && cause.message) || err.message || '')
-  // undici 的连接超时**:必须**归成"连不上"（可安全重试），
-  // 不能因为它带 Timeout 字样就被当成"响应超时"而放弃重试。
-  const isConnectTimeout = causeCode === 'UND_ERR_CONNECT_TIMEOUT'
-  const isResponseTimeout = !isConnectTimeout && (
-    causeCode === 'UND_ERR_HEADERS_TIMEOUT' || causeCode === 'UND_ERR_BODY_TIMEOUT' || (err && err.name === 'TimeoutError'))
-  const connectLike = isConnectTimeout
-    || ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH',
-      'ETIMEDOUT', 'ECONNABORTED'].indexOf(causeCode) >= 0
-  const info = Object.assign({}, baseInfo, {
-    phase: connectLike ? 'connect' : 'response',
-    gotResponse: false,
-    errName: (err && err.name) || '',
-    causeCode: causeCode,
-    causeMessage: causeMessage
-  })
-  if (isResponseTimeout) {
-    return apiFailure('NETWORK_TIMEOUT', '服务器响应超时，请稍后重试', info)
-  }
-  return apiFailure('NETWORK_UNREACHABLE', '连不上服务器（' + (causeCode || (err && err.name) || '连接失败') + '）', info)
+  return apiNet.classify(err, baseInfo)
 }
 
 async function api(pathname, opts) {
@@ -1214,7 +1166,7 @@ async function api(pathname, opts) {
     }))
   }
   // 拿到了响应头 = 连接确实建立过，之后的请求可以吃"热"预算（4s）。
-  apiNetWarm = true
+  apiNet.markWarm()
   rememberCookies(res)
   const text = await res.text()
   try {
@@ -2014,30 +1966,29 @@ function stripEmoji(text) {
     .trim()
 }
 
-const transCache = new Map()
+/**
+ * 翻译缓存与幂等键（实现见 src/translate/translation-cache.js）。
+ *
+ * 依赖用注入而不是闭包：这样它不必加载 electron，普通 Node 即可单测 ——
+ * 幂等键算错就是用户被重复扣费，这个逻辑最需要测试。
+ */
+const transCacheModule = require('./src/translate/translation-cache')
+const transCacheApi = transCacheModule.createTranslationCache({
+  currentUser: () => currentPixUser(),
+  deviceId: () => deviceId()
+})
+const { isDeadRequest, isRetryableNetworkError } = transCacheModule
 
 function transCacheKey(from, to, engine, text) {
-  return crypto.createHash('sha256')
-    .update([engine || '', from || 'auto', to || '', text].join('\u0001'))
-    .digest('hex')
+  return transCacheApi.cacheKey(from, to, engine, text)
 }
 
 function getTransCached(from, to, engine, text) {
-  const key = transCacheKey(from, to, engine, text)
-  const row = transCache.get(key)
-  if (!row) return ''
-  transCache.delete(key)
-  transCache.set(key, row)
-  return row
+  return transCacheApi.get(from, to, engine, text)
 }
 
 function putTransCached(from, to, engine, text, translation) {
-  const out = String(translation || '').trim()
-  if (!out) return
-  const key = transCacheKey(from, to, engine, text)
-  transCache.delete(key)
-  transCache.set(key, out)
-  while (transCache.size > 1000) transCache.delete(transCache.keys().next().value)
+  transCacheApi.put(from, to, engine, text, translation)
 }
 
 // 为翻译请求生成服务端幂等键：同设备 + 同参数 + 同文本永远是同一个键，
@@ -2069,104 +2020,37 @@ function putTransCached(from, to, engine, text, translation) {
  *     其余失败（余额不足 / 通道未接通 / 网络错误）保持原号；
  *   · 于是"服务端已成功但响应读丢"这种最危险的情况仍然命中同一个号，
  *     服务端直接返回已存的译文，**不会重复扣费**。
- */
-const transAttempt = new Map()
-// 指纹 → 代数的表无限增长会漏内存；翻译是热路径，元素很小，给个上限整体清空即可
-// （清空只会让少数几条文本退回第 0 代，不会算错账）。
-const TRANS_ATTEMPT_MAX = 4096
-
-/**
- * 服务端明确表示"这个 Idempotency-Key 已经用死了，换一个再来"的错误码。
  *
- * 前三个是"预留已终结/已过期/被别的请求体占用"；最后一个
- * `ENGINE_SWITCH_REQUIRES_NEW_REQUEST` 是服务端**故意**要求客户端换号重发的
- * （换通道重译要重新计费），必须一起换，否则换通道后这条文本也翻不出来。
+ * 实现见 src/translate/translation-cache.js（纯 Node，不依赖 electron，可单测）。
  */
-const DEAD_REQUEST_CODES = [
-  'REQUEST_FINALIZED',
-  'RESERVATION_EXPIRED',
-  'IDEMPOTENCY_KEY_REUSED',
-  'ENGINE_SWITCH_REQUIRES_NEW_REQUEST'
-]
-
 function transFingerprint(text, from, to, engine) {
-  return crypto.createHash('sha256')
-    .update([currentPixUser(), String(engine || ''), String(from || ''), String(to || ''), String(text || '')]
-      .join('\u0001'))
-    .digest('hex')
-    .slice(0, 40)
+  return transCacheApi.fingerprint(text, from, to, engine)
 }
 
 function transRequestId(text, from, to, engine) {
-  const fingerprint = transFingerprint(text, from, to, engine)
-  const generation = transAttempt.get(fingerprint) || 0
-  return `desktop:${deviceId()}:${fingerprint}:${generation}`
+  return transCacheApi.requestId(text, from, to, engine)
 }
 
 /** 换一代：让下一次重试拿到全新的 Idempotency-Key。 */
 function bumpTransAttempt(text, from, to, engine) {
-  const fingerprint = transFingerprint(text, from, to, engine)
-  if (transAttempt.size > TRANS_ATTEMPT_MAX) transAttempt.clear()
-  transAttempt.set(fingerprint, (transAttempt.get(fingerprint) || 0) + 1)
-}
-
-function isDeadRequest(data) {
-  return !!(data && data.success === false && DEAD_REQUEST_CODES.indexOf(String(data.code || '')) >= 0)
+  transCacheApi.bumpAttempt(text, from, to, engine)
 }
 
 /**
- * 发一次 /translate/run；两类失败各自**原地重发一次**。
+ * 发一次 /translate/run，失败按类型决定是否重发 —— 实现在
+ * src/translate/translation-cache.js 的 createRequestTranslate。
  *
- * ## 一类：连接建立失败（网络传输层，**不换号**）
- *
- * 明确的 DNS / TCP 连接失败时，请求**没有发出去**，可以安全地原样重发一次：
- * 复用同一个 requestId（= 服务端幂等键），所以即使第一次其实到达了服务端，
- * 服务端也只会返回已存结果，不会重复扣费。连接失败不再让用户白等 10s。
- *
- * ## 二类：命中"号用死了"（业务层，**必须换号**）
- *
- * 为什么要在原地重发、而不是把错误抛给用户让他手动再点一次：
- * 这类失败与"翻译服务坏了"完全无关（上一轮的预留被退款而已），
- * 把它显示成"翻译失败，请稍后重试"是在骗用户 —— 重试永远还是同一个号。
- * 只重发**一次**：连换两个号都不行，说明不是号的问题，那就如实上报。
+ * 抽出去的理由和前一段一样：这段逻辑涉及资金（重复扣费 / 永久 409），
+ * 必须能被单测直接覆盖，而不是靠"切片源码 + 手拼依赖"。
  */
+const requestTranslateImpl = transCacheModule.createRequestTranslate({
+  api: (pathname, opts) => api(pathname, opts),
+  cache: transCacheApi,
+  getLog: () => clientLog
+})
+
 async function requestTranslate(text, from, to, engine, trigger) {
-  const body = () => ({
-    text: text, from: from, to: to, engine: engine, trigger: trigger,
-    requestId: transRequestId(text, from, to, engine)
-  })
-  // requestId 同时就是服务端的 Idempotency-Key；带上它只为取证（日志里能看出用的哪个号）。
-  const call = () => api('/translate/run', {
-    method: 'POST', form: body(),
-    requestId: transRequestId(text, from, to, engine)
-  })
-
-  let data
-  try {
-    data = await call()
-  } catch (err) {
-    // 只在"连接建立失败、请求根本没发出去"时重发一次。
-    // **不换号**（同一个 requestId = 同一个幂等键）：即便第一次其实到达过服务端，
-    // 服务端也只会返回已存结果、不会重复扣费；若真没连上，这次也只是再试一下。
-    if (!isRetryableNetworkError(err)) throw err
-    if (clientLog) {
-      try {
-        clientLog.warn('translate', '连接失败，复用同一幂等号重试一次 · requestId='
-          + transRequestId(text, from, to, engine)
-          + ' · cause=' + String((err.pix && err.pix.causeCode) || ''))
-      } catch (e) {}
-    }
-    data = await call()
-  }
-
-  if (!isDeadRequest(data)) return data
-  // 换号重发一次。注意 `body()` 是在**换号之后**才求值的，
-  // 否则 requestId 还是旧的，重发等于白发一次。
-  bumpTransAttempt(text, from, to, engine)
-  data = await call()
-  // 连换两个号都还是"号用死了"：说明不是号的问题，下一轮别再无谓地原地打转。
-  if (isDeadRequest(data)) bumpTransAttempt(text, from, to, engine)
-  return data
+  return requestTranslateImpl(text, from, to, engine, trigger)
 }
 
 function pushGuestPrefs() {

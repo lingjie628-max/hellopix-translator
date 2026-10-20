@@ -32,81 +32,54 @@
  */
 
 const assert = require('node:assert/strict')
-const crypto = require('node:crypto')
 const fs = require('node:fs')
 const path = require('node:path')
 const test = require('node:test')
-const vm = require('node:vm')
 
 const root = path.join(__dirname, '..')
-const mainSrc = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
 const serviceSrc = fs.readFileSync(path.join(root, 'server', 'services', 'core-service.js'), 'utf8')
 
-/** 切出 `header` 那段函数定义（按花括号配对）。 */
-function sliceBlock(src, header) {
-  const start = src.indexOf(header)
-  assert.ok(start >= 0, '找不到源码片段：' + header)
-  const lineEnd = src.indexOf('\n', start)
-  const line = src.slice(start, lineEnd)
-  // 行内下标必须加上 start 才是源码位置，否则会从文件开头附近配平，切出别的代码。
-  const open = line.indexOf('{')
-  if (open < 0) return line
-  let depth = 0
-  for (let i = start + open; i < src.length; i += 1) {
-    const ch = src[i]
-    if (ch === '{') depth += 1
-    else if (ch === '}') {
-      depth -= 1
-      if (depth === 0) return src.slice(start, i + 1)
-    }
-  }
-  throw new Error('花括号不配对：' + header)
-}
-
-/** 切出多行数组常量（`const X = [ ... \n]`）。 */
-function sliceArray(src, header) {
-  const start = src.indexOf(header)
-  assert.ok(start >= 0, '找不到数组常量：' + header)
-  const end = src.indexOf('\n]', start)
-  assert.ok(end > 0, '数组常量没有结尾：' + header)
-  return src.slice(start, end + 2)
-}
-
 /**
- * 在隔离上下文里跑 main.js 里幂等相关的**真身**。
+ * 在隔离上下文里跑幂等相关的**真身**。
  *
- * `account` 用一个可变的盒子，测试里能"切换登录账号"。
+ * ## 为什么不再切片 main.js 源码
+ *
+ * 这段逻辑已经搬进 `desktop/src/translate/translation-cache.js`（纯 Node，
+ * 不依赖 electron）。原先它靠 `sliceBlock(mainSrc, ...)` + 手拼依赖来测，
+ * 前提是"函数必须留在 main.js 且源码形态不变" —— 那是隐式契约，一动就误报。
+ *
+ * 现在直接 require 真身，断言一个字没改。测试强度不降反升：它测的是产品
+ * 实际调用的那份实现，不再是一份复制出来的源码。
  */
-function makeSandbox(responder) {
+function makeSandbox (responder) {
   const calls = []
   const box = { account: 'ahao' }
-  const ctx = vm.createContext({
-    crypto: crypto,
-    currentPixUser: () => box.account,
-    deviceId: () => 'desktop-abc123',
-    clientLog: null,
+  const mod = require('../desktop/src/translate/translation-cache')
+  const cache = mod.createTranslationCache({
+    currentUser: () => box.account,
+    deviceId: () => 'desktop-abc123'
+  })
+  const requestTranslate = mod.createRequestTranslate({
     api: async (pathname, opts) => {
       calls.push(opts.form)
       return responder(opts.form, calls.length)
-    }
+    },
+    cache,
+    getLog: () => null
   })
-  const src = [
-    'const transAttempt = new Map()',
-    sliceBlock(mainSrc, 'const TRANS_ATTEMPT_MAX = 4096'),
-    sliceArray(mainSrc, 'const DEAD_REQUEST_CODES = ['),
-    sliceBlock(mainSrc, 'function transFingerprint(text, from, to, engine)'),
-    sliceBlock(mainSrc, 'function transRequestId(text, from, to, engine)'),
-    sliceBlock(mainSrc, 'function bumpTransAttempt(text, from, to, engine)'),
-    sliceBlock(mainSrc, 'function isDeadRequest(data)'),
-    sliceBlock(mainSrc, 'function isRetryableNetworkError(err)'),
-    sliceBlock(mainSrc, 'async function requestTranslate(text, from, to, engine, trigger)')
-  ].join('\n\n')
-  vm.runInContext(
-    src + '\n\nglobalThis.__api = { transAttempt, transFingerprint, transRequestId, '
-      + 'bumpTransAttempt, isDeadRequest, requestTranslate, DEAD_REQUEST_CODES }',
-    ctx
-  )
-  return { api: ctx.__api, calls, box, ctx }
+  return {
+    api: {
+      transFingerprint: cache.fingerprint,
+      transRequestId: cache.requestId,
+      bumpTransAttempt: cache.bumpAttempt,
+      isDeadRequest: mod.isDeadRequest,
+      requestTranslate,
+      DEAD_REQUEST_CODES: mod.DEAD_REQUEST_CODES
+    },
+    calls,
+    box,
+    cache
+  }
 }
 
 const OK = { success: true, translation: '你好', chars: 2 }

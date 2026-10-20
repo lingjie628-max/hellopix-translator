@@ -414,21 +414,41 @@ test('★计费上限★「全部自动翻」的成本上限是"没翻过的正�
   // 这是允许删掉历史闸门的**前提**，必须锁住：
   // 客户端 requestId 对同一段正文 + 同一通道是恒定的 → 服务端按 Idempotency-Key
   // 幂等 → 同一条消息翻多少次都只计一次费。少任何一环，删闸门就变成"重复扣费"。
-  const at = main.indexOf('function transFingerprint')
-  assert.ok(at > 0, '找不到 transFingerprint')
-  const fp = main.slice(at, main.indexOf('function transRequestId', at))
-  assert.ok(/currentPixUser\(\)/.test(fp), '指纹必须含用户身份（不同子账号不能共用预留）')
-  for (const piece of ['engine', 'from', 'to', 'text']) {
-    assert.ok(new RegExp('String\\(' + piece + " \\|\\| ''\\)").test(fp),
-      '指纹少了 ' + piece + ' —— 换通道/换语种会复用旧号，等于白送一次翻译')
-  }
-  const idAt = main.indexOf('function transRequestId')
-  const idFn = main.slice(idAt, idAt + 400)
-  assert.ok(/transAttempt\.get\(fingerprint\) \|\| 0/.test(idFn),
-    'requestId 的"代"必须默认复用（只有显式换号才 +1），否则每次重放都会变成新的计费')
-  assert.ok(!/Date\.now\(\)|Math\.random\(\)/.test(idFn),
-    'requestId 里出现时间/随机数 → 每次重放都是新号 → 幂等失效、重复扣费')
+  //
+  // 原先是切 main.js 源码断言几个字符串。现在直接跑实现：行为验证比字符串匹配强 ——
+  // 它不关心函数怎么写，只关心"换账号/换通道/换正文到底会不会换号"。
+  const { createTranslationCache } = require('../desktop/src/translate/translation-cache')
 
+  const make = user => createTranslationCache({ currentUser: () => user, deviceId: () => 'dev' })
+
+  // 1) 指纹必须含用户身份：不同子账号不能共用预留
+  const alice = make('alice').fingerprint('hello', 'zh', 'en', 'google')
+  const bob = make('bob').fingerprint('hello', 'zh', 'en', 'google')
+  assert.notEqual(alice, bob, '指纹必须含用户身份（不同子账号不能共用预留）')
+
+  // 2) 换通道 / 换语种 / 换正文都必须换号
+  const c = make('alice')
+  const base = c.fingerprint('hello', 'zh', 'en', 'google')
+  for (const [label, fp] of [
+    ['通道', c.fingerprint('hello', 'zh', 'en', 'deepl')],
+    ['源语种', c.fingerprint('hello', 'ja', 'en', 'google')],
+    ['目标语种', c.fingerprint('hello', 'zh', 'fr', 'google')],
+    ['正文', c.fingerprint('world', 'zh', 'en', 'google')]
+  ]) {
+    assert.notEqual(fp, base, '指纹少了 ' + label + ' —— 换' + label + '会复用旧号，等于白送一次翻译')
+  }
+
+  // 3) 代必须默认复用（只有显式换号才 +1），否则每次重放都变成新的计费
+  const c2 = make('alice')
+  const first = c2.requestId('hello', 'zh', 'en', 'google')
+  assert.equal(c2.requestId('hello', 'zh', 'en', 'google'), first,
+    'requestId 的"代"必须默认复用，否则每次重放都会变成新的计费')
+
+  // 4) requestId 里不许出现时间 / 随机数 → 每次重放都是新号 → 幂等失效
+  assert.match(first, /^desktop:dev:[0-9a-f]{40}:0$/, 'requestId 必须是确定性的：设备 + 指纹 + 代数')
+  assert.ok(!/Date\.now|Math\.random/.test(first))
+
+  // 5) 客户端幂等键只有在服务端按它查预留时才成立 —— 这是"删掉历史闸门"的真正前提
   const server = fs.readFileSync(path.join(root, 'server', 'services', 'core-service.js'), 'utf8')
   assert.ok(/SELECT \* FROM translation_reservations WHERE user_id=\$1 AND idempotency_key=\$2/.test(server),
     '服务端必须按 idempotency_key 查已有预留')

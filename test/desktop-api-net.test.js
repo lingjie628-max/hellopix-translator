@@ -24,73 +24,61 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 const test = require('node:test')
-const vm = require('node:vm')
 
 const root = path.join(__dirname, '..')
 const mainSrc = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
 
-/** 按花括号配对，把 main.js 里某个函数的真身整段切出来。 */
-function sliceBlock(src, header) {
-  const start = src.indexOf(header)
-  assert.ok(start >= 0, '找不到源码片段：' + header)
-  const lineEnd = src.indexOf('\n', start)
-  const line = src.slice(start, lineEnd)
-  const open = line.indexOf('{')
-  if (open < 0) return line
-  let depth = 0
-  for (let i = start + open; i < src.length; i += 1) {
-    const ch = src[i]
-    if (ch === '{') depth += 1
-    else if (ch === '}') {
-      depth -= 1
-      if (depth === 0) return src.slice(start, i + 1)
-    }
-  }
-  throw new Error('花括号不配对：' + header)
-}
-
-/** 从 startMarker 切到 endMarker（含），用于切常量/let 声明块。 */
-function sliceFromTo(src, startMarker, endMarker) {
-  const start = src.indexOf(startMarker)
-  assert.ok(start >= 0, '找不到起点：' + startMarker)
-  const end = src.indexOf(endMarker, start)
-  assert.ok(end > start, '找不到终点：' + endMarker)
-  return src.slice(start, end + endMarker.length)
-}
-
 /**
- * 在隔离上下文里跑传输层真身。
- * `fakeUndici` 传 null 表示"装不上 undici"，用来验退回全局 fetch 的分支。
+ * 构造一份传输层真身。
+ *
+ * 原先靠 `sliceBlock(mainSrc, ...)` 从 main.js 抠源码、再塞进 VM 手拼依赖。
+ * 这段逻辑已经搬进 `desktop/src/net/api-net.js`（纯 Node，不依赖 electron），
+ * 现在直接调工厂 —— 测的是产品实际调用的那份实现，不是复制出来的源码。
+ *
+ * @param {object|null} fakeUndici  传 null 表示"装不上 undici"
+ * @param {object} [extra]          额外覆盖项（目前用于注入 clientLog）
  */
-function loadNetApi(fakeUndici, extra) {
-  const src = [
-    sliceFromTo(mainSrc, 'const API_CONNECT_TIMEOUT_MS', 'let apiLibTried = false'),
-    sliceBlock(mainSrc, 'function apiTransport()'),
-    sliceBlock(mainSrc, 'function apiDispatcher()'),
-    sliceBlock(mainSrc, 'function closeApiAgents()'),
-    sliceBlock(mainSrc, 'function apiRaw(url, init)'),
-    sliceBlock(mainSrc, 'function isRetryableNetworkError(err)'),
-    sliceBlock(mainSrc, 'function apiFailure(code, message, info)'),
-    sliceBlock(mainSrc, 'function classifyTransportError(err, baseInfo)')
-  ].join('\n\n')
-
+function loadNetApi (fakeUndici, extra) {
+  const mod = require('../desktop/src/net/api-net')
   const fetchCalls = []
-  const ctx = vm.createContext(Object.assign({
-    URL: URL,
-    AbortSignal: AbortSignal,
+  const ctx = Object.assign({
     clientLog: null,
-    require: () => { if (fakeUndici) return fakeUndici; const e = new Error('MODULE_NOT_FOUND'); e.code = 'MODULE_NOT_FOUND'; throw e },
-    fetch: (url, init) => { fetchCalls.push({ url: url, init: init }); return Promise.resolve({ via: 'global-fetch' }) }
-  }, extra || {}))
+    fetch: (url, init) => {
+      fetchCalls.push({ url: url, init: init })
+      return Promise.resolve({ via: 'global-fetch' })
+    }
+  }, extra || {})
 
-  vm.runInContext(src
-    + '\nglobalThis.__net = {'
-    + ' apiTransport, apiDispatcher, closeApiAgents, apiRaw, isRetryableNetworkError, classifyTransportError,'
-    + ' setWarm: v => { apiNetWarm = v }, getAgents: () => apiAgents }',
-  ctx)
-  const api = ctx.__net
-  api.fetchCalls = fetchCalls
-  return api
+  const net = mod.createApiNet({
+    // 必须与产品默认一致；产品侧从 main.js 的同名常量传入
+    timeouts: {
+      connectFirstMs: 8000,
+      connectMs: 4000,
+      totalMs: 30000
+    },
+    getLog: () => ctx.clientLog || null,
+    // 注入：假 undici / 假全局 fetch。生产不传，走真实实现。
+    requireUndici: () => {
+      if (fakeUndici) return fakeUndici
+      const e = new Error('MODULE_NOT_FOUND')
+      e.code = 'MODULE_NOT_FOUND'
+      throw e
+    },
+    fetch: ctx.fetch
+  })
+  net.fetchCalls = fetchCalls
+  // 兼容测试里的命名（产品模块用的是短名）
+  net.setWarm = net.markWarm
+  net.getAgents = net.__agents
+  net.apiTransport = net.transport
+  net.apiDispatcher = net.dispatcher
+  net.closeApiAgents = net.close
+  net.apiRaw = net.raw
+  net.apiFailure = net.failure
+  net.classifyTransportError = net.classify
+  // isRetryableNetworkError 属于幂等/重试模块，但测试在这里一起验，转出去
+  net.isRetryableNetworkError = require('../desktop/src/translate/translation-cache').isRetryableNetworkError
+  return net
 }
 
 /** 一个假的 undici：记下 Agent 的构造参数与 fetch 的 dispatcher，便于断言。 */
@@ -269,23 +257,31 @@ test('接线守卫：已彻底移除 TCP 预检（在正常路径上不额外建
 })
 
 test('接线守卫：api() 直接发请求，并用自带 undici 的连接超时', () => {
+  // 实现已搬进 src/net/api-net.js；这里同时检查 main.js 的接线与实现的约束。
+  const netSrc = fs.readFileSync(path.join(root, 'desktop', 'src', 'net', 'api-net.js'), 'utf8')
   assert.match(mainSrc, /res = await apiRaw\(base \+ '\/apis' \+ pathname, init\)/, 'api() 必须直接走 apiRaw')
-  assert.match(mainSrc, /lib\.fetch\(url, Object\.assign\(\{ dispatcher: dispatcher \}, init\)\)/,
+  assert.match(netSrc, /l\.fetch\(url, Object\.assign\(\{ dispatcher: disp \}, init\)\)/,
     '必须用自带 undici 且带上 dispatcher（连接超时归我们管）')
-  assert.match(mainSrc, /new lib\.Agent\(\{[\s\S]{0,200}?connect: \{ timeout: API_CONNECT_TIMEOUT_MS \}/,
-    'Agent 必须显式设置连接超时')
   assert.match(mainSrc, /const API_CONNECT_TIMEOUT_MS = 4000/)
   assert.match(mainSrc, /const API_CONNECT_TIMEOUT_FIRST = 8000/)
   assert.match(mainSrc, /const API_TOTAL_TIMEOUT_MS = 30000/)
   assert.ok(!/totalTimeoutMs:\s*4000/.test(mainSrc),
     '禁止把"整个翻译请求"设成 4 秒超时 —— 那会把正常翻译也砍掉')
+  // 数字必须真从 main.js 流进工厂，不能各写一份
+  assert.match(mainSrc, /connectFirstMs:\s*API_CONNECT_TIMEOUT_FIRST/)
+  assert.match(mainSrc, /connectMs:\s*API_CONNECT_TIMEOUT_MS/)
+  assert.match(mainSrc, /totalMs:\s*API_TOTAL_TIMEOUT_MS/)
 })
 
 test('接线守卫：连接超时与响应超时是两个独立参数（不是一个数两头用）', () => {
-  const connect = mainSrc.match(/connect: \{ timeout: API_CONNECT_TIMEOUT_MS \}/)
-  const headers = mainSrc.match(/headersTimeout: API_TOTAL_TIMEOUT_MS/)
-  const body = mainSrc.match(/bodyTimeout: API_TOTAL_TIMEOUT_MS/)
+  const netSrc = fs.readFileSync(path.join(root, 'desktop', 'src', 'net', 'api-net.js'), 'utf8')
+  const connect = netSrc.match(/connect: \{ timeout: timeout\.connectMs \}/)
+  const headers = netSrc.match(/headersTimeout: timeout\.totalMs/)
+  const body = netSrc.match(/bodyTimeout: timeout\.totalMs/)
   assert.ok(connect && headers && body, '连接超时 / 响应头超时 / 响应体超时都要分别设置')
+  // 冷启动那一路用的是更宽的 connectFirstMs，不能被合并成同一个数
+  assert.match(netSrc, /connect: \{ timeout: timeout\.connectFirstMs \}/,
+    '冷启动必须用独立的连接预算')
   assert.ok(Number(mainSrc.match(/const API_TOTAL_TIMEOUT_MS = (\d+)/)[1])
     > Number(mainSrc.match(/const API_CONNECT_TIMEOUT_MS = (\d+)/)[1]) * 5,
   '响应兜底必须远大于连接预算，否则慢翻译会被误杀')
