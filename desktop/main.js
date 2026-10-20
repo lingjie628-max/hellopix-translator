@@ -3394,6 +3394,35 @@ ipcMain.handle('app:savePreset', (event, payload) => {
 ipcMain.handle('app:tabs', () => tabPayload())
 
 /**
+ * 翻译相关 IPC（实现见 src/ipc/translate.js）。
+ *
+ * 注意 composer* / guestPrefs / run 是**客页**调用的，走 handleUnsafe +
+ * trustedTabSender 自校验 —— 那是另一个来源，不能拿 isMainSender 卡。
+ */
+require('./src/ipc/translate').registerTranslateIpc({
+  reg: ipcReg,
+  state: {
+    get tabs () { return tabs },
+    get profile () { return profile },
+    bridgeHealth: { get: id => bridgeHealth.get(id) }
+  },
+  actions: {
+    api,
+    pushGuestPrefs,
+    trustedTabSender,
+    rejectUntrustedSender,
+    bridgeReport,
+    nativeComposer,
+    log: (channel, msg) => { if (clientLog) clientLog.info(channel, msg) },
+    getTransCached,
+    putTransCached,
+    transRequestId,
+    requestTranslate
+  },
+  env: { tabPrefs, stripEmoji, stripBusyMarks, pickLang }
+})
+
+/**
  * 账号相关 IPC（实现见 src/ipc/auth.js）。
  *
  * profile / cookieJar 必须 setter 直连：写错就是掉号或串号。
@@ -3748,147 +3777,6 @@ ipcMain.handle('customer:reminders', async () => {
 
 // 渲染层加载时主动查一次：警告条不能只在"刚变成坏"的那一刻出现 ——
 // 渲染层重载、切标签、重启后都要能恢复显示。
-ipcMain.handle('translate:bridgeStatus', event => {
-  if (!isMainSender(event)) return rejectUntrustedSender()
-  const rows = []
-  tabs.forEach(tab => {
-    const st = bridgeHealth.get(tab.id)
-    if (st && st.ok === false) rows.push({ id: tab.id, name: tab.name, reason: st.reason })
-  })
-  return { success: true, rows: rows }
-})
-
-ipcMain.handle('translate:engines', async () => {  try {
-    return await api('/translate/engines')
-  } catch (e) {
-    return { success: false, rows: [] }
-  }
-})
-ipcMain.handle('translate:savePrefs', async (_event, payload) => {
-  try {
-    const data = await api('/client/translate-prefs', { method: 'POST', form: payload || {} })
-    if (profile && payload) {
-      if (payload.transRecv !== undefined) profile.transRecv = Number(payload.transRecv) ? 1 : 0
-      if (payload.transSend !== undefined) profile.transSend = Number(payload.transSend) ? 1 : 0
-      if (payload.transGroup !== undefined) profile.transGroup = Number(payload.transGroup) ? 1 : 0
-      if (payload.langMine) profile.langMine = payload.langMine
-      if (payload.langOther) profile.langOther = payload.langOther
-      if (payload.includeZh !== undefined) profile.includeZh = Number(payload.includeZh) ? 1 : 0
-      if (payload.engine) profile.activeEngine = payload.engine
-      pushGuestPrefs()
-    }
-    return data
-  } catch (e) {
-    return { success: false, msg: e.message || '保存失败' }
-  }
-})
-ipcMain.handle('translate:guestPrefs', event => {
-  const tab = trustedTabSender(event.sender)
-  if (!tab) return rejectUntrustedSender()
-  // guest 能问到 prefs，说明 preload 真的执行到了 —— 这是"桥活着"最可靠的证据。
-  bridgeReport(tab.id, true, '')
-  return tabPrefs(tab)
-})
-
-// ---------------------------------------------------------------------------
-// composer 的**原生输入**通道（0.1.19）
-//
-// 真机 0.1.18 证据：expected="Test translation information."(29) vs
-// actual="测试翻译信息"(6) —— 页面内 `execCommand` 的写入**从未进入** WhatsApp
-// 编辑器的输入管线（它拦掉 `isTrusted:false` 的 beforeinput）。所以改由浏览器
-// 进程发起真实输入：这里只做 Chromium 编辑命令，**不碰 DOM**。
-//
-// 拆成两步（清空 / 插入）而不是一次做完，是为了让 guest 能在两步之间**回读 DOM**
-// 留证：COMPOSER_CLEARED / NATIVE_TEXT_INSERTED —— 这是本轮要求的关键 trace。
-// ---------------------------------------------------------------------------
-function composerTargetOf (event) {
-  const tab = trustedTabSender(event.sender)
-  if (!tab) return { tab: null, wc: null }
-  const wc = tab.view && tab.view.webContents
-  if (!wc || wc.isDestroyed()) return { tab: tab, wc: null }
-  return { tab: tab, wc: wc }
-}
-
-ipcMain.handle('translate:composerSelectAllDelete', event => {
-  const { tab, wc } = composerTargetOf(event)
-  if (!tab) return rejectUntrustedSender()
-  if (!wc) return { ok: false, reason: 'NO_WEB_CONTENTS' }
-  const res = nativeComposer.selectAllAndClear(wc)
-  if (clientLog) {
-    clientLog.info('native-input', '实例 ' + tab.id + ' COMPOSER_CLEARED ok=' + res.ok +
-      (res.ok ? '' : ' reason=' + res.reason) + ' focused=' + res.focused)
-  }
-  return res
-})
-
-ipcMain.handle('translate:composerInsertText', (event, payload) => {
-  const { tab, wc } = composerTargetOf(event)
-  if (!tab) return rejectUntrustedSender()
-  if (!wc) return { ok: false, reason: 'NO_WEB_CONTENTS' }
-  const text = String((payload && payload.text) || '')
-  // 逐行模式：只在前一种写法的换行结构没对上时由 guest 显式要求。
-  const res = (payload && payload.linewise)
-    ? nativeComposer.insertTextLines(wc, text)
-    : nativeComposer.insertText(wc, text)
-  if (clientLog) {
-    clientLog.info('native-input', '实例 ' + tab.id + ' NATIVE_TEXT_INSERTED chars=' + text.length +
-      ' ok=' + res.ok + (payload && payload.linewise ? ' linewise=1' : '') +
-      (res.ok ? '' : ' reason=' + res.reason))
-  }
-  return res
-})
-ipcMain.handle('translate:run', async (event, payload) => {
-  const tab = trustedTabSender(event.sender)
-  if (!tab) return rejectUntrustedSender()
-  const p = payload || {}
-  const raw = String(p.text || '').trim()
-  if (raw.length > 5000) return { success: false, msg: '单次翻译最多 5000 个字符' }
-  // 占位符绝不能进翻译接口：它是我们自己的状态，翻出来只会污染译文。
-  const text = stripEmoji(stripBusyMarks(raw))
-  if (!text) return { success: true, translation: '', skipped: 'busy' }
-  const s = (tab && tab.settings) || {}
-  const incoming = !!p.incoming
-  const to = incoming
-    ? pickLang(s.recvTo, (profile && profile.langMine) || 'zh')
-    : pickLang(s.sendTo, 'en')
-  const from = incoming ? (s.recvFrom || 'auto') : (s.sendFrom || 'auto')
-  const engine = s.engine || (profile && profile.activeEngine) || ''
-  // 调用来源，一路带到服务端落进 translate_logs.trigger。
-  // 出异常字符消耗时，靠它区分"用户点了译"和"扫描时自动翻"。
-  const trigger = String(p.trigger || '').trim()
-  // 真机取证用：把**实际送给上游**的 source_text 记进客户端日志。
-  // 排查"译文里混进 UI 文案"这类问题时，没有这一行只能靠猜。
-  if (clientLog) {
-    clientLog.info('translate', 'source_text=' + JSON.stringify(text) +
-      ' · from=' + from + ' to=' + to + ' engine=' + engine + ' dir=' + (incoming ? 'in' : 'out') +
-      ' trigger=' + (trigger || '-'))
-  }
-  const hit = getTransCached(from, to, engine, text)
-  if (hit) return { success: true, translation: hit, cached: true }
-  try {
-    // requestTranslate 内部处理"上一轮的请求号已终结"：换号重发一次再返回。
-    // 这条路径不吞错 —— 服务端的 {success:false, code, msg} 原样上抛给渲染层，
-    // 由 guest-inject 的 notifyTranslateIssue() 显示成人话（余额不足 / 通道未包含）。
-    const data = await requestTranslate(text, from, to, engine, trigger)
-    const out = String((data && (data.translation || data.text)) || '').trim()
-    if (data && data.success && out) {
-      putTransCached(from, to, engine, text, out)
-      if (out !== text) putTransCached('auto', from === 'auto' ? 'zh' : from, engine, out, text)
-    }
-    // 把这次实际使用的幂等号带回渲染层：真机取证要求 trace 里能看到 requestId，
-    // 才能分清"同一次动作内的重发（复用幂等号）"和"用户再次点击（新号）"。
-    if (data && typeof data === 'object') {
-      try { data.requestId = transRequestId(text, from, to, engine) } catch (e) {}
-    }
-    return data
-  } catch (e) {
-    // 只有"已拿到服务端响应、翻译服务处理失败"才算 TRANSLATE_FAILED。
-    // 传输层给过分类的（连不上 / 超时 / 服务端返回异常）按原码上报，
-    // 绝不把网络不可达冒充成"翻译服务坏了"，否则用户会一直以为是我们这边的问题。
-    const code = (e && e.pix && e.code) ? e.code : 'TRANSLATE_FAILED'
-    return { success: false, code: code, msg: (e && e.message) || '翻译失败' }
-  }
-})
 ipcMain.handle('app:overlay', (event, on) => {
   if (!isMainSender(event)) return rejectUntrustedSender()
   overlayOpen = !!on
@@ -3994,7 +3882,7 @@ if (!app.isPackaged) {
     guestPrefs, trustedTabSender, pickLang, tabPrefs,
     stripBusyMarks, stripEmoji, transCacheKey, transFingerprint, transRequestId,
     isDeadRequest, relayKeyOf, parseJsonSafe, proxyHistoryFile,
-    bridgeEnabledFor, rejectUntrustedSender, composerTargetOf,
+    bridgeEnabledFor, rejectUntrustedSender,
     unreadFromTitle, bindTabUnread, syncGlobalUnread, bindTabLoading,
     tabPayload, sendTabs, layoutViews, applyViewBounds,
     hideTab, showHiddenTab, createWebView, popupTabContextMenu,

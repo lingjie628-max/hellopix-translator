@@ -867,10 +867,15 @@ test('main.js 必须有 preload-error 监听（装载失败要进客户端日志
 })
 
 test('main.js 必须用「guest 是否来问 prefs」判断桥是否活着', () => {
-  const main = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
-  const handler = main.slice(main.indexOf("ipcMain.handle('translate:guestPrefs'"))
-  assert.match(handler.slice(0, 400), /bridgeReport\(\s*tab\.id,\s*true/,
+  // handler 已迁到 src/ipc/translate.js，语义不变
+  const impl = fs.readFileSync(path.join(root, 'desktop', 'src', 'ipc', 'translate.js'), 'utf8')
+  const at = impl.indexOf("'translate:guestPrefs'")
+  assert.ok(at > 0, '找不到 translate:guestPrefs')
+  assert.match(impl.slice(at, at + 400), /bridgeReport\(\s*tab\.id,\s*true/,
     'guest 能问到 prefs = preload 真的跑起来了，这是最可靠的存活证据')
+  // main.js 必须把这个频道真正接上去，否则 handler 永远不会被调用
+  const main = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
+  assert.match(main, /registerTranslateIpc\(/)
 })
 
 test('main.js 必须有看门狗：到点没通信就判桥未启动', () => {

@@ -580,22 +580,31 @@ test('0.1.19：发送链上不允许再出现任何「页面内改 DOM」的写�
 })
 
 test('0.1.19：主进程必须提供原生输入通道（Chromium 编辑命令），且不碰 DOM', () => {
+  // 通道已迁到 src/ipc/translate.js
+  const impl = fs.readFileSync(path.join(root, 'desktop', 'src', 'ipc', 'translate.js'), 'utf8')
   assert.ok(main.indexOf("require('./src/translate/native-composer')") > 0, '主进程没有引入 native-composer')
-  assert.ok(main.indexOf("ipcMain.handle('translate:composerSelectAllDelete'") > 0,
-    '缺少原生清空通道')
-  assert.ok(main.indexOf("ipcMain.handle('translate:composerInsertText'") > 0,
-    '缺少原生插入通道')
+  assert.ok(impl.indexOf("'translate:composerSelectAllDelete'") > 0, '缺少原生清空通道')
+  assert.ok(impl.indexOf("'translate:composerInsertText'") > 0, '缺少原生插入通道')
   // 通道必须走可信来源校验（否则任意页面都能驱动 WhatsApp 输入框）。
-  const at = main.indexOf("ipcMain.handle('translate:composerSelectAllDelete'")
-  const seg = main.slice(at, main.indexOf('ipcMain.handle', at + 10))
+  const at = impl.indexOf("'translate:composerSelectAllDelete'")
+  const seg = impl.slice(at, impl.indexOf('handleUnsafe', at + 10) > 0
+    ? impl.indexOf('handleUnsafe', at + 10)
+    : impl.length)
   assert.ok(/trustedTabSender|composerTargetOf/.test(seg), '原生输入通道缺少来源校验')
+  // 迁走的通道必须用 handleUnsafe 显式注册 —— 它们服务的是客页，
+  // 但"允许客页调用"这件事必须在代码里看得见
+  assert.match(impl.slice(Math.max(0, at - 200), at), /handleUnsafe/, '客页通道必须显式声明为 handleUnsafe')
+  // 绝不能碰 DOM
+  assert.equal(impl.includes('executeJavaScript('), false, '原生输入通道不能注入脚本')
 })
 
 test('主进程独立再拦一次（不信任渲染进程）', () => {
   assert.match(main, /const CLIENT_BUSY_MARKS = /, '主进程没有占位符名单')
-  const runAt = main.indexOf("ipcMain.handle('translate:run'")
+  // translate:run 已迁到 src/ipc/translate.js
+  const impl = fs.readFileSync(path.join(root, 'desktop', 'src', 'ipc', 'translate.js'), 'utf8')
+  const runAt = impl.indexOf("'translate:run'")
   assert.ok(runAt > 0, '找不到 translate:run 处理器')
-  const run = main.slice(runAt, runAt + 2600)
+  const run = impl.slice(runAt, runAt + 2800)
   assert.ok(run.indexOf('stripBusyMarks(') > 0, '主进程没摘占位符')
   assert.ok(run.indexOf('stripBusyMarks(') < run.indexOf('getTransCached('),
     '必须在进缓存/发上游之前就摘掉')
