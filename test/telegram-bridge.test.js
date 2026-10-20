@@ -243,7 +243,16 @@ test('tdesktop apply script refuses an unpinned tdesktop version', () => {
 // 于是"版本已匹配"会放行一棵与 tag 无关的快照（2026-09-11 云编译就是这么编上 dev 的）。
 // 所以 git 目录必须再比 HEAD；这里把那条 fail-closed 固化下来。
 test('tdesktop apply script rejects a dev snapshot that only shares the version number', {
-  skip: spawnSync('git', ['--version']).status !== 0
+  // 有些执行环境（含部分沙箱化测试运行器）禁止子进程写 .git/，
+  // git init 会报 "Operation not permitted"。那不是代码问题，
+  // 这里提前探一下，不可写就跳过，免得把环境限制误报成回归。
+  skip: (() => {
+    if (spawnSync('git', ['--version']).status !== 0) return '本机没有 git'
+    const probe = fs.mkdtempSync(path.join(os.tmpdir(), 'pix-gitprobe-'))
+    const r = spawnSync('git', ['init', '-q'], { cwd: probe, encoding: 'utf8' })
+    fs.rmSync(probe, { recursive: true, force: true })
+    return r.status === 0 ? false : '当前环境禁止子进程写 .git/'
+  })()
 }, () => {
   const { tree } = makeTdesktopTree('7.2.8')
   const git = (args) => {

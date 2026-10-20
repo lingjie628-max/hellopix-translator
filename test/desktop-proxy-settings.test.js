@@ -46,6 +46,7 @@ const root = path.join(__dirname, '..')
 const mainSrc = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
 const preloadSrc = fs.readFileSync(path.join(root, 'desktop', 'preload.js'), 'utf8')
 const appSrc = fs.readFileSync(path.join(root, 'desktop', 'renderer', 'app.js'), 'utf8')
+const proxyPanelSrc = fs.readFileSync(path.join(root, 'desktop', 'renderer', 'proxy-panel.js'), 'utf8')
 const htmlSrc = fs.readFileSync(path.join(root, 'desktop', 'renderer', 'index.html'), 'utf8')
 
 /** 记录 setProxy 调用的 session 替身。真实实现只要求 session 有 setProxy。 */
@@ -483,7 +484,8 @@ test('【9】弹窗 UI 存在，且用 window.pix.proxySettings 加载当前线�
   for (const id of ['proxySettings', 'psProxyType', 'psProxyHost', 'psProxyPort', 'psProxyUser', 'psProxyPass', 'psProxySave']) {
     assert.ok(htmlSrc.includes('id="' + id + '"'), `index.html 缺少 #${id}`)
   }
-  const open = fnBody(appSrc, 'openProxySettings')
+  // openProxySettings 已迁到 renderer/proxy-panel.js
+  const open = fnBody(proxyPanelSrc, 'openProxySettings')
   assert.ok(open.includes('window.pix.proxySettings('), '弹窗必须读当前线路的已有配置')
   assert.ok(open.includes('psProxyHost.value'), '读取到的配置要回填到表单')
 })
