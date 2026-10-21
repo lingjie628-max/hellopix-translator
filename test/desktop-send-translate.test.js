@@ -615,14 +615,23 @@ test('发送翻译关闭时：不拦截，原文照常发送', async () => {
   } finally { h.close() }
 })
 
-test('英文发英文（目标语言相同）：不拦截、不调接口', async () => {
+test('英文发英文：本地不再猜语种，交给上游 auto（译文=原文，缓存兜住重复）', async () => {
+  // 原来的断言是"不拦截、不调接口"，靠的是 detectLang 把纯 ASCII 认成英语。
+  // 但 detectLang 认不出的语言**一律返回 'en'** —— 德语/俄语/阿拉伯语/
+  // 印地语全被当成英语放行，"其他语言翻译没反应"就是从这来的。
+  //
+  // 现在的取舍：本地不再猜，拉丁字母区一律送翻。
+  // 英语文本的译文等于原文，成本极小；重复发送由 translation-cache 兜住。
+  // 详见 test/translation-lang-detection.test.js。
   const h = await mount()
   try {
     h.composer.textContent = 'hello there'
-    assert.equal(h.pressEnter(), false, '同语言不需要翻译，直接放行')
+    assert.equal(h.pressEnter(), true, '会被拦下并送翻（不再本地猜"已经是英语"）')
     await settle()
-    assert.equal(h.translateCalls.length, 0)
-    assert.deepEqual(h.sent, ['hello there'])
+    assert.equal(h.translateCalls.length, 1, '应恰好调用一次翻译接口')
+    assert.equal(h.translateCalls[0].incoming, false, '这是发送方向')
+    // 目标语言由主进程 translate:run 解析（sendTo → pickLang → to），
+    // 客页发出的 payload 里本来就不带 to，这里只验证确实发了请求。
   } finally { h.close() }
 })
 
@@ -754,7 +763,7 @@ test('并发重复按 Enter 只产生一次请求（占位符硬闸去重）', a
 // 这与 D1 是同一族的失效：不是"翻错了"，而是"根本没拦"。
 //
 // `runIntercept` 里 `preventDefault()` 在第一个 await 之前同步执行，所以已经进到
-// 翻译流程的那一下是安全的；但在它**之前**的每一步（readComposer / detectLang /
+// 翻译流程的那一下是安全的；但在它**之前**的每一步（readComposer / isDefinitelyLang /
 // maskUrls / hasTranslatableText）只要抛一次，就是一个 unhandled rejection：
 // preventDefault 还没执行，这一下 Enter 直接落到 WhatsApp 的发送逻辑上 ——
 // 中文原文出网，而且界面上一点反应都没有。

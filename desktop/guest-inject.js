@@ -408,6 +408,31 @@ const pixBridge = {
       border-top-color: rgba(255,255,255,.12);
     }
     /* ------------------------------------------------------------------
+       混合路由标记：这句译文实际是**哪条通道**翻的。
+
+       服务端开了混合路由后，短句走专用翻译 API、长句走 LLM。
+       用户选的是 LLM 通道 —— 若不在界面上标出来，就成了"静默切换供应商"。
+
+       只在 data-pix-routed 存在时显示（= 路由真的发生了），
+       没路由的译文完全不受影响，保持原样。
+       用 ::after + content: attr() 而不是往 DOM 里塞节点：
+       多一个元素就多一次 MutationObserver 回调，容易把扫描器带进自激。
+       ------------------------------------------------------------------ */
+    .pix-trans[data-pix-routed]::after {
+      content: "· 快速通道";
+      display: inline-block;
+      margin-left: 6px;
+      font-size: 10px;
+      line-height: 1;
+      vertical-align: middle;
+      padding: 2px 5px;
+      border-radius: 8px;
+      opacity: 0.55;
+      border: 1px solid currentColor;
+      pointer-events: none;
+      user-select: none;
+    }
+    /* ------------------------------------------------------------------
        翻译操作行（P0-3：入口被 WhatsApp 时间/勾遮挡）
        真机现象：单行/短消息时，"译"和 WhatsApp 的时间 / 单勾 / 双勾挤在气泡
        右下角，按钮被盖住、点不动。
@@ -1285,8 +1310,31 @@ const pixBridge = {
     return MessageParser.hasBusy(text)
   }
 
+  /**
+   * 这条消息是不是**中文**（用来决定"母语消息不翻 / includeZh 关着就 hide"）。
+   *
+   * 不能只看 `[\u4e00-\u9fff]` —— 那个区间是 **CJK 统一汉字**，日语、韩语
+   * 里的汉字（漢字）全都落在里面。原来这么写，导致：
+   *
+   *     こんにちは、会議は3時です
+   *
+   * 被判定成 hasChinese=true，而 includeZh 默认关闭 →
+   * messageAction 直接返回 'hide'，**日语消息连「译」按钮都不给**。
+   * 用户看到的就是"换成其他语言就完全没反应"。
+   *
+   * 现在多加一条：只要出现了假名，就不是中文。
+   * 纯汉字句子（日本人也写的那些）仍按中文处理 —— 因为从字符上无法区分，
+   * 而按中文处理的最坏结果是"不翻"，成本可控；反过来把中文判成外语，
+   * 会拿用户的母语消息去扣费翻译。
+   */
   function hasChinese(text) {
-    return /[\u4e00-\u9fff]/.test(String(text || ''))
+    const s = String(text || '')
+    if (!/[\u4e00-\u9fff]/.test(s)) return false
+    // 有假名 → 日语，不是中文
+    if (/[\u3040-\u309f\u30a0-\u30ff]/.test(s)) return false
+    // 有谚文 → 韩语（韩汉混写），不是中文
+    if (/[\uac00-\ud7af]/.test(s)) return false
+    return true
   }
 
   /**
@@ -1325,10 +1373,16 @@ const pixBridge = {
    * 系统提示都不该调翻译接口，调用方拿到空串就不会画译文框。
    */
   async function translateParsed(parsed, incoming, trigger) {
-    if (!parsed || !parsed.translatable) return ''
-    const out = await translateText(parsed.sourceText, incoming, trigger)
-    if (!out) return ''
-    return MessageParser.restoreUrls(out, parsed.urls)
+    if (!parsed || !parsed.translatable) return null
+    const res = await translateTextDetailed(parsed.sourceText, incoming, trigger)
+    if (!res || !res.out) return null
+    // 保留引擎元数据：调用方要把它标在译文框上（见 markTransEngine）。
+    return {
+      out: MessageParser.restoreUrls(res.out, parsed.urls),
+      engine: res.engine || '',
+      engineName: res.engineName || '',
+      routed: res.routed || null
+    }
   }
 
   /**
@@ -1839,18 +1893,94 @@ const pixBridge = {
     reportClue('', 'in')
   }
 
-  function detectLang(text) {
+  /**
+   * 文本是不是**确定无疑**属于某种语言。
+   *
+   * ## 为什么不用 detectLang()
+   *
+   * detectLang 是"猜"：它只有几个正则，猜不出来就返回 'en'。
+   * 拿它做"要不要翻译"的闸门，等于**把所有认不出的语言当成英语**放行 ——
+   * 德语、俄语、阿拉伯语、印地语、印尼语等全都在这里被静默跳过。
+   *
+   * ## 这里的判据：按书写系统（Unicode script），而不是按语言
+   *
+   * 只有当目标语言有**专属且唯一的书写系统**时，才能确定地判断：
+   *   · 日语 → 平假名/片假名（但不含纯汉字，那是中文）
+   *   · 韩语 → 谚文
+   *   · 泰语 / 希腊语 / 希伯来语 / 阿拉伯语 / 亚美尼亚语 / 格鲁吉亚语 …
+   *
+   * 拉丁字母区（en/de/fr/es/pt/it/id/tr/vi…）**一律返回 false**：
+   * 它们共用同一套字母，凭字符无法区分，必须交给上游 auto 检测。
+   *
+   * 返回 false 的代价只是"多翻一次"（上游译文等于原文时消耗也很小），
+   * 返回 true 错了的代价是"该翻的没翻"—— 后者用户直接看得见。
+   */
+  function isDefinitelyLang(text, lang) {
     const s = String(text || '')
-    if (/[\u4e00-\u9fff]/.test(s)) return 'zh'
-    if (/[\u3040-\u30ff]/.test(s)) return 'ja'
-    if (/[\uac00-\ud7af]/.test(s)) return 'ko'
-    if (/[\u0e00-\u0e7f]/.test(s)) return 'th'
-    if (/[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(s)) return 'vi'
-    return 'en'
+    if (!s || !lang) return false
+    const target = String(lang).toLowerCase()
+    const base = target.split('-')[0]
+
+    // 去掉数字、标点、空白、emoji 后剩下的"实义字符"
+    const letters = s.replace(/[\s\d\p{P}\p{S}\p{Emoji_Presentation}]/gu, '')
+    if (!letters) return false
+
+    const all = re => {
+      const hits = letters.match(new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g'))
+      return !!hits && hits.length === letters.length
+    }
+
+    switch (base) {
+      // 日语必须有假名。纯汉字那句是中文，不是日语 —— 这正是原来
+      // "日语被当成中文、接收方向直接 hide"的原因。
+      case 'ja': return /[\u3040-\u30ff]/.test(letters) && /^[\u3040-\u30ff\u30fc\u4e00-\u9fff]*$/.test(letters)
+      case 'ko': return all(/[\uac00-\ud7af\u1100-\u11ff]/)
+      case 'th': return all(/[\u0e00-\u0e7f]/)
+      case 'zh': return all(/[\u4e00-\u9fff]/)
+      case 'ru': case 'uk': case 'bg': case 'sr': case 'mk': case 'be':
+        return all(/[\u0400-\u04ff]/)
+      case 'ar': case 'fa': case 'ur': case 'ps': case 'ckb':
+        return all(/[\u0600-\u06ff\u0750-\u077f]/)
+      case 'he': return all(/[\u0590-\u05ff]/)
+      case 'el': return all(/[\u0370-\u03ff]/)
+      case 'hy': return all(/[\u0530-\u058f]/)
+      case 'ka': return all(/[\u10a0-\u10ff]/)
+      case 'hi': case 'mr': case 'ne': case 'sa': case 'bn': case 'gu': case 'pa':
+      case 'or': case 'ta': case 'te': case 'kn': case 'ml': case 'si':
+        return all(/[\u0900-\u0dff]/)
+      // 拉丁字母区（en/de/fr/es/pt/it/id/tr/vi… 共用同一套字母）：
+      // **无法凭字符确定**，一律返回 false → 照常送翻。
+      //
+      // ## 为什么连英语也不在本地跳过
+      //
+      // 曾经想用"纯 ASCII = 英语"省一次接口调用，但纯 ASCII 的德语
+      // （`Guten Tag, Besprechung um 15 Uhr`）、意大利语、荷兰语、土耳其语
+      // 全都不带变音符 —— 这条捷径等于把"所有非拉丁语言"的 bug 换个壳
+      // 又引回来。而漏翻是用户直接看得见的错误，多翻一次只是几个字符。
+      //
+      // 重复发送同一段的成本由 translation-cache 兜住：相同文本第二次
+      // 直接命中缓存（translate:run 里 getTransCached 在请求之前）。
+      default: return false
+    }
   }
 
+  /**
+   * 这条消息是不是已经是我的母语 —— 是的话接收方向不翻。
+   *
+   * ## 原来的实现是 detectLang(text) === langMine，有两个方向的错
+   *
+   * 1. **日语被判成中文**：`こんにちは、会議は3時です` 里的汉字先命中
+   *    `[\u4e00-\u9fff]`，于是 langMine='zh' 时 sameLang=true →
+   *    messageAction 返回 'hide' —— 日语消息**连「译」按钮都不给**。
+   * 2. **法语/西语/葡语被判成越南语**：`à`/`é`/`ó` 命中了越南语字符集，
+   *    本来不是母语却被判成"同语种"（虽然结果恰好也是翻译，但逻辑是错的）。
+   *
+   * 现在改用 isDefinitelyLang：**只有确定是母语书写系统时才 hide**。
+   * 拿不准的一律翻译 —— 接收方向多翻一次只是多花一点字符，
+   * 而漏翻是用户完全看不到消息内容。
+   */
   function sameLang(text) {
-    return detectLang(text) === (prefs.langMine || 'zh')
+    return isDefinitelyLang(text, prefs.langMine || 'zh')
   }
 
   function clearExtras(host) {
@@ -1949,6 +2079,9 @@ const pixBridge = {
     // 网络传输层：与"翻译服务坏了"分开说，否则用户会一直以为是我们这边的问题。
     NETWORK_UNREACHABLE: '连不上服务器，请检查网络后重试',
     NETWORK_TIMEOUT: '服务器响应超时，请稍后重试',
+    // 连续连不上时的退避窗口（见 src/net/api-net.js）。
+    // 必须单独成一句：它**不是**"服务坏了"，而是"刚断过网，马上就好"。
+    NETWORK_BACKOFF: '网络刚断开过，正在等待恢复，请稍后重试',
     SERVER_BAD_RESPONSE: '服务器返回异常，请稍后重试'
   }
   const noticeSeenAt = new Map()
@@ -2324,14 +2457,24 @@ const pixBridge = {
       const out = String((resp && (resp.translation || resp.text)) || '').trim()
       if (out) cache.set(key, out)
       // requestId 原样透传：真机取证要求能看到"这次重试用的是哪个幂等号"。
-      return { ok: !!out, code: out ? '' : 'EMPTY_RESULT', out: out, requestId: (resp && resp.requestId) || '' }
+      // engine / routed 同理：服务端可能把短句分派到快速通道，
+      // 每个调用方都要能拿到真实通道并标在译文上（见 markTransEngine）。
+      return {
+        ok: !!out,
+        code: out ? '' : 'EMPTY_RESULT',
+        out: out,
+        requestId: (resp && resp.requestId) || '',
+        engine: (resp && resp.engine) || '',
+        engineName: (resp && resp.engineName) || '',
+        routed: (resp && resp.routed) || null
+      }
     }).catch(err => {
       pending.delete(key)
       // 走到这里说明 IPC / 线路层面就断了（服务端错误已在上面 return）。
       // 同样不能静默；也**不能丢掉错误类别** —— 否则界面又会把"连不上服务器"
       // 说成"翻译失败"，正是本次要修的那类误导。
       const cls = String((err && err.pix && err.pix.code) || '')
-      const code = ['NETWORK_UNREACHABLE', 'NETWORK_TIMEOUT', 'SERVER_BAD_RESPONSE'].indexOf(cls) >= 0
+      const code = ['NETWORK_UNREACHABLE', 'NETWORK_TIMEOUT', 'NETWORK_BACKOFF', 'SERVER_BAD_RESPONSE'].indexOf(cls) >= 0
         ? cls : 'TRANSLATE_FAILED'
       notifyTranslateIssue({ code: code, msg: (err && err.message) || '' })
       return { ok: false, code: code, out: '' }
@@ -2353,7 +2496,48 @@ const pixBridge = {
    * 于是"译文和原文一样 / 结果是图标噪音"这类情况会让用户看到
    * 「点一下，按钮没了，什么也没发生」，与 0.1.14 报的 A1 症状完全一致。
    */
-  function paint(host, translated, original) {
+  /**
+   * 在译文框上标注"这句是谁翻的"。
+   *
+   * ## 为什么必须标
+   *
+   * 服务端开了混合路由后，短句会走专用翻译 API（快），长句仍走 LLM（质量好）。
+   * 用户选的是 LLM 通道，界面显示的也是它 —— 如果译文不标注真实来源，
+   * 就成了 resolveEngineId 头部点名禁止的"静默切换供应商"。
+   *
+   * 所以：**只要路由发生了，就一定要留下可追溯的痕迹**。
+   *
+   * 用 data-* 而不是改 textContent —— 后者会触发 MutationObserver 自激
+   * （见 paint() 里那段说明）。悬停提示由 CSS 的 ::after 读取这个属性渲染。
+   *
+   * @param {Element} box   .pix-trans 节点
+   * @param {object}  meta  { routed?: {from,to,reason}, engine?, model? }
+   */
+  function markTransEngine(box, meta) {
+    if (!box) return
+    const m = meta || {}
+    const routed = m.routed && m.routed.to ? m.routed : null
+    // 没有路由信息（老服务端 / 路由没发生）：不写这些属性，
+    // 免得给每条译文都挂一个空标记。
+    if (!routed && !m.engine) {
+      try { box.removeAttribute('data-pix-engine'); box.removeAttribute('data-pix-routed') } catch (e) {}
+      return
+    }
+    try {
+      if (m.engine) box.setAttribute('data-pix-engine', String(m.engine).slice(0, 32))
+      if (routed) {
+        box.setAttribute('data-pix-routed', String(routed.to || '').slice(0, 32))
+        // 悬停能看到从哪条切到哪条 —— 出问题时用户能直接报给我们
+        box.setAttribute('title', '此句由「' + String(routed.to || '')
+          + '」快速通道翻译（你选择的是「' + String(routed.from || '') + '」）')
+      } else {
+        box.removeAttribute('data-pix-routed')
+        box.removeAttribute('title')
+      }
+    } catch (e) {}
+  }
+
+  function paint(host, translated, original, meta) {
     if (!isMessageHost(host)) return false
     const before = String(original == null ? '' : original)
     // 译文和原文一致就不画：多一个和原文一模一样的框只会让人以为翻译坏了。
@@ -2376,6 +2560,10 @@ const pixBridge = {
       //
       // 0.1.25 把「群聊=自动」扩到会话里全部消息之后，这个循环会被放大到
       // 整个会话，所以必须在这里掐断：**没变就是没事发生**。
+      //
+      // 但通道标记仍然要补：内容可能相同而路由结果不同（比如服务端开了混合路由）。
+      // 只改 data-* 属性不进 textContent，不会触发上面那台自激机器。
+      markTransEngine(box, meta)
       return true
     }
     if (!box) {
@@ -2384,6 +2572,7 @@ const pixBridge = {
       insertTransBox(host, box)
     }
     box.textContent = translated
+    markTransEngine(box, meta)
     // ★ 硬校验：译文节点必须**真的**挂在宿主下，且宿主仍在原消息行内 ★
     // 只看"函数有没有报错"是不够的 —— 真机上出现过"状态已翻译、节点却在聊天
     // 底部"。这里用 parentElement + 行归属双重确认，过不了就不许显示"已翻译"。
@@ -2485,6 +2674,7 @@ const pixBridge = {
   const CHIP_FAIL_TEXT = {
     NETWORK_UNREACHABLE: '连不上服务器 · 点击重试',
     NETWORK_TIMEOUT: '服务器超时 · 点击重试',
+    NETWORK_BACKOFF: '网络恢复中 · 点击重试',
     SERVER_BAD_RESPONSE: '服务器异常 · 点击重试',
     INSUFFICIENT_CHARS: '余额不足 · 点击重试',
     ENGINE_NOT_ALLOWED: '通道不可用 · 点击重试',
@@ -2719,7 +2909,10 @@ const pixBridge = {
       hostClass: String(host.className || '').slice(0, 80),
       hostParentTag: String((host.parentElement && host.parentElement.tagName) || '').toLowerCase()
     })
-    const drew = paint(host, translated, displayText(parsed, ''))
+    const drew = paint(host, translated, displayText(parsed, ''), {
+      engine: res.engine,
+      routed: res.routed
+    })
     trace('TRANSLATION_RENDERED', {
       chain: 'receive',
       messageId: key.value || '-',
@@ -3092,7 +3285,18 @@ const pixBridge = {
     // 网址一旦被模型改写就点不开了。纯 URL 消息直接原样发送，不调翻译接口。
     const masked = MessageParser.maskUrls(forApi)
     if (!MessageParser.hasTranslatableText(masked.masked)) return null
-    if (detectLang(masked.masked) === (prefs.sendTo || 'en')) return null
+    // 目标语言与原文同语种时不必翻译 —— 但**判据必须保守**。
+    //
+    // 原实现是 `detectLang(text) === sendTo`，而 detectLang 是个只认
+    // zh/ja/ko/th/vi 的正则猜词器：德语、俄语、阿拉伯语、印地语、印尼语
+    // 等一律返回 'en'。于是 sendTo='en'（默认值）时，**这些语言全被判成
+    // "本来就是英语"，直接放行不翻**。这正是"英语正常、其他语种没反应"
+    // 的根因。
+    //
+    // 现在只做一件事：文本**确定无疑是目标语言**时才跳过。
+    // 拿不准就交给上游 —— 所有通道都支持 source='auto'，多翻一次顶多
+    // 浪费本地一次判断，而漏翻是用户直接看得见的错误。
+    if (isDefinitelyLang(masked.masked, prefs.sendTo || 'en')) return null
     // 到这里才真正决定"拦下并翻译"。状态机从这一刻开始，trace 走同一 actionId。
     sendActionId = newSendActionId()
     sendActionPhase = 'captured'
@@ -3113,7 +3317,7 @@ const pixBridge = {
    *
    * ## 为什么必须有它
    *
-   * `decideIntercept` 里的每一步 —— `readComposer`、`detectLang`、
+   * `decideIntercept` 里的每一步 —— `readComposer`、`isDefinitelyLang`、
    * `MessageParser.maskUrls`、`hasTranslatableText` —— 只要抛一次
    * （页面上出现没见过的 DOM、选区被页面脚本改动、解析器遇到新格式），
    * 这一下 Enter 就会直接落到 WhatsApp 的发送逻辑上，**中文原文出网**，
@@ -3234,6 +3438,7 @@ const pixBridge = {
       // 网络类失败要说清楚是"连不上 / 超时"，不能让用户以为是我们翻译坏了。
       // 文案与顶部提示（NOTICE_TEXT）共用同一句，避免两处各说各话。
       const netText = (code === 'NETWORK_UNREACHABLE' || code === 'NETWORK_TIMEOUT'
+        || code === 'NETWORK_BACKOFF'
         || code === 'SERVER_BAD_RESPONSE') ? String(NOTICE_TEXT[code] || '') : ''
       showSendFailureNotice(box, raw, masked, {
         title: netText ? '网络异常，消息未发送' : '翻译失败，消息未发送',
@@ -4174,8 +4379,12 @@ const pixBridge = {
         try {
           const translated = await translateParsed(job.parsed, true, TRIGGER_AUTO)
           // 翻译失败时**不清**已有译文框：一次网络抖动不该把上面那条好好的译文抹掉。
-          if (translated) paint(job.host, translated, job.text)
-          else autoFailedAt.set(job.id, Date.now())
+          if (translated) {
+            paint(job.host, translated.out, job.text, {
+              engine: translated.engine,
+              routed: translated.routed
+            })
+          } else autoFailedAt.set(job.id, Date.now())
         } catch (e) {
           autoFailedAt.set(job.id, Date.now())
         } finally {
