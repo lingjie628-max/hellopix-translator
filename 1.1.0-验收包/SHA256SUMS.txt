@@ -1,9 +1,2 @@
-# 1.1.0 验收包 SHA256
-#
-# 本包尚未构建 —— 打出 Hello Pix-1.1.0-arm64.dmg 后，把真实哈希写在这里：
-#   shasum -a 256 "Hello Pix-1.1.0-arm64.dmg"
-#
-# ⚠️ 绝不要沿用 1.0.0 的哈希（daf82dad...）。那是另一个产物，
-#    写错会让"先验指纹再安装"这道检查完全失去意义。
-#
-# 格式：<sha256>  <文件名>
+ab311f9f00b417584c874d5209b74fa2f3e78b357caf4fe2ab956c79dcfe797e  Hello Pix-1.1.0-arm64.dmg
+a4cdfedc88c33ef4cf8a1c63d81186e79fde1cbe575de9c1f48239ca1035240a  Hello Pix-1.1.0.dmg
