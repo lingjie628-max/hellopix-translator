@@ -9,6 +9,7 @@ const { estimateUpstreamCost } = require('../lib/upstream-pricing')
 const { mapRow, mapRows } = require('../repositories/production-repository')
 const { RedisTranslationCache } = require('../stores')
 const catalog = require('../lib/client-catalog')
+const translationRouter = require('./translation-router')
 
 function number(value, fallback) {
   const parsed = Number(value)
@@ -383,6 +384,44 @@ class CoreService {
   }
 
   /**
+   * 混合路由总开关。
+   *
+   * 默认**关闭**。理由：这是要上线的行为变更，改的是"用户选 A、实际用 B"，
+   * 一旦哪里有遗漏（比如客户端不认 routed 字段、某个套餐没配快速通道），
+   * 影响的是一次真实翻译。所以必须先开闸验证，再全量。
+   *
+   * 打开方式：环境变量 PIX_HYBRID_ROUTING=1。
+   * 关闭时 routeTranslate 直接返回原通道，行为与改动前**逐字节一致**。
+   */
+  hybridRoutingEnabled() {
+    if (this.hybridRouting !== undefined && this.hybridRouting !== null) return Boolean(this.hybridRouting)
+    return String(process.env.PIX_HYBRID_ROUTING || '').trim() === '1'
+  }
+
+  /**
+   * 允许被用作"快速通道"的通道 id，按优先级排列。
+   *
+   * 为什么是配置而不是硬编码：
+   *   · 不同套餐接通的通道不一样，硬编码一个不存在的 id 等于功能静默失效；
+   *   · 将来换供应商（Qwen-MT → 别家）不该改代码。
+   *
+   * 默认 `qwen`（通义千问 MT）优先 —— 理由是：
+   *   · 它是**专用翻译模型**（qwen-mt-flash），不是通用对话模型，无推理开销；
+   *   · 覆盖 100+ 语种，含马来语/印尼语/泰语/越南语这些聊天场景高频语种；
+   *   · 与 LLM 通道共用同一套 OpenAI 兼容实现，已在本仓库有单测覆盖。
+   *
+   * 打开方式：PIX_FAST_ENGINES=qwen,google（逗号分隔，按优先级）。
+   */
+  fastEngineIds() {
+    if (Array.isArray(this.fastEngines)) return this.fastEngines
+    const raw = String(process.env.PIX_FAST_ENGINES || '').trim()
+    if (raw) {
+      return raw.split(',').map(s => s.trim()).filter(Boolean)
+    }
+    return ['qwen']
+  }
+
+  /**
    * 解析实际使用的翻译通道 id。
    *
    * 顺序：**本次请求显式指定** → 账号设置 → 主账号设置 → 权益内第一个可用通道 → 空串
@@ -520,6 +559,25 @@ class CoreService {
       // 得让他知道是"这个通道还没上线"，而不是"翻译坏了"。
       throw new ApiError(503, `翻译通道「${engine.name}」尚未上线，请换一个通道`, 'ENGINE_NOT_CONFIGURED')
     }
+    // ---- 混合路由：短文本走专用翻译 API ----
+    //
+    // 2026-10-21 真机实测：LLM 通道中位 1926ms、P90 3253ms，且大部分时间在
+    // "prompt → 推理 → 逐 token 生成"，压不下去。而 48% 的真实消息在 50 字符以内，
+    // 这类短句用专用翻译 API（seq2seq，无生成）通常 150~400ms。
+    //
+    // 放在**权益校验之后**是有意的：先确认用户选的通道合法，再考虑要不要换快路。
+    // 绝不能因为"快"就跳过套餐校验，也不能路由到套餐外的通道。
+    //
+    // 路由结果会写进 response.routed，客户端据此显示实际通道 ——
+    // resolveEngineId 头部的"不得静默切换"约束靠这个字段来满足。
+    const route = translationRouter.routeTranslate({
+      selected: engine,
+      text: text,
+      candidates: allowed,
+      fastEngineIds: this.fastEngineIds(),
+      enabled: this.hybridRoutingEnabled()
+    })
+    const usedEngine = route.engine
     const chars = this.translator.countBillableChars(text)
     const key = String(idempotencyKey || data.requestId || '').trim()
     if (!key || key.length > 160) throw new ApiError(400, '缺少有效的 Idempotency-Key', 'IDEMPOTENCY_KEY_REQUIRED')
@@ -578,7 +636,10 @@ class CoreService {
       }
 
       const cacheTenant = `${session.kind}:${session.account.id}`
-      const cacheRequest = { engine: engineId, from, to, text }
+      // 缓存键用**实际执行的通道**：同一个句子走 LLM 和走专用 API 的译文
+      // 可能不同，混用缓存会让"换了路由却拿到旧译文"。
+      const cacheEngineId = usedEngine && usedEngine.id ? usedEngine.id : engineId
+      const cacheRequest = { engine: cacheEngineId, from, to, text }
       let cachedText = null
       try {
         cachedText = await this.translationCache.get(cacheTenant, cacheRequest)
@@ -586,11 +647,11 @@ class CoreService {
         console.error('Translation cache read failed:', error.message)
       }
       const result = cachedText == null
-        ? await this.translator.translate(engine, {
+        ? await this.translator.translate(usedEngine, {
           text, from, to, detected: this.translator.detectLang(text)
         }, {
           allowPublicNetwork: this.allowPublicNetwork,
-          credentials: await this.engineCredentials(engine.id)
+          credentials: await this.engineCredentials(usedEngine.id)
         })
         : { ok: true, text: cachedText, cached: true }
       if (!result || !result.ok) throw new ApiError(502, result && result.msg || '翻译服务暂不可用', 'TRANSLATE_FAILED')
@@ -616,20 +677,29 @@ class CoreService {
         // 真实调用的模型与厂商，随响应一起回给客户端。
         // 适配层可能因为参数不被接受而降级重试（比如某些模型不收 temperature），
         // 降级后的模型以适配层报上来的为准 —— 展示的必须**就是**这次真正调用的那个。
-        const usedModel = String(result.model || engine.model || '')
+        const usedModel = String(result.model || (usedEngine && usedEngine.model) || '')
+        // 实际执行的通道。路由发生时 usedEngine 与 engine 不同，响应必须如实反映 ——
+        // engine/engineName 一律报 usedEngine，代表"这句话真的是它翻的"。
+        const effectiveEngine = usedEngine || engine
         const response = {
           success: true,
-          wired: Boolean(engine.wired),
+          wired: Boolean(effectiveEngine.wired),
           cached: Boolean(result.cached),
           skipped: refundable ? (result.skipped || 'unchanged') : undefined,
           translation: translated,
           chars: refundable ? 0 : chars,
           remain: number(balance.charBalance),
           from: from === 'auto' ? this.translator.detectLang(text) : from,
-          engine: engineId,
-          engineName: engine.name || '',
-          provider: engine.provider || '',
-          model: usedModel
+          engine: effectiveEngine.id || engineId,
+          engineName: effectiveEngine.name || '',
+          provider: effectiveEngine.provider || '',
+          model: usedModel,
+          // 路由透明化：只有真发生了通道切换才带这个字段。
+          // 客户端据此在芯片上标注"快速通道"，用户随时能看到实际用了谁 ——
+          // 这正是 resolveEngineId 头部"不得静默切换"要求的可见性。
+          routed: route.routed
+            ? { from: route.from, to: route.to, reason: route.reason }
+            : undefined
         }
         let translateLogId = null
         if (!refundable) {
@@ -657,8 +727,11 @@ class CoreService {
           translateLogId = await this.logTranslateRow(client, {
             userId: session.parent.id,
             subAccountId: session.kind === 'sub' ? session.account.id : null,
-            engineId, reservationId: reservation.id, sourceLanguage: logSourceLanguage, targetLanguage: logTarget,
-            chars, costAmount: number(engine.costPerMillion) * chars / 1000000, sourceHash: logSourceHash,
+            // 落库用**实际执行的通道**：成本要按真实供应商结算，
+            // 记成用户选的那条会让月度对账凭空多/少一块。
+            engineId: effectiveEngine.id || engineId,
+            reservationId: reservation.id, sourceLanguage: logSourceLanguage, targetLanguage: logTarget,
+            chars, costAmount: number(effectiveEngine.costPerMillion) * chars / 1000000, sourceHash: logSourceHash,
             snippet: String(text || '').slice(0, 300), cached: Boolean(result.cached), durationMs, trigger,
             fallbackSource: String(text || '')
           })
