@@ -973,17 +973,26 @@ function rememberCookies(res) {
 // `Agent({ connect: { timeout } })` 只管连接建立这一段；响应阶段由
 // headersTimeout / bodyTimeout 单独兜底 —— 两段天然分开，互不误伤（GPT 慢响应不会被误杀）。
 // 自带 undici 与 Node 内置 fetch 是同一个库，行为一致，差别只在"连接超时归我们管"。
-const API_CONNECT_TIMEOUT_MS = 4000
+/**
+ * 连接预算（只约束"建连"这一段，不是整个请求）。
+ *
+ * ## 为什么热路径也是 8000 而不是 4000
+ *
+ * 2026-10-20 真机取证：`UND_ERR_CONNECT_TIMEOUT` 稳定落在 4520~4700ms，
+ * 而同一时刻用同样的 undici + 同样的 Agent 另起进程，连接只要 280~390ms。
+ * 结论是链路上**间歇性丢 SYN**，不是服务端慢 —— 撞上丢包窗口时 4 秒必然失败，
+ * 8 秒则大概率在 TCP 重传后连上。详见 src/net/api-net.js 的 DEFAULTS 注释。
+ *
+ * 冷启动仍单独给更大预算（DNS 未预热 + 首次 TLS 协商）。
+ */
+const API_CONNECT_TIMEOUT_MS = 8000
 const API_CONNECT_TIMEOUT_FIRST = 8000
 const API_TOTAL_TIMEOUT_MS = 30000
-
-// 冷启动首次要现做 DNS 解析 + TLS 握手（还隔着 Cloudflare），4s 预算会误伤；
-// 首轮过后回到 4s。与 pingLine 的 PING_TIMEOUT_FIRST 是同一个道理。
-// 冷启动首次要现做 DNS 解析 + TLS 握手（还隔着 Cloudflare），4s 预算会误伤；
-// 首轮过后回到 4s。与 pingLine 的 PING_TIMEOUT_FIRST 是同一个道理。
+/** 连续连不上时的退避阶梯（毫秒），见 src/net/api-net.js 的 DEFAULTS.backoffMs。 */
+const API_CONNECT_BACKOFF_MS = [0, 2000, 6000, 15000, 30000]
 
 /**
- * 出站 HTTP 传输层（连接池 / 超时 / 错误分类）—— 实现见 src/net/api-net.js。
+ * 出站 HTTP 传输层（连接池 / 超时 / 错误分类 / 退避）—— 实现见 src/net/api-net.js。
  *
  * 它是纯 Node 模块，不依赖 electron，因此"连接超时到底算哪类错误"这种判断
  * 可以直接单测，不必切片 main.js 源码。
@@ -992,7 +1001,8 @@ const apiNet = require('./src/net/api-net').createApiNet({
   timeouts: {
     connectFirstMs: API_CONNECT_TIMEOUT_FIRST,
     connectMs: API_CONNECT_TIMEOUT_MS,
-    totalMs: API_TOTAL_TIMEOUT_MS
+    totalMs: API_TOTAL_TIMEOUT_MS,
+    backoffMs: API_CONNECT_BACKOFF_MS
   },
   getLog: () => clientLog
 })
@@ -1068,6 +1078,20 @@ async function api(pathname, opts) {
   // 直接发请求，**不做任何额外的连通性预检**（那是另一条连接，既控不住超时又白增开销）。
   // 连接超时由 apiRaw() 里的 undici Agent 在"连接阶段"独立控制；
   // 这里的总超时只是最后的兜底，绝不用来卡正常的慢翻译。
+
+  // 退避：连续连不上时，别每 8 秒撞一次同一个丢包窗口。
+  // 轮询类调用会经过这里 —— 链路断着的时候，多发几次请求只会刷日志。
+  //
+  // **用户手动动作不受退避约束**（options.skipBackoff）：退避是为了压住自动轮询，
+  // 不该惩罚"用户看见失败提示、主动点了重试"。他点了就说明他愿意等，
+  // 这时候再回一句"网络恢复中，请稍后"只会让他以为按钮坏了。
+  const wait = options.skipBackoff ? 0 : apiNet.backoffRemaining()
+  if (wait > 0) {
+    throw apiFailure('NETWORK_BACKOFF', '网络尚未恢复，请稍后重试', Object.assign({}, trace, {
+      phase: 'connect', gotResponse: false, retryAfterMs: Math.round(wait), elapsedMs: Date.now() - started
+    }))
+  }
+
   let res
   try {
     const init = { method: method, headers: headers, body: body }
@@ -1076,12 +1100,23 @@ async function api(pathname, opts) {
     if (totalMs > 0) init.signal = AbortSignal.timeout(totalMs)
     res = await apiRaw(base + '/apis' + pathname, init)
   } catch (err) {
-    throw classifyTransportError(err, Object.assign({}, trace, {
+    const classified = classifyTransportError(err, Object.assign({}, trace, {
       elapsedMs: Date.now() - started
     }))
+    // 连接建立失败：记一次退避，并把两个 Agent 全部重建。
+    //
+    // 为什么必须重建：一次 SYN 超时之后，连接池里可能留着"看起来可用、
+    // 实际已经半死"的 socket。不重建的话，后续请求会一直复用它 ——
+    // 表现就是"自己好不了，必须重启 App"。真机取证里"重启后仍失败、
+    // 过一阵才自己恢复"就是这一类。
+    apiNet.noteResult(classified.code)
+    if (classified.code === 'NETWORK_UNREACHABLE') apiNet.recycle()
+    throw classified
   }
-  // 拿到了响应头 = 连接确实建立过，之后的请求可以吃"热"预算（4s）。
+  // 拿到了响应头 = 连接确实建立过，之后的请求可以吃"热"预算（8s）。
   apiNet.markWarm()
+  // 拿到响应就说明链路通了：退避归零，别让上一次的抖动继续压着后续请求。
+  apiNet.noteResult('')
   rememberCookies(res)
   const text = await res.text()
   try {

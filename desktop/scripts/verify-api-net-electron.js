@@ -38,6 +38,7 @@ function makeApi() {
   const cookieJar = {}
   const factory = new Function(
     'safeApiUrl', 'cookieJar', 'deviceId', 'rememberCookies', 'clientLog', 'require', 'fetch',
+    'isRetryableNetworkError',
     'let apiBase = ""\n'
     + region
     + '\nfunction __setBase(v) { apiBase = v }'
@@ -45,14 +46,26 @@ function makeApi() {
     + ' classifyTransportError: classifyTransportError, isRetryableNetworkError: isRetryableNetworkError,'
     + ' setBase: __setBase }'
   )
+  // new Function 里的 require 以**本脚本目录**为基准解析，而切出来的源码是
+  // main.js 里写的相对路径（'./src/net/api-net'）。这里补一个按 desktop/ 根
+  // 解析的 require 传进去，否则装配阶段就 MODULE_NOT_FOUND。
+  const desktopRoot = path.join(__dirname, '..')
+  const requireFromDesktop = (id) => {
+    try { return require(id) } catch (e) {
+      if (e.code !== 'MODULE_NOT_FOUND') throw e
+      return require(require.resolve(id, { paths: [desktopRoot] }))
+    }
+  }
   return factory(
     x => x,                       // safeApiUrl：这里只测传输层，不测 URL 安全策略
     cookieJar,
     () => 'desktop-selftest',
     () => {},                     // rememberCookies
     null,                         // clientLog
-    require,
-    fetch
+    requireFromDesktop,
+    fetch,
+    // 真实实现来自 translation-cache（不在 main.js 的切片范围里）
+    require(path.join(desktopRoot, 'src', 'translate', 'translation-cache')).isRetryableNetworkError
   )
 }
 
@@ -79,7 +92,7 @@ async function main() {
   console.log('\n── ① 正常网络：新增开销（对真实后端，各 12 次）')
   const apiLive = makeApi()
   apiLive.setBase(LIVE)
-  // 先跑热一次（与线上一致：首轮之后吃 4s 热预算）
+  // 先跑热一次（与线上一致：首轮之后吃 8s 热预算）
   try { await apiLive.api('/client/lines') } catch (e) { console.log('   (预热失败，忽略)', e.code || e.message) }
 
   const apiTimes = []
@@ -141,12 +154,15 @@ async function main() {
   let warmErr = null
   const warmMs = await timed(async () => { try { await apiWarm.api('/client/lines') } catch (e) { warmErr = e; throw e } })
   await new Promise(r => warmSrv.close(r))
-  console.log('     真 api() 热预算(4s)            : ' + warmMs + 'ms  [' + (warmErr && warmErr.code || '?') + ']')
+  console.log('     真 api() 热预算(8s)            : ' + warmMs + 'ms  [' + (warmErr && warmErr.code || '?') + ']')
 
   if (fetchBlack > 8000) {
     check('② 裸 fetch 能复现"连不上要白等 ~10s"', true, fetchBlack + 'ms')
-    check('② 热预算确实把等待压到 ~4s（不是 undici 默认的 10s）', warmMs < 6000, warmMs + 'ms vs ' + fetchBlack + 'ms')
-    check('② 冷预算按我们设的 8s 走（证明超时归我们管）', coldMs >= 7000 && coldMs < 9500, coldMs + 'ms')
+    // 2026-10-20 起热预算也是 8s：真机取证显示 4s 会稳定撞上链路丢 SYN 的窗口，
+    // 而 8s 能等到 TCP 重传。代价只是真断网时多等 4 秒。
+    check('② 热预算按我们设的 8s 走（不是 undici 默认的 10s）',
+      warmMs >= 7000 && warmMs < 9500, warmMs + 'ms vs ' + fetchBlack + 'ms')
+    check('② 冷预算同为 8s（证明超时归我们管）', coldMs >= 7000 && coldMs < 9500, coldMs + 'ms')
     check('② 连接超时被归为 NETWORK_UNREACHABLE（可安全重试）',
       warmErr && warmErr.code === 'NETWORK_UNREACHABLE' && warmErr.pix && warmErr.pix.phase === 'connect',
       warmErr && (warmErr.code + ' / ' + (warmErr.pix && warmErr.pix.causeCode)))

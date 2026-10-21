@@ -27,11 +27,39 @@
 const DEFAULTS = {
   /** 冷启动首次请求的连接预算：要覆盖 DNS + TLS 首次协商。 */
   connectFirstMs: 8000,
-  /** 热路径连接预算。 */
-  connectMs: 4000,
+  /**
+   * 热路径连接预算。
+   *
+   * ## 为什么从 4000 提到 8000
+   *
+   * 真机取证（2026-10-20）：`UND_ERR_CONNECT_TIMEOUT` 在 4520~4700ms 之间反复出现，
+   * 而**同一时刻**用同样的 undici + 同样的 Agent 在本机另起进程，连接只要 280~390ms。
+   * 这不是"服务端慢"，是链路上有东西**间歇性丢 SYN**：撞上丢包窗口，4 秒就必然失败，
+   * 8 秒则大概率在重传后连上（TCP SYN 默认重传节奏 1s/1s/2s/4s）。
+   *
+   * 代价：真的连不上时，用户多等 4 秒。但"偶尔能连上"比"稳定连不上"重要得多 ——
+   * 连不上是用户直接看得见的失败，多等几秒只是慢。
+   */
+  connectMs: 8000,
   /** 整体预算上限（连接 + 传输）。 */
-  totalMs: 30000
+  totalMs: 30000,
+  /**
+   * 连接失败后的退避阶梯（毫秒）。
+   *
+   * 不加退避时，轮询会每 8 秒撞一次同一个丢包窗口，日志一天刷上百条、
+   * 用户也一直卡在"网络异常"。第 n 次连续失败等 backoffMs[n-1]，用完后取最后一个。
+   * 成功一次立刻归零。
+   */
+  backoffMs: [0, 2000, 6000, 15000, 30000]
 }
+
+/**
+ * 只让**连接建立阶段**的失败吃退避。
+ *
+ * 业务失败（余额不足、通道未开通、502）与服务端慢响应都与"链路是不是通"无关，
+ * 拿它们去惩罚下一次请求，会把一个正常可用的用户越拖越慢。
+ */
+const BACKOFF_CODES = ['NETWORK_UNREACHABLE']
 
 function createApiNet (deps) {
   const d = deps || {}
@@ -46,6 +74,50 @@ function createApiNet (deps) {
   let lib = null
   let agents = null
   let warm = false
+
+  /**
+   * 连续"连不上"的次数 —— 退避的唯一状态。
+   *
+   * 只在 NETWORK_UNREACHABLE 时 +1，任何一次拿到响应就归零。
+   * 不用时间衰减：一次成功就说明链路恢复了，没理由再压着。
+   */
+  let connectFailures = 0
+  /** 下一次允许发请求的时间戳（ms）。0 = 不限制。 */
+  let nextAllowedAt = 0
+
+  /** 当前应该等多久才能发下一个请求（0 = 现在就能发）。 */
+  function backoffRemaining (now) {
+    const at = nextAllowedAt
+    if (!at) return 0
+    const left = at - (now == null ? Date.now() : now)
+    return left > 0 ? left : 0
+  }
+
+  /**
+   * 记一次请求的结局，推进或清零退避窗口。
+   *
+   * @param {string} code  '' 表示成功；否则是 apiFailure 的 code
+   */
+  function noteResult (code) {
+    if (!code) {
+      // 拿到响应 = 链路是通的。退避立刻归零，别让上一次的抖动继续压着。
+      connectFailures = 0
+      nextAllowedAt = 0
+      return
+    }
+    if (BACKOFF_CODES.indexOf(String(code)) < 0) return
+    connectFailures++
+    const ladder = timeout.backoffMs || DEFAULTS.backoffMs
+    const idx = Math.min(connectFailures, ladder.length) - 1
+    const wait = ladder[idx] || 0
+    nextAllowedAt = wait > 0 ? Date.now() + wait : 0
+  }
+
+  /** 两个 Agent 全部重建 —— 连接失败后旧的 keep-alive socket 可能已经半死。 */
+  function recycle () {
+    close()
+    warm = false
+  }
 
   /** 优先用自带的 undici（连接超时可控），装不上退回全局 fetch。 */
   function transport () {
@@ -146,10 +218,16 @@ function createApiNet (deps) {
     classify,
     isWarm: () => warm,
     markWarm: () => { warm = true },
+    // ---- 超时预算 / 退避 ----
+    timeouts: () => Object.assign({}, timeout),
+    backoffRemaining,
+    noteResult,
+    recycle,
+    failures: () => connectFailures,
     // 测试与排障用
-    __reset () { close(); libTried = false; lib = null; warm = false },
+    __reset () { close(); libTried = false; lib = null; warm = false; connectFailures = 0; nextAllowedAt = 0 },
     __agents: () => agents
   }
 }
 
-module.exports = { createApiNet, DEFAULTS }
+module.exports = { createApiNet, DEFAULTS, BACKOFF_CODES }

@@ -152,6 +152,18 @@ function isRetryableNetworkError (err) {
 }
 
 /**
+ * 这个 trigger 是不是"用户主动点的"。
+ *
+ * 用途只有一个：让他绕过连续失败退避（见 createRequestTranslate）。
+ * 取值来源见 guest-inject.js 的 TRIGGER_*——新增 trigger 时要么加进这里、
+ * 要么确认它确实是自动行为。
+ */
+const MANUAL_TRIGGERS = ['manual_click', 'manual_send', 'retranslate']
+function isManualTrigger (trigger) {
+  return MANUAL_TRIGGERS.indexOf(String(trigger || '').trim()) >= 0
+}
+
+/**
  * 发一次 /translate/run；两类失败各自**原地重发一次**。
  *
  * ## 一类：连接建立失败（网络传输层，**不换号**）
@@ -183,8 +195,12 @@ function createRequestTranslate (deps) {
       text: text, from: from, to: to, engine: engine, trigger: trigger,
       requestId: cache.requestId(text, from, to, engine)
     })
+    // 用户手动触发（点译 / 按发送）时，绕过连续失败退避 ——
+    // 他看见失败提示后主动点的重试，不该被"网络恢复中"挡回去。
+    // 自动扫描 / 自动接收仍受退避约束，避免断网时刷爆日志。
+    const skipBackoff = isManualTrigger(trigger)
     const call = () => api('/translate/run', {
-      method: 'POST', form: body(),
+      method: 'POST', form: body(), skipBackoff: skipBackoff,
       requestId: cache.requestId(text, from, to, engine)
     })
 
@@ -220,6 +236,8 @@ module.exports = {
   createTranslationCache,
   isDeadRequest,
   isRetryableNetworkError,
+  isManualTrigger,
+  MANUAL_TRIGGERS,
   createRequestTranslate,
   DEAD_REQUEST_CODES
 }

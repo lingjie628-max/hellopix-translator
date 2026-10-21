@@ -63,8 +63,11 @@ test('失败 chip 必须带真实错误类别（禁止把"连不上服务器"说
   assert.match(setChip, /chip\.textContent = '翻译中…'/)
   assert.match(setChip, /chip\.textContent = '已翻译'/)
   // IPC 层抛错也不能丢掉网络类错误码。
-  assert.match(guest, /NETWORK_UNREACHABLE', 'NETWORK_TIMEOUT', 'SERVER_BAD_RESPONSE'\]\.indexOf\(cls\)/,
+  assert.match(guest, /NETWORK_UNREACHABLE', 'NETWORK_TIMEOUT', 'NETWORK_BACKOFF', 'SERVER_BAD_RESPONSE'\]\.indexOf\(cls\)/,
     'translateTextDetailed 的 catch 必须保留网络类错误码')
+  // 连续连不上时的退避窗口也必须自成一类：它不是"翻译服务坏了"。
+  assert.match(guest, /NETWORK_BACKOFF: '网络恢复中 · 点击重试'/,
+    '退避窗口必须有独立文案，不能退回"翻译失败"')
 })
 
 test('硬规则 4：渲染前必须有 isMessageHost 硬守卫 + TARGET_MISSING 兜底（禁止画到聊天根节点）', () => {

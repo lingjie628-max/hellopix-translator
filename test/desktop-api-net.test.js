@@ -262,7 +262,8 @@ test('接线守卫：api() 直接发请求，并用自带 undici 的连接超时
   assert.match(mainSrc, /res = await apiRaw\(base \+ '\/apis' \+ pathname, init\)/, 'api() 必须直接走 apiRaw')
   assert.match(netSrc, /l\.fetch\(url, Object\.assign\(\{ dispatcher: disp \}, init\)\)/,
     '必须用自带 undici 且带上 dispatcher（连接超时归我们管）')
-  assert.match(mainSrc, /const API_CONNECT_TIMEOUT_MS = 4000/)
+  // 热路径连接预算：2026-10-20 真机取证后从 4000 提到 8000（链路间歇丢 SYN）
+  assert.match(mainSrc, /const API_CONNECT_TIMEOUT_MS = 8000/)
   assert.match(mainSrc, /const API_CONNECT_TIMEOUT_FIRST = 8000/)
   assert.match(mainSrc, /const API_TOTAL_TIMEOUT_MS = 30000/)
   assert.ok(!/totalTimeoutMs:\s*4000/.test(mainSrc),
@@ -271,6 +272,8 @@ test('接线守卫：api() 直接发请求，并用自带 undici 的连接超时
   assert.match(mainSrc, /connectFirstMs:\s*API_CONNECT_TIMEOUT_FIRST/)
   assert.match(mainSrc, /connectMs:\s*API_CONNECT_TIMEOUT_MS/)
   assert.match(mainSrc, /totalMs:\s*API_TOTAL_TIMEOUT_MS/)
+  assert.match(mainSrc, /backoffMs:\s*API_CONNECT_BACKOFF_MS/,
+    '退避阶梯必须从 main.js 流进工厂')
 })
 
 test('接线守卫：连接超时与响应超时是两个独立参数（不是一个数两头用）', () => {
@@ -282,12 +285,130 @@ test('接线守卫：连接超时与响应超时是两个独立参数（不是�
   // 冷启动那一路用的是更宽的 connectFirstMs，不能被合并成同一个数
   assert.match(netSrc, /connect: \{ timeout: timeout\.connectFirstMs \}/,
     '冷启动必须用独立的连接预算')
-  assert.ok(Number(mainSrc.match(/const API_TOTAL_TIMEOUT_MS = (\d+)/)[1])
-    > Number(mainSrc.match(/const API_CONNECT_TIMEOUT_MS = (\d+)/)[1]) * 5,
-  '响应兜底必须远大于连接预算，否则慢翻译会被误杀')
+  // 响应兜底必须明显大于连接预算（至少 3 倍），否则慢翻译会被误杀。
+  //
+  // 不能要求"5 倍以上"：连接预算从 4s 提到 8s（链路间歇丢 SYN）之后，
+  // 5 倍就是 40s，而 30s 的整体兜底本来就是为了给上游留足余量 —— 两者不矛盾。
+  const connectMs = Number(mainSrc.match(/const API_CONNECT_TIMEOUT_MS = (\d+)/)[1])
+  const totalMs = Number(mainSrc.match(/const API_TOTAL_TIMEOUT_MS = (\d+)/)[1])
+  assert.ok(totalMs >= connectMs * 3,
+    '响应兜底必须明显大于连接预算（≥3 倍），否则慢翻译会被误杀；当前 ' + totalMs + ' vs ' + connectMs)
 })
 
 test('依赖守卫：undici 必须是运行时依赖，否则连接超时控制会静默失效', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'desktop', 'package.json'), 'utf8'))
   assert.ok(pkg.dependencies && pkg.dependencies.undici, 'package.json 必须声明 undici 依赖')
+})
+
+// ---------------------------------------------------------------------------
+// 5. 连接失败后的退避与连接池重建
+// ---------------------------------------------------------------------------
+// 真机取证（2026-10-20）：`UND_ERR_CONNECT_TIMEOUT` 每 8 秒刷一条，连续 25 分钟。
+// 两个问题：
+//   ① 轮询不带退避，撞在同一个丢包窗口上一遍遍重试，日志一天 190 条；
+//   ② 连接失败后不重建连接池，池里留着半死的 socket，可能"自己好不了"。
+
+test('退避：首次失败不惩罚，连续失败按阶梯递增', () => {
+  const api = loadNetApi(fakeUndiciLib())
+  assert.equal(api.backoffRemaining(), 0, '初始不该有任何等待')
+
+  api.noteResult('NETWORK_UNREACHABLE')
+  assert.equal(api.failures(), 1)
+  assert.equal(api.backoffRemaining(), 0, '第一次失败仍立即重试（可能是瞬时抖动）')
+
+  api.noteResult('NETWORK_UNREACHABLE')
+  assert.ok(api.backoffRemaining() > 0, '连续第二次失败后必须开始等')
+
+  const waits = []
+  for (let i = 0; i < 4; i++) {
+    api.noteResult('NETWORK_UNREACHABLE')
+    waits.push(Math.round(api.backoffRemaining() / 1000))
+  }
+  for (let i = 1; i < waits.length; i++) {
+    assert.ok(waits[i] >= waits[i - 1], '退避必须是单调递增的，不能忽长忽短：' + waits.join(','))
+  }
+  assert.ok(waits[waits.length - 1] <= 30, '封顶 30 秒，别把正常请求永久卡死')
+})
+
+test('★ 退避：一次成功就立刻归零（链路通了不该继续压着）', () => {
+  const api = loadNetApi(fakeUndiciLib())
+  for (let i = 0; i < 4; i++) api.noteResult('NETWORK_UNREACHABLE')
+  assert.ok(api.backoffRemaining() > 0, '前置：应该已经在退避')
+
+  api.noteResult('') // 拿到响应
+  assert.equal(api.failures(), 0, '连续失败计数必须清零')
+  assert.equal(api.backoffRemaining(), 0, '退避窗口必须立刻打开')
+})
+
+test('退避：业务失败不吃退避（余额不足/502 跟链路通不通无关）', () => {
+  const api = loadNetApi(fakeUndiciLib())
+  for (const code of ['TRANSLATE_FAILED', 'SERVER_BAD_RESPONSE', 'NETWORK_TIMEOUT', 'AUTH_REQUIRED']) {
+    api.noteResult(code)
+  }
+  assert.equal(api.failures(), 0, '只有连接不可达才推进退避')
+  assert.equal(api.backoffRemaining(), 0,
+    '服务端答复了（哪怕是错误）说明链路是通的，不该惩罚后续请求')
+})
+
+test('★ 连接失败必须重建两个 Agent（池里的半死 socket 不能继续复用）', () => {
+  const lib = fakeUndiciLib()
+  const api = loadNetApi(lib)
+  api.apiDispatcher()
+  const before = api.getAgents()
+  assert.ok(before, '前置：应该有连接池')
+
+  api.recycle()
+  assert.equal(before.cold.closed, true, '旧的冷 Agent 必须关掉')
+  assert.equal(before.warm.closed, true, '旧的热 Agent 必须关掉')
+  assert.equal(api.getAgents(), null, '引用要清空')
+
+  // 重建之后是新池子，且回到冷启动预算
+  const fresh = api.apiDispatcher()
+  assert.ok(fresh && fresh !== before.cold, '必须真的新建，不能复用旧的')
+  assert.equal(fresh.opts.connect.timeout, 8000, '重建后回到冷启动预算（DNS/TLS 要重新协商）')
+})
+
+test('接线守卫：api() 在连接失败时必须 recycle，成功时必须清零退避', () => {
+  assert.match(mainSrc, /apiNet\.noteResult\(classified\.code\)/,
+    '失败结局必须上报给退避（否则退避永远不生效）')
+  assert.match(mainSrc, /apiNet\.recycle\(\)/,
+    '连接不可达后必须重建连接池')
+  assert.match(mainSrc, /apiNet\.noteResult\(''\)/,
+    '拿到响应必须清零退避')
+  assert.match(mainSrc, /apiNet\.backoffRemaining\(\)/,
+    '发请求前必须检查退避窗口')
+})
+
+// ---------------------------------------------------------------------------
+// 6. 手动重试不能被退避挡住
+// ---------------------------------------------------------------------------
+// 退避是为了压住自动轮询。用户看见"网络异常"后主动点重试，如果被回一句
+// "网络恢复中，请稍后"，他会以为按钮坏了 —— 那是比网络问题更糟的体验。
+
+test('isManualTrigger：只有用户主动的动作才算', () => {
+  const { isManualTrigger } = require('../desktop/src/translate/translation-cache')
+  for (const t of ['manual_click', 'manual_send', 'retranslate']) {
+    assert.equal(isManualTrigger(t), true, t + ' 是用户主动点的')
+  }
+  for (const t of ['auto_receive', '', null, undefined, 'unknown']) {
+    assert.equal(isManualTrigger(t), false, String(t) + ' 不是用户主动点')
+  }
+})
+
+test('★ 手动触发必须带 skipBackoff，自动扫描不带', async () => {
+  const { createRequestTranslate, createTranslationCache } = require('../desktop/src/translate/translation-cache')
+  const cache = createTranslationCache()
+  const calls = []
+  const api = (pathname, opts) => {
+    calls.push(opts)
+    return Promise.resolve({ success: true, translation: 'ok' })
+  }
+  const run = createRequestTranslate({ api: api, cache: cache })
+
+  await run('你好', 'zh', 'en', 'gpt', 'manual_send')
+  assert.equal(calls[0].skipBackoff, true, '按发送是用户主动动作，不该被退避挡')
+
+  calls.length = 0
+  await run('Hello', 'en', 'zh', 'gpt', 'auto_receive')
+  assert.equal(calls[0].skipBackoff, false, '自动接收仍受退避约束（断网时别刷爆日志）')
 })
