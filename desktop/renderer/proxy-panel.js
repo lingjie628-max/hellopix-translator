@@ -52,8 +52,11 @@ function psFillTypeOptions() {
 function psSchemeOptions(preset) {
   const list = (preset && preset.schemes && preset.schemes.length) ? preset.schemes : ['socks5', 'http', 'https']
   psProxyScheme.innerHTML = list.map(item => {
-    const label = item === 'socks5' ? 'Socks5' : item.toUpperCase()
-    return '<option value="' + item + '">' + label + '</option>'
+    const label = item === 'socks5' ? 'Socks5' : String(item).toUpperCase()
+    // 一律走 esc()：这行原来直接拼 item。现在数据源是主进程内置预设，
+    // 不会有恶意值，但"渲染时拼接"这条路上不该有例外 —— 哪天预设改成
+    // 服务端可配置，这里就是现成的注入点，而且改动方式看起来会"完全无害"。
+    return '<option value="' + esc(item) + '">' + esc(label) + '</option>'
   }).join('')
 }
 
@@ -320,8 +323,9 @@ function syncProxyFields(keepValues) {
   }
   if (preset.schemes && preset.schemes.length) {
     addProxyScheme.innerHTML = preset.schemes.map(item => {
-      const label = item === 'socks5' ? 'Socks5' : item.toUpperCase()
-      return '<option value="' + item + '">' + label + '</option>'
+      const label = item === 'socks5' ? 'Socks5' : String(item).toUpperCase()
+      // 同上：拼接一律转义，不留"反正数据可信"的例外。
+      return '<option value="' + esc(item) + '">' + esc(label) + '</option>'
     }).join('')
     if (!keepValues) addProxyScheme.value = preset.scheme || preset.schemes[0]
   }

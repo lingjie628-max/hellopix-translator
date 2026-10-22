@@ -52,15 +52,27 @@ function emit(channel, payload) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload)
 }
 
-// 为翻译请求生成服务端幂等键：同设备 + 同参数 + 同文本永远是同一个键，
-// 服务端据此做幂等去重（重复渲染/重试不会二次扣费）；正式后端缺此键会直接 400。
-function transRequestKey(text, from, to, engine) {
+// 为翻译请求生成服务端幂等键。
+//
+// ★ 键必须**每次请求都不同** ★
+//
+// 幂等键的用途只有一个：让"同一个请求被重复发送"（双击、超时重试、
+// Telegram 渲染两次气泡）在服务端合并成一笔，不重复扣费。
+// 它描述的是**一次请求**，不是**一段文本**。
+//
+// 这里曾经用「设备 + 引擎 + 语种 + 文本」的哈希当键，看起来很严谨，
+// 实际是拿内容指纹冒充请求指纹。后果是服务端的重放分支（reserveTranslate
+// 里 `existing` 命中就原样回上次的响应）**永远会命中**：
+//
+//   · 同一个窗口里同一句话出现第二次 → 直接拿到上一次的译文，
+//     上游换没换模型、用户换没换术语库，都不会重新翻译；
+//   · 该键在 translation_reservations 里是终态 → 想重新翻只能换一个字。
+//
+// 正确做法：用随机 UUID（与 Windows 版一致）。真正的"同一次请求重发"
+// 由调用方复用同一个 key 来表达（见调用处）；新的一次翻译就一定是新键。
+function transRequestKey() {
   const deviceId = String((store && store.read().deviceId) || '')
-  const fingerprint = crypto.createHash('sha256')
-    .update([String(engine || ''), String(from || ''), String(to || ''), String(text || '')].join('\u0001'))
-    .digest('hex')
-    .slice(0, 40)
-  return `tg-app:${deviceId}:${fingerprint}`
+  return `tg-app:${deviceId}:${crypto.randomUUID()}`
 }
 
 async function createWindow() {
@@ -90,7 +102,21 @@ app.whenReady().then(async () => {
     data.deviceId = crypto.randomUUID()
     store.write(data)
   }
-  pix = createPixApi({ base: PIX_API, deviceId: data.deviceId })
+  pix = createPixApi({
+    base: PIX_API,
+    deviceId: data.deviceId,
+    // 恢复上次的会话 cookie，并在每次变化时落盘。
+    //
+    // 少了这一步的话，重启 Telegram 客户端就等于掉登录态 —— 用户每次都要
+    // 重新走一遍 Hello Pix 账号登录。Windows 版（telegram-win）一直是这么做的，
+    // macOS 版漏了。
+    cookies: data.pixCookies || {},
+    onCookies(cookies) {
+      const next = store.read()
+      next.pixCookies = cookies
+      store.write(next)
+    }
+  })
   telegram = new TelegramService(store, emit)
   try {
     await telegram.restore()
@@ -124,8 +150,14 @@ ipcMain.handle('pix:login', async (_event, payload) => {
 
 ipcMain.handle('pix:logout', async () => {
   try { await pix.request('/client/logout', { method: 'POST', form: {} }) } catch (_error) {}
+  // 服务端登出可能失败（断网/线路挂了），本地也必须断干净：
+  // 清 cookie 内存 + 落盘，否则下一次登录会带着旧会话去请求。
+  pix.clearSession()
   const data = store.read()
   data.pix = null
+  // 首次启动时 store 里可能还没有 pixCookies 这个键 —— 显式写成 {}，
+  // 让"没登录"和"有 cookie 但没 profile"不会被后续逻辑混淆。
+  data.pixCookies = {}
   store.write(data)
   return { ok: true }
 })
@@ -139,7 +171,21 @@ ipcMain.handle('pix:session', async () => {
       store.write(data)
       return result.obj
     }
-  } catch (_error) {}
+    // 服务端明确说"没有会话"（401 / 被踢）时，本地那份 profile 已经
+    // 作废了。只靠 catch 兜住会一直返回旧 profile，界面停在已登录状态，
+    // 用户点什么都失败 —— 要把本地状态一起清掉。
+    if (result && result.success === false) {
+      pix.clearSession()
+      const data = store.read()
+      data.pix = null
+      data.pixCookies = {}
+      store.write(data)
+      return null
+    }
+  } catch (_error) {
+    // 网络异常：不能因为一次请求失败就把用户踹下线，
+    // 留本地缓存的 profile 让他还能看到界面。
+  }
   return store.read().pix || null
 })
 
@@ -178,9 +224,11 @@ ipcMain.handle('pix:translate', async (_event, payload) => {
       text,
       from: incoming ? 'auto' : settings.lang,
       to: incoming ? settings.lang : 'auto',
-      engine: settings.engine,
-      requestId: transRequestKey(text, incoming ? 'auto' : settings.lang, incoming ? settings.lang : 'auto', settings.engine)
-    }
+      engine: settings.engine
+    },
+    // 每次翻译一个新键（见 transRequestKey 的注释）。
+    // 走 options 而不是塞进 form：pix-api 会同时写 Idempotency-Key 头与 requestId。
+    idempotencyKey: transRequestKey()
   })
   if (!result || result.success === false) throw new Error((result && result.msg) || '翻译失败')
   return { text: result.text || result.translated || result.obj || '' }

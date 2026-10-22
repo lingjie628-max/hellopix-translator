@@ -292,8 +292,10 @@ ipcMain.handle('pix:logout', async () => {
   const data = store.read()
   data.pix = null
   data.pixCookies = {}
+  // clearSession 会把内存 cookie 清空并触发 onCookies 落盘；
+  // store 那一步是显式兜底（onCookies 的 update 可能吞掉写盘异常）。
+  pix.clearSession()
   store.write(data)
-  pix.state.cookies = {}
   writeAllBridges()
   stopDock()
   telegramPid = 0

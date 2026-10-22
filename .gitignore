@@ -89,3 +89,9 @@ desktop/scripts/probe-out/
 
 # 打包前由 scripts/fetch-line-ext.js 生成（第三方扩展，不入库）
 desktop/vendor/
+
+# 测试临时工作区：夹具要在仓库内建目录才能稳定 git init（沙箱化运行器写 TMPDIR 会受限）
+.tmp-test/
+
+# 测试运行器每次跑完写的汇总报告（机器相关、时间戳变化，无归档价值）
+.tmp-test-report.json

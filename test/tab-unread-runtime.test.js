@@ -197,19 +197,57 @@ test('压力：30 个窗口 × 3000 次标题变化 —— 只在数值真变时
   console.log('  9 万次标题事件 ' + ms.toFixed(1) + 'ms，标签栏刷新 ' + h.sends() + ' 次')
 })
 
-test('压力：Messenger 式标题闪烁持续 1 秒 —— 角标全程不闪', async () => {
+/**
+ * 标题闪烁 + 清零延迟的确定性子测试。
+ *
+ * 原先写的是"真实循环 1 秒、每 DELAY/3 毫秒翻转一次标题"。
+ * 全量并发时事件循环被拖住，最后一次翻转可能整轮都没跑完 ——
+ * 于是 `unread` 停在 0，报 `0 !== 2`。这是测试在赌 CPU，不是在验逻辑。
+ *
+ * 改成显式推演时序：手动翻若干次，再放足够长的空格让它到期。
+ * 断言的仍然是"闪烁期间角标不归零、只有清零延迟到期才归零"。
+ */
+test('标题反复闪烁期间角标保持，只在静默超过清零延迟后归零', async () => {
   const h = harness()
   const t = h.addTab()
   t.setTitle('(2) Messenger')
-  const end = Date.now() + 1000
-  let flip = false
-  while (Date.now() < end) {
-    t.setTitle(flip ? '(2) Messenger' : '李四 给你发了消息')
-    flip = !flip
-    await sleep(DELAY / 3)
-  }
   assert.equal(t.unread, 2)
   assert.equal(h.sends(), 1)
+
+  // 模拟 Messenger：(2) X 与「某人发来消息」交替出现，间隔远小于清零延迟
+  for (let i = 0; i < 6; i++) {
+    t.setTitle(i % 2 ? '(2) Messenger' : '李四 给你发了消息')
+    await sleep(5)
+    assert.equal(t.unread, 2, `第 ${i} 次闪烁后角标被误清`)
+  }
+  assert.equal(h.sends(), 1, '闪烁不应产生额外刷新')
+
+  // 现在标题稳定为无数字（真的读完了），等清零延迟到期
+  t.setTitle('Messenger')
+  await sleep(DELAY + 80)
+  assert.equal(t.unread, 0, '没人再发消息，延迟到期后必须归零')
+  assert.equal(h.sends(), 2)
+})
+
+/**
+ * 清零窗口只排一次，不随后续无数字标题反复重置。
+ *
+ * 这是上面那条的分支加强版：平台在"读完"之后还会连续推送不带数字的标题
+ * （`Messenger`、`Messenger - 3 条未读`、`Messenger`…）。
+ * 如果每条无数字标题都重置定时器，清零就永远排不到期，
+ * 角标一直挂着 —— 用户看到"读完了还在提示"。
+ */
+test('清零窗口期间的后续无数字标题不得重置定时器', async () => {
+  const h = harness()
+  const t = h.addTab()
+  t.setTitle('(3) Messenger')
+  t.setTitle('Messenger')          // t=0：排上清零（DELAY=40ms）
+  await sleep(25)
+  t.setTitle('Messenger 有 1 条未读')  // t=25：间隔 25ms < DELAY，重置后被推到 t=65
+  await sleep(30)                  // t=55：正常实现已到期；被重置的实现还没
+  assert.equal(t.unread, 0, '定时器被后续无数字标题重置了：清零永远排不到期')
+  await sleep(40)
+  assert.equal(t.unread, 0)
 })
 
 test('压力：大批窗口同时读完再全部关闭 —— 无残留定时器、无多余刷新', async () => {

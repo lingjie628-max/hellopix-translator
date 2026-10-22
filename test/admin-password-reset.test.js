@@ -79,7 +79,10 @@ test('重置密码弹窗：两次输入必须一致，且不少于 6 位', () =>
 
 // --- 3. 服务端接口 -------------------------------------------------------
 
-const routes = read('server/routes/production.js')
+const { readAllRoutes } = require('./helpers/route-source')
+
+// 路由已按域拆分，读整个 routes 目录
+const routes = readAllRoutes()
 
 test('服务端存在 /admin/users/resetPassword，且只做一件事', () => {
   const at = routes.indexOf("'/admin/users/resetPassword'")

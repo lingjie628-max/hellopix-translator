@@ -40,8 +40,7 @@
 const {
   openAiCompatible, LLM_LANGUAGES,
   pickKey, endpointOf, readErrorDetail, timeoutReason,
-  callParamsOf, estimateTokens, normalizeUsage, inputLimitError,
-  DEFAULT_TIMEOUT_MS
+  callParamsOf, estimateTokens, normalizeUsage, inputLimitError
 } = require('./translation-adapters')
 
 // ===========================================================================

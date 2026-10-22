@@ -32,15 +32,42 @@ const test = require('node:test')
 
 const root = path.join(__dirname, '..')
 const read = p => fs.readFileSync(path.join(root, p), 'utf8')
+const { readAllRoutes, routeBlock } = require('./helpers/route-source')
 
-const routes = read('server/routes/production.js')
+// 路由已按域拆成多个模块，这里读整个 routes 目录 —— 再拆也不会假红
+const routes = readAllRoutes()
 const dashboard = read('src/components/admin/AdminDashboard.vue')
 const mock = read('mock/index.js')
 
+/**
+ * 总览的**统计口径源码**：路由薄壳 + 数据组装服务。
+ *
+ * 2026-10-22 把 83 行内联 SQL 搬进了 `services/dashboard-stats-service.js`，
+ * 路由只剩 `res.json(await dashboardStats.overview())`。
+ *
+ * 所以断言必须跟着口径走 —— 只读路由壳会**全部假绿**：
+ * 壳里没有任何 SQL，`!/FROM orders/` 这种否定断言永远通过。
+ * （这一批 8 个测试当时全红、3 个原本绿的变成假绿，就是这么暴露的。）
+ */
+const statsService = read('server/services/dashboard-stats-service.js')
+const STATS_SOURCE = [routeBlock('get', '/admin/stats') || '', statsService].join('\n')
+
+/**
+ * 统计口径源码 = 路由壳 + 数据组装服务。
+ *
+ * 用这个而不是只读路由：测的是"这件事代码里做了没有"，
+ * 而不是"它写在哪个文件里"。搬迁不该让守卫失效。
+ */
 function statsBlock() {
-  const at = routes.indexOf("router.get('/admin/stats'")
-  assert.ok(at > 0, '找不到 /admin/stats 路由')
-  return routes.slice(at, routes.indexOf('\n  }))', at))
+  // 用括号配平切出整条路由注册语句，不依赖缩进或 "  }))" 这种格式细节
+  const shell = routeBlock('get', '/admin/stats')
+  assert.ok(shell, '找不到 /admin/stats 路由')
+  assert.ok(statsService.includes('class DashboardStatsService'),
+    '找不到 DashboardStatsService —— 统计口径的落脚点变了，请同步更新本测试')
+  // 路由必须保持薄壳：一旦有人把 SQL 塞回路由，口径会分裂成两份
+  assert.ok(!/FROM\s+\w/.test(shell),
+    '/admin/stats 路由里又出现了 SQL —— 口径应只留在 dashboard-stats-service.js')
+  return STATS_SOURCE
 }
 
 test('/admin/stats 必须回前端要用的每一个字段', () => {
@@ -130,6 +157,33 @@ test('金额小数位要收住，否则界面会印出 0.047575 这种长串', (
   assert.match(block, /ROUND\(COALESCE\(sum\(cost_amount\),0\),4\)/,
     '成本按 4 位小数收口 —— numeric 原样返回会是 0.047575')
   assert.match(block, /ROUND\(COALESCE\(sum\(paid_amount\),0\),2\)/, '充值金额按 2 位小数收口')
+
+  // 毛利是 JS 里算的，SQL 的 ROUND 管不着它 —— 必须在代码里自己收口。
+  // 不用 toFixed：它返回字符串，前端再拿去相减就成了字符串拼接。
+  const service = statsService
+  assert.match(service, /Math\.round\(\s*\(?\s*received\s*-\s*cost\s*\)?\s*\*\s*100\s*\)\s*\/\s*100/,
+    '毛利必须用 Math.round(x*100)/100 收到 2 位小数，否则会印出 123.45000000000002')
+  assert.doesNotMatch(service, /return\s+received\s*-\s*cost\s*$/m,
+    '毛利不得直接返回相减结果（浮点尾数会漏到界面上）')
+  // 不用 toFixed：它返回字符串，前端再拿去相减就成了字符串拼接。
+  // 查之前先剥注释 —— 注释里正好写着"不要用 toFixed"，不剥会自己命中自己。
+  const codeOnly = service
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1')
+  assert.doesNotMatch(codeOnly, /toFixed\(/, '不要用 toFixed —— 它返回字符串，会污染后续运算')
+})
+
+test('计数类必须强转 ::int，否则前端拿到的会是字符串', () => {
+  // pg 的 count(*) 是 bigint，node-pg 默认按字符串返回。
+  // 前端 `(s.subCount || 0)` 拿到 "12"，拼字符串看不出问题，
+  // 一做加减就成了 "12"+1 === "121"。金额类用 ::numeric / ::bigint 是安全的，
+  // 所以只钉计数。
+  const sql = statsBlock()
+  for (const alias of ['user_count', 'active_users', 'enterprise_users', 'sub_count',
+    'fan_count', 'short_link_hits', 'recharge_count', 'recharge_pending', 'recharge_pending_stale']) {
+    const re = new RegExp(`::int\\s+AS\\s+${alias}\\b`)
+    assert.match(sql, re, `${alias} 没有 ::int —— 前端会拿到字符串而不是数字`)
+  }
 })
 
 test('套餐文案的币种必须跟「价格货币」一致，不能写死 ¥', () => {

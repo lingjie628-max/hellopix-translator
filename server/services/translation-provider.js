@@ -25,7 +25,7 @@
  *      由 core-service 以 502 返回并退还预扣字符。
  */
 
-const crypto = require('node:crypto')
+const { pooledFetch } = require('../lib/http-pool')
 
 const {
   gptAdapter, grokAdapter, deeplAdapter, papagoAdapter, niutransAdapter,
@@ -635,7 +635,10 @@ async function translate(engine, payload, options) {
   const configuredTimeout = Number((engine.callParams || {}).timeoutMs)
   const settings = Object.assign({
     allowPublicNetwork: false,
-    fetch: globalThis.fetch,
+    // ★ 必须用池化 fetch，不能是裸 globalThis.fetch ★
+    // 裸 fetch 每次翻译都要重做 TCP + TLS 握手（实测 GPT P95 7.9s 的冷连接就是这么来的）。
+    // 池化版本语义完全一致，建不出池时自己退化成裸 fetch。
+    fetch: pooledFetch,
     timeoutMs: Number.isFinite(configuredTimeout) && configuredTimeout > 0 ? configuredTimeout : DEFAULT_TIMEOUT_MS
   }, options || {})
   if (typeof settings.fetch !== 'function') {

@@ -205,26 +205,48 @@ test('restoreWindowBounds', async t => {
   })
 })
 
+/**
+ * 等文件出现，而不是死等 600ms。
+ *
+ * 原来写的是 `setTimeout(600)` 然后直接读文件。单跑没问题，
+ * 全量并发时机器被几十个测试进程压住，Node 的事件循环让 500ms 定时器
+ * 拖到 600ms 之后才触发 → 读到 ENOENT → 一条完全无关的用例偶发变红。
+ *
+ * 判据没变（防抖 500ms 后才写），只是把"等到超时"换成"等到条件成立"：
+ *   · 仍先断言防抖期内**不**落盘；
+ *   · 之后最多等 5s，超时才报错，并带上真实的等待时长。
+ */
+async function waitForFile(file, timeoutMs = 5000) {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    if (fs.existsSync(file)) return Date.now() - start
+    await new Promise(r => setTimeout(r, 20))
+  }
+  throw new Error(`等了 ${timeoutMs}ms 仍未落盘: ${file}`)
+}
+
 test('scheduleSaveWindowBounds', async t => {
   await t.test('防抖 500ms 后把 bounds 落盘', async () => {
     const { sandbox, userData } = buildSandbox({ displays: [MAIN_DISPLAY] })
+    const file = path.join(userData, 'window-bounds.json')
     const box = { x: 40, y: 60, width: 1500, height: 950 }
     sandbox.__setWin({ isDestroyed: () => false, isFullScreen: () => false, isMaximized: () => false, getBounds: () => box })
     sandbox.__schedule()
-    assert.ok(!fs.existsSync(path.join(userData, 'window-bounds.json')), '防抖期内不应落盘')
-    await new Promise(r => setTimeout(r, 600))
-    const written = JSON.parse(fs.readFileSync(path.join(userData, 'window-bounds.json'), 'utf8'))
+    assert.ok(!fs.existsSync(file), '防抖期内不应落盘')
+    await waitForFile(file)
+    const written = JSON.parse(fs.readFileSync(file, 'utf8'))
     assert.deepStrictEqual(written, box)
   })
 
   await t.test('连续调用只落盘最后一次（防抖）', async () => {
     const { sandbox, userData } = buildSandbox({ displays: [MAIN_DISPLAY] })
+    const file = path.join(userData, 'window-bounds.json')
     const boxes = [{ x: 1, y: 1, width: MIN_W, height: MIN_H }, { x: 2, y: 2, width: 1200, height: 700 }, { x: 3, y: 3, width: 1300, height: 800 }]
     let cur = boxes[0]
     sandbox.__setWin({ isDestroyed: () => false, isFullScreen: () => false, isMaximized: () => false, getBounds: () => cur })
     for (const b of boxes) { cur = b; sandbox.__schedule() }
-    await new Promise(r => setTimeout(r, 600))
-    const written = JSON.parse(fs.readFileSync(path.join(userData, 'window-bounds.json'), 'utf8'))
+    await waitForFile(file)
+    const written = JSON.parse(fs.readFileSync(file, 'utf8'))
     assert.deepStrictEqual(written, boxes[2], '只应写入最后一次的 bounds')
   })
 
@@ -238,7 +260,8 @@ test('scheduleSaveWindowBounds', async t => {
         getBounds: () => ({ x: 0, y: 0, width: 1512, height: 982 })
       })
       sandbox.__schedule()
-      await new Promise(r => setTimeout(r, 600))
+      // 这里反过来：要证明"永远不写"，只能等到超过防抖窗口再断言
+      await new Promise(r => setTimeout(r, 700))
       assert.ok(!fs.existsSync(path.join(userData, 'window-bounds.json')), `${state} 状态不应落盘`)
     }
   })

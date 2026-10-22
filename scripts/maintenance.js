@@ -22,7 +22,6 @@
  *   node scripts/maintenance.js --apply    # 真执行
  */
 
-const path = require('path')
 const { Pool } = require('pg')
 const config = require('../server/config')
 

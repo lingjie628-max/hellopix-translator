@@ -38,8 +38,64 @@ function createTranslationCache (deps) {
   const CACHE_MAX = 1000
 
   /** 指纹 → 尝试代数。无限增长会漏内存，给个上限整体清空即可。 */
-  const attempt = new Map()
   const ATTEMPT_MAX = 4096
+  const attempt = new Map()
+
+  // 代数必须**跨进程存活**。
+  //
+  // 键 = 账号 + 内容指纹 + 代数。服务端一旦为某个键建过预留，这个键就用死了；
+  // 命中"号用死了"时靠 bumpAttempt 换一代。如果代数只活在内存里，
+  // 用户重启 App 后代数归零 → 又发回那个已进终态的键 →
+  // 这句话从此**永远 REQUEST_FINALIZED**，直到他手动改一个字。
+  // "重启就能好"是所有用户的第一反应，而重启恰好抹掉唯一的修复手段 ——
+  // 这类故障最难查，所以必须落盘。
+  const loadAttempts = typeof d.loadAttempts === 'function' ? d.loadAttempts : null
+  const saveAttempts = typeof d.saveAttempts === 'function' ? d.saveAttempts : null
+  if (loadAttempts) {
+    try {
+      const saved = loadAttempts()
+      if (saved && typeof saved === 'object') {
+        Object.keys(saved).forEach((key) => {
+          const n = Number(saved[key])
+          if (Number.isInteger(n) && n > 0) attempt.set(key, n)
+        })
+      }
+    } catch (e) { /* 磁盘读坏了就当从头开始，不能因此起不来 */ }
+  }
+
+  /** 落盘。失败只影响"重启后能不能接着用"，不能影响本次翻译。 */
+  let dirty = false
+  let flushTimer = null
+  function flushAttempts () {
+    if (!saveAttempts || !dirty) return
+    try {
+      const out = {}
+      attempt.forEach((value, key) => { out[key] = value })
+      saveAttempts(out)
+      dirty = false
+    } catch (e) { /* 满盘 / 权限问题：保持 dirty，下次再试 */ }
+  }
+  /**
+   * 标记待落盘。
+   *
+   * 不能每 bump 一次就同步写文件：换号发生在**翻译失败的路径**上，
+   * 用户连点重试时可能一秒写几十次盘。这里合并成 1 秒一次，
+   * 外加 `flushAttempts` 供退出时强制刷盘。
+   */
+  function persistAttempts () {
+    dirty = true
+    if (flushTimer || !saveAttempts) return
+    flushTimer = setTimeout(() => {
+      flushTimer = null
+      flushAttempts()
+    }, 1000)
+    if (flushTimer.unref) flushTimer.unref()
+  }
+  /** 强制立即落盘（退出前 / 测试里调用）。 */
+  function flushNow () {
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null }
+    flushAttempts()
+  }
 
   function cacheKey (from, to, engine, text) {
     return nodeCrypto.createHash('sha256')
@@ -98,6 +154,8 @@ function createTranslationCache (deps) {
     const fp = fingerprint(text, from, to, engine)
     if (attempt.size > ATTEMPT_MAX) attempt.clear()
     attempt.set(fp, (attempt.get(fp) || 0) + 1)
+    // 立刻落盘：用户可能下一步就关掉 App 再开
+    persistAttempts()
   }
 
   function attemptOf (text, from, to, engine) {
@@ -110,11 +168,12 @@ function createTranslationCache (deps) {
     requestId,
     bumpAttempt,
     attemptOf,
+    flushAttempts: flushNow,
     get,
     put,
     get size () { return cache.size },
     get attemptSize () { return attempt.size },
-    clear () { cache.clear(); attempt.clear() }
+    clear () { cache.clear(); attempt.clear(); dirty = true; flushNow() }
   }
 }
 
@@ -147,8 +206,18 @@ function isRetryableNetworkError (err) {
   const pix = err && err.pix
   if (!err || err.code !== 'NETWORK_UNREACHABLE' || !pix || pix.gotResponse) return false
   const cause = String(pix.causeCode || '')
+  // ★ 这份名单必须与 api-net.js 的 classify()「连接类」判据**保持一致** ★
+  //
+  // 踩过的坑（真机：一次抖动就弹「连不上服务器，消息未发送」）：
+  // classify 把任何走不到响应头的失败都归成 NETWORK_UNREACHABLE，而这里
+  // 只认 6 个 code —— `ECONNRESET` / `EPIPE` / `UND_ERR_SOCKET` 这些
+  // **千真万确属于连接层**的失败被归了类却不重试，用户只看到一次失败。
+  //
+  // 新增连接类 code 时两边要一起改，否则就是"归了类却不救"。
   return ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH',
-    'UND_ERR_CONNECT_TIMEOUT'].indexOf(cause) >= 0
+    'ETIMEDOUT', 'ECONNABORTED',
+    'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET', 'UND_ERR_CLOSED',
+    'ECONNRESET', 'EPIPE'].indexOf(cause) >= 0
 }
 
 /**
@@ -161,6 +230,21 @@ function isRetryableNetworkError (err) {
 const MANUAL_TRIGGERS = ['manual_click', 'manual_send', 'retranslate']
 function isManualTrigger (trigger) {
   return MANUAL_TRIGGERS.indexOf(String(trigger || '').trim()) >= 0
+}
+
+/**
+ * 连接失败后，重发前等多久。
+ *
+ * 为什么不能是 0：失败时 main.js 会 `apiNet.recycle()` 重建连接池，
+ * 立刻重发等于在新池建好的瞬间又撞一次墙，那次重试基本白给。
+ * 120ms 足以让 recycle 生效，用户也察觉不到。
+ *
+ * 测试可以注入 0 来跳过等待；生产默认 120ms。
+ */
+function translateRetryDelayMs (deps) {
+  const raw = deps && deps.retryDelayMs
+  const n = Number(raw)
+  return Number.isFinite(n) && n >= 0 ? n : 120
 }
 
 /**
@@ -218,6 +302,13 @@ function createRequestTranslate (deps) {
             + ' · cause=' + String((err.pix && err.pix.causeCode) || ''))
         } catch (e) {}
       }
+      // ★ 必须等一下再重发 ★
+      //
+      // 上一次失败时 main.js 已经调了 `apiNet.recycle()` 把连接池整个重建。
+      // 紧接着立刻重发，等于在**新池还没建好**的瞬间又撞一次同样的墙 ——
+      // 那一次重试基本白给，用户看到的就是"重试了还是连不上"。
+      // 120ms 足够让 recycle 生效，又不至于让用户觉得卡。
+      await new Promise(resolve => setTimeout(resolve, translateRetryDelayMs(deps)))
       data = await call()
     }
 

@@ -100,17 +100,42 @@ test('规则2/5/6：只有一本 char_balance，没有按通道拆分的余额',
 
 test('规则3/4：扣费严格 1:1 —— 扣的就是计费字符数，与通道无关', () => {
   // 计费字符只由原文决定（中文按 2、其余按 1），不掺通道系数。
+  //
+  // 不钉死变量名：translate 已拆成多个阶段方法，原文变量现在叫 parsed.text。
+  // 这里守的是"计费字符必须来自 countBillableChars"，而不是"那个变量叫什么"。
   assert.match(
     CORE,
-    /const chars = this\.translator\.countBillableChars\(text\)/,
+    /const chars = this\.translator\.countBillableChars\(\w+(?:\.\w+)?\)/,
     '计费字符必须来自 countBillableChars(text)'
   )
-  // 扣款就是 -chars，原样，没有任何乘除。
+
+  // 扣费是"记账"不是"再算一次"：结算时把 chars 原样累加，没有任何乘除。
+  //
+  // 注意别写成搜 `-chars` —— 那个写法在 transferChars（主子账号分字符）里也有，
+  // 拿去当"翻译扣费"的证据会**永久假绿**：不管翻译扣费改成什么样它都能蒙对。
+  // 这条断言曾经就是这么骗了半年。
   assert.match(
     CORE,
-    /adjustChars\(client, session\.kind, session\.account\.id, -chars\)/,
-    '预留扣款必须是 -chars：1000 计费字符扣 1000，DeepSeek 与 GPT 完全一致'
+    /char_used=char_used\+\$2,translate_count=translate_count\+1/,
+    '结算扣费必须是 char_used + chars 的原样累加'
   )
+  // 累加进去的那个参数必须就是 chars 本身，不是 chars*倍数
+  const settle = CORE.slice(CORE.indexOf('async settleTranslate('), CORE.indexOf('async settleTranslate(') + 6000)
+  assert.match(settle, /\[session\.account\.id, chars\], client/,
+    '结算事务传给 UPDATE 的必须是 chars 本身')
+
+  // 只查**扣客户字符**的那几行。
+  // 不能全文搜 `chars * N` —— costAmount 那里是 `costPerMillion * chars / 1e6`，
+  // 那是给厂商的**成本估算**，跟扣客户几个字符是两回事。
+  // 曾经我在这里写了个粗糙的 /chars\s*[*\/]/，结果拦住了正常的成本计算。
+  const chargeLines = settle.split('\n').filter(line =>
+    /char_used=char_used\+|adjustChars\(/.test(line) && !/^\s*(\/\/|\*)/.test(line))
+  assert.ok(chargeLines.length > 0, '找不到扣客户字符的那几行')
+  for (const line of chargeLines) {
+    assert.doesNotMatch(line, /[*\/]\s*\d|Math\.(round|floor|ceil)/,
+      `扣客户字符的地方出现了乘除 —— 那就是倍率，V1.0.x 不允许：${line.trim()}`)
+  }
+
   // 退款也是原样 +chars（不是按别的口径退）。
   assert.match(
     CORE,

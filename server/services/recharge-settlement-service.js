@@ -44,49 +44,26 @@ const { RechargeAmountService } = require('./recharge-amount-service')
 const { RechargeEntitlement } = require('./recharge-entitlement')
 const { STATUS: RECHARGE_STATUS, statusText, assertTransition } = require('./recharge-state')
 const { checkTransferEligibility } = require('./tron/transfer')
-const { formatMilli } = require('../lib/money')
+const { formatMilli, toMilli } = require('../lib/money')
+const nearAmount = require('../lib/near-amount')
+const { NETWORK, OUTCOME, MATCH_KIND, EXCEPTION_KIND } = require('./recharge-settlement-constants')
+const verdicts = require('./recharge/settlement-verdicts')
 
-/** 链标识。与 chain_transactions.network 对应 */
-const NETWORK = 'tron'
-
-/** 匹配结论，与 chain_transactions.match_kind 的 CHECK 一致 */
 /**
- * 处理结论。
+ * pg 的 numeric 列出来是字符串（"65.318"）。转成毫 USDT 的 BigInt。
  *
- * `SKIPPED_UNRESOLVED` 是新增的：**事件位置未知**（回执没取到）时跳过，
- * 且调用方**不得推进游标越过它** —— 否则这一笔就永久漏掉了。
- * 下一轮重扫会重新尝试取回执。
+ * 用 `toMilli` 而不是 `parseMilli`：这里拿到的是**人类可读金额**，
+ * 不是已经是毫的值。两者差 1000 倍，用错会让订单金额静默放大一千倍。
+ *
+ * 空值返回 null —— 「没有尾数」和「尾数是 0」在判断依据上是两件事：
+ * 早期订单没有 surcharge_amount，不能拿 0 去参与笔误比对。
  */
-const OUTCOME = Object.freeze({
-  SETTLED: 'SETTLED',
-  SHADOW_MATCHED: 'SHADOW_MATCHED',
-  DUPLICATE: 'DUPLICATE',
-  EXCEPTION: 'EXCEPTION',
-  SKIPPED_UNRESOLVED: 'SKIPPED_UNRESOLVED'
-})
+function milliFromNumeric(value) {
+  if (value === null || value === undefined || value === '') return null
+  return toMilli(String(value)).toString()
+}
 
-const MATCH_KIND = Object.freeze({
-  MATCHED: 'MATCHED',            // 精确匹配到一张待支付且未过期的订单
-  LATE_PAYMENT: 'LATE_PAYMENT',  // 金额对得上，但订单已终态（过期/已付/取消）
-  NO_MATCH: 'NO_MATCH',          // 金额不落在任何一个预约上
-  DUPLICATE_TX: 'DUPLICATE_TX',  // 这笔链上交易已经处理过
-  NOT_ELIGIBLE: 'NOT_ELIGIBLE'   // 代币/地址/精度不符合，不参与匹配
-})
-
-/** 异常类型，与 recharge_exceptions.kind 的 CHECK 一致 */
-const EXCEPTION_KIND = Object.freeze({
-  UNDERPAID: 'UNDERPAID',
-  OVERPAID: 'OVERPAID',
-  WRONG_TOKEN: 'WRONG_TOKEN',
-  WRONG_ADDRESS: 'WRONG_ADDRESS',
-  EXPIRED_PAYMENT: 'EXPIRED_PAYMENT',
-  NO_MATCH: 'NO_MATCH',
-  DUPLICATE_PAYMENT: 'DUPLICATE_PAYMENT',
-  DUPLICATE_TXID: 'DUPLICATE_TXID'
-})
-
-class RechargeSettlementService {
-  constructor(repo, options) {
+class RechargeSettlementService {  constructor(repo, options) {
     const opts = options || {}
     this.repo = repo
     this.amountService = opts.amountService || new RechargeAmountService()
@@ -123,7 +100,6 @@ class RechargeSettlementService {
    */
   async handleTransfer(client, transfer, context) {
     const ctx = context || {}
-    const mode = this.mode
 
     // ---- ⓪ 事件位置未知就直接跳过 ----
     //
@@ -132,26 +108,14 @@ class RechargeSettlementService {
     // 后续真正的事件 0 到来时就会撞上它被静默丢掉。
     // 调用方看到这个结论必须跳过该条、且不推进游标越过它。
     if (transfer.eventIndex === null || transfer.eventIndex === undefined) {
-      return {
-        outcome: OUTCOME.SKIPPED_UNRESOLVED,
-        matchKind: null,
-        rechargeId: null,
-        exceptionKind: null,
-        detail: { reason: '事件位置未知（交易回执未取到）', txId: transfer.txId }
-      }
+      return verdicts.skipUnresolved(transfer, '事件位置未知（交易回执未取到）')
     }
 
     // ---- ① 先落库占住事件身份。这一步就是幂等锚点 ----
-    const recorded = await this.recordTransaction(client, transfer, { mode })
+    const recorded = await this.recordTransaction(client, transfer, { mode: this.mode })
     if (!recorded.inserted) {
       // 这笔链上交易已经见过。**绝不产生任何余额变化**，也不报错。
-      return {
-        outcome: OUTCOME.DUPLICATE,
-        matchKind: MATCH_KIND.DUPLICATE_TX,
-        rechargeId: recorded.existingRechargeId,
-        exceptionKind: null,
-        detail: { reason: '该 TXID 已处理过', mode: recorded.existingMode }
-      }
+      return verdicts.duplicateEvent(recorded)
     }
 
     // ---- ② 资格过滤：代币、地址、金额精度 ----
@@ -160,72 +124,24 @@ class RechargeSettlementService {
       toAddress: ctx.toAddress
     })
     if (!eligibility.ok) {
-      const kind = this.exceptionKindForEligibility(eligibility.reason)
-      await this.recordException(client, transfer, {
-        kind,
-        summary: this.eligibilitySummary(eligibility.reason, transfer),
-        detail: { reason: eligibility.reason, expected: ctx.toAddress || null }
-      })
-      await this.finalizeTransaction(client, recorded.id, {
-        status: 'exception', matchKind: MATCH_KIND.NOT_ELIGIBLE, rechargeId: null,
-        shadowAction: { wouldSettle: false, action: 'exception', kind, reason: eligibility.reason }
-      })
-      return {
-        outcome: OUTCOME.EXCEPTION, matchKind: MATCH_KIND.NOT_ELIGIBLE,
-        rechargeId: null, exceptionKind: kind, detail: { reason: eligibility.reason }
-      }
+      return this.rejectWithException(client, transfer, recorded.id,
+        verdicts.ineligible(this, transfer, eligibility, ctx))
     }
 
     // ---- ③ 匹配候选订单 ----
     const match = await this.matchCandidate(client, transfer)
 
     if (match.kind === MATCH_KIND.NO_MATCH) {
-      await this.recordException(client, transfer, {
-        kind: EXCEPTION_KIND.NO_MATCH,
-        summary: `金额 ${formatMilli(transfer.amountMilli)} USDT 不匹配任何订单`,
-        detail: { amountMilli: transfer.amountMilli.toString() }
-      })
-      await this.finalizeTransaction(client, recorded.id, {
-        status: 'exception', matchKind: MATCH_KIND.NO_MATCH, rechargeId: null,
-        shadowAction: { wouldSettle: false, action: 'exception', kind: EXCEPTION_KIND.NO_MATCH }
-      })
-      return {
-        outcome: OUTCOME.EXCEPTION, matchKind: MATCH_KIND.NO_MATCH,
-        rechargeId: null, exceptionKind: EXCEPTION_KIND.NO_MATCH, detail: {}
-      }
+      // 先找「疑似归属」再下结论：金额精确匹配失败不等于这笔钱与平台无关，
+      // 最常见的原因是商户抄错数字。疑似结果**只提示不裁决**。
+      const suspicion = await this.suspectCandidates(client, transfer)
+      return this.rejectWithException(client, transfer, recorded.id,
+        verdicts.noMatch(this, transfer, suspicion))
     }
 
     if (match.kind === MATCH_KIND.LATE_PAYMENT) {
-      // 迟到款：金额能找到归属，但那张订单已经结束。
-      // **绝不能改配给新订单** —— 新订单要是恰好用了同一金额，
-      // 那是 24 小时保护期没生效，属于更严重的 bug，应当暴露而不是掩盖。
-      await this.recordException(client, transfer, {
-        kind: EXCEPTION_KIND.EXPIRED_PAYMENT,
-        rechargeId: match.order.id,
-        reservationId: match.reservation && match.reservation.id,
-        summary: `迟到款：归属订单 ${match.order.orderNumber}（${match.reason}），已进异常池`,
-        detail: {
-          orderNumber: match.order.orderNumber,
-          orderStatus: Number(match.order.status),
-          orderStatusText: statusText(Number(match.order.status)),
-          reason: match.reason,
-          amountMilli: transfer.amountMilli.toString()
-        }
-      })
-      await this.finalizeTransaction(client, recorded.id, {
-        status: 'exception', matchKind: MATCH_KIND.LATE_PAYMENT,
-        rechargeId: null, // 不改配给任何订单，只留异常
-        shadowAction: {
-          wouldSettle: false, action: 'exception',
-          kind: EXCEPTION_KIND.EXPIRED_PAYMENT,
-          belongedTo: match.order.orderNumber
-        }
-      })
-      return {
-        outcome: OUTCOME.EXCEPTION, matchKind: MATCH_KIND.LATE_PAYMENT,
-        rechargeId: null, exceptionKind: EXCEPTION_KIND.EXPIRED_PAYMENT,
-        detail: { belongedTo: match.order.orderNumber, reason: match.reason }
-      }
+      return this.rejectWithException(client, transfer, recorded.id,
+        verdicts.latePayment(transfer, match))
     }
 
     // ---- ③′ 同一 TXID 已结算过别的订单 → 进异常池，不自动发放 ----
@@ -237,70 +153,39 @@ class RechargeSettlementService {
     // 规则：**一个 TXID 最多结算一张订单**，其余全部进异常池等人工判断。
     const sameTx = await this.settledBySameTx(client, transfer, recorded.id)
     if (sameTx) {
-      await this.recordException(client, transfer, {
-        kind: EXCEPTION_KIND.DUPLICATE_TXID,
-        rechargeId: match.order ? match.order.id : null,
-        summary: `同一交易 ${transfer.txId.slice(0, 16)}… 的另一个事件已结算过订单，本事件不自动入账`,
-        detail: {
-          settledRechargeId: sameTx.recharge_id,
-          settledEventIndex: sameTx.event_index,
-          thisEventIndex: transfer.eventIndex,
-          amountMilli: transfer.amountMilli.toString()
-        }
-      })
-      await this.finalizeTransaction(client, recorded.id, {
-        status: 'exception', matchKind: MATCH_KIND.DUPLICATE_TX,
-        rechargeId: null,
-        shadowAction: {
-          wouldSettle: false, action: 'exception', kind: EXCEPTION_KIND.DUPLICATE_TXID,
-          settledRechargeId: sameTx.recharge_id
-        }
-      })
-      return {
-        outcome: OUTCOME.EXCEPTION, matchKind: MATCH_KIND.DUPLICATE_TX,
-        rechargeId: null, exceptionKind: EXCEPTION_KIND.DUPLICATE_TXID,
-        detail: { settledRechargeId: sameTx.recharge_id, thisEventIndex: transfer.eventIndex }
-      }
+      return this.rejectWithException(client, transfer, recorded.id,
+        verdicts.duplicateTxid(transfer, match, sameTx))
     }
 
     // ---- ④ 精确匹配 ----
     if (!this.autoSettlementEnabled) {
       // Shadow：只记录"本来会做什么"，不动余额、不改订单状态
-      const shadowAction = {
-        wouldSettle: true,
-        action: 'credit',
-        rechargeId: match.order.id,
-        orderNumber: match.order.orderNumber,
-        chars: Number(match.order.chars),
-        userId: match.order.userId,
-        amountMilli: transfer.amountMilli.toString(),
-        note: 'AUTO_SETTLEMENT_ENABLED=false，仅记录不执行'
-      }
-      await this.finalizeTransaction(client, recorded.id, {
-        status: 'seen', matchKind: MATCH_KIND.MATCHED,
-        rechargeId: match.order.id, shadowAction
-      })
-      return {
-        outcome: OUTCOME.SHADOW_MATCHED, matchKind: MATCH_KIND.MATCHED,
-        rechargeId: match.order.id, exceptionKind: null, detail: shadowAction
-      }
+      const shadow = verdicts.shadowMatched(transfer, match.order)
+      await this.finalizeTransaction(client, recorded.id, shadow.transactionPatch)
+      return shadow.result
     }
 
     // ---- ⑤ 真实入账 ----
     const settled = await this.creditOrder(client, {
       transfer, order: match.order, reservation: match.reservation
     })
-    await this.finalizeTransaction(client, recorded.id, {
-      status: 'settled', matchKind: MATCH_KIND.MATCHED,
-      rechargeId: match.order.id,
-      settledAt: new Date(),
-      shadowAction: { wouldSettle: true, action: 'credit', executed: true, alreadyPaid: settled.alreadyPaid }
-    })
-    return {
-      outcome: settled.alreadyPaid ? OUTCOME.DUPLICATE : OUTCOME.SETTLED,
-      matchKind: MATCH_KIND.MATCHED,
-      rechargeId: match.order.id, exceptionKind: null, detail: settled
-    }
+    const final = verdicts.settled(transfer, match.order, settled)
+    await this.finalizeTransaction(client, recorded.id, final.transactionPatch)
+    return final.result
+  }
+
+  /**
+   * 异常闸门的统一出口：写异常池 → 落终态 → 返回结论。
+   *
+   * 拆 `handleTransfer` 的真正理由就在这里 —— 这四步以前在五个闸门里
+   * 各抄一遍，每条分支的 `finalizeTransaction` 参数还不完全一样。
+   * 漏改一处就等于"钱进了异常池但链上记录还是 seen"，对账时看起来
+   * 像"还在处理中"，实际上永远不会再被处理。
+   */
+  async rejectWithException(client, transfer, transactionId, verdict) {
+    await this.recordException(client, transfer, verdict.exception)
+    await this.finalizeTransaction(client, transactionId, verdict.transactionPatch)
+    return verdict.result
   }
 
   // ---------------------------------------------------------------- 落库
@@ -513,8 +398,119 @@ class RechargeSettlementService {
     }
   }
 
-  // ---------------------------------------------------------------- 异常池
+  /**
+   * 找「这笔钱最可能是哪张订单」的候选，供人工核对。
+   *
+   * ## 为什么限定在「近期、已付款或待付款」的订单上
+   *
+   * 候选池大了没有意义 —— 一张半年前的订单和今天的到账金额接近，
+   * 只是巧合。同时必须包含**已支付**的订单：真实的笔误事故里，
+   * 超管往往先手工确认收款，订单状态已经是 paid，链上那笔却还挂在异常池。
+   * 只查 pending 会让这类已经人工处理过的单永远找不到对应关系。
+   *
+   * ## 绝不返回超过一条
+   *
+   * 两条候选同时成立时，说明金额本身不足以定位 —— 那时候人工看图更快，
+   * 给出两个模糊候选反而让人以为系统"知道"是哪张。
+   * 取置信度最高、差额最小的那条。
+   *
+   * @returns {Promise<object|null>} 可直接 JSON 化的提示对象
+   */
+  async suspectCandidates(client, transfer) {
+    // 只对打到「近期用过或正在用」的收款地址的钱做疑似分析。
+    // 打到已弃用旧地址的钱，金额再像也不是当前订单体系的钱 —— 那属于对账，
+    // 不该被提示成"疑似某张订单"。
+    if (transfer.toAddress) {
+      const { rows: known } = await client.query(
+        `SELECT 1 FROM recharges
+          WHERE pay_address = $1 AND created_at >= now() - ($2 || ' hours')::interval
+         UNION ALL
+         SELECT 1 FROM recharge_amount_reservations
+          WHERE pay_address = $1 AND reserved_at >= now() - ($2 || ' hours')::interval
+         LIMIT 1`,
+        [transfer.toAddress, String(nearAmount.LOOKBACK_HOURS)]
+      )
+      if (!known.length) return null
+    }
 
+    // ★ 候选池必须限定在**同一个收款地址与合约**上 ★
+    //
+    // 原来这里的 WHERE 只有 status + created_at，抓的是**全平台**近 72 小时的
+    // 订单。后果：钱打到商户 A 的地址，金额却恰好接近商户 B 的某张订单，
+    // 系统就提示"疑似 B 的订单 XX" —— 人工只要照着点「确认收款」，
+    // 就把 A 付的钱记到了 B 的账上。两家的钱串了，而且事后从流水里看不出来
+    // （异常记录写的是"笔误匹配"，不是"跨商户"）。
+    //
+    // 上面那段 pay_address 检查只回答了"要不要做疑似分析"，不回答
+    // "哪些订单能进候选池"。near-amount.js 的契约里写得很清楚：
+    // 「调用方必须自己限定这些订单都是同一收款地址与合约」。
+    //
+    // 合约列名是 pay_token_contract（见 migrations/027），不是 chain。
+    const { rows } = await client.query(
+      `SELECT id, order_number, status,
+              paid_amount, surcharge_amount,
+              (paid_amount - surcharge_amount) AS base_amount
+         FROM recharges
+        WHERE status IN ($1, $2)
+          AND created_at >= now() - ($3 || ' hours')::interval
+          AND ($4::text IS NULL OR pay_address = $4)
+          AND ($5::text IS NULL OR pay_token_contract IS NULL OR pay_token_contract = $5)
+        ORDER BY created_at DESC
+        LIMIT 50`,
+      [
+        RECHARGE_STATUS.PENDING, RECHARGE_STATUS.PAID,
+        String(nearAmount.LOOKBACK_HOURS),
+        transfer.toAddress || null,
+        transfer.tokenContract || transfer.contractAddress || null
+      ]
+    )
+    if (!rows.length) return null
+
+    const candidates = rows.map(row => ({
+      id: String(row.id),
+      orderNumber: row.order_number,
+      status: Number(row.status),
+      statusText: statusText(Number(row.status)),
+      paidAmountMilli: milliFromNumeric(row.paid_amount),
+      surchargeMilli: milliFromNumeric(row.surcharge_amount),
+      baseMilli: milliFromNumeric(row.base_amount)
+    }))
+
+    const found = nearAmount.findCandidate({
+      amountMilli: transfer.amountMilli,
+      candidates
+    })
+    if (!found) return null
+
+    return {
+      kind: found.kind,
+      confidence: found.confidence,
+      orderId: found.order.id,
+      orderNumber: found.order.orderNumber,
+      orderStatus: found.order.status,
+      orderStatusText: found.order.statusText,
+      expectedMilli: found.order.paidAmountMilli,
+      deltaMilli: found.deltaMilli.toString(),
+      deltaText: nearAmount.formatDelta(found.deltaMilli),
+      reason: found.reason,
+      // 明确写死：人工确认前绝不自动入账
+      autoSettle: false
+    }
+  }
+
+  /**
+   * NO_MATCH 的摘要文案。
+   *
+   * 有疑似归属时把线索写进摘要 —— 运维在列表页就能看到，
+   * 不必点进 detail 才知道这笔钱可能属于谁。
+   */
+  noMatchSummary(transfer, suspicion) {
+    const base = `金额 ${formatMilli(transfer.amountMilli)} USDT 不匹配任何订单`
+    if (!suspicion) return base
+    return `${base}；疑似订单 ${suspicion.orderNumber}（${suspicion.reason}，需人工确认）`
+  }
+
+  // ---------------------------------------------------------------- 异常池
   exceptionKindForEligibility(reason) {
     if (reason === 'WRONG_TOKEN') return EXCEPTION_KIND.WRONG_TOKEN
     if (reason === 'WRONG_ADDRESS') return EXCEPTION_KIND.WRONG_ADDRESS

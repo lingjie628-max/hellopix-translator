@@ -78,23 +78,33 @@ function mount(html) {
 }
 
 /** 装配真实的 translateText() 依赖，用来验"失败会不会走到提示"。 */
-function mountTranslate() {
+function mountTranslate(opts) {
   // 缓存 / 去重 / 提示这些逻辑现在住在 translateTextDetailed() 里，
   // translateText() 只是它的字符串外壳（发送链路用）。这里挂载真正干活的那个。
+  //
+  // 依赖列表要跟着实现走：`withTranslateTimeout`（超时看门狗）和 `trace`
+  // 都在 translateTextDetailed 里被调用，不注入就是 ReferenceError。
+  // 这里注入一个**直通版**看门狗：本文件验的是"服务端失败会不会弹提示"，
+  // 超时行为由 test/guest-translate-timeout.test.js 单独钉住。
+  const o = opts || {}
   const src = grab('translateTextDetailed')
+  const cache = o.cache || new Map()
   const calls = []
   const fn = new Function(
     'stripEmoji', 'MessageParser', 'cache', 'pending', 'api', 'notifyTranslateIssue',
+    'withTranslateTimeout', 'trace',
     src + '\nreturn translateTextDetailed'
   )(
     t => t,
     { stripBusy: t => t },
+    cache,
     new Map(),
-    new Map(),
-    () => ({ translate: () => Promise.resolve({ success: false, code: 'INSUFFICIENT_CHARS', msg: '字符余额不足' }) }),
-    resp => { calls.push(resp); return 'notified' }
+    o.api || (() => ({ translate: () => Promise.resolve({ success: false, code: 'INSUFFICIENT_CHARS', msg: '字符余额不足' }) })),
+    o.notify || (resp => { calls.push(resp); return 'notified' }),
+    (key, promise) => promise,
+    () => {}
   )
-  return { fn, calls }
+  return { fn, calls, cache }
 }
 
 const NOTICE_ID = 'pix-translate-notice'
@@ -184,31 +194,16 @@ test('translateTextDetailed 收到 success:false 时返回失败结果但必须�
 })
 
 test('失败不进翻译缓存 —— 否则下次直接返回空串，用户永远是坏的', async () => {
-  const src = grab('translateTextDetailed')
-  const cache = new Map()
-  const fn = new Function(
-    'stripEmoji', 'MessageParser', 'cache', 'pending', 'api', 'notifyTranslateIssue',
-    src + '\nreturn translateTextDetailed'
-  )(
-    t => t, { stripBusy: t => t }, cache, new Map(),
-    () => ({ translate: () => Promise.resolve({ success: false, code: 'INSUFFICIENT_CHARS' }) }),
-    () => 'notified'
-  )
+  const { fn, cache } = mountTranslate()
   await fn('hello', true, 'auto_receive')
   assert.equal(cache.size, 0)
 })
 
 test('成功路径仍照常返回译文并写缓存', async () => {
-  const src = grab('translateTextDetailed')
-  const cache = new Map()
-  const fn = new Function(
-    'stripEmoji', 'MessageParser', 'cache', 'pending', 'api', 'notifyTranslateIssue',
-    src + '\nreturn translateTextDetailed'
-  )(
-    t => t, { stripBusy: t => t }, cache, new Map(),
-    () => ({ translate: () => Promise.resolve({ success: true, translation: '你好' }) }),
-    () => { throw new Error('成功路径不该弹提示') }
-  )
+  const { fn, cache } = mountTranslate({
+    api: () => ({ translate: () => Promise.resolve({ success: true, translation: '你好' }) }),
+    notify: () => { throw new Error('成功路径不该弹提示') }
+  })
   const res = await fn('hello', true, 'auto_receive')
   assert.equal(res.ok, true)
   assert.equal(res.out, '你好')

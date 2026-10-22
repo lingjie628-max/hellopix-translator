@@ -67,6 +67,56 @@ test('旧文件损坏时不会把进程带崩（读回 fallback）', () => {
   assert.deepEqual(store.get({ ok: 1 }), { ok: 1 })
 })
 
+/**
+ * ★ 退出恰好撞上"异步写正在进行"的窗口 ★
+ *
+ * `writeNow()` 一开始就把 dirty 置 false，真正的落盘丢进异步任务。
+ * 如果进程在这段窗口里退出：
+ *
+ *   · 老实现 `if (!dirty) return` → 直接放弃写
+ *   · 正在进行的异步写被进程结束掐断
+ *   · 磁盘上还是旧文件，并可能留一个 .tmp-<pid> 垃圾
+ *
+ * 内存 cache 始终是最新的，所以 flushSync 必须**无视 dirty** 按 cache 写一次。
+ */
+test('★ 异步写正在进行时退出，flushSync 仍必须把最新内容落盘', async () => {
+  const file = tmpFile()
+  const store = createStore(file, { debounceMs: 0 })
+  store.set({ phase: 'first' })
+  // 触发立即写但不 await —— 此刻 writing 挂起、dirty 已被置为 false
+  const inflight = store.set({ phase: 'second' }, { immediate: true })
+
+  // 趁异步写还没完成，模拟"进程要退出了"
+  store.flushSync()
+
+  const onDisk = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(onDisk.phase, 'second',
+    '退出时磁盘上必须是内存里的最新值，否则重启后用的是旧配置')
+
+  // 让在途写收尾，避免影响后续用例
+  await inflight
+})
+
+test('★ flushSync 之后不应留下 .tmp 垃圾文件', async () => {
+  const file = tmpFile()
+  const store = createStore(file, { debounceMs: 0 })
+  store.set({ a: 1 })
+  const inflight = store.set({ a: 2 }, { immediate: true })
+  store.flushSync()
+  await inflight.catch(() => {})
+
+  const leftovers = fs.readdirSync(path.dirname(file)).filter(n => n.indexOf('.tmp-') >= 0)
+  assert.deepEqual(leftovers, [], '临时文件残留会在 userData 里越积越多')
+})
+
+test('从没写过任何东西时 flushSync 不该凭空造出一个 "null" 文件', () => {
+  const file = tmpFile()
+  const store = createStore(file)
+  store.flushSync()
+  assert.equal(fs.existsSync(file), false,
+    '没数据却写了个 null 出来，下次 get() 会拿到 null 而不是调用方给的 fallback')
+})
+
 test('mutate 不丢已有字段', async () => {
   const file = tmpFile()
   const store = createStore(file, { debounceMs: 5 })

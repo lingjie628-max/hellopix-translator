@@ -162,6 +162,10 @@ function detectAbnormalExit(dir) {
 module.exports = {
   ALLOWED_SCOPES,
   MAX_LINES,
+  // 与服务端共用一份契约：单行截断长度决定"崩溃堆栈能保留多少帧"，
+  // 两端不一致就会静默丢帧（服务端更严）或失去保护（更松）。
+  // 导出它，让 test/crash-report-contract.test.js 能直接比对两端的值。
+  MAX_LINE_CHARS,
   markerPath,
   readMarker,
   writeMarker,

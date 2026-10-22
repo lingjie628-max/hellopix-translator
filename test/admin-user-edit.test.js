@@ -63,8 +63,7 @@ test('编辑态：提交载荷必须剔除 charBalance', () => {
 
   // 反过来确认：不能靠"服务端别拦"来解决。
   // 守卫本身是资金安全的必要条件，必须原样保留在服务端。
-  const routes = fs.readFileSync(
-    path.join(__dirname, '..', 'server/routes/production.js'), 'utf8')
+  const routes = require('./helpers/route-source').readAllServerSource()
   assert.match(routes, /USE_CHARACTER_GRANT/,
     '服务端的余额守卫不能被删掉 —— 余额只能走 char_ledger，不能从用户编辑接口改')
 })
@@ -131,8 +130,7 @@ test('服务端 bool()：必须认得表单发来的 "true"/"false"，且认不�
 })
 
 test('编辑商户的 UPDATE 必须写 enterprise 与 auto_reply，且不得再用 Boolean(number(...))', () => {
-  const routes = fs.readFileSync(
-    path.join(__dirname, '..', 'server/routes/production.js'), 'utf8')
+  const routes = require('./helpers/route-source').readAllServerSource()
   const at = routes.indexOf('UPDATE users SET nickname=COALESCE')
   assert.ok(at > 0, '找不到「编辑商户」的 UPDATE 语句')
   const block = routes.slice(at, routes.indexOf('WHERE id=$1', at))

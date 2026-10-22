@@ -261,6 +261,18 @@ export default {
       }
       if (!this.channels.length) { this.$message.warning('收款方式尚未配置，请联系客服'); return }
       this.submitting = true
+      this.createOrder(0)
+    },
+    /**
+     * 下单，撞金额时自动重来一次。
+     *
+     * 服务端认金额为订单身份（尾数池），两个请求几乎同时下单时，
+     * 后插入的那个会撞唯一约束。那不是用户做错了什么，换一个尾数就好 ——
+     * 但用户明明只点了一次，却要看到一条红字再自己点第二次，体验上
+     * 就是"这个按钮坏了"。所以这里对**服务端明确标记 retryable** 的冲突
+     * 自动重发一次（只一次，不会把真实故障变成无限重试）。
+     */
+    createOrder(attempt) {
       this.postRequest('/userRecharge/create', {
         baseid: this.form.id,
         month: Math.max(1, Number(this.form.month) || 1),
@@ -270,7 +282,15 @@ export default {
         if (!resp || resp.status !== 200) return // 失败提示由拦截器统一弹出
         this.order = resp.data
         this.renderQr(resp.data.channel && resp.data.channel.address)
-      }).catch(() => { this.submitting = false })
+      }).catch(error => {
+        const data = (error && error.response && error.response.data) || {}
+        if (data.code === 'AMOUNT_COLLISION' && data.retryable === true && attempt < 1) {
+          // 静默重试：这条红字对用户没有信息量，真正有意义的是最终结果
+          this.createOrder(attempt + 1)
+          return
+        }
+        this.submitting = false
+      })
     },
     /** 二维码内容只放地址本身：带 amount 的 tron: URI 各家钱包支持不一，只放地址最通用 */
     renderQr(address) {

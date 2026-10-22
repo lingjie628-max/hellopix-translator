@@ -1,7 +1,7 @@
 {
   "name": "hello-pix-desktop",
   "productName": "Hello Pix",
-  "version": "1.1.0",
+  "version": "1.1.2",
   "private": true,
   "description": "Hello Pix 桌面客户端",
   "author": "Hello Pix",
@@ -56,7 +56,7 @@
       "line-ext-shim.js",
       "package.json",
       "src/**/*.js",
-    "shared/**/*.js",
+      "shared/**/*.js",
       "renderer/**/*",
       "node_modules/undici/**/*",
       "!renderer/*.mp4",

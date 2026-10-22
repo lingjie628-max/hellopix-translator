@@ -24,7 +24,6 @@
 
 const { app, BrowserWindow, WebContentsView } = require('electron')
 const path = require('path')
-const hidden = require(path.join(__dirname, '..', 'src/window/hidden-tabs.js'))
 
 const root = path.join(__dirname, '..')
 const sleep = ms => new Promise(r => setTimeout(r, ms))

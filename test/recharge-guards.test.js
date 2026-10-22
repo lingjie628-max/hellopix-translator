@@ -21,7 +21,14 @@ const path = require('node:path')
 const test = require('node:test')
 
 const root = path.join(__dirname, '..')
-const routeSource = fs.readFileSync(path.join(root, 'server/routes/production.js'), 'utf8')
+// 路由已按域拆分，读整个 routes 目录
+const routeSource = require('./helpers/route-source').readAllRoutes()
+
+/** 下单逻辑所在文件（已从路由下沉到 service） */
+const ORDER_SERVICE = path.join(root, 'server/services/recharge-order-service.js')
+function readOrderService() {
+  return fs.readFileSync(ORDER_SERVICE, 'utf8')
+}
 
 // ---------------------------------------------------------------- 源码守卫
 
@@ -34,10 +41,9 @@ test('旧的降级尾数逻辑已彻底删除', () => {
 })
 
 test('下单路径接入的是新的金额预约服务，而不是自己算尾数', () => {
-  const create = routeSource.slice(
-    routeSource.indexOf("router.post('/userRecharge/create'"),
-    routeSource.indexOf("router.get('/team/info'")
-  )
+  // 下单逻辑已下沉到 services/recharge-order-service.js。
+  // 不再按路由切片 —— 那只能看到薄壳，断言必失效（而且修法往往是删断言）。
+  const create = readOrderService()
   assert.match(create, /rechargeAmount\.allocate\(/, '下单必须走 RechargeAmountService.allocate')
   assert.match(create, /attachToRecharge\(/, '预约要回填订单归属')
   // 金额一律经 milli helper，不得出现浮点运算
@@ -48,25 +54,41 @@ test('下单路径接入的是新的金额预约服务，而不是自己算尾�
 })
 
 test('下单时快照收款地址与代币合约 —— 否则换地址后历史订单无法核对', () => {
-  const create = routeSource.slice(
-    routeSource.indexOf("router.post('/userRecharge/create'"),
-    routeSource.indexOf("router.get('/team/info'")
-  )
+  const create = readOrderService()
   assert.match(create, /pay_address/, '订单必须快照收款地址')
   assert.match(create, /pay_token_contract/, '订单必须快照代币合约')
   assert.match(create, /expires_at/, '订单必须有有效期')
 })
 
 test('USDT 合约是常量而不是后台可改配置 —— 防手滑改成仿盘合约', () => {
-  assert.match(routeSource, /const USDT_TRC20_CONTRACT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'/)
+  // 合约地址的**唯一真相**在 services/tron/transfer.js。
+  // 路由层不许自己再定义一份 —— 曾经有过第二份，拆分时跟着搬走，
+  // 导致 /userRecharge/create 里三处引用全部悬空。
+  const transferSource = fs.readFileSync(
+    path.join(root, 'server/services/tron/transfer.js'), 'utf8')
+
+  assert.match(transferSource, /const USDT_TRC20_CONTRACT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'/)
+
+  // 全仓只允许一处定义
+  const defs = (routeSource + transferSource).match(/const USDT_TRC20_CONTRACT = '/g) || []
+  assert.equal(defs.length, 1, `合约地址常量只能定义一次，实际 ${defs.length} 处`)
+
   // 不应从 app_settings 或请求体里读合约
   assert.doesNotMatch(routeSource, /tokenContract:\s*String\(data\./)
   assert.doesNotMatch(routeSource, /byKey\['payment\.contract'\]/)
 })
 
 test('订单有效期是 30 分钟', () => {
-  assert.match(routeSource, /const RECHARGE_TTL_MINUTES = 30/)
-  assert.match(routeSource, /RECHARGE_TTL_MINUTES \* 60 \* 1000/)
+  // 常量现在跟下单逻辑住在同一个文件里（services/recharge-order-service.js），
+  // 由生产代码与测试共同引用同一个导出，不存在第二份副本。
+  const create = readOrderService()
+  assert.match(create, /const RECHARGE_TTL_MINUTES = 30/)
+  assert.match(create, /RECHARGE_TTL_MINUTES \* 60 \* 1000/)
+
+  // 全仓只允许一处定义 —— 两份副本迟早走偏
+  const all = routeSource + readOrderService()
+  const defs = all.match(/const RECHARGE_TTL_MINUTES = /g) || []
+  assert.equal(defs.length, 1, `有效期常量只能定义一次，实际 ${defs.length} 处`)
 })
 
 // ------------------------------------------------------- 报价改整数后没变价
@@ -301,10 +323,7 @@ test('所有 recharges 新增列都有对应 migration', () => {
 })
 
 test('下单代码写入的每一列都能在 migration 里找到', () => {
-  const create = routeSource.slice(
-    routeSource.indexOf("router.post('/userRecharge/create'"),
-    routeSource.indexOf("router.get('/team/info'")
-  )
+  const create = readOrderService()
   const insert = create.slice(create.indexOf('INSERT INTO recharges'), create.indexOf('RETURNING *'))
   const migrationsDir = path.join(root, 'migrations')
   const allSql = fs.readdirSync(migrationsDir)
@@ -401,17 +420,31 @@ test('代码里引用的 app_settings 键全部满足数据库约束', () => {
 
 test('mail 配置的读写键一致，不会一边写一边读另一个名字', () => {
   const mailer = fs.readFileSync(path.join(root, 'server/lib/mailer.js'), 'utf8')
-  const route = fs.readFileSync(path.join(root, 'server/routes/production.js'), 'utf8')
   const alert = fs.readFileSync(path.join(root, 'server/lib/ops-alert.js'), 'utf8')
+  // 路由层拆成多个模块后，'mail.alert_to' 的键映射搬进了 admin.js
+  // （readSettings）。这里扫整个 routes 目录，而不是钉死单个文件 ——
+  // 否则下次再拆一次模块，这个测试又会假红。
+  //
+  // 注意必须**递归**：admin.js 已按业务域拆进 admin/ 子目录，
+  // 只 readdirSync 顶层会把子目录全漏掉（这个测试自己就踩过一次）。
+  const collectRoutes = dir => fs.readdirSync(dir, { withFileTypes: true })
+    .flatMap(e => e.isDirectory()
+      ? collectRoutes(path.join(dir, e.name))
+      : e.name.endsWith('.js') ? [fs.readFileSync(path.join(dir, e.name), 'utf8')] : [])
+  const routeText = collectRoutes(path.join(root, 'server/routes')).join('\n')
   // 三处必须用同一个键名
   assert.match(mailer, /'mail\.alert_to'/)
   assert.match(alert, /\['mail\.alert_to'\]/)
-  assert.match(route, /\['mail\.alert_to',/)
+  assert.match(routeText, /\['mail\.alert_to',/)
+  // 路由层里这个键映射必须**恰好出现一次**：
+  // 拆模块时若漏搬或重复搬，都会让"写进去读不出来"或"读到两份配置"
+  assert.equal((routeText.match(/\['mail\.alert_to',/g) || []).length, 1,
+    "路由层里 ['mail.alert_to', ...] 的键映射应恰好出现一次")
   // 剥掉注释再查：注释里会引用旧键名来说明这次修的是什么，那是文档不是代码
   const stripComments = t => t
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/(^|[^:])\/\/.*$/gm, '$1')
-  for (const [name, text] of [['mailer', mailer], ['ops-alert', alert], ['production', route]]) {
+  for (const [name, text] of [['mailer', mailer], ['ops-alert', alert], ['routes', routeText]]) {
     assert.doesNotMatch(stripComments(text), /mail\.alertTo/,
       `${name} 的**可执行代码**里还有旧键名 mail.alertTo`)
   }

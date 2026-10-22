@@ -1,6 +1,6 @@
 {
   "name": "hello-pix",
-  "version": "1.1.0",
+  "version": "1.1.2",
   "private": true,
   "description": "Hello Pix 翻译软件",
   "engines": {
@@ -11,7 +11,9 @@
     "start": "vue-cli-service serve",
     "start:prod": "NODE_ENV=production node server/index.js",
     "build": "NODE_ENV=production vue-cli-service build --mode production",
-    "test:security": "node --test test/*.test.js",
+    "test:security": "node scripts/run-tests.js",
+    "test:strict": "PIX_TEST_STRICT=required node scripts/run-tests.js",
+    "test:env": "./scripts/test-env.sh up",
     "test:integration": "node --test test/database.integration.test.js",
     "desktop": "npm start --prefix desktop",
     "telegram": "npm start --prefix standalone/telegram",
@@ -20,6 +22,9 @@
     "seed:admin": "node scripts/seed-admin.js",
     "engine:wired": "node scripts/set-engine-wired.js",
     "check:plan-copy": "node scripts/check-plan-copy.js",
+    "check:dangling": "node scripts/scan-dangling.js",
+    "check:unused": "node scripts/scan-unused-requires.js",
+    "check:dead": "node scripts/scan-dangling.js && node scripts/scan-unused-requires.js",
     "verify:client": "node scripts/verify-preload-load.js",
     "verify:client:source": "node scripts/verify-preload-load.js --source"
   },

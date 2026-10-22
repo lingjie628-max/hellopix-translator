@@ -9,6 +9,7 @@ const {
   RedisTranslationCache,
   createMemoryStores
 } = require('../server/redis-security')
+const { key } = require('../server/stores/redis-client')
 
 class FakeRedis {
   constructor() {
@@ -119,7 +120,10 @@ test('Redis verification store hashes and consumes captcha codes', async () => {
   const redis = new FakeRedis()
   const store = new RedisVerificationStore(redis)
   await store.setCaptcha('image-1', 'AbC9')
-  const raw = await redis.get('pix:captcha:image-1')
+  // 用 key() 构造键名，别写死 'pix:captcha:...'：
+  // 前缀的唯一来源是 REDIS_KEY_PREFIX，测试不该复制一份字面量。
+  const raw = await redis.get(key('captcha', 'image-1'))
+  assert.ok(raw, '验证码应已写入 Redis')
   assert.equal(raw.includes('abc9'), false)
   assert.equal((await store.verifyCaptcha('image-1', 'abc9', true)).ok, true)
   assert.equal((await store.verifyCaptcha('image-1', 'abc9', true)).missing, true)

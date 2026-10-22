@@ -16,7 +16,6 @@
  */
 
 const fs = require('node:fs')
-const path = require('node:path')
 
 function readAsar (asarPath) {
   const buf = fs.readFileSync(asarPath)

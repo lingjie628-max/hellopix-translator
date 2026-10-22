@@ -2447,7 +2447,7 @@ const pixBridge = {
     if (pending.has(key)) return pending.get(key)
     const pix = api()
     if (!pix || !pix.translate) return Promise.resolve({ ok: false, code: 'NO_BRIDGE', out: '' })
-    const job = pix.translate({ text: cleaned, incoming: incoming, trigger: trigger || '' }).then(resp => {
+    const job = withTranslateTimeout(key, pix.translate({ text: cleaned, incoming: incoming, trigger: trigger || '' }).then(resp => {
       pending.delete(key)
       // 余额不足 / 通道不在套餐里之类：必须弹提示，不能表现成"没译文"。
       if (resp && resp.success === false) {
@@ -2478,9 +2478,58 @@ const pixBridge = {
         ? cls : 'TRANSLATE_FAILED'
       notifyTranslateIssue({ code: code, msg: (err && err.message) || '' })
       return { ok: false, code: code, out: '' }
-    })
+    }))
     pending.set(key, job)
     return job
+  }
+
+  /**
+   * 给一次翻译挂看门狗。
+   *
+   * ## 为什么必须有
+   *
+   * `pix.translate` 是 `ipcRenderer.invoke`，它只在主进程**返回**时 resolve。
+   * 只要主进程那一次 handler 因为任何原因不返回（宿主进程被拖死、
+   * requestTranslate 里某个 await 挂住、tab 已被销毁但 handler 没走完），
+   * 这个 Promise 就永远挂着。后果不是"慢了"，而是**永久**：
+   *
+   *   1. `pending` 里那条 job 再也不会 delete —— 同一个句子之后再翻，
+   *      直接复用这个永不完成的 Promise，连重试都卡死；
+   *   2. 发送链路里 `sendBusy` 永远是 true —— `guardBusySend()` 会拦下
+   *      之后**每一次**发送，用户按回车毫无反应，也没有任何错误提示。
+   *
+   * 所以超时后必须做两件事：把 key 从 pending 里摘掉，并返回一个
+   * 明确带错误码的失败结果，让上层走到"翻译失败 → 重试/发原文"的可操作分支。
+   *
+   * 超时值给得很宽（默认 90s）：网络层自己有 connect/backoff 预算，
+   * 长句 LLM 生成也慢，这里只是兜"永不返回"这一种病，不是用来催正常请求。
+   */
+  const TRANSLATE_TIMEOUT_MS = 90 * 1000
+  function withTranslateTimeout(key, promise) {
+    return new Promise(function (resolve) {
+      let settled = false
+      const timer = setTimeout(function () {
+        if (settled) return
+        settled = true
+        // 关键：摘掉 pending，否则"重试"会复用这条死 job。
+        // 这里不判断 map 里是不是同一个对象 —— 同 key 同 job 是设计约束，
+        // 判断反而会在 set() 之前/之后引入边界分歧。
+        pending.delete(key)
+        trace('TRANSLATE_TIMEOUT', { ms: TRANSLATE_TIMEOUT_MS })
+        resolve({ ok: false, code: 'CLIENT_TIMEOUT', out: '' })
+      }, TRANSLATE_TIMEOUT_MS)
+      Promise.resolve(promise).then(function (value) {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(value)
+      }, function (err) {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve({ ok: false, code: 'CLIENT_EXCEPTION', out: '', err: (err && err.message) || '' })
+      })
+    })
   }
 
   async function translateText(text, incoming, trigger) {
@@ -3411,6 +3460,7 @@ const pixBridge = {
     trace('TRANSLATE_STARTED', { chain: 'send', trigger: TRIGGER_SEND })
     // 用**带错误码**的版本：统一压成"翻译失败"会把"余额不足 / 通道不在套餐 /
     // 断线 / 空结果"全糊掉，用户与事后取证都看不出真正死在哪一步（本轮明令禁止）。
+    // 超时兜底在 translateTextDetailed 内部（见那里的看门狗），这里只管异常。
     let res = null
     try {
       res = await translateTextDetailed(masked.masked, false, TRIGGER_SEND)
@@ -4362,6 +4412,14 @@ const pixBridge = {
   // ---------------------------------------------------------------------------
   const AUTO_POOL_SIZE = 3
   const autoQueue = []
+  // 正在翻译的消息 id —— **必须单独记一份**，不能靠 autoQueue 判断"是否已翻译"。
+  //
+  // 踩过的坑：enqueueAuto 原来只扫 autoQueue，而 autoPump 一 shift 出去、
+  // 这条 job 就不在队里了。可它要跑 1 秒（一次网络往返），而 scan 每 220ms
+  // 一轮 —— 期间它会被当成"还没翻过"重新入队、重新翻译、**再扣一次费**。
+  // 打开一个 30 条的会话，同一条消息能被翻好几遍，用户看到的字符消耗
+  // 和实际收到的译文条数对不上，就是这个原因。
+  const autoInFlight = Object.create(null)
   let autoRunning = 0
   let lastScanIdentity = ''
 
@@ -4375,6 +4433,7 @@ const pixBridge = {
     while (autoRunning < AUTO_POOL_SIZE && autoQueue.length) {
       const job = autoQueue.shift()
       autoRunning++
+      if (job.id) autoInFlight[job.id] = 1
       const run = async () => {
         try {
           const translated = await translateParsed(job.parsed, true, TRIGGER_AUTO)
@@ -4388,6 +4447,9 @@ const pixBridge = {
         } catch (e) {
           autoFailedAt.set(job.id, Date.now())
         } finally {
+          // 先摘 in-flight 标记再 pump：pump 里可能立刻派发下一条，
+          // 顺序反了会让同一条消息在极短窗口内被重复放行。
+          if (job.id) delete autoInFlight[job.id]
           autoRunning--
           autoPump()
         }
@@ -4399,7 +4461,9 @@ const pixBridge = {
   /**
    * 把本轮扫描发现的待自动翻译消息交给派发池。返回真正入队的条数。
    *
-   * 倒序入队 = **最新的先翻**。同一条消息（按消息身份去重）不会重复入队。
+   * 倒序入队 = **最新的先翻**。同一条消息（按消息身份去重）不会重复入队 ——
+   * 判重要同时看**排队中**和**正在翻译中**两处，只看队列会让 in-flight 的那条
+   * 被重复派发（见 autoInFlight 的注释）。
    */
   function enqueueAuto(jobs) {
     if (!jobs || !jobs.length) return 0
@@ -4408,7 +4472,7 @@ const pixBridge = {
     let added = 0
     for (let i = jobs.length - 1; i >= 0; i--) {
       const job = jobs[i]
-      if (!job.id || known[job.id]) continue
+      if (!job.id || known[job.id] || autoInFlight[job.id]) continue
       const failedAt = autoFailedAt.get(job.id)
       if (failedAt && Date.now() - failedAt < AUTO_FAIL_COOLDOWN_MS) continue
       known[job.id] = 1
@@ -4432,6 +4496,11 @@ const pixBridge = {
       lastScanIdentity = identity
       autoQueue.length = 0
       autoFailedAt.clear()
+      // in-flight 标记同样按会话作废：消息 id 只在本会话内有意义，
+      // 留着会让新会话里恰好同 id 的消息被永远挡在门外（就像旧冷却误伤那样）。
+      // 正在跑的那几条不会因为这次清理而出错 —— 它们各自持着 job 引用，
+      // 只是 finally 里的 delete 变成 no-op（本来也已经删不到了）。
+      for (const key in autoInFlight) delete autoInFlight[key]
     }
 
     const nodes = messageNodes()

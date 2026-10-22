@@ -6,11 +6,72 @@ const test = require('node:test')
 const databaseUrl = process.env.PIX_TEST_DATABASE_URL
 const redisUrl = process.env.PIX_TEST_REDIS_URL
 
+/**
+ * 环境变量存在 ≠ 服务活着。
+ *
+ * 这里踩过一个 40 分钟的坑：`PIX_TEST_DATABASE_URL` 还指向上次
+ * `test-env.sh` 起在 55433 的 Postgres，但那个集群早就关了。测试不 skip，
+ * 真的去连一个不存在的端口，而 pg 客户端的连接超时默认是「永不放弃」——
+ * `node --test` 就那么挂着，`npm run test:strict` 也跟着挂，
+ * 既没红也没绿，纯粹是根死木头。
+ *
+ * 判定标准换成「端口通不通」。用 spawnSync 跑一段同步 TCP 探测，
+ * 因为测试的顶层是同步的，拿不到 await。
+ */
+function reachable(rawUrl) {
+  let url
+  try {
+    url = new URL(rawUrl)
+  } catch (e) {
+    return false
+  }
+  const port = Number(url.port || (url.protocol === 'redis:' ? 6379 : 5432))
+  const host = url.hostname || '127.0.0.1'
+  const probe = `
+    const net = require('node:net')
+    const s = net.connect(${port}, ${JSON.stringify(host)})
+    const done = ok => { try { s.destroy() } catch (e) {} process.exit(ok ? 0 : 1) }
+    s.setTimeout(1200, () => done(false))
+    s.on('connect', () => done(true))
+    s.on('error', () => done(false))
+  `
+  const r = require('node:child_process').spawnSync(process.execPath, ['-e', probe], { timeout: 4000 })
+  return r.status === 0
+}
+
+/**
+ * 集成测试必须用自己的 Redis DB，不能和开发环境共用。
+ *
+ * 踩过：`PIX_TEST_REDIS_URL` 直接指到开发实例的 db 0，测试往同一个
+ * `rate:login-ip:127.0.0.1:<窗口>` 里反复累加。单次跑 11 次登录，上限 30，
+ * 于是**第三轮开始就间歇性 429** —— 表现为"偶发失败"，重启一次又绿了，
+ * 最容易被当成幽灵 bug 含糊过去。
+ *
+ * 这里统一把 URL 的 db 改成 15 并在用例结束后清空该库：
+ *   · 不依赖外部 .env 写得对不对；
+ *   · 不会污染开发/线上用的库；
+ *   · 反复跑不会因为计数残留而变红。
+ */
+function isolatedRedisUrl(rawUrl) {
+  const url = new URL(rawUrl)
+  url.pathname = '/15'
+  return url.toString()
+}
+
+const unreachable = []
+if (databaseUrl && !reachable(databaseUrl)) unreachable.push('PIX_TEST_DATABASE_URL')
+if (redisUrl && !reachable(redisUrl)) unreachable.push('PIX_TEST_REDIS_URL')
+
 test('PostgreSQL and Redis preserve billing under concurrency', {
   skip: !databaseUrl || !redisUrl
+    ? '未配置 PIX_TEST_DATABASE_URL / PIX_TEST_REDIS_URL'
+    : unreachable.length
+        ? unreachable.join(' / ') + ' 指向的服务连不上，先跑 npm run test:env'
+        : false
 }, async () => {
+  const testRedisUrl = isolatedRedisUrl(redisUrl)
   process.env.DATABASE_URL = databaseUrl
-  process.env.REDIS_URL = redisUrl
+  process.env.REDIS_URL = testRedisUrl
 
   const { pool } = require('../server/db/postgres')
   const { getRedis, closeRedis } = require('../server/db/redis')
@@ -288,20 +349,35 @@ test('PostgreSQL and Redis preserve billing under concurrency', {
     const v1 = await channelsAt(1)
     const v2 = await channelsAt(2)
     const v3 = await channelsAt(3)
+    const v5 = await channelsAt(5)
     assert.deepEqual(v1, ['deepseek'],
       'v1 是改动前的快照：含 gemini / google / niutrans，但都已下架，对商户只剩 deepseek 可见')
+    // v2 是**历史快照**，当初确实卖过 qwen / doubao / glm / minimax / mistral。
+    // 但快照 ≠ 商户当前看到的目录 —— `engines()` 会过滤掉已停用的通道。
+    // 所以这里验的是"过滤之后剩什么"；快照本身必须原样保留，
+    // 不能被后续迁移回溯改写（那就是偷偷换掉老客户买的东西）。
     assert.deepEqual(v2, ['deepseek', 'gpt'],
-      'v2 含 qwen / doubao 等新通道，但 039 已把它们全部下架，只剩 deepseek 与 gpt')
+      'v2 快照里的 qwen / doubao / glm / minimax / mistral 都已停用或下架，'
+      + '商户侧只应看到仍然可用的 deepseek 与 gpt')
     assert.deepEqual(v3, ['deepseek', 'gpt'],
       'v3 就是 V1.0.x 的开放集合：仅 DeepSeek 与 GPT')
-    assert.ok(!v2.includes('niutrans') && !v3.includes('qwen'),
-      '已下架通道对商户不可见（但对账仍查得到）')
+    // 048 撤掉 qwen 之后目录推到 v5，同样只有这两个
+    assert.deepEqual(v5, ['deepseek', 'gpt'],
+      '048 之后的新目录 v5 = {deepseek, gpt}，qwen 已撤回')
+    assert.ok(!v2.includes('niutrans') && !v2.includes('qwen'),
+      '已停用通道对商户不可见（但对账仍查得到）')
 
-    // 下架的通道在库里、在历史套餐快照里都还在 —— 这是"当初卖过什么"的证据
+    // 停用的通道在库里、在历史套餐快照里都还在 —— 这是"当初卖过什么"的证据。
+    //
+    // qwen 是特例：048 撤它时**刻意不设 retired_at**（它从未上线，
+    // 谈不上下架），只把 enabled / wired 置 false。所以这里验的是
+    // "行还在、且已停用"，不能要求 retired_at 非空 —— 那等于逼着
+    // 迁移把一个"没卖过的东西"标成"卖过又下架"，台账就假了。
     const retiredRow = await pool.query(
       "SELECT enabled,wired,retired_at IS NOT NULL AS retired FROM engines WHERE id='qwen'")
-    assert.equal(retiredRow.rows[0].retired, true, '下架是软删除：行必须还在')
-    assert.equal(retiredRow.rows[0].enabled, false)
+    assert.ok(retiredRow.rows[0], '停用是软删除：行必须还在，否则历史日志的 engine_id 外键会断')
+    assert.equal(retiredRow.rows[0].enabled, false, 'qwen 必须已停用')
+    assert.equal(retiredRow.rows[0].wired, false, 'qwen 必须未接通')
 
     await pool.query("UPDATE users SET package_catalog_version=NULL WHERE id=$1", [userId])
 
@@ -394,6 +470,8 @@ test('PostgreSQL and Redis preserve billing under concurrency', {
       await pool.query('DELETE FROM users WHERE id=$1', [userId])
     }
     if (adminId) await pool.query('DELETE FROM admins WHERE id=$1', [adminId])
+    // 用完清空专用库：本用例的所有限流键、验证码、会话都在 15 号库
+    try { await redis.flushdb() } catch (e) { /* 连接已断时忽略 */ }
     await closeRedis()
     await pool.end()
   }

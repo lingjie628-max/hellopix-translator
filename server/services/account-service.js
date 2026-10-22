@@ -55,7 +55,10 @@ class AccountService {
     this.redis = redis
     this.options = options || {}
     this.mailer = new Mailer(repo)
-    this.verification = new VerificationService(redis, (options && options.redisPrefix) || 'pix')
+    // 不传 prefix 时用 redis-client 的 PREFIX（即 REDIS_KEY_PREFIX），
+    // 传 `null` 表示显式不要前缀（测试用）。
+    this.verification = new VerificationService(
+      redis, options && options.redisPrefix !== undefined ? options.redisPrefix : undefined)
   }
 
   // -------------------------------------------------------------------------

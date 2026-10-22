@@ -48,6 +48,8 @@ const path = require('node:path')
 const captcha = require('../server/lib/captcha')
 const { RedisVerificationStore } = require('../server/stores/verification-store')
 const { AccountService } = require('../server/services/account-service')
+const { VerificationService } = require('../server/services/verification-service')
+const { key } = require('../server/stores/redis-client')
 
 const root = path.join(__dirname, '..')
 
@@ -168,8 +170,11 @@ function makeHarness() {
 }
 
 const EMAIL = 'merchant@example.com'
-const CAPTCHA_KEY = id => `pix:captcha:${id}`
-const CODE_KEY = (scene, email) => `pix:verify:code:${scene}:${email}`
+const CAPTCHA_KEY = id => key('captcha', id)
+// 键名必须由业务自己算，测试不能复制一份前缀字面量。
+// 前缀的唯一来源是 REDIS_KEY_PREFIX（见 stores/redis-client），
+// 写死 `pix:verify:...` 会在前缀为空的环境里全部失配。
+const CODE_KEY = (scene, email) => new VerificationService(null).key('code', scene, email)
 
 /** 直接种一张已知答案的图形验证码（与 issue 走同一个 store，同一套哈希/键） */
 async function seedCaptcha(redis, imageId, code, ttlMs) {
@@ -198,9 +203,9 @@ test('captcha.consume 能区分「过期」与「错误」—— 前端才能决
 })
 
 test('没提交 imageId 时算出的就是空键 —— 这正是生产误报「已过期」的成因', async () => {
-  const { key } = require('../server/stores/redis-client')
-  assert.equal(key('captcha', undefined), 'pix:captcha:')
-  assert.equal(key('captcha', null), 'pix:captcha:')
+  const { key, PREFIX } = require('../server/stores/redis-client')
+  assert.equal(key('captcha', undefined), `${PREFIX}captcha:`)
+  assert.equal(key('captcha', null), `${PREFIX}captcha:`)
   assert.notEqual(key('captcha', undefined), key('captcha', 'img-1'))
 })
 

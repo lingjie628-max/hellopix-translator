@@ -103,7 +103,17 @@ test('production refuses to boot the in-memory demo backend', () => {
 
 test('desktop and standalone translation requests carry an idempotency key', () => {
   // 正式后端 core.translate 强制幂等键（缺失返回 400 IDEMPOTENCY_KEY_REQUIRED），
-  // 桌面端与独立电报端必须带 requestId；同文本同参数幂等可避免重复渲染二次扣费。
+  // 桌面端与独立电报端必须带。
+  //
+  // ⚠️ 幂等键描述的是**一次请求**，不是**一段文本**。
+  //    曾经有个版本按「引擎+语种+文本」做内容指纹当键，注释还写着
+  //    "同文本同参数幂等可避免重复渲染二次扣费" —— 这个理由不成立：
+  //    · 重复渲染省不省钱是**翻译缓存**（translation_cache，TTL 24h）的职责；
+  //    · 幂等键的作用是让"同一次请求被重发"（双击、超时重试）只结算一次；
+  //    · 用内容指纹当键的后果是服务端 reserveTranslate 永远命中已有终态行，
+  //      直接回上次的响应 —— 换术语库/换模型后再翻同一句，拿到的还是旧译文，
+  //      且不报任何错。
+  //    所以这里断言的是「有键」+「键是随机的」，不是「键由内容决定」。
   const root = path.join(__dirname, '..')
   // 桌面端的请求构造现在在 src/translate/translation-cache.js（见 createRequestTranslate）
   const desktopNet = fs.readFileSync(
@@ -112,5 +122,6 @@ test('desktop and standalone translation requests carry an idempotency key', () 
   assert.ok(/requestId:\s*cache\.requestId\(text, from, to, engine\)/.test(desktopNet),
     'desktop translate:run 请求缺少 requestId')
   assert.ok(telegramMain.includes('function transRequestKey('), 'standalone telegram 缺少幂等键生成函数')
-  assert.ok(telegramMain.includes('requestId: transRequestKey('), 'standalone telegram 翻译请求缺少 requestId')
+  assert.ok(/idempotencyKey:\s*transRequestKey\(\)/.test(telegramMain),
+    'standalone telegram 翻译请求缺少幂等键')
 })

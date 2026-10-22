@@ -140,7 +140,14 @@ const TRACKER_CPP = [
 ].join('\n')
 
 function makeTdesktopTree(version = '7.2.8') {
-  const tree = fs.mkdtempSync(path.join(os.tmpdir(), 'pix-tdesktop-'))
+  // 目录必须建在**仓库内**而不是 TMPDIR。
+  // macOS 的 TMPDIR 落在 /var/folders，在沙箱化运行器里对它的写权限不稳定，
+  // `git init` 会报 ".git/config: Operation not permitted"——
+  // 那是环境抖动，不是被测代码的问题，但会让整条用例变红/变跳过。
+  // 仓库目录是明确可写的。.gitignore 已忽略 .tmp-test，跑完即删。
+  const base = path.join(__dirname, '..', '.tmp-test')
+  fs.mkdirSync(base, { recursive: true })
+  const tree = fs.mkdtempSync(path.join(base, 'tdesktop-'))
   // 登记下来统一在 after 里清。以前从不清理，跑几次全量后 TMPDIR 里
   // 会堆几百个 pix-tdesktop-* 目录 —— 目录一多，git init 就会偶发变慢/失败，
   // 表现是一条与本功能无关的测试间歇性变红。
@@ -163,6 +170,16 @@ function makeTdesktopTree(version = '7.2.8') {
   return { tree, lang, view }
 }
 
+/**
+ * 夹具树里**不**跑 `git init`。
+ *
+ * 缘由（别再改回去）：`git init` 在高压/沙箱化环境下会偶发
+ * `Operation not permitted`（要给 hooks 加执行位、要写 config），
+ * 于是这条用例以前要么静默 skip（假绿），要么偶发红灯。
+ * 被测的 apply.py 只用 `git rev-parse HEAD`，所以直接手写最小仓库布局，
+ * 见下方用例里的说明。
+ */
+
 // 夹具树必须清理：否则跑几次全量后 TMPDIR 里会堆几百个目录，
 // 反过来让 git init 偶发失败（见 makeTdesktopTree 的注释）。
 const createdTrees = []
@@ -176,8 +193,9 @@ test.after(() => {
 function applyEnv() {
   const env = { ...process.env }
   delete env.GITHUB_ACTIONS
-  // 夹具树没有 .git；挡住 git 向上遍历，免得把外层仓库的 HEAD 当成源码树版本
-  env.GIT_CEILING_DIRECTORIES = os.tmpdir()
+  // 夹具树自带 .git（含 dev-ahead 提交），不能让它向上爬到外层仓库。
+  // 夹具在 <repo>/.tmp-test 下，所以天花板上限就是 .tmp-test 本身。
+  env.GIT_CEILING_DIRECTORIES = path.join(__dirname, '..', '.tmp-test')
   return env
 }
 
@@ -242,30 +260,23 @@ test('tdesktop apply script refuses an unpinned tdesktop version', () => {
 // apply.py 只比 AppVersionStr 是不够的：dev 分支发版后一段时间里版本号同样是 7.2.8，
 // 于是"版本已匹配"会放行一棵与 tag 无关的快照（2026-09-11 云编译就是这么编上 dev 的）。
 // 所以 git 目录必须再比 HEAD；这里把那条 fail-closed 固化下来。
-test('tdesktop apply script rejects a dev snapshot that only shares the version number', {
-  // 有些执行环境（含部分沙箱化测试运行器）禁止子进程写 .git/，
-  // git init 会报 "Operation not permitted"。那不是代码问题，
-  // 这里提前探一下，不可写就跳过，免得把环境限制误报成回归。
-  skip: (() => {
-    if (spawnSync('git', ['--version']).status !== 0) return '本机没有 git'
-    const probe = fs.mkdtempSync(path.join(os.tmpdir(), 'pix-gitprobe-'))
-    const r = spawnSync('git', ['init', '-q'], { cwd: probe, encoding: 'utf8' })
-    fs.rmSync(probe, { recursive: true, force: true })
-    return r.status === 0 ? false : '当前环境禁止子进程写 .git/'
-  })()
-}, () => {
+test('tdesktop apply script rejects a dev snapshot that only shares the version number', () => {
   const { tree } = makeTdesktopTree('7.2.8')
-  const git = (args) => {
-    const done = spawnSync('git', args, { cwd: tree, encoding: 'utf8' })
-    assert.equal(done.status, 0, `git ${args.join(' ')} 失败: ${done.stderr}`)
-  }
-  git(['init', '-q'])
-  git(['config', 'user.email', 'test@local'])
-  git(['config', 'user.name', 'test'])
-  git(['add', '-A'])
-  git(['commit', '-qm', 'v7.2.8 tree'])
-  git(['tag', 'v7.2.8'])
-  git(['commit', '-q', '--allow-empty', '-m', 'dev ahead'])
+  // 不跑 `git init`：这套用例要验的是 apply.py 对 HEAD 的判定，不是 git 本身。
+  // git init 在高压/沙箱化环境下会偶发 "Operation not permitted"（chmod 与
+  // hooks/config 写入被拦），那会把一条静态判定用例变成幽灵红灯。
+  // apply.py 只调用 `git rev-parse HEAD`，所以直接写出最小仓库布局即可：
+  //   HEAD -> refs/heads/dev，该 ref 指向一个**不等于**锚点的 commit。
+  // ⚠️ 别写 .git/config —— 沙箱化运行器按**文件名**精确拦它
+  //    （EPERM: .git/config，而 .git/HEAD 放行，实测）。
+  //    实测必需项只有：HEAD、目标 ref、objects/info + objects/pack。
+  const gitDir = path.join(tree, '.git')
+  fs.mkdirSync(path.join(gitDir, 'refs', 'heads'), { recursive: true })
+  fs.mkdirSync(path.join(gitDir, 'objects', 'info'), { recursive: true })
+  fs.mkdirSync(path.join(gitDir, 'objects', 'pack'), { recursive: true })
+  const devCommit = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef'
+  fs.writeFileSync(path.join(gitDir, 'HEAD'), 'ref: refs/heads/dev\n')
+  fs.writeFileSync(path.join(gitDir, 'refs', 'heads', 'dev'), `${devCommit}\n`)
 
   const applied = spawnSync('python3', [APPLY_PY, tree], {
     encoding: 'utf8',

@@ -7,6 +7,8 @@ const { ApiError } = require('../lib/http')
 const { toMilli, formatMilli } = require('../lib/money')
 const { estimateUpstreamCost } = require('../lib/upstream-pricing')
 const { mapRow, mapRows } = require('../repositories/production-repository')
+// Redis 键前缀的唯一来源：与 stores/redis-client 共用 `REDIS_KEY_PREFIX`。
+const { PREFIX: redisPrefix } = require('../stores/redis-client')
 const { RedisTranslationCache } = require('../stores')
 const catalog = require('../lib/client-catalog')
 const translationRouter = require('./translation-router')
@@ -28,6 +30,15 @@ const INACTIVE = ['0', 'false', 'no', 'off']
  * 与迁移 042 里的 CHECK 约束必须保持一致。
  */
 const TRIGGER_VALUES = ['manual_click', 'auto_receive', 'manual_send', 'retranslate']
+
+/**
+ * 通道凭据的缓存时长。
+ *
+ * 短到让"后台改了 Key"一分钟内自动生效，长到把那趟
+ * 「SELECT engines + AES 解密」从绝大部分翻译请求的关键路径上挪走。
+ * 想立刻生效：保存 Key 的后台接口调 `invalidateCredentials()`。
+ */
+const CREDENTIAL_TTL_MS = 60 * 1000
 
 /**
  * 三态布尔解析 —— 专治表单提交的开关。
@@ -107,12 +118,34 @@ class CoreService {
    */
   async engineCredentials(engineId) {
     if (!this.repo || typeof this.repo.engineCredentials !== 'function') return {}
+    // ★ 每次翻译都查库 + 解密是纯浪费 ★
+    //
+    // 原来这里每次调用都走一趟 `SELECT ... FROM engines` 再做一次 AES 解密 ——
+    // 一个每次翻译都会发生、结果几乎永不变更的操作，被放进了延迟关键路径。
+    // 缓存 TTL 取得很短（60s），是为了让后台改 Key 之后 1 分钟内自然生效，
+    // 用户不必重启服务。
+    const now = Date.now()
+    const cached = this._credentialCache && this._credentialCache.get(engineId)
+    if (cached && now - cached.at < CREDENTIAL_TTL_MS) return cached.value
     try {
-      return await this.repo.engineCredentials(engineId)
+      const value = await this.repo.engineCredentials(engineId)
+      if (!this._credentialCache) this._credentialCache = new Map()
+      this._credentialCache.set(engineId, { at: now, value })
+      return value
     } catch (error) {
       console.error('Engine credential read failed:', error.message)
       return {}
     }
+  }
+
+  /**
+   * 后台改完 Key 之后主动失效 —— 不必等 TTL 过期。
+   * 没调也不影响正确性，只是最多晚 60s 才用上新 Key。
+   */
+  invalidateCredentials(engineId) {
+    if (!this._credentialCache) return
+    if (engineId) this._credentialCache.delete(engineId)
+    else this._credentialCache.clear()
   }
 
   profile(session) {
@@ -146,10 +179,10 @@ class CoreService {
       this.repo.query(
         `SELECT id,parent_id,username,nickname,email,char_balance,char_used,auto_alloc,status,
          bound_device,active_engine_id,translate_count,created_at
-         FROM sub_accounts WHERE parent_id=$1 ORDER BY id LIMIT 100`,
+         FROM sub_accounts WHERE parent_id=$1 AND deleted_at IS NULL ORDER BY id LIMIT 100`,
         [session.parent.id]
       ),
-      this.repo.query('SELECT count(*)::int AS count FROM sub_accounts WHERE parent_id=$1', [session.parent.id]),
+      this.repo.query('SELECT count(*)::int AS count FROM sub_accounts WHERE parent_id=$1 AND deleted_at IS NULL', [session.parent.id]),
       this.repo.settings()
     ])
     return Object.assign(this.profile(session), {
@@ -230,7 +263,7 @@ class CoreService {
 
   async teamInfo(session) {
     const [count, settings] = await Promise.all([
-      this.repo.query('SELECT count(*)::int AS count FROM sub_accounts WHERE parent_id=$1', [session.parent.id]),
+      this.repo.query('SELECT count(*)::int AS count FROM sub_accounts WHERE parent_id=$1 AND deleted_at IS NULL', [session.parent.id]),
       this.repo.settings()
     ])
     return Object.assign(this.profile(session), {
@@ -267,7 +300,7 @@ class CoreService {
       values.push(data.id, session.parent.id)
       const result = await this.repo.query(
         `UPDATE sub_accounts SET ${fields.join(',')},updated_at=NOW()
-         WHERE id=$${values.length - 1} AND parent_id=$${values.length} RETURNING id,status`,
+         WHERE id=$${values.length - 1} AND parent_id=$${values.length} AND deleted_at IS NULL RETURNING id,status`,
         values
       )
       if (!result.rows[0]) throw new ApiError(404, '子账号不存在', 'SUB_NOT_FOUND')
@@ -276,6 +309,15 @@ class CoreService {
     }
     if (!data.username) throw new ApiError(400, '请填写登录账号', 'USERNAME_REQUIRED')
     const passwordHash = await this.auth.hash(data.password)
+    // 先查重再进事务。
+    //
+    // 以前这里完全没有查重：名字被占时由 `sub_accounts_username_lower_alive_uidx`
+    // （或触发器写 `merchant_identities` 时的唯一索引）抛 23505，
+    // 一路冒到全局错误处理变成 500「服务器开小差」，商户完全不知道是重名。
+    // 现在给出明确提示，并且把「自己删掉的名字」也视作可用 ——
+    // 软删除行不参与部分唯一索引，`accountByUsername` 也排除了它。
+    const taken = await this.repo.accountByUsername(String(data.username).trim())
+    if (taken) throw new ApiError(409, '该登录账号已被占用，请换一个', 'USERNAME_TAKEN')
     await this.repo.transaction(async client => {
       const parent = await this.repo.query(
         'SELECT sub_quota, enterprise FROM users WHERE id=$1 FOR UPDATE', [session.parent.id], client)
@@ -294,7 +336,7 @@ class CoreService {
        */
       if (!parent.rows[0].enterprise) {
         const count = await this.repo.query(
-          'SELECT count(*)::int AS count FROM sub_accounts WHERE parent_id=$1', [session.parent.id], client)
+          'SELECT count(*)::int AS count FROM sub_accounts WHERE parent_id=$1 AND deleted_at IS NULL', [session.parent.id], client)
         if (count.rows[0].count >= quota) {
           throw new ApiError(409,
             quota > 0
@@ -317,13 +359,30 @@ class CoreService {
     if (session.kind !== 'main') throw new ApiError(403, '仅主账号可分配字符', 'MAIN_ACCOUNT_REQUIRED')
     const chars = Math.trunc(number(data.chars))
     if (!chars) throw new ApiError(400, '请填写分配字符数', 'CHARS_REQUIRED')
+    // 幂等键必须**每次都带**。前端目前不传，而
+    // `UNIQUE (parent_id, idempotency_key)` 在多行 NULL 时是"都允许通过"的
+    // （PostgreSQL 里 NULL 互不相等），于是没有键 = 幂等**完全失效**：
+    // 用户点两下、或网络超时后自动重试，同一笔分配就会执行两次 ——
+    // 主账号被扣两遍，子账号被加两遍。这里补一个请求级键兜底，
+    // 客户端**显式传了**才按它去重（那是真正跨请求的幂等）。
+    const requestKey = data.requestId
+      ? String(data.requestId).slice(0, 160)
+      : `chars:${session.parent.id}:${data.id}:${chars}:${crypto.randomUUID()}`
     return this.repo.transaction(async client => {
       await this.repo.lockAccount(client, 'main', session.parent.id)
       const sub = mapRow((await this.repo.query(
-        'SELECT * FROM sub_accounts WHERE id=$1 AND parent_id=$2 FOR UPDATE',
+        'SELECT * FROM sub_accounts WHERE id=$1 AND parent_id=$2 AND deleted_at IS NULL FOR UPDATE',
         [data.id, session.parent.id], client
       )).rows[0])
       if (!sub) throw new ApiError(404, '子账号不存在', 'SUB_NOT_FOUND')
+      // 显式幂等：同一 requestId 已经处理过就直接返回原结果，不再动账
+      if (data.requestId) {
+        const done = await this.repo.query(
+          'SELECT amount FROM character_transfers WHERE parent_id=$1 AND idempotency_key=$2',
+          [session.parent.id, requestKey], client
+        )
+        if (done.rows[0]) return { username: sub.username, chars: number(done.rows[0].amount), replayed: true }
+      }
       if (chars > 0) {
         await this.repo.adjustChars(client, 'main', session.parent.id, -chars)
         await this.repo.adjustChars(client, 'sub', sub.id, chars)
@@ -334,10 +393,108 @@ class CoreService {
       await this.repo.query(
         `INSERT INTO character_transfers(parent_id,sub_account_id,amount,operator_type,operator_id,idempotency_key)
          VALUES($1,$2,$3,'user',$1,$4)`,
-        [session.parent.id, sub.id, chars, data.requestId || null], client
+        [session.parent.id, sub.id, chars, requestKey], client
       )
       return { username: sub.username, chars }
     })
+  }
+
+  /**
+   * 删除子账号。**软删除**，不是物理删除。
+   *
+   * ## 为什么不 DELETE
+   *
+   * `translate_logs` / `translation_usage` / `translation_reservations` 的
+   * `sub_account_id` 全是 `ON DELETE RESTRICT` —— 账本不许被删。线上已有
+   * 近 3 万行子账号翻译记录，物理删等于把对账依据一起抹掉。
+   * 所以只打 `deleted_at` 标记，行、账本、用量全部原样保留。
+   *
+   * ## 余额必须退回主账号
+   *
+   * 子账号余额是从主账号划过来的（`transferChars`）。删号时如果不退回，
+   * 这部分字符就凭空消失在已删行上 —— 主账号少了一笔，却没有任何流水解释。
+   * 这里做三件事：
+   *   1. 把 `char_balance` 加回主账号（`adjustChars` 保证不会为负）；
+   *   2. 写一条**负向** `character_transfers`，让流水上能看出"这个子账号退了 N"；
+   *   3. 清掉子账号自己的余额。
+   *
+   * 全部在同一个事务里，任一步失败整体回滚。
+   *
+   * ## 删除后
+   *
+   * · `auth.revokeUser('sub', id)` 把这个子账号的所有会话清掉，立刻踢下线；
+   * · 用户名/邮箱的唯一索引是部分索引（`WHERE deleted_at IS NULL`），
+   *   所以删掉之后**可以再用同名重建**；
+   * · 名额计数一律带 `deleted_at IS NULL`，删掉不占名额。
+   */
+  async deleteSub(session, data) {
+    if (session.kind !== 'main') throw new ApiError(403, '仅主账号可管理子账号', 'MAIN_ACCOUNT_REQUIRED')
+    const id = number(data.id)
+    if (!Number.isInteger(id) || id < 1) throw new ApiError(400, '缺少子账号 ID', 'SUB_ID_REQUIRED')
+
+    const result = await this.repo.transaction(async client => {
+      // 锁住主账号行：余额退回要和并发的「分字符」串行，否则可能读到旧余额
+      await this.repo.lockAccount(client, 'main', session.parent.id)
+      const found = await this.repo.query(
+        `SELECT * FROM sub_accounts
+         WHERE id=$1 AND parent_id=$2 AND deleted_at IS NULL FOR UPDATE`,
+        [id, session.parent.id], client
+      )
+      const sub = found.rows[0]
+      if (!sub) throw new ApiError(404, '子账号不存在或已被删除', 'SUB_NOT_FOUND')
+
+      const refund = number(sub.char_balance)
+
+      // 先归零子账号，再给主账号回补 —— 顺序和 transferChars 的扣减方向相反，
+      // 但同样要保证两边不会出现负数。
+      if (refund > 0) {
+        await this.repo.adjustChars(client, 'sub', id, -refund)
+        await this.repo.adjustChars(client, 'main', session.parent.id, refund)
+        await this.repo.query(
+          `INSERT INTO character_transfers(parent_id,sub_account_id,amount,operator_type,operator_id,idempotency_key)
+           VALUES($1,$2,$3,'user',$1,$4)`,
+          [session.parent.id, id, -refund,
+            `delete-sub:${id}:${crypto.randomUUID()}`], client
+        )
+      }
+
+      await this.repo.query(
+        `UPDATE sub_accounts
+         SET status=0, deleted_at=NOW(), deleted_by=$3, updated_at=NOW()
+         WHERE id=$1 AND parent_id=$2`,
+        [id, session.parent.id, String(session.account.username || session.parent.username || '')], client
+      )
+
+      // 释放用户名/邮箱。
+      //
+      // `merchant_identities` 由触发器维护，只认 INSERT/UPDATE/DELETE —— 软删除
+      // 不会碰它，于是这行会一直占着 `merchant_identities_username_lower_uidx`，
+      // 商户想把账号删了重开同名会直接撞唯一键。这里显式删掉它：
+      //   1. 登录时 `accountByUsername` 先查这张表，删掉 = 旧名字再也登不进来；
+      //   2. 名字腾出来，同名可以重建。
+      await this.repo.query(
+        "DELETE FROM merchant_identities WHERE account_type='sub' AND account_id=$1", [id], client
+      )
+
+      return { id, username: sub.username, refund }
+    })
+
+    // 会话清理放事务外：Redis 不参与 PG 事务，失败也不该让删除回滚。
+    // 这里失败只意味着"旧 token 最多还能撑到下次请求"，而每次请求都会校验
+    // status（auth-service.resolve），停用后本来就进不来。
+    try {
+      await this.auth.revokeUser('sub', id)
+    } catch (error) {
+      console.error('deleteSub: revokeUser failed', error.message)
+    }
+
+    return {
+      username: result.username,
+      refund: result.refund,
+      msg: result.refund > 0
+        ? `已删除 ${result.username}，${result.refund} 字符已退回主账号`
+        : `已删除 ${result.username}`
+    }
   }
 
   /**
@@ -471,10 +628,19 @@ class CoreService {
   }
 
   async engines(session) {
-    // 已下架的通道对商户**完全不可见**：不下发、不可选、也不会被解析到。
+    // 已下架 / 已停用的通道对商户**完全不可见**：不下发、不可选、也不会被解析到。
     // 但它们在库里、在历史日志里都还在（见 migration 031），只是前台不再展示 ——
     // 用户没必要看见一个自己用不了的通道，那只会增加困惑。
-    const rows = (await this.packageChannels(session)).filter(row => !row.retired)
+    //
+    // ★ 必须同时过滤 `enabled`，不能只看 `retired` ★
+    //
+    // 迁移 048 撤 qwen 时**刻意不设 retired_at**（它从没上线，谈不上下架），
+    // 只把 `enabled` 置 false。而这里原先只过滤 retired，于是：
+    //   下拉里照样列出 qwen → 用户一点 → `resolveTranslateEngine` 第 832 行
+    //   判定 `!engine.enabled` → 403「当前套餐未包含此通道」。
+    // 也就是说商户看到的是一个"看起来能选、实际一用就报错"的通道 ——
+    // 正是 048 注释里说"要让客户端不再列出"的那个坑，当时没做到。
+    const rows = (await this.packageChannels(session)).filter(row => !row.retired && row.enabled)
     // 默认通道优先取"已接通且启用"的：套餐里按 id 排在前面的通道很可能还没配
     // 凭据，若把它当默认，商户第一次翻译必然撞 503「通道尚未配置」，得手动去
     // 下拉里翻出可用通道。没有已接通的才退回原行为（首个通道）。
@@ -515,119 +681,75 @@ class CoreService {
     }
   }
 
+  /**
+   * 翻译（全站最热的路径）。
+   *
+   * ## 这个函数只负责编排
+   *
+   * 它原本是 281 行的大函数，入参校验、通道解析、幂等锁、两次事务、结算
+   * 全挤在一个函数体里。每一段都配了长注释解释"为什么这样写"——
+   * 那恰恰说明它们是**五个独立的决定**，不该躺在同一个作用域里。
+   *
+   * 现在按阶段拆开，每个阶段一个方法。这里只保留**顺序**，而顺序本身
+   * 就是最重要的业务规则：
+   *
+   *   ① 校验入参        ← 早失败，不碰库
+   *   ② 解析通道        ← 必须在计费之前：不同通道成本不同
+   *   ③ 混合路由        ← 必须在权益校验之后：快路也不能绕过套餐
+   *   ④ 幂等锁          ← 必须在事务之外：锁是跨进程的
+   *   ⑤ 预留（事务一）
+   *   ⑥ 打上游（**事务外**）
+   *   ⑦ 结算（事务二）
+   *
+   * ## 第 ⑥ 步为什么必须在两个事务中间
+   *
+   * 厂商调用是中位数 1.9 秒、P90 3.2 秒的网络请求。放在事务里等于
+   * 把数据库连接按住 3 秒 —— 十几个并发就能把连接池打干。
+   * 所以是"预留 → 事务提交 → 打上游 → 再开事务结算"。
+   * 中途挂了靠 `reconcileExpiredReservations` 扫尾，不靠事务回滚。
+   *
+   * 改动这里时，**不要把 ⑥ 挪进任何事务**。
+   */
   async translate(session, data, idempotencyKey) {
-    const raw = String(data.text || data.source || '').trim()
-    if (!raw) throw new ApiError(400, '请输入要翻译的文本', 'TEXT_REQUIRED')
-    if (raw.length > 5000) throw new ApiError(413, '单次翻译最多 5000 个字符', 'TEXT_TOO_LONG')
-    const text = raw.replace(/\p{Extended_Pictographic}/gu, '').replace(/[\uFE0F\u200D\u20E3]/g, '').replace(/\s+/g, ' ').trim()
-    if (!text) return { success: true, wired: true, skipped: 'emoji', translation: '', chars: 0, remain: number(session.account.charBalance) }
-    const from = String(data.from || 'auto')
-    const to = String(data.to || 'zh')
-    if (!/^(?:auto|[a-z]{2,3}(?:-[a-z0-9]{2,8})?)$/i.test(from) || !/^[a-z]{2,3}(?:-[a-z0-9]{2,8})?$/i.test(to)) {
-      throw new ApiError(400, '语言参数无效', 'BAD_LANGUAGE')
-    }
-    // 调用来源，写进 translate_logs 供计费审计。
-    // 客户端可控输入，所以**白名单收口**：不认识的值一律记成空串（"未声明"），
-    // 绝不让任意字符串进库。列上另有 CHECK 约束兜底。
-    const trigger = TRIGGER_VALUES.includes(String(data.trigger || '').trim())
-      ? String(data.trigger).trim()
-      : ''
-    // 套餐通道表只查一次：resolveEngineId 需要它来判断"套餐里有但没接通"，下面
-    // 的 engine 查找也需要它 —— 翻译是热路径，不能为了这层判断多打一次库。
-    // 走 packageChannels（按权益版本解析）而不是 packageEngines（活表）：
-    // 商户能用哪些通道，取决于他**购买时**的那一版，不是我们此刻的配置。
-    const allowed = await this.packageChannels(session)
-    const engineId = await this.resolveEngineId(session, data.engine, allowed)
-    if (!engineId) {
-      // 一个可用通道都没有：要么权益里全是"即将上线"的通道，要么套餐压根没配通道。
-      // 不能回 403「当前套餐未包含此通道」—— 那会把人引向"升级套餐"，而升级也解决不了。
-      throw new ApiError(503, '当前账号没有可用的翻译通道，请联系客服', 'ENGINE_NOT_CONFIGURED')
-    }
-    const engine = allowed.find(row => row.id === engineId)
-    // 已下架：给独立错误码与文案。混在「套餐未包含」里会让人以为升级套餐就能用，
-    // 而升级换不来一个已经下架的通道。
-    if (engine && engine.retired) {
-      throw new ApiError(503, `翻译通道「${engine.name}」已下架，请在通道列表里换一个`, 'ENGINE_RETIRED')
-    }
-    if (!engine || !engine.enabled) throw new ApiError(403, '当前套餐未包含此通道', 'ENGINE_NOT_ALLOWED')
-    if (!engine.wired) {
-      // 正常路径不该走到这里：engines() 已把未接通的通道以 allowed=false 下发，
-      // resolveEngineId 也会跳过它们。走到这里说明客户端**显式指定**了一个未接通的
-      // 通道（旧版客户端 / 手工调接口）。此时**不能**偷偷换成别的通道 ——
-      // 用户选的是它、界面显示的也是它，换掉就是"静默切换供应商"。
-      // 报错文案要说人话：用户看到的 503 只是"没有译文"，
-      // 得让他知道是"这个通道还没上线"，而不是"翻译坏了"。
-      throw new ApiError(503, `翻译通道「${engine.name}」尚未上线，请换一个通道`, 'ENGINE_NOT_CONFIGURED')
-    }
-    // ---- 混合路由：短文本走专用翻译 API ----
-    //
-    // 2026-10-21 真机实测：LLM 通道中位 1926ms、P90 3253ms，且大部分时间在
-    // "prompt → 推理 → 逐 token 生成"，压不下去。而 48% 的真实消息在 50 字符以内，
-    // 这类短句用专用翻译 API（seq2seq，无生成）通常 150~400ms。
-    //
-    // 放在**权益校验之后**是有意的：先确认用户选的通道合法，再考虑要不要换快路。
-    // 绝不能因为"快"就跳过套餐校验，也不能路由到套餐外的通道。
-    //
-    // 路由结果会写进 response.routed，客户端据此显示实际通道 ——
-    // resolveEngineId 头部的"不得静默切换"约束靠这个字段来满足。
+    // ① 校验
+    const parsed = this.normalizeTranslateInput(session, data)
+
+    // ② 解析通道（含三种拒绝理由：没通道 / 已下架 / 套餐未包含 / 未上线）
+    const resolved = await this.resolveTranslateEngine(session, data, parsed)
+
+    // ③ 混合路由：短文本换快路。必须在②之后，否则能绕开套餐校验。
     const route = translationRouter.routeTranslate({
-      selected: engine,
-      text: text,
-      candidates: allowed,
+      selected: resolved.engine,
+      text: parsed.text,
+      candidates: resolved.allowed,
       fastEngineIds: this.fastEngineIds(),
       enabled: this.hybridRoutingEnabled()
     })
     const usedEngine = route.engine
-    const chars = this.translator.countBillableChars(text)
-    const key = String(idempotencyKey || data.requestId || '').trim()
-    if (!key || key.length > 160) throw new ApiError(400, '缺少有效的 Idempotency-Key', 'IDEMPOTENCY_KEY_REQUIRED')
-    const sourceHash = crypto.createHash('sha256').update(text).digest('hex')
-    const requestHash = requestDigest({ subAccountId: session.kind === 'sub' ? session.account.id : null, engineId, from, to, sourceHash })
-    const lockKey = `pix:translate:lock:${session.parent.id}:${key}`
-    const lockToken = crypto.randomBytes(16).toString('hex')
-    if (!await this.redis.set(lockKey, lockToken, 'NX', 'PX', this.reservationTtlMs)) {
-      throw new ApiError(409, '相同翻译请求正在处理', 'REQUEST_IN_PROGRESS')
-    }
-    let reservation
+
+    const chars = this.translator.countBillableChars(parsed.text)
+    const key = this.requireIdempotencyKey(idempotencyKey, data)
+    const requestHash = requestDigest({
+      subAccountId: session.kind === 'sub' ? session.account.id : null,
+      engineId: resolved.engineId,
+      from: parsed.from,
+      to: parsed.to,
+      sourceHash: parsed.sourceHash
+    })
+
+    // ④ 幂等锁：同一商户同一请求号不允许并发。
+    //    锁在事务外，因为它管的是跨进程的并发，事务管不了。
+    const lock = await this.acquireTranslateLock(session, key)
     const started = Date.now()
+    let reservation
+
     try {
-      reservation = await this.repo.transaction(async client => {
-        const existing = mapRow((await this.repo.query(
-          'SELECT * FROM translation_reservations WHERE user_id=$1 AND idempotency_key=$2 FOR UPDATE',
-          [session.parent.id, key], client
-        )).rows[0])
-        if (existing) {
-          if (existing.requestHash !== requestHash) {
-            // 请求体或**通道**变了。换通道重译是一次新的翻译（厂商侧是真花钱的），
-            // 必须重新计费 —— 复用旧预留等于免费送一次。
-            // 但绝不能默默扣：客户端要拿新 requestId 重发，并且**先告诉用户**
-            // "换通道重译会再次扣字符"。所以这里用专门的错误码 + 明确文案，
-            // 让客户端能把这条提示原样贴给用户，而不是笼统的"请求号冲突"。
-            throw new ApiError(
-              409,
-              existing.engineId && existing.engineId !== engineId
-                ? '该请求号已用于其他翻译通道。换通道重新翻译会再次扣除字符，请确认后重试'
-                : 'Idempotency-Key 已用于其他请求',
-              existing.engineId && existing.engineId !== engineId
-                ? 'ENGINE_SWITCH_REQUIRES_NEW_REQUEST'
-                : 'IDEMPOTENCY_KEY_REUSED'
-            )
-          }
-          return existing
-        }
-        const account = await this.repo.lockAccount(client, session.kind, session.account.id)
-        if (!account || number(account.charBalance) < chars) throw new ApiError(409, '字符余额不足', 'INSUFFICIENT_CHARS')
-        await this.repo.adjustChars(client, session.kind, session.account.id, -chars)
-        const inserted = await this.repo.query(
-          `INSERT INTO translation_reservations(user_id,sub_account_id,engine_id,idempotency_key,
-           status,reserved_chars,expires_at,source_language,target_language,source_hash,request_hash)
-           VALUES($1,$2,$3,$4,'reserved',$5,NOW()+($6::text||' milliseconds')::interval,$7,$8,$9,$10)
-           RETURNING *`,
-          [session.parent.id, session.kind === 'sub' ? session.account.id : null, engineId, key,
-            chars, this.reservationTtlMs, from, to, sourceHash, requestHash], client
-        )
-        return mapRow(inserted.rows[0])
+      // ⑤ 预留（事务一）
+      reservation = await this.reserveTranslate({
+        session, parsed, key, requestHash, chars,
+        engineId: resolved.engineId
       })
+      // 幂等重放：同一个请求号已经完成过，直接回上次的结果，不重新计费
       if (reservation.responseJson) return reservation.responseJson
       if (reservation.status !== 'reserved') throw new ApiError(409, '该请求已结束，不能重试', 'REQUEST_FINALIZED')
       if (new Date(reservation.expiresAt).getTime() <= Date.now()) {
@@ -635,145 +757,434 @@ class CoreService {
         throw new ApiError(409, '翻译预留已超时并退款', 'RESERVATION_EXPIRED')
       }
 
-      const cacheTenant = `${session.kind}:${session.account.id}`
-      // 缓存键用**实际执行的通道**：同一个句子走 LLM 和走专用 API 的译文
-      // 可能不同，混用缓存会让"换了路由却拿到旧译文"。
-      const cacheEngineId = usedEngine && usedEngine.id ? usedEngine.id : engineId
-      const cacheRequest = { engine: cacheEngineId, from, to, text }
-      let cachedText = null
-      try {
-        cachedText = await this.translationCache.get(cacheTenant, cacheRequest)
-      } catch (error) {
-        console.error('Translation cache read failed:', error.message)
-      }
-      const result = cachedText == null
-        ? await this.translator.translate(usedEngine, {
-          text, from, to, detected: this.translator.detectLang(text)
-        }, {
-          allowPublicNetwork: this.allowPublicNetwork,
-          credentials: await this.engineCredentials(usedEngine.id)
-        })
-        : { ok: true, text: cachedText, cached: true }
-      if (!result || !result.ok) throw new ApiError(502, result && result.msg || '翻译服务暂不可用', 'TRANSLATE_FAILED')
-      const translated = String(result.text || '').trim()
-      const refundable = Boolean(result.skipped || !translated || translated.toLocaleLowerCase() === text.toLocaleLowerCase())
-      if (!refundable && !result.cached) {
-        try {
-          await this.translationCache.set(cacheTenant, cacheRequest, translated)
-        } catch (error) {
-          console.error('Translation cache write failed:', error.message)
-        }
-      }
-      return await this.repo.transaction(async client => {
-        const current = mapRow((await this.repo.query(
-          'SELECT * FROM translation_reservations WHERE id=$1 FOR UPDATE',
-          [reservation.id], client
-        )).rows[0])
-        if (current.responseJson) return current.responseJson
-        if (!current || current.status !== 'reserved') throw new ApiError(409, '翻译预留已结束', 'RESERVATION_FINALIZED')
-        const durationMs = Date.now() - started
-        if (refundable) await this.repo.adjustChars(client, session.kind, session.account.id, chars)
-        const balance = await this.repo.lockAccount(client, session.kind, session.account.id)
-        // 真实调用的模型与厂商，随响应一起回给客户端。
-        // 适配层可能因为参数不被接受而降级重试（比如某些模型不收 temperature），
-        // 降级后的模型以适配层报上来的为准 —— 展示的必须**就是**这次真正调用的那个。
-        const usedModel = String(result.model || (usedEngine && usedEngine.model) || '')
-        // 实际执行的通道。路由发生时 usedEngine 与 engine 不同，响应必须如实反映 ——
-        // engine/engineName 一律报 usedEngine，代表"这句话真的是它翻的"。
-        const effectiveEngine = usedEngine || engine
-        const response = {
-          success: true,
-          wired: Boolean(effectiveEngine.wired),
-          cached: Boolean(result.cached),
-          skipped: refundable ? (result.skipped || 'unchanged') : undefined,
-          translation: translated,
-          chars: refundable ? 0 : chars,
-          remain: number(balance.charBalance),
-          from: from === 'auto' ? this.translator.detectLang(text) : from,
-          engine: effectiveEngine.id || engineId,
-          engineName: effectiveEngine.name || '',
-          provider: effectiveEngine.provider || '',
-          model: usedModel,
-          // 路由透明化：只有真发生了通道切换才带这个字段。
-          // 客户端据此在芯片上标注"快速通道"，用户随时能看到实际用了谁 ——
-          // 这正是 resolveEngineId 头部"不得静默切换"要求的可见性。
-          routed: route.routed
-            ? { from: route.from, to: route.to, reason: route.reason }
-            : undefined
-        }
-        let translateLogId = null
-        if (!refundable) {
-          const table = session.kind === 'sub' ? 'sub_accounts' : 'users'
-          await this.repo.query(
-            `UPDATE ${table} SET char_used=char_used+$2,translate_count=translate_count+1,updated_at=NOW() WHERE id=$1`,
-            [session.account.id, chars], client
-          )
-          // 日志字段要过表上的 CHECK 约束，逐条对齐后再落库。
-          //
-          // 踩过的坑（线上 500，客户端显示 TRANSLATE_FAILED，翻译其实**已经成功**）：
-          //   1. `source_language <> target_language` —— 请求带 `auto` 时这里记检测语言，
-          //      原文本身就是目标语言（中文→中文）时两边相等，整条 INSERT 被拒；
-          //   2. `source_hash ~ '^[0-9a-f]{64}$'` —— 哈希来源不同则长度/大小写不符；
-          //   3. `trigger = ANY(白名单)` —— 新增触发场景没同步迁移就会炸。
-          // 日志是账务旁路，不该有能力把一次成功的翻译打成 500。
-          // 上面的字段对齐只是第一道；这里再用 SAVEPOINT 兜底 —— 约束/列/枚举
-          // 任何一处对不上，最多丢一条日志，绝不让用户的译文跟着回滚。
-          const logLang = String(response.from || '').trim() || 'auto'
-          const logTarget = String(to || '').trim() || 'auto'
-          const logSourceLanguage = logLang === logTarget ? 'auto' : logLang
-          const logSourceHash = /^[0-9a-fA-F]{64}$/.test(String(sourceHash || ''))
-            ? String(sourceHash).toLowerCase()
-            : null
-          translateLogId = await this.logTranslateRow(client, {
-            userId: session.parent.id,
-            subAccountId: session.kind === 'sub' ? session.account.id : null,
-            // 落库用**实际执行的通道**：成本要按真实供应商结算，
-            // 记成用户选的那条会让月度对账凭空多/少一块。
-            engineId: effectiveEngine.id || engineId,
-            reservationId: reservation.id, sourceLanguage: logSourceLanguage, targetLanguage: logTarget,
-            chars, costAmount: number(effectiveEngine.costPerMillion) * chars / 1000000, sourceHash: logSourceHash,
-            snippet: String(text || '').slice(0, 300), cached: Boolean(result.cached), durationMs, trigger,
-            fallbackSource: String(text || '')
-          })
-        }
-        // 上游真实消耗：**不管这次是否退款给客户都要记**。
-        //
-        // 为什么：退款是"这条译文没价值，不扣你的字符"，但厂商那边
-        // **是真的消耗了 token 也真的会产生账单**。把退款就当没发生过，
-        // 成本表上就凭空少了一块，月度对账必然对不上。
-        // 所以只要真打了上游（非缓存命中）就落一条内部台账，
-        // 与对客户的字符账本彻底分开、互不影响。
-        if (!result.cached) {
-          await this.recordUpstreamUsage(client, {
-            reservation, engine, result, session, translateLogId,
-            from: response.from, to, durationMs, refundable
-          })
-        }
-        const settlement = refundable
-          ? `status='released',committed_chars=0,committed_at=NULL,released_at=NOW()`
-          : `status='committed',committed_chars=$2,committed_at=NOW(),released_at=NULL`
-        const values = refundable
-          ? [reservation.id, JSON.stringify(response), durationMs]
-          : [reservation.id, chars, JSON.stringify(response), durationMs]
-        await this.repo.query(
-          `UPDATE translation_reservations SET ${settlement},
-           response_json=$${refundable ? 2 : 3}::jsonb,
-           duration_ms=$${refundable ? 3 : 4},updated_at=NOW() WHERE id=$1`,
-          values, client
-        )
-        return response
+      // ⑥ 打上游（事务外 —— 见函数头）
+      const result = await this.callUpstream({ session, parsed, engine: usedEngine })
+
+      // ⑦ 结算（事务二）
+      return await this.settleTranslate({
+        session, parsed, key, chars, started, trigger: parsed.trigger,
+        reservation, result, route, engine: resolved.engine,
+        usedEngine: usedEngine || resolved.engine, engineId: resolved.engineId
       })
     } catch (error) {
+      // 预留没走完就把钱还回去。这里只处理"已经预留出去但没结算"的情况。
       if (reservation && reservation.status === 'reserved') {
         await this.releaseReservation(reservation.id, error.code || 'TRANSLATE_FAILED')
       }
       throw error
     } finally {
+      // 释放锁：用 token 比对，避免误删别人的锁（比如自己的锁已超时并被他人重取）
       await this.redis.eval(
         'if redis.call("get",KEYS[1])==ARGV[1] then return redis.call("del",KEYS[1]) else return 0 end',
-        1, lockKey, lockToken
+        1, lock.key, lock.token
       )
     }
+  }
+
+  /**
+   * ① 入参校验与规范化。
+   *
+   * 纯函数式：只读 session/data，不碰库、不碰锁。所以能早失败，
+   * 也能被单测直接调。
+   *
+   * 注意 `trigger` 是**客户端可控**的，必须白名单收口 ——
+   * 它要进 translate_logs，列上有 CHECK 约束，但约束报错是 500，
+   * 而这里能给出干净的 400/静默置空。
+   */
+  normalizeTranslateInput(session, data) {
+    const raw = String(data.text || data.source || '').trim()
+    if (!raw) throw new ApiError(400, '请输入要翻译的文本', 'TEXT_REQUIRED')
+    if (raw.length > 5000) throw new ApiError(413, '单次翻译最多 5000 个字符', 'TEXT_TOO_LONG')
+
+    // 去掉 emoji 再判断是否为空：纯表情消息不需要翻译，也不该计费。
+    // 但返回的是"跳过"而不是错误 —— 客户端发个表情不算出错。
+    const text = raw
+      .replace(/\p{Extended_Pictographic}/gu, '')
+      .replace(/[\uFE0F\u200D\u20E3]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+
+    const from = String(data.from || 'auto')
+    const to = String(data.to || 'zh')
+    if (!/^(?:auto|[a-z]{2,3}(?:-[a-z0-9]{2,8})?)$/i.test(from) ||
+        !/^[a-z]{2,3}(?:-[a-z0-9]{2,8})?$/i.test(to)) {
+      throw new ApiError(400, '语言参数无效', 'BAD_LANGUAGE')
+    }
+
+    const trigger = TRIGGER_VALUES.includes(String(data.trigger || '').trim())
+      ? String(data.trigger).trim()
+      : ''
+
+    return {
+      text,
+      empty: !text,
+      from,
+      to,
+      trigger,
+      sourceHash: crypto.createHash('sha256').update(text).digest('hex')
+    }
+  }
+
+  /**
+   * ② 解析通道：套餐权益 → 选中的引擎 → 逐个排除不合法的理由。
+   *
+   * ## 四种拒绝必须分开，不能合并成一句"不可用"
+   *
+   * 用户看到不同文案会做不同的事：
+   *   - 没有可用通道（503）→ 找客服。升级套餐也解决不了，不能说"升级"
+   *   - 已下架（503）      → 换一个通道。升级也换不来一个下架的东西
+   *   - 套餐未包含（403）   → 升级套餐。这是唯一"该引导升级"的情况
+   *   - 未上线（503）      → 换一个通道。这是我们的问题，不是他的
+   *
+   * 合并文案的代价是用户按提示操作后仍然失败，而且不知道还能做什么。
+   */
+  async resolveTranslateEngine(session, data, input) {
+    // 权益版本按**购买时**那一版解析（packageChannels），不是当前配置的活表。
+    // 商户能用什么通道，是他买的时候定下的，我们后来改配置不该改变他的权益。
+    const allowed = await this.packageChannels(session)
+    const engineId = await this.resolveEngineId(session, data.engine, allowed)
+
+    if (!engineId) {
+      // 权益里一个可用通道都没有 —— 可能全是"即将上线"，也可能套餐压根没配。
+      // 不能回 403「套餐未包含」：那会把人引向升级，而升级也解决不了。
+      throw new ApiError(503, '当前账号没有可用的翻译通道，请联系客服', 'ENGINE_NOT_CONFIGURED')
+    }
+
+    const engine = allowed.find(row => row.id === engineId)
+
+    if (engine && engine.retired) {
+      throw new ApiError(503, `翻译通道「${engine.name}」已下架，请在通道列表里换一个`, 'ENGINE_RETIRED')
+    }
+    if (!engine || !engine.enabled) {
+      throw new ApiError(403, '当前套餐未包含此通道', 'ENGINE_NOT_ALLOWED')
+    }
+    if (!engine.wired) {
+      // 正常路径不该走到这里：engines() 已把未接通的通道以 allowed=false 下发，
+      // resolveEngineId 也会跳过它们。能到这儿说明客户端**显式指定**了未接通的
+      // 通道（旧版客户端 / 手工调接口）。
+      //
+      // 此时**绝不能**偷偷换成别的通道 —— 用户选的是它、界面显示的也是它，
+      // 换掉就是"静默切换供应商"。宁可报错。
+      throw new ApiError(503, `翻译通道「${engine.name}」尚未上线，请换一个通道`, 'ENGINE_NOT_CONFIGURED')
+    }
+
+    return { allowed, engineId, engine }
+  }
+
+  /**
+   * 请求号校验。
+   *
+   * 长度上限 160：它要进 redis key 和数据库唯一索引，
+   * 不设限等于让人用超长 key 撑爆内存。
+   */
+  requireIdempotencyKey(idempotencyKey, data) {
+    const key = String(idempotencyKey || data.requestId || '').trim()
+    if (!key || key.length > 160) {
+      throw new ApiError(400, '缺少有效的 Idempotency-Key', 'IDEMPOTENCY_KEY_REQUIRED')
+    }
+    return key
+  }
+
+  /**
+   * ④ 分布式幂等锁。
+   *
+   * 前缀统一由 redis-client 提供 —— 这里**不能**再自己拼 `pix:`。
+   * 曾经两边各加一次，线上键实际是 `pix:pix:translate:lock:...`，
+   * 清理脚本按单前缀扫的时候一个都扫不到。
+   */
+  async acquireTranslateLock(session, key) {
+    const lockKey = `${redisPrefix}translate:lock:${session.parent.id}:${key}`
+    const token = crypto.randomBytes(16).toString('hex')
+    const ok = await this.redis.set(lockKey, token, 'NX', 'PX', this.reservationTtlMs)
+    if (!ok) throw new ApiError(409, '相同翻译请求正在处理', 'REQUEST_IN_PROGRESS')
+    return { key: lockKey, token }
+  }
+
+  /**
+   * ⑤ 预留（事务一）。
+   *
+   * 幂等在这里实现，而不是靠应用层记状态：
+   *   - `FOR UPDATE` 锁行，同一请求号并发只有一个能进
+   *   - 已存在且 requestHash 一致 → 直接返回旧记录（重放）
+   *   - 已存在但 hash 不一致 → 拒绝，并区分"换了通道"
+   *
+   * ## 换通道为什么要单独一个错误码
+   *
+   * 换通道重译在厂商侧是真花钱的，必须重新计费。但绝不能默默扣 ——
+   * 客户端要拿新 requestId 重发，并且**先告诉用户**"会再扣一次"。
+   * 所以用 `ENGINE_SWITCH_REQUIRES_NEW_REQUEST`，让客户端能把这条
+   * 文案原样贴给用户，而不是笼统的"请求号冲突"。
+   */
+  async reserveTranslate({ session, parsed, key, requestHash, chars, engineId }) {
+    return this.repo.transaction(async client => {
+      const existing = mapRow((await this.repo.query(
+        'SELECT * FROM translation_reservations WHERE user_id=$1 AND idempotency_key=$2 FOR UPDATE',
+        [session.parent.id, key], client
+      )).rows[0])
+
+      if (existing) {
+        if (existing.requestHash !== requestHash) {
+          const switched = existing.engineId && existing.engineId !== engineId
+          throw new ApiError(
+            409,
+            switched
+              ? '该请求号已用于其他翻译通道。换通道重新翻译会再次扣除字符，请确认后重试'
+              : 'Idempotency-Key 已用于其他请求',
+            switched ? 'ENGINE_SWITCH_REQUIRES_NEW_REQUEST' : 'IDEMPOTENCY_KEY_REUSED'
+          )
+        }
+        return existing
+      }
+
+      // ---- 预扣：校验余额 + 真扣 ----
+      //
+      // 这一段是**唯一的扣费起点**，`settleTranslate` 与 `releaseReservation`
+      // 都建立在"钱已经扣过"的前提上：
+      //   · 结算成功 → 不动余额（预扣的那笔就是这一单的账单）
+      //   · 可退款（原文=译文）→ `+chars` 还回去
+      //   · 上游失败 / 超时 → `releaseReservation` 里 `+reservedChars` 还回去
+      //
+      // 一旦少了这两行，后两处就变成**凭空发钱**：每失败一次余额涨一次。
+      // 实测：1000 起始，跑一轮集成测试余额变成 1004，而 char_used 还是 0 ——
+      // 账面看着像扣了（`char_used` 来自另一条链路），实际一分没扣。
+      //
+      // `lockAccount` 必须在 `adjustChars` 之前：并发两个请求同时读到 1000、
+      // 各自通过 `>= chars` 检查，就会一起扣成负数。
+      const account = await this.repo.lockAccount(client, session.kind, session.account.id)
+      if (!account || number(account.charBalance) < chars) {
+        throw new ApiError(409, '字符余额不足', 'INSUFFICIENT_CHARS')
+      }
+      await this.repo.adjustChars(client, session.kind, session.account.id, -chars)
+
+      const inserted = await this.repo.query(
+        `INSERT INTO translation_reservations
+           (user_id, sub_account_id, engine_id, idempotency_key, status, reserved_chars,
+            expires_at, source_language, target_language, source_hash, request_hash)
+         VALUES ($1,$2,$3,$4,'reserved',$5,
+                 NOW() + ($6::text || ' milliseconds')::interval, $7,$8,$9,$10)
+         RETURNING *`,
+        [session.parent.id, session.kind === 'sub' ? session.account.id : null, engineId, key,
+          chars, this.reservationTtlMs, parsed.from, parsed.to, parsed.sourceHash, requestHash], client
+      )
+      return mapRow(inserted.rows[0])
+    })
+  }
+
+  /**
+   * ⑥ 读缓存 / 打上游。
+   *
+   * **整个过程在事务之外** —— 这是全函数最要紧的约束，见 translate 的头部注释。
+   *
+   * 缓存键用**实际执行的通道**（usedEngine），不是用户选的那个：
+   * 同一句话走 LLM 和走专用 API 的译文可能不同，混用会导致
+   * "换了路由却拿到旧译文"。
+   *
+   * 缓存读失败只记日志不抛：缓存是加速手段，挂了就该直连上游，
+   * 不能因为 redis 抽风让翻译整体不可用。
+   */
+  async callUpstream({ session, parsed, engine, engineId }) {
+    const cacheTenant = `${session.kind}:${session.account.id}`
+    const cacheEngineId = engine && engine.id ? engine.id : engineId
+    const cacheRequest = { engine: cacheEngineId, from: parsed.from, to: parsed.to, text: parsed.text }
+
+    let cachedText = null
+    try {
+      cachedText = await this.translationCache.get(cacheTenant, cacheRequest)
+    } catch (error) {
+      console.error('Translation cache read failed:', error.message)
+    }
+
+    let result
+    if (cachedText != null) {
+      result = { ok: true, text: cachedText, cached: true }
+    } else {
+      // ★ 分段计时 ★ 翻译慢到底慢在哪，光看总时长猜不出来：
+      // 可能是取凭据、可能是厂商本身、也可能是连接建立。
+      // 打一行 TRANS_PERF 直接量出来。
+      const tCred = Date.now()
+      const credentials = await this.engineCredentials(engine.id)
+      const credMs = Date.now() - tCred
+
+      const tVendor = Date.now()
+      result = await this.translator.translate(engine, {
+        text: parsed.text, from: parsed.from, to: parsed.to,
+        detected: this.translator.detectLang(parsed.text)
+      }, {
+        allowPublicNetwork: this.allowPublicNetwork,
+        credentials
+      })
+      const vendorMs = Date.now() - tVendor
+
+      try {
+        console.log('TRANS_PERF engine=' + engine.id +
+          ' cred=' + credMs + 'ms vendor=' + vendorMs + 'ms' +
+          ' retries=' + (result && result.retries != null ? result.retries : '-') +
+          ' len=' + String(parsed.text || '').length)
+      } catch (e) { /* 日志失败不能影响翻译 */ }
+    }
+
+    if (!result || !result.ok) {
+      throw new ApiError(502, (result && result.msg) || '翻译服务暂不可用', 'TRANSLATE_FAILED')
+    }
+
+    const translated = String(result.text || '').trim()
+    // 可退款 = 没翻出东西 / 翻出来跟原文一样（大小写不敏感）。
+    // 这些情况下不该扣字符 —— 用户没拿到价值。
+    // 注意 cached 命中时即使"一样"也不退：那是缓存里的历史结果，字符早就扣过了。
+    const refundable = Boolean(
+      result.skipped || !translated || translated.toLocaleLowerCase() === parsed.text.toLocaleLowerCase()
+    )
+
+    if (!refundable && !result.cached) {
+      try {
+        await this.translationCache.set(cacheTenant, cacheRequest, translated)
+      } catch (error) {
+        console.error('Translation cache write failed:', error.message)
+      }
+    }
+
+    return { result, translated, refundable }
+  }
+
+  /**
+   * ⑦ 结算（事务二）。
+   *
+   * 二次 `FOR UPDATE` 是必要的：第 ⑤ 步提交后到第 ⑦ 步之间，
+   * 预留可能已被对账任务判超时并退给用户。再查一次能发现这种情况，
+   * 避免"钱已经退了还继续结算"。
+   *
+   * ## 日志为什么用 SAVEPOINT 兜底
+   *
+   * 日志是账务旁路，不该有能力把一次**已经成功**的翻译打成 500。
+   * 曾经因为 CHECK 约束对不上（source==target、hash 大小写、trigger 白名单）
+   * 导致整个事务回滚，用户看到 TRANSLATE_FAILED 但厂商已经收了钱。
+   */
+  async settleTranslate({ session, parsed, chars, started, trigger, reservation, result, route, engine, usedEngine, engineId }) {
+    const { result: upstream, translated, refundable } = result
+
+    return this.repo.transaction(async client => {
+      const current = mapRow((await this.repo.query(
+        'SELECT * FROM translation_reservations WHERE id=$1 FOR UPDATE',
+        [reservation.id], client
+      )).rows[0])
+
+      // 并发时后到的那个直接复用已有结果，不重复结算
+      if (current && current.responseJson) return current.responseJson
+      if (!current || current.status !== 'reserved') {
+        throw new ApiError(409, '翻译预留已结束', 'RESERVATION_FINALIZED')
+      }
+
+      const durationMs = Date.now() - started
+
+      // 余额已在 `reserveTranslate` 预扣过（那是唯一扣费起点）。
+      // 这里**只处理退款**：翻译没产生价值时把预扣的还回去。
+      //
+      // 千万不要在这里再补一次 `-chars` —— 那是重复扣费（预扣 + 结算 = 扣两次）。
+      // 也不能只写这一行而没有预扣 —— 那会变成凭空发钱。
+      // 两者是配套的，改动前先看 `reserveTranslate` 里的注释。
+      if (refundable) await this.repo.adjustChars(client, session.kind, session.account.id, chars)
+      const balance = await this.repo.lockAccount(client, session.kind, session.account.id)
+
+      // 真实调用的模型，以适配层报上来的为准：
+      // 适配层可能因参数不被接受而**降级重试**（某些模型不收 temperature），
+      // 展示的必须就是这次真正调用的那个，不是我们以为的那个。
+      const usedModel = String((upstream && upstream.model) || (usedEngine && usedEngine.model) || '')
+      const response = {
+        success: true,
+        wired: Boolean(usedEngine.wired),
+        cached: Boolean(upstream && upstream.cached),
+        skipped: refundable ? ((upstream && upstream.skipped) || 'unchanged') : undefined,
+        translation: translated,
+        chars: refundable ? 0 : chars,
+        remain: number(balance.charBalance),
+        from: parsed.from === 'auto' ? this.translator.detectLang(parsed.text) : parsed.from,
+        engine: usedEngine.id || engineId,
+        engineName: usedEngine.name || '',
+        provider: usedEngine.provider || '',
+        model: usedModel,
+        // 路由透明化：只有真发生了通道切换才带这个字段。
+        // 客户端据此在芯片上标注"快速通道"，用户随时能看到实际用了谁 ——
+        // 这满足 resolveEngineId 头部"不得静默切换"的可见性要求。
+        routed: route.routed
+          ? { from: route.from, to: route.to, reason: route.reason }
+          : undefined
+      }
+
+      let translateLogId = null
+      if (!refundable) {
+        // 扣字符与计数。submit 路径与这里必须口径一致，否则两边账单对不上。
+        const table = session.kind === 'sub' ? 'sub_accounts' : 'users'
+        await this.repo.query(
+          `UPDATE ${table} SET char_used=char_used+$2,translate_count=translate_count+1,updated_at=NOW() WHERE id=$1`,
+          [session.account.id, chars], client
+        )
+
+        // 日志字段要过表上的 CHECK 约束，逐条对齐后再落库。
+        //
+        // 踩过的坑（线上 500，客户端显示 TRANSLATE_FAILED，翻译其实**已经成功**）：
+        //   1. `source_language <> target_language` —— 请求带 auto 时记检测语言，
+        //      原文本身就是目标语言（中文→中文）时两边相等，整条 INSERT 被拒；
+        //   2. `source_hash ~ '^[0-9a-f]{64}$'` —— 哈希来源不同则长度/大小写不符；
+        //   3. `trigger = ANY(白名单)` —— 新增触发场景没同步迁移就会炸。
+        //
+        // 上面的字段对齐只是第一道；logTranslateRow 内部再用 SAVEPOINT 兜底 ——
+        // 约束/列/枚举任何一处对不上，最多丢一条日志，绝不让用户的译文跟着回滚。
+        const logLang = String(response.from || '').trim() || 'auto'
+        const logTarget = String(parsed.to || '').trim() || 'auto'
+        const logSourceLanguage = logLang === logTarget ? 'auto' : logLang
+        const logSourceHash = /^[0-9a-fA-F]{64}$/.test(String(parsed.sourceHash || ''))
+          ? String(parsed.sourceHash).toLowerCase()
+          : null
+
+        translateLogId = await this.logTranslateRow(client, {
+          userId: session.parent.id,
+          subAccountId: session.kind === 'sub' ? session.account.id : null,
+          // 落库用**实际执行的通道**：成本按真实供应商结算，
+          // 记成用户选的那条会让月度对账凭空多/少一块。
+          engineId: usedEngine.id || engineId,
+          reservationId: reservation.id,
+          sourceLanguage: logSourceLanguage,
+          targetLanguage: logTarget,
+          chars,
+          costAmount: number(usedEngine.costPerMillion) * chars / 1000000,
+          sourceHash: logSourceHash,
+          snippet: String(parsed.text || '').slice(0, 300),
+          cached: Boolean(upstream && upstream.cached),
+          durationMs,
+          trigger,
+          fallbackSource: String(parsed.text || '')
+        })
+      }
+
+      // 上游真实消耗：**不管这次是否退款给客户都要记**。
+      //
+      // 退款是"这条译文没价值，不扣你的字符"，但厂商那边是真的消耗了
+      // token 也真的会产生账单。把退款当成没发生过，成本表上就凭空少一块，
+      // 月度对账必然对不上。所以只要真打了上游（非缓存命中）就落一条内部台账，
+      // 与对客户的字符账本彻底分开。
+      if (!(upstream && upstream.cached)) {
+        await this.recordUpstreamUsage(client, {
+          reservation, engine, result: upstream, session, translateLogId,
+          from: response.from, to: parsed.to, durationMs, refundable
+        })
+      }
+
+      // 结算预留：退款 → released；否则 → committed。
+      const settlement = refundable
+        ? `status='released',committed_chars=0,committed_at=NULL,released_at=NOW()`
+        : `status='committed',committed_chars=$2,committed_at=NOW(),released_at=NULL`
+      const values = refundable
+        ? [reservation.id, JSON.stringify(response), durationMs]
+        : [reservation.id, chars, JSON.stringify(response), durationMs]
+
+      await this.repo.query(
+        `UPDATE translation_reservations SET ${settlement},
+         response_json=$${refundable ? 2 : 3}::jsonb,
+         duration_ms=$${refundable ? 3 : 4},updated_at=NOW() WHERE id=$1`,
+        values, client
+      )
+      return response
+    })
   }
 
   /**
@@ -1089,12 +1500,23 @@ class CoreService {
       }
     const standaloneApps = listed.filter(item => item.releaseGroup === 'standalone')
     const discounts = setting(settings, 'billing.discounts', {})
+
+    // "主下载按钮"必须跟架构走。
+    //
+    // 老实现直接取 `downloads.client_url` 这个后台设置 —— 它是**不带架构**的一条
+    // 静态地址。于是 `arch=x64` 的 Intel 用户点主按钮，下到的是 Apple 芯片包
+    // （装上去直接闪退），而页面上"其他版本"里明明列着正确的 x64。
+    //
+    // 现在优先用按架构挑出来的 macOS 包；一条都没登记时才退回静态设置
+    // （保留后台手填一个外链的可能性，不至于把按钮藏掉）。
+    const macUrl = download('macos')
+    const mainDownloadUrl = macUrl || setting(settings, 'downloads.client_url', '')
     return {
       siteName: setting(settings, 'site.name', 'Hello Pix'),
       announcement: setting(settings, 'site.announcement', ''),
-      clientDownloadUrl: setting(settings, 'downloads.client_url', ''),
+      clientDownloadUrl: mainDownloadUrl,
       clientDownloads: {
-        app: setting(settings, 'downloads.client_url', ''),
+        app: mainDownloadUrl,
         windows: download('windows'), macos: download('macos'), android: download('android'),
         ios: download('ios'),
         standalone: standaloneApps[0] ? standaloneApps[0].url : '',
@@ -1246,7 +1668,15 @@ class CoreService {
     const releaseGroup = catalog.groupId(data.group || data.releaseGroup)
     if (!releaseGroup) throw new ApiError(400, '请选择有效的客户端分组', 'BAD_RELEASE_GROUP')
     const url = String(data.url || '').trim()
-    const enabled = data.enabled === undefined ? true : Boolean(number(data.enabled))
+    // 上架开关：缺省 = 缺省上架；给了值就按字面解析。
+    // 别用 `Boolean(number(x))` —— `Number('true')`/`Number('no')` 是 NaN → false，
+    // 表单里传字符串会把"上架"静默降级成"下架"，用户那边直接看不到新版本。
+    const enabled = data.enabled === undefined || data.enabled === ''
+      ? true
+      : bool(data.enabled) === true
+    if (data.enabled !== undefined && data.enabled !== '' && bool(data.enabled) === null) {
+      throw new ApiError(400, 'enabled 必须是 true/false/1/0', 'BAD_BOOLEAN')
+    }
     if (enabled && !catalog.hasPublicUrl(url)) {
       throw new ApiError(400, '上架版本必须填写 HTTPS 下载地址', 'DOWNLOAD_URL_REQUIRED')
     }

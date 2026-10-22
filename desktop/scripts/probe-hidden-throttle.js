@@ -21,7 +21,6 @@
  */
 
 const { app, BrowserWindow, WebContentsView } = require('electron')
-const path = require('path')
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const mb = n => Math.round(n / 1048576) + ' MB'

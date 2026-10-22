@@ -83,7 +83,11 @@ class ProductionRepository {
     if (!identity.rows[0]) return null
     const kind = identity.rows[0].account_type === 'sub' ? 'sub' : 'main'
     const table = kind === 'sub' ? TABLES.subs : TABLES.users
-    const result = await this.query(`SELECT * FROM ${table} WHERE id=$1`, [identity.rows[0].account_id], client)
+    // 子账号软删除后行还在，这里必须显式排除，否则旧名字仍能通过身份表找回来。
+    const result = await this.query(
+      `SELECT * FROM ${table} WHERE id=$1${kind === 'sub' ? ' AND deleted_at IS NULL' : ''}`,
+      [identity.rows[0].account_id], client
+    )
     return result.rows[0] ? Object.assign(mapRow(result.rows[0]), { kind }) : null
   }
 
@@ -92,7 +96,11 @@ class ProductionRepository {
     if (!match) return null
     const kind = match[1]
     const table = kind === 'sub' ? TABLES.subs : TABLES.users
-    const result = await this.query(`SELECT * FROM ${table} WHERE id=$1`, [match[2]], client)
+    // 已软删除的子账号 = 不存在：会话立刻作废（每次请求都会走到这里）。
+    const result = await this.query(
+      `SELECT * FROM ${table} WHERE id=$1${kind === 'sub' ? ' AND deleted_at IS NULL' : ''}`,
+      [match[2]], client
+    )
     const account = mapRow(result.rows[0])
     if (!account) return null
     const parentId = kind === 'sub' ? account.parentId : account.id

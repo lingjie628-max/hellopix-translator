@@ -264,7 +264,8 @@ test('测试邮件不含验证码，一眼能看出是测试信', () => {
 
 // ----------------------------------------------------------------- 源码守卫
 
-const routeSource = fs.readFileSync(path.join(root, 'server/routes/production.js'), 'utf8')
+// 路由已按域拆分，读整个 routes 目录
+const routeSource = require('./helpers/route-source').readAllRoutes()
 const mailerSource = fs.readFileSync(path.join(root, 'server/lib/mailer.js'), 'utf8')
 const verifyVue = fs.readFileSync(path.join(root, 'src/components/admin/AdminVerify.vue'), 'utf8')
 

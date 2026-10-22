@@ -56,6 +56,20 @@ function sqlInt(value) {
   return BigInt(value).toString()
 }
 
+/**
+ * 毫金额 → `recharges.paid_amount` 能直接比较的 numeric 字面量。
+ *
+ * 绝不能写 `BigInt / 1000`：整数除法会把 0.526 变成 0，
+ * 于是"查这个金额有没有被占用"永远查不到，去重形同虚设。
+ */
+function formatAmountForQuery(amountMilli) {
+  const milli = BigInt(amountMilli)
+  const negative = milli < 0n
+  const abs = negative ? -milli : milli
+  const text = `${abs / 1000n}.${String(abs % 1000n).padStart(3, '0')}`
+  return negative ? `-${text}` : text
+}
+
 class RechargeAmountService {
   constructor(options) {
     const opts = options || {}
@@ -158,6 +172,20 @@ class RechargeAmountService {
   /** 插入一条 held 预约；撞唯一索引返回 null（不是错误，是正常的碰撞） */
   async tryInsert(client, { payAddress, tokenContract, base, suffixMilli, reusableAfter }) {
     const amountMilli = base + suffixMilli
+
+    // 先查 `recharges` 的全局唯一约束。
+    //
+    // 预约表的唯一索引只覆盖 (地址, 币种, 金额)，而订单表是**全站唯一金额**。
+    // 不做这一步的话，随机尾数有概率撞上"别的地址的待支付单"，
+    // 而 `ON CONFLICT` 管不到另一张表 —— 冲突会一路冒到 INSERT recharges
+    // 变成 23505 / 500。查询开销远小于一次失败回滚 + 用户看到报错。
+    const taken = await client.query(
+      `SELECT 1 FROM recharges
+        WHERE status = 0 AND paid_amount = $1::numeric LIMIT 1`,
+      [formatAmountForQuery(amountMilli)]
+    )
+    if (taken.rows[0]) return null
+
     const result = await client.query(
       `INSERT INTO recharge_amount_reservations
          (pay_address, pay_token_contract, amount_milli, suffix, reusable_after)
@@ -186,15 +214,37 @@ class RechargeAmountService {
    */
   async freeAmounts(client, { payAddress, tokenContract, base }) {
     const upper = base + BigInt(SUFFIX_MAX)
+    // ## 为什么必须同时查 `recharges`，不能只看自己的预约表
+    //
+    // 两边的唯一约束**粒度不一样**：
+    //
+    //   recharge_amount_reservations_held_uq  (pay_address, pay_token_contract, amount_milli)
+    //   recharges_pending_amount_uq           (payment_type, paid_amount)  ← 全站唯一
+    //
+    // 预约表按收款地址隔离，订单表却是**全站唯一金额**。只看预约表的话，
+    // 地址 A 分配的尾数完全不知道地址 B 已经占了这个金额 —— 于是
+    // `allocate` 高高兴兴返回一个 number，插进 `recharges` 时撞 23505。
+    //
+    // 这不是测试环境的偶然：只要有两个以上在用的收款地址、且同一时间
+    // 有足够多的待支付单，尾数池就会重叠。真实后果是**用户付款后匹配到
+    // 别人的订单**——只不过那一步之前会先被唯一约束拦下来变成 500。
+    //
+    // 所以这里把订单表里仍在等待支付的金额也当成"已占用"。
     const { rows } = await client.query(
-      `SELECT amount_milli
-         FROM recharge_amount_reservations
-        WHERE pay_address = $1
-          AND pay_token_contract = $2
-          AND state = 'held'
-          AND amount_milli > $3::bigint
-          AND amount_milli <= $4::bigint`,
-      [payAddress, tokenContract, sqlInt(base), sqlInt(upper)]
+      `SELECT amount_milli FROM recharge_amount_reservations
+        WHERE pay_address = $1 AND pay_token_contract = $2 AND state = 'held'
+          AND amount_milli > $3::bigint AND amount_milli <= $4::bigint
+       UNION
+       SELECT (paid_amount * 1000)::bigint FROM recharges
+        WHERE status = 0
+          AND paid_amount > $5::numeric AND paid_amount <= $6::numeric`,
+      [
+        payAddress, tokenContract, sqlInt(base), sqlInt(upper),
+        // numeric 侧用人类可读金额比较。**不能用 Number(base)/1000**：
+        // 浮点会把 40.566 变成 40.56599999…，闭区间边界就可能漏掉一档。
+        formatAmountForQuery(base),
+        formatAmountForQuery(upper)
+      ]
     )
     const taken = new Set(rows.map(row => String(row.amount_milli)))
     const free = []

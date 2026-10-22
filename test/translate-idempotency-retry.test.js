@@ -65,6 +65,9 @@ function makeSandbox (responder) {
       return responder(opts.form, calls.length)
     },
     cache,
+    // 连接失败后的重试间隔在测试里设 0：真机默认 120ms 是为了等连接池重建，
+    // 而这里的假 api 不需要重建，等只会让整套测试凭空慢几百毫秒。
+    retryDelayMs: 0,
     getLog: () => null
   })
   return {
@@ -193,11 +196,23 @@ test('持续连接失败：最多重发一次就如实上报，仍然不换号�
   assert.match(box.api.transRequestId('hello', 'auto', 'zh', 'deepseek'), /:0$/, '失败也不换代')
 })
 
-test('是否送达不确定的错误（连接建立之后才断）不参与自动重试', async () => {
+test('连接中途断开（ECONNRESET）也允许重试一次 —— 幂等号保证不会重复扣费', async () => {
+  // 这条测试原本断言"ECONNRESET 不许重试"，理由是"请求可能已经到服务端"。
+  // 那个顾虑本身没错，但结论错了：**同一 requestId 重发不会产生第二次计费**。
+  //
+  // 服务端 core-service.js 的预留流程是：
+  //   SELECT ... FROM translation_reservations WHERE user_id=$1 AND idempotency_key=$2 FOR UPDATE
+  //   命中且 requestHash 相同 → 直接返回已存结果，不再调厂商、不再扣字符。
+  // 所以"请求已到达"这一最坏情况，第二次收到的是**已存结果**，账不重复。
+  //
+  // 反过来，把 ECONNRESET 判死不重试的代价是**真机已验证的掉消息**：
+  // 一次 socket 抖动 → 用户看到"网络异常，消息未发送"，原文被退回输入框。
+  // 现在它属于连接层失败，重试会更划算。
   const box = makeSandbox(() => { throw netErr('ECONNRESET') })
   await assert.rejects(() => box.api.requestTranslate('hello', 'auto', 'zh', 'deepseek', 'auto_receive'))
-  assert.equal(box.calls.length, 1,
-    'ECONNRESET 发生在连接建立之后，请求可能已经到服务端，属于"不确定"，不许盲目重发')
+  assert.equal(box.calls.length, 2, '首发 + 一次重试')
+  assert.equal(box.calls[0].requestId, box.calls[1].requestId,
+    '必须复用同一个幂等号 —— 换了号才可能重复扣费')
 })
 
 test('已拿到服务端响应（含 502 上游超时）绝不重发，避免重复计费', async () => {

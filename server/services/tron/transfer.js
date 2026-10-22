@@ -25,7 +25,6 @@
  * 下游任何一步都不该改它。要附加信息（匹配到哪张订单）请另开对象。
  */
 
-const { ApiError } = require('../../lib/http')
 const { base58Decode } = require('../../lib/tron-address')
 
 const USDT_TRC20_CONTRACT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'

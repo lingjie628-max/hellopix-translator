@@ -86,7 +86,15 @@ function createStore(file, options) {
     // 串行化：前一次还没写完就排队，避免两个写交错把文件写坏。
     if (writing) { pending = true; return writing }
     dirty = false
-    const snapshot = JSON.stringify(cache, null, pretty ? 2 : 0)
+    // 序列化失败（BigInt / 循环引用）时不能让 Promise 直接 reject 掉，
+    // 否则这个 rejection 会穿过 set() 的所有调用点变成 unhandledRejection。
+    let snapshot
+    try {
+      snapshot = JSON.stringify(cache, null, pretty ? 2 : 0)
+    } catch (error) {
+      onError(error)
+      return
+    }
     const tmp = file + '.tmp-' + process.pid
     writing = (async () => {
       try {
@@ -133,19 +141,47 @@ function createStore(file, options) {
    *
    * 只在 `will-quit` / 致命错误里用：那时异步写不一定来得及，
    * 而这份文件关系到用户下次打开看到什么。它不在热路径上。
+   *
+   * ★ 不能靠 dirty 判断要不要写 ★
+   *
+   * `writeNow()` 一开始就把 `dirty` 置 false，然后把真正的写盘丢进
+   * 异步任务（`fsp.writeFile` + `fsp.rename`）。如果进程恰好在
+   * **那一小段异步窗口里**退出：
+   *
+   *   dirty === false  →  老实现直接 return  →  什么都没写
+   *   writing 还挂着   →  进程结束，异步写被掐断
+   *   磁盘上仍是旧文件，还可能留一个 `.tmp-<pid>` 垃圾文件
+   *
+   * 而内存里的 `cache` 始终是最新的（`set()` 同步更新它），所以这里
+   * **无条件按 cache 写一次**就是安全的：内容要么和已经落盘的一致
+   * （多写一次是幂等的），要么正好补上那块丢失的窗口。
    */
   function flushSync() {
     if (timer) { clearTimeout(timer); timer = null }
-    if (!dirty) return
     dirty = false
+    // 即使 cache 还是 null（从没读过也没写过），也不该写一个 "null" 出来。
+    if (cache === null || cache === undefined) return
+    // ★ 序列化必须放在 try 里 ★
+    //
+    // 原来 `JSON.stringify(cache)` 在 try 外面：cache 里只要混进一个 BigInt
+    // 或者被意外挂了循环引用，stringify 直接抛 TypeError，而这个函数是在
+    // `will-quit` 里调用的 —— 抛出去就是退出流程中断，用户看到的是
+    // "关不掉的窗口" 加一份没写完的配置。序列化失败本来是可以兜住的，
+    // 没理由让它把退出流程一起带走。
+    let snapshot
+    try {
+      snapshot = JSON.stringify(cache, null, pretty ? 2 : 0)
+    } catch (e) {
+      onError(e)
+      return
+    }
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true })
-      const snapshot = JSON.stringify(cache, null, pretty ? 2 : 0)
       const tmp = file + '.tmp-' + process.pid
       fs.writeFileSync(tmp, snapshot, 'utf8')
       fs.renameSync(tmp, file)
     } catch (e) {
-      try { fs.writeFileSync(file, JSON.stringify(cache, null, pretty ? 2 : 0), 'utf8') } catch (e2) { onError(e2) }
+      try { fs.writeFileSync(file, snapshot, 'utf8') } catch (e2) { onError(e2) }
       onError(e)
     }
   }

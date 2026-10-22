@@ -67,13 +67,30 @@ function detectLang(text) {
   return 'en'
 }
 
+/**
+ * 计费字符数。
+ *
+ * ★ 必须和服务端 `translation-provider.js` 的实现逐字一致 ★
+ *
+ * 这里的计算结果决定 mock 环境下的扣费。原来的写法按 **UTF-16 code unit**
+ * 迭代（`s[i]`），而生产是按 **code point** 迭代（`for...of`）：
+ *
+ *   输入 😀（代理对）
+ *     mock 老实现: s.length === 2 → 计 2
+ *     生产实现:    一次迭代      → 计 1
+ *
+ * 于是带 emoji 的文本在测试里扣的钱和线上不一样 —— 测试全绿，
+ * 线上账单是另一个数。这类偏差只在特定字符上出现，最难在评审时看出来。
+ *
+ * 规则本身（CJK 基本区算 2、其余算 1）照抄生产，不做"改进"：
+ * mock 的职责是复现生产行为，不是提出更好的口径。
+ */
 function countBillableChars(text) {
-  const s = String(text || '')
-  let n = 0
-  for (let i = 0; i < s.length; i++) {
-    n += /[\u4e00-\u9fff]/.test(s[i]) ? 2 : 1
+  let count = 0
+  for (const char of String(text || '')) {
+    count += /[\u4e00-\u9fff]/.test(char) ? 2 : 1
   }
-  return n
+  return count
 }
 
 function fetchText(url, timeoutMs) {
@@ -131,21 +148,34 @@ async function demoTranslate(payload, options) {
   const hit = phraseLookup(text, to)
   if (hit) return { ok: true, text: hit, demo: true }
 
+  let lastIssue = '真实翻译通道尚未配置'
   if (!options || options.allowPublicNetwork !== true) {
-    return { ok: false, msg: '真实翻译通道尚未配置' }
+    return { ok: false, msg: lastIssue }
   }
 
   try {
     const out = await gtxTranslate(text, detected, to)
     if (out && out.toLowerCase() !== text.toLowerCase()) return { ok: true, text: out, demo: true }
-  } catch (e) {}
+  } catch (e) {
+    lastIssue = 'gtx 通道失败：' + ((e && e.message) || e)
+  }
 
   try {
     const out = await memoryTranslate(text, detected, to)
     if (out && out.toLowerCase() !== text.toLowerCase()) return { ok: true, text: out, demo: true }
-  } catch (e) {}
+  } catch (e) {
+    lastIssue = 'memory 通道失败：' + ((e && e.message) || e)
+  }
 
-  return { ok: true, text: text, demo: true }
+  // ★ 不能把原文当译文返回 ★
+  //
+  // 原来这里是 `return { ok: true, text: text, demo: true }`。所有通道都挂了，
+  // 结果却是 success:true 且文本与原文一模一样 —— 前端拿到"译文"直接回填输入框，
+  // 用户看到的是"翻了个寂寞"，而 mock 侧因为 `translatedText === text` 走
+  // skipped 分支，一个字符都不计费。开发调试时会误判成"翻译是通的，
+  // 只是模型不干活"，把真正的通道故障埋在下面。
+  // 真实失败要能被看见，mock 也不该例外。
+  return { ok: false, msg: '翻译通道无结果：' + lastIssue }
 }
 
 async function translate(engine, payload, options) {

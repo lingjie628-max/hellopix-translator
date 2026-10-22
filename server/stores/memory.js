@@ -1,6 +1,5 @@
 'use strict'
 
-const crypto = require('crypto')
 const { positiveInteger } = require('./redis-client')
 const { hashCode, normalizeEmail } = require('./verification-store')
 const { cacheDigest } = require('./translation-cache')

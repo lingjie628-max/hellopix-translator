@@ -31,6 +31,37 @@ const BACKUP_MAX_AGE_HOURS = 26      // 每日备份，超过 26 小时说明昨
 const DISK_MAX_PERCENT = 85
 const SILENCE_HOURS = 1
 
+/**
+ * 充值异常告警阈值。
+ *
+ * ## 为什么要专门盯着这个
+ *
+ * 2026-10-21 审计发现：`recharge_exceptions` 里有 11 条 `open` 记录，
+ * 最早的一条已经挂了 **28 天**，期间巡检每 10 分钟跑一次、每次都正常 ——
+ * 因为它只检查服务/磁盘/备份/分区，**完全没看钱有没有进来**。
+ *
+ * 这批记录里只有 1 笔是真实订单的付款（65.138，金额抄错的笔误），
+ * 其余是测试款与外部转账。**但系统当时无法区分这两类** ——
+ * 在运维眼里它们长得一模一样。这才是要修的东西：
+ * 让真实的钱能被认出来，让不相关的钱能被快速排除。
+ *
+ * 钱的问题不能靠"用户来投诉"发现。这里是最后一道主动防线。
+ *
+ * ## 两个阈值
+ *
+ * - `RECHARGE_OPEN_MAX`：未处理异常超过这个条数就告警
+ * - `RECHARGE_OPEN_MAX_HOURS`：单条异常悬置超过这个小时数就告警
+ *
+ * 条数阈值抓「异常突然变多」（比如链上扫描坏了，一批进款全匹配不上）；
+ * 时长阈值抓「异常一直没人管」（比如这次 28 天）。
+ * 只用一个会漏：一条挂一个月，条数永远是 1，按条数永远不告警。
+ */
+const RECHARGE_OPEN_MAX = 3
+const RECHARGE_OPEN_MAX_HOURS = 12
+/** 单封告警邮件最多列多少条明细 —— 列太多会被当成噪音跳过 */
+const RECHARGE_ALERT_SAMPLE = 10
+
+
 const STATE_FILE = '/var/lib/hello-pix-alert-state.json'
 
 // ---------------------------------------------------------------------------
@@ -113,6 +144,102 @@ async function checkPartitions(pool) {
 }
 
 // ---------------------------------------------------------------------------
+// 充值异常
+// ---------------------------------------------------------------------------
+
+/**
+ * 检查未处理的充值异常。
+ *
+ * ## 三个独立判据（任一成立就告警）
+ *
+ * 1. **条数**：`open` 太多 → 可能是扫描/匹配整体坏了
+ * 2. **时长**：有条 `open` 挂了太久 → 有人在等钱，没人管
+ * 3. **金额**：有「疑似订单」却没人工确认 → 系统已经指出可能是谁的钱了
+ *
+ * ## 为什么把「疑似」单列一条
+ *
+ * 普通 `NO_MATCH` 可能真是外部转账、测试款，运维看一眼就能忽略。
+ * 但带 `suspicion` 的那种，系统已经算出「这笔像订单 HPxxx 的笔误」——
+ * 它需要的是一个**决定**（认或不认），而不是一个**观察**。
+ * 混在总数里会被稀释掉，所以单独拎出来。
+ */
+async function checkRechargeExceptions(pool) {
+  const problems = []
+
+  const { rows: summary } = await pool.query(
+    `SELECT count(*)::int AS n,
+            COALESCE(sum(amount_milli), 0)::text AS total_milli,
+            COALESCE(EXTRACT(EPOCH FROM (now() - min(created_at))) / 3600, 0)::float AS oldest_hours,
+            count(*) FILTER (WHERE detail ? 'suspicion'
+                              AND detail->'suspicion' <> 'null'::jsonb)::int AS suspicious_n
+       FROM recharge_exceptions
+      WHERE status = 'open'`
+  )
+  const s = summary[0] || { n: 0, total_milli: '0', oldest_hours: 0, suspicious_n: 0 }
+
+  if (!Number(s.n)) return problems
+
+  const totalUsdt = (Number(s.total_milli) / 1000).toFixed(3)
+  const oldestHours = Number(s.oldest_hours) || 0
+
+  // ① 条数
+  if (Number(s.n) > RECHARGE_OPEN_MAX) {
+    problems.push([
+      '充值异常积压',
+      `${s.n} 条未处理（阈值 ${RECHARGE_OPEN_MAX}），合计 ${totalUsdt} USDT`
+    ])
+  }
+
+  // ② 时长
+  if (oldestHours > RECHARGE_OPEN_MAX_HOURS) {
+    problems.push([
+      '充值异常长时间未处理',
+      `最早一条已悬置 ${oldestHours.toFixed(1)} 小时（阈值 ${RECHARGE_OPEN_MAX_HOURS}h），`
+      + `共 ${s.n} 条 / ${totalUsdt} USDT`
+    ])
+  }
+
+  // ③ 疑似归属待确认
+  if (Number(s.suspicious_n) > 0) {
+    problems.push([
+      '有到账疑似某张订单但未确认',
+      `${s.suspicious_n} 条已识别出疑似归属，需人工核对（系统不会自动入账）`
+    ])
+  }
+
+  // 明细。按金额降序 —— 金额大的先看，这是唯一合理的排序。
+  const { rows: sample } = await pool.query(
+    `SELECT id, kind, amount_milli, created_at, summary,
+            detail->'suspicion' AS suspicion
+       FROM recharge_exceptions
+      WHERE status = 'open'
+      ORDER BY amount_milli DESC, created_at ASC
+      LIMIT $1`,
+    [RECHARGE_ALERT_SAMPLE]
+  )
+
+  for (const row of sample) {
+    const usdt = (Number(row.amount_milli) / 1000).toFixed(3)
+    const hours = Math.max(0, Math.floor((Date.now() - new Date(row.created_at).getTime()) / 3600000))
+    let line = `#${row.id} ${usdt} USDT · ${row.kind} · ${hours}h 前`
+    if (row.suspicion) {
+      const sus = typeof row.suspicion === 'string' ? JSON.parse(row.suspicion) : row.suspicion
+      if (sus && sus.orderNumber) {
+        line += ` · 疑似 ${sus.orderNumber}（${sus.reason || ''}）`
+      }
+    }
+    problems.push(['　└ 异常明细', line])
+  }
+
+  if (Number(s.n) > RECHARGE_ALERT_SAMPLE) {
+    problems.push(['　└ 异常明细', `…另有 ${Number(s.n) - RECHARGE_ALERT_SAMPLE} 条未列出`])
+  }
+
+  return problems
+}
+
+
+// ---------------------------------------------------------------------------
 
 /**
  * 发告警。实现在 server/lib/ops-alert.js —— 抽出去是因为 ChainWatcher
@@ -154,6 +281,14 @@ async function main() {
   try {
     const part = await checkPartitions(pool)
     if (!part.ok) problems.push(['消息分区缺失', part.detail])
+
+    // 充值异常。单独 try：一张表查不了不该让其余巡检也中断，
+    // 但**必须计入问题** —— 静默跳过等于这次巡检又在"什么都很正常"。
+    try {
+      problems.push(...await checkRechargeExceptions(pool))
+    } catch (e) {
+      problems.push(['充值异常检查失败', String(e.message || e).slice(0, 120)])
+    }
   } catch (e) {
     problems.push(['数据库不可连', String(e.message || e).slice(0, 120)])
   } finally {
@@ -191,4 +326,15 @@ async function main() {
   }
 }
 
-main().catch(e => { console.error('巡检异常:', e.message); process.exit(1) })
+// 直接执行时才跑巡检；被测试 import 时只暴露函数。
+// require.main === module 在 `node scripts/alert.js` 与 systemd 环境下都成立。
+if (require.main === module) {
+  main().catch(e => { console.error('巡检异常:', e.message); process.exit(1) })
+}
+
+module.exports = {
+  checkRechargeExceptions,
+  RECHARGE_OPEN_MAX,
+  RECHARGE_OPEN_MAX_HOURS,
+  RECHARGE_ALERT_SAMPLE
+}

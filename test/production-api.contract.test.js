@@ -9,6 +9,7 @@ const { stub, pagination } = require('../server/lib/http')
 const { CoreService, requestDigest } = require('../server/services/core-service')
 
 const root = path.join(__dirname, '..')
+const { readRoute, readAllRoutes, routeBlock } = require('./helpers/route-source')
 
 test('production API targets only the canonical catalog schema', () => {
   const files = [
@@ -112,9 +113,11 @@ test('persistent runtime closes dependencies when migration gate fails', async (
 
 test('client catalog migration is required and admin clients are no longer stubbed', () => {
   const index = fs.readFileSync(path.join(root, 'server/index.js'), 'utf8')
-  const routes = fs.readFileSync(path.join(root, 'server/routes/production.js'), 'utf8')
+  // 路由已按域拆分：整目录读，桩清单只在 production.js 里
+  const routes = readAllRoutes()
+  const base = readRoute('production.js')
   const migration = fs.readFileSync(path.join(root, 'migrations/004_client_releases_draft_url.js'), 'utf8')
-  const unmigrated = routes.slice(routes.indexOf('const unmigrated'))
+  const unmigrated = base.slice(base.indexOf('const unmigrated'))
   assert.match(index, /004_client_releases_draft_url/)
   assert.match(routes, /listClientReleases/)
   assert.match(routes, /saveClientRelease/)
@@ -224,13 +227,30 @@ test('client-facing engine query never selects credential columns', () => {
 })
 
 test('engine admin routes are registered before the unmigrated stub list', () => {
-  const source = fs.readFileSync(path.join(root, 'server/routes/production.js'), 'utf8')
-  const listIndex = source.indexOf('const unmigrated = [')
+  const base = readRoute('production.js')
+  const source = readAllRoutes()
+  const listIndex = base.indexOf('const unmigrated = [')
   assert.ok(listIndex > 0)
   for (const route of ['/admin/engines', '/admin/engines/save', '/admin/engines/active']) {
-    const routeIndex = source.indexOf(`'${route}'`, source.indexOf('router.get(\'/admin/engines\''))
-    assert.ok(routeIndex > 0 && routeIndex < listIndex, `${route} 必须在 stub 列表之前注册`)
-    assert.ok(!source.slice(listIndex).includes(`'${route}'`), `${route} 不应再留在 unmigrated 列表里`)
+    // 实现必须存在（可能已搬进 admin.js）
+    assert.ok(source.includes(`'${route}'`), `${route} 找不到实现`)
+    // 且不能还在 stub 清单里
+    assert.ok(!base.slice(listIndex).includes(`'${route}'`), `${route} 不应再留在 unmigrated 列表里`)
+  }
+  // 真正要守的顺序：admin 路由挂在 stub 兜底**之前**。
+  // admin.js 已按业务域拆成 admin/*.js，所以逐个检查 6 个挂载点都在兜底之前。
+  const ADMIN_MOUNTS = [
+    'registerAdminContent',
+    'registerAdminDashboard',
+    'registerAdminUsers',
+    'registerAdminClients',
+    'registerAdminOps',
+    'registerAdminSettings'
+  ]
+  for (const mount of ADMIN_MOUNTS) {
+    const at = base.indexOf(`${mount}(router, ctx)`)
+    assert.ok(at > 0, `找不到挂载点 ${mount}(router, ctx)`)
+    assert.ok(at < listIndex, `${mount} 必须挂在 unmigrated 兜底之前`)
   }
   // 保存路径必须强制校验密钥已配置，不得明文落库
   assert.match(source, /CREDENTIAL_KEY_MISSING/)
@@ -238,8 +258,8 @@ test('engine admin routes are registered before the unmigrated stub list', () =>
 })
 
 test('wired is derived from adapter readiness, not typed in by hand', () => {
-  const source = fs.readFileSync(path.join(root, 'server/routes/production.js'), 'utf8')
-  const body = source.slice(source.indexOf("router.post('/admin/engines/save'"), source.indexOf("router.post('/admin/engines/active'"))
+  const body = routeBlock('post', '/admin/engines/save')
+  assert.ok(body, '找不到 /admin/engines/save')
   assert.match(body, /const wired = enabled && ready/, 'wired 必须由 enabled + 适配器就绪推导')
   assert.doesNotMatch(body, /wired\s*=\s*(?:Boolean\()?Number\(data\.wired/, '不允许前端直接指定 wired')
 })

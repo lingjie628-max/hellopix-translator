@@ -625,8 +625,12 @@ test('套餐随结算发放 / 编辑商户 / 子账号额度', { skip: !database
 
     const list = await request('GET', `/admin/users?keyword=${encodeURIComponent(user.username)}`, null, 'admin')
     assert.equal(list.status, 200, `列表 HTTP ${list.status} ${list.text.slice(0, 200)}`)
-    const row = ((list.json && list.json.data && list.json.data.rows) || [])[0]
-    assert.ok(row, '列表里找不到刚建的商户')
+    // 分页响应是 `{ rows, total, page, pageSize }` —— **平铺在 body 顶层**。
+    // 原先这里写的是 `list.json.data.rows`，多包了一层 `data`，
+    // 于是永远拿到空数组、永远报「列表里找不到刚建的商户」。
+    // 而这条测试平时是真库 skip 的，所以这个笔误一直没被人看见。
+    const row = ((list.json && list.json.rows) || [])[0]
+    assert.ok(row, `列表里找不到刚建的商户：${list.text.slice(0, 200)}`)
 
     assert.equal(Number(row.subCount), 2,
       '列表必须回真实的子账号数。原先真后端 SELECT 里根本没有 sub_count，'

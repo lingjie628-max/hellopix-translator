@@ -35,7 +35,10 @@ const root = path.join(__dirname, '..')
 const read = p => fs.readFileSync(path.join(root, p), 'utf8')
 
 const usersVue = read('src/components/admin/AdminUsers.vue')
-const routes = read('server/routes/production.js')
+const { readAllServerSource } = require('./helpers/route-source')
+
+// 路由已按域拆分，读整个 routes 目录
+const routes = readAllServerSource()
 const mock = read('mock/index.js')
 
 // --- 1. 列表必须回真实计数 -----------------------------------------------

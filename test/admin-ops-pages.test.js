@@ -27,7 +27,10 @@ const path = require('node:path')
 const test = require('node:test')
 
 const root = path.join(__dirname, '..')
-const routeSource = fs.readFileSync(path.join(root, 'server/routes/production.js'), 'utf8')
+const { readAllRoutes, routeBlock } = require('./helpers/route-source')
+
+// 路由已按域拆分，读整个 routes 目录；单条路由用 routeBlock 精确切出
+const routeSource = readAllRoutes()
 
 test('在线账号 / 进粉统计 不再走桩', () => {
   // 取出 unmigrated 数组的原文
@@ -44,10 +47,10 @@ test('两条路径都有真实实现（GET）', () => {
 })
 
 test('实现读的是新客户模型，不是那几张空表', () => {
-  const start = routeSource.indexOf("router.get('/admin/accounts'")
-  const end = routeSource.indexOf('function safeParse')
-  assert.ok(start > 0 && end > start, '定位不到运营两页的实现段')
-  const block = routeSource.slice(start, end)
+  // 原来靠"从 /admin/accounts 到 function safeParse"取段，
+  // 拆模块后 safeParse 与路由已不在同一文件，改用括号配平精确切出单条路由
+  const block = routeBlock('get', '/admin/accounts')
+  assert.ok(block, '定位不到 /admin/accounts 的实现')
 
   assert.match(block, /FROM conversations/, '应当从 conversations 取数')
   assert.match(block, /LEFT JOIN customers/, '应当关联 customers')
@@ -64,15 +67,15 @@ test('筛选条件真的参与 SQL，而不是只在参数里传', () => {
   // pg 直接报 "bind message supplies 1 parameters, but prepared statement requires 0"。
   // 现在改成带整数校验的内联常量。
   assert.match(routeSource, /const ONLINE_WINDOW_SQL = Number\.isInteger\(/, '窗口常量缺少整数校验')
-  const start = routeSource.indexOf("router.get('/admin/accounts'")
-  const block = routeSource.slice(start, routeSource.indexOf("router.get('/admin/fans'"))
+  const block = routeBlock('get', '/admin/accounts')
+  assert.ok(block, '定位不到 /admin/accounts 的实现')
   assert.doesNotMatch(block, /\$1 \|\| ' minutes'/, '窗口又变成绑定参数了（会触发参数个数不匹配）')
   assert.match(block, /interval '\$\{ONLINE_WINDOW_SQL\} minutes'/, '窗口应内联且来自受校验的常量')
 })
 
 test('重粉判定与「被见到次数」同源，不会各算各的', () => {
-  const start = routeSource.indexOf("router.get('/admin/fans'")
-  const block = routeSource.slice(start, routeSource.indexOf('function safeParse'))
+  const block = routeBlock('get', '/admin/fans')
+  assert.ok(block, '定位不到 /admin/fans 的实现')
   assert.match(block, /const seenCount = `\(SELECT count\(\*\) FROM conversations c2 WHERE c2\.customer_id = c\.customer_id\)`/,
     '重粉应基于「同一 customer 被几个会话见过」')
   assert.match(block, /const fanTypeExpr = `CASE WHEN c\.customer_id IS NOT NULL AND \$\{seenCount\} > 1 THEN '重粉' ELSE '新粉' END`/,

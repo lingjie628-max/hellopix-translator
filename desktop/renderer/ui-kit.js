@@ -29,15 +29,33 @@ function show(el, on) {
  *
  * 主进程据此决定是否把实例视图整块摘掉 —— 只要有一个面板没让开，
  * 用户看到的就是"面板被页面咬掉一半"。
+ *
+ * ## 确认框也必须算进来
+ *
+ * 这里漏过 `closeConfirm` 一次，代价是**整个关闭功能不可用**：
+ * 点右键「关闭应用」→ 确认框弹在渲染层 → 而这时七个面板全是 hidden
+ * → `setOverlay(false)` → 主进程把 WhatsApp 的 `WebContentsView` 重新盖回来
+ * → 弹框连同取消按钮整块被压在页面底下，用户既关不掉也退不出。
+ *
+ * 判断依据用 `dialog.open` 而不是 hidden 类：`<dialog>` 走的是 showModal()，
+ * 它的可见性由 `open` 属性决定，从来不加 hidden 类。用 hidden 判断会永远为 false，
+ * 等于没修。
  */
 function overlayVisible() {
-  return !profile.classList.contains('hidden') ||
-    !transPanel.classList.contains('hidden') ||
-    !lockScreen.classList.contains('hidden') ||
-    !addApp.classList.contains('hidden') ||
-    !proxySettings.classList.contains('hidden') ||
-    !updatePanel.classList.contains('hidden') ||
-    !standalonePanel.classList.contains('hidden')
+  // 自动发现，不再手抄白名单。
+  //
+  // 手抄白名单漏过一次（closeConfirm），代价是整个关闭功能被页面吞掉；
+  // 而漏的原因永远是同一个：新加一个浮层，没人记得回来改这个函数。
+  // 三种形态覆盖全部浮层，新增浮层只要落进任一形态就自动生效：
+  //   · `.modal`        —— 面板类，显隐靠 hidden 类；
+  //   · `.lock-screen`  —— 锁屏，整屏覆盖，同样靠 hidden 类；
+  //   · `dialog[open]`  —— 原生 dialog，显隐靠 open 属性（closeConfirm 就是这种）。
+  const fullscreen = document.querySelectorAll('.modal, .lock-screen')
+  for (const el of fullscreen) {
+    if (!el.classList.contains('hidden')) return true
+  }
+  const openDialogs = document.querySelectorAll('dialog[open]')
+  return openDialogs.length > 0
 }
 
 function syncOverlay() {
@@ -110,9 +128,14 @@ function confirmAction(title, text, okText) {
   okBtn.textContent = okText || '确认'
 
   // 上一个还开着就先按"取消"结掉，避免两个 Promise 悬着。
+  //
+  // ★ 顺序要紧：**先**调 prev，**再**清 closeConfirmResolve。
+  //   反过来写（先置 null 再调）会被 finish 首行的
+  //   `if (closeConfirmResolve !== finish) return` 直接拦掉 ——
+  //   于是前一个 Promise 永远拿不到 resolve，await 它的调用方就永久挂住。
+  //   真实场景：连点两次关闭、或右键连点，前一次确认框背后的流程直接僵死。
   if (closeConfirmResolve) {
     const prev = closeConfirmResolve
-    closeConfirmResolve = null
     prev(false)
   }
 
@@ -125,6 +148,13 @@ function confirmAction(title, text, okText) {
       dialog.oncancel = null
       dialog.onclose = null
       try { if (dialog.open) dialog.close() } catch (e) {}
+      // 关掉之后必须让主进程把实例视图放回来 —— 少了这一行，
+      // 用户取消一次关闭之后窗口里就只剩一块空白，直到他切一次标签。
+      //
+      // 包 try/catch：setOverlay 走 IPC，主进程那边任何一个异常都会让这个
+      // await 变成 rejected。**绝不能让恢复视图失败把 resolve 吞掉** ——
+      // 那样 Promise 永远悬着，关闭流程卡死，比视图盖住还严重。
+      try { syncOverlay() } catch (e) {}
       resolve(answer)
     }
     closeConfirmResolve = finish
@@ -137,6 +167,11 @@ function confirmAction(title, text, okText) {
     try {
       if (dialog.open) dialog.close()
       dialog.showModal()
+      // 让开原生视图。**必须在 showModal 之后**：
+      // 之前调的话 dialog 还没 open，overlayVisible() 判定为 false，
+      // setOverlay(false) 等于没让，确认框照样被 WhatsApp 页面盖住。
+      // showModal 是同步的，open 属性立刻生效，所以这里调是安全的。
+      try { syncOverlay() } catch (e) {}
       // 焦点显式落到取消上（autofocus 在某些内核对 dialog 不生效）
       cancelBtn.focus()
     } catch (e) {

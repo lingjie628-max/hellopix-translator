@@ -273,8 +273,125 @@ function asyncJson(file) {
 /** 退出前把异步队列里的数据同步落盘。 */
 function flushSyncStores() {
   for (const store of syncStores.values()) {
-    try { store.flushSync() } catch (e) {}
+    try {
+      store.flushSync()
+    } catch (e) {
+      // 以前这里是个空 catch。后果：退出时一条 store 写盘失败（磁盘满、
+      // 权限、被杀软锁文件），用户下次启动发现标签和设置全没了，
+      // 而日志里一个字都没有 —— 等于把问题锁死在现场之外。
+      // 退出阶段控制台还在，直接打出来，至少能让人事后对得上。
+      try {
+        console.error('[store] 退出前落盘失败 ' + (store && store.file) + '：' + (e && e.message))
+      } catch (_) {}
+    }
   }
+}
+
+/* ------------------------------------------------------- 登录态（Cookie）落盘 */
+
+/**
+ * 把每个分区的 Cookie 刷到磁盘。
+ *
+ * ## 为什么必须有这一步 —— 「重启软件掉号」
+ *
+ * Chromium 的 Cookie 存储是**异步批量写盘**的：`cookies.set()` 之后内存里立刻
+ * 生效，磁盘上却要等它自己找时机落盘（通常是几十秒到几分钟的合并写）。进程一旦
+ * 在这之前消失 —— 强杀、崩溃、`app.exit()`、断电 —— 这批 Cookie 就全没了。
+ *
+ * 而各大平台（Telegram / WhatsApp / X …）的登录态**就挂在 Cookie 上**。
+ * 用户看到的现象正是：用得好好的，关掉再开，全部要重新扫码。
+ *
+ * 本应用还把这个窗口放大了两处：
+ *
+ *   1. 多开 —— 每个实例一个 partition，落盘要逐个 session 调用，漏一个就掉一个；
+ *   2. 「重启生效」走的是 `app.exit()`（见 relaunchAndExit），**不触发
+ *      before-quit**，原本连自家的 json 都不落盘。
+ *
+ * 所以这里既要在退出前刷，也要在**启动早期**刷一次（上一次若是被强杀，
+ * 磁盘上的 Cookie 可能落后于用户最后一次登录）。
+ *
+ * **务必用 `flushStore()` 而不是 `cookies.get()`**：`get` 只是读，不会写盘。
+ *
+ * @param {object} [options]
+ * @param {boolean} [options.includeIdle=true] 是否连当前没有窗口的分区也刷。
+ *        退出时必须 true —— 用户可能就是关掉了某个窗口、只剩托盘。
+ * @returns {Promise<{flushed:number, failed:number}>}
+ */
+async function flushAllCookies(options) {
+  const opts = options || {}
+  const includeIdle = opts.includeIdle !== false
+  const sessions = new Set()
+  // 1) 活着的标签页所用的分区
+  tabs.forEach(tab => {
+    try {
+      if (tab.view && tab.view.webContents && !tab.view.webContents.isDestroyed()) {
+        sessions.add(tab.view.webContents.session)
+      }
+    } catch (e) { /* 已销毁的标签页跳过 */ }
+  })
+  // 2) 磁盘上已有的分区目录 —— 覆盖"窗口已关闭但登录态还要留"的情况
+  if (includeIdle) {
+    try {
+      const dir = path.join(app.getPath('userData'), 'Partitions')
+      fs.readdirSync(dir).forEach(name => {
+        // 只认我们自己造的目录，别的软件残留在 userData 里的一概不碰。
+        if (name.indexOf('pix-') !== 0) return
+        try { sessions.add(session.fromPartition('persist:' + name)) } catch (e) {}
+      })
+    } catch (e) { /* 首次启动还没有 Partitions 目录 */ }
+  }
+  let flushed = 0
+  let failed = 0
+  for (const ses of sessions) {
+    try {
+      await ses.cookies.flushStore()
+      flushed += 1
+    } catch (e) {
+      failed += 1
+    }
+  }
+  if (failed) {
+    try { console.error('[cookie] 落盘失败 ' + failed + ' 个分区（成功 ' + flushed + '）') } catch (e) {}
+  }
+  return { flushed, failed }
+}
+
+/**
+ * 退出流程里同步等待 Cookie 落盘。
+ *
+ * `before-quit` 是**同步**事件 —— 光在里面 `await` 没用，事件返回后进程就走。
+ * 正确做法是"拦一次、刷完再放行"：
+ *
+ *   第 1 次进 before-quit → preventDefault，启动刷盘，刷完/超时后重新 app.quit()
+ *   第 2 次进 before-quit → cookieFlushDone 已为 true，直接放行
+ *
+ * 超时兜底不能省：`flushStore()` 是跨进程 IPC，某个分区若卡住，没有超时
+ * 用户看到的就是"点了退出，软件不响应"。宁可少落一次，也不能卡死退出。
+ *
+ * 注意：**不要用 `Atomics.wait` 去同步等** —— 它阻塞的正是事件循环，
+ * 而刷盘的 promise 回调恰好要在这个循环里执行，结果只能等到超时。
+ */
+const COOKIE_FLUSH_TIMEOUT_MS = 1500
+let cookieFlushDone = false
+let cookieFlushPending = false
+
+function flushCookiesBeforeQuit(event) {
+  if (cookieFlushDone) return
+  // 拦住这一次退出，等刷完再重来。
+  event.preventDefault()
+  if (cookieFlushPending) return
+  cookieFlushPending = true
+  const done = () => {
+    if (cookieFlushDone) return
+    cookieFlushDone = true
+    cookieFlushPending = false
+    app.quit()
+  }
+  const timer = setTimeout(done, COOKIE_FLUSH_TIMEOUT_MS)
+  Promise.resolve()
+    .then(() => flushAllCookies({ includeIdle: true }))
+    .catch(() => {})
+    .then(() => { clearTimeout(timer); done() })
 }
 
 /* ---------------------------------------------------------------- 日志落盘 */
@@ -491,6 +608,24 @@ function makePartition(platformId, index) {
  * 只在**确实创建出 tab** 之后才登记：`restoreOneApp()` 可能因为平台下线、
  * homeUrl 非法等原因提前 return，那种 id 不能算"本实例管理"，否则会在保存时
  * 把它从磁盘上删掉 —— 那是数据丢失，比覆盖更糟。
+ *
+ * ## 别再把这里改成"先登记再建"（2026-10-21 的误判）
+ *
+ * 用户重启后三个 WhatsApp 从标签栏消失，一度怀疑是 `did-stop-loading` 抢在
+ * `restoreOneApp()` 循环结束前调用 `saveOpenApps()`，把"还没建出的 tab"删掉，
+ * 于是把顺序改成了先 seed 再建。**这个诊断是错的**，已回退：
+ *
+ *     bindTabLoading(tab)   // 注册 did-stop-loading（异步）
+ *     tabs.push(tab)        // ← 同步入列
+ *     startTabLoad(tab)
+ *
+ * `did-stop-loading` 是事件循环里稍后才派发的，而 `forEach` 是同步的 ——
+ * 回调有机会跑时，`tabs` 里已经是全部（恢复成功的）tab 了。用真实 Electron
+ * 语义（启动快照 + 落盘）建模验证过，两种登记时机结果完全一致。
+ *
+ * 反而"先登记"会破坏上面这半条语义：恢复失败的 id 被当成管理过，下次保存
+ * 静默删掉。账号消失的真凶是 `byUser[user]` 整段覆盖 + 用户名对不上，
+ * 见 test/desktop-open-apps-merge.test.js 的「事故复盘」用例。
  */
 const seededTabIds = new Set()
 
@@ -590,19 +725,23 @@ function bindTabUnread(tab) {
     tab.unread = n
     sendTabs()
   }
+  // 清零定时器只排一次：高频标题闪烁不重置它。
+  const armClearTimer = delay => setTimeout(() => {
+    clearTimer = null
+    if (wc.isDestroyed()) return
+    apply(unreadFromTitle(wc.getTitle()))
+  }, delay)
   wc.on('page-title-updated', (_event, title) => {
     const n = unreadFromTitle(title)
     if (n > 0) {
       if (clearTimer) { clearTimeout(clearTimer); clearTimer = null }
       apply(n)
-      return
+    } else if (tab.unread && !clearTimer) {
+      // 只在还有未读时才排清零。标题乱跳（Messenger 式 "(2) X" / "X" 交替）
+      // 不会反复重置定时器 —— 否则高频闪烁会让清零永远排不上，
+      // 角标一直挂着，看起来像"读完了还在提示"。
+      clearTimer = armClearTimer(UNREAD_CLEAR_DELAY_MS)
     }
-    if (!tab.unread || clearTimer) return
-    clearTimer = setTimeout(() => {
-      clearTimer = null
-      if (wc.isDestroyed()) return
-      apply(unreadFromTitle(wc.getTitle()))
-    }, UNREAD_CLEAR_DELAY_MS)
   })
   wc.once('destroyed', () => { if (clearTimer) clearTimeout(clearTimer) })
 }
@@ -950,10 +1089,37 @@ function rememberCookies(res) {
     if (eq < 0) return
     const name = part.slice(0, eq).trim()
     const value = part.slice(eq + 1).trim()
-    if (!/^(__Host-)?pix_/.test(name)) return
+    // 不把管理端会话收进客户端 jar。
+    //
+    // 原来这里用的是 `/^(__Host-)?pix_/` —— 前缀匹配会把管理端的
+    // `__Host-pix_admin` 一起收进来。桌面客户端永远不调管理员接口，
+    // 这个 cookie 进了 jar 之后唯一的去向就是被拼进每个 `/apis/client/*`
+    // 请求的 Cookie 头。服务端签名能挡住冒用，但那仍然是**把一个跟
+    // 自己无关的高权限凭据暴露到了完全不需要它的请求面上**。
+    // 权限边界的问题不该指望下游兜着。
+    if (!isClientCookie(name)) return
     if (value) cookieJar[name] = value
     else delete cookieJar[name]
   })
+}
+
+/**
+ * 客户端不该收的 cookie 名（生产带 `__Host-`，开发不带）。
+ *
+ * 判据用**排除法**而不是白名单：白名单的失效方向是"服务端将来新增一个
+ * 客户端需要的 cookie，客户端静默把它丢了"，那是最难查的一类 bug
+ * （后端说发了、抓包也有、登录态就是不生效）。排除法的失效方向是
+ * "某个本该排除的漏过去了" —— 服务端签名仍然拦得住，只是多暴露一点面。
+ * 两种失效的代价不对称，所以选排除法。
+ */
+const CLIENT_COOKIE_DENY = new Set([
+  '__Host-pix_admin', 'pix_admin_session', 'pix_admin'
+])
+
+function isClientCookie(name) {
+  if (CLIENT_COOKIE_DENY.has(name)) return false
+  // 仍然要求是本产品的 cookie：别把同域下别的系统下发的 cookie 也收进来。
+  return /^(__Host-)?pix_/.test(name)
 }
 
 // ── API 传输层：连接超时 / 整体兜底 / 错误分类 ────────────────────────
@@ -1569,6 +1735,12 @@ function destroyTab(tab) {
   }
   bridgeHealth.delete(tab.id)
   stopSshTunnel(tab)
+  // 端口也要还给占用表：否则同一个进程里反复开/关 SSH 代理窗口，
+  // 每开一次就永久吃掉一个端口，几十次之后就没有可用端口了。
+  if (tab.sshPort) {
+    sshPortsInUse.delete(tab.sshPort)
+    tab.sshPort = null
+  }
   // releaseSocksRelay 是 async（relay.close() 要等监听端口真正释放）。
   // 不接住这个 promise 的话，它里面的异步收尾会漂浮在事件循环上 ——
   // 端口与句柄晚一步才还，而用户可能马上就开下一个实例。
@@ -1595,6 +1767,23 @@ function clearTabs(opts) {
   usedCount = {}
   nextTab = 1
   showHome = true
+  // ★ 必须一起清 ★
+  //
+  // `seededTabIds` 的语义是"**本实例当前这一批**从磁盘恢复出来、由我管理的 id"，
+  // 而 saveOpenApps() 的合并规则是：
+  //
+  //     磁盘上有、但 seededTabIds 里有、且 live 里没有  →  判定为我关掉的，删掉
+  //
+  // 之前这里只清了 tabs，没清 seededTabIds。于是换账号时：
+  //
+  //   1. 登出 A → clearTabs({keepSaved:true})，seededTabIds 还留着 A 的 wa-1、wa-2
+  //   2. 登录 B → restoreOpenApps('B')。B 的磁盘数据里也有 wa-1（id 格式是
+  //      platform-N，两个账号撞同名是常态）
+  //   3. 只要 B 的 wa-1 这一轮恢复失败（平台下线 / homeUrl 失效），它就不在 live 里，
+  //      而 seededTabIds.has('wa-1') 为真 → saveOpenApps() 把 B 磁盘上的 wa-1 删掉
+  //
+  // 结果是 B 账号的窗口列表被静默删除。数据丢失，且没有任何报错。
+  seededTabIds.clear()
   if (!opts || !opts.keepSaved) saveOpenApps()
   sendTabs()
 }
@@ -1731,9 +1920,31 @@ async function updateTabSettings(id, patch) {
   // applySessionProxy 全项目只有 startTabLoad 一个调用点，于是"改一条已存在
   // 线路的代理"永远不生效，必须关掉线路重建才行。
   // 修法：复用同一个 applyTabProxy（不另写一套），并只 reload 这条线路。
+  //
+  // ★ 失败必须回滚 settings ★
+  //
+  // 上面第 1872 行已经把 `tab.settings` 换成新值、第 1884 行还落了盘。
+  // 所以 applyTabProxy 抛错时，状态是：
+  //
+  //   tab.settings（内存 + 磁盘）= 新代理 B
+  //   session 上的实际规则      = 旧代理 A（applyTabProxy 没走到写 session 那步）
+  //
+  // 用户看到"保存成功"，以为换了出口，实际还在用 A。对多账号运营来说，
+  // 这是**以为换了 IP、其实没换**，比直接报错危险得多。
+  // 所以这里必须把 settings 退回改动前，并重新落盘 —— 保持
+  // "内存 / 磁盘 / 实际生效"三者一致，失败就干脆当没改过。
   const proxyChanged = proxyFieldsChanged(before, tab.settings)
   if (proxyChanged) {
-    await applyTabProxy(tab, tabProxyDeps())
+    try {
+      await applyTabProxy(tab, tabProxyDeps())
+    } catch (err) {
+      const msg = (err && err.message) || String(err || '代理未能生效')
+      tab.settings = normalizeTabSettings(Object.assign({}, before))
+      sendTabs()
+      saveOpenApps()
+      if (clientLog) clientLog.error('proxy', '实例 ' + tab.id + ' 代理切换失败，已回滚：' + msg)
+      return { success: false, msg: '代理未能生效，已保留原设置：' + msg, proxyChanged: false }
+    }
     reloadTabContents(tab)
   }
   return { success: true, proxyChanged: proxyChanged }
@@ -1770,9 +1981,21 @@ function stripEmoji(text) {
  * 幂等键算错就是用户被重复扣费，这个逻辑最需要测试。
  */
 const transCacheModule = require('./src/translate/translation-cache')
+/**
+ * 幂等键的「尝试代数」落盘。
+ *
+ * 单独一个文件，不塞进 config.json —— 里面是"哪些文本的键已经用死了"，
+ * 属于运行期状态而不是用户配置，混进去会被"重置配置"顺手抹掉，
+ * 也会让 config.json 无谓地膨胀。
+ *
+ * 内容只有指纹与代数，没有原文：指纹是 sha256 的前 40 位，反推不出文本。
+ */
+const TRANS_ATTEMPTS_FILE = 'translate-attempts.json'
 const transCacheApi = transCacheModule.createTranslationCache({
   currentUser: () => currentPixUser(),
-  deviceId: () => deviceId()
+  deviceId: () => deviceId(),
+  loadAttempts: () => readJson(userFile(TRANS_ATTEMPTS_FILE), null),
+  saveAttempts: (value) => writeJson(userFile(TRANS_ATTEMPTS_FILE), value)
 })
 const { isDeadRequest, isRetryableNetworkError } = transCacheModule
 
@@ -2031,6 +2254,70 @@ function stopSshTunnel(tab) {
   tab.sshProc = null
 }
 
+/**
+ * 为本实例挑一个 SSH 动态转发的本地端口。
+ *
+ * ## 原来这里是一个必坏的写法
+ *
+ * 老代码是 `18100 + (Number(tab.index) || 1)`，而 `tab.index` **从来没有
+ * 被赋值过**（全文件只有这一处读它）。于是每一项都落进 `|| 1`，端口恒为
+ * 18101：
+ *
+ *   · 同一个进程里开第二个 SSH 代理窗口 → 抢同一个端口，第二个必然绑不上；
+ *   · 多开时每个进程的序号都从头算 → 进程 A 和进程 B 也抢 18101。
+ *
+ * 而 `ssh -D` 绑不上端口时只会写 stderr 然后退出，而这里 `stdio: 'ignore'`
+ * 又把 stderr 丢了 —— 用户看到的是"代理设好了，但页面打不开任何网页"。
+ * 静默失效，最难查。
+ *
+ * ## 新算法
+ *
+ * 用**槽位**（instanceSlot 已经给每个进程分配了独占槽位）做高位，
+ * 进程内序号做低位，两者组合出互不冲突的端口段：
+ *
+ *   槽位 1，第 1 个 → 18300 + 1*10 + 1 = 18311
+ *   槽位 1，第 2 个 → 18321
+ *   槽位 2，第 1 个 → 18411
+ *
+ * 槽位 1..20、序号 1..9 → 18311..19191，全部落在 IANA 动态/私有端口段内，
+ * 与 Chromium 的临时端口（通常 49152+）也不重叠。
+ *
+ * @param {number|string} slot  当前实例槽位
+ * @param {number} ordinal      本进程内第几个走 SSH 的标签页
+ */
+function sshTunnelPort(slot, ordinal) {
+  // 槽位可能是一次性随机串（抢锁失败时的降级），取它能提取的数字，没有就用 0。
+  const slotNum = Number(String(slot).replace(/[^0-9]/g, '')) || 0
+  // 别再给槽位封顶：`Math.min(19, ...)` 会让槽位 19 和 20 算出同一个端口，
+  // 而 instanceSlot 的上限本来就是 20 —— 正好在最后一个槽位上撞。
+  const slotBand = Math.max(0, slotNum)
+  const seq = Math.min(9, Math.max(1, Number(ordinal) || 1))
+  return 18300 + slotBand * 100 + seq * 10 + 1
+}
+
+/** 本进程内已分配出去的 SSH 端口，避免同进程内多个 tab 撞号。 */
+const sshPortsInUse = new Set()
+
+/**
+ * 挑一个空闲端口：从基准开始往后试，直到找到没被本进程占用、
+ * 且当前没有别的进程在监听的端口。
+ */
+function pickSshPort(tab) {
+  const base = sshTunnelPort(currentSlot(), (tab && tab.sshOrdinal) || 1)
+  for (let offset = 0; offset < 40; offset += 10) {
+    const candidate = base + offset
+    if (candidate > 65535) break
+    if (sshPortsInUse.has(candidate)) continue
+    sshPortsInUse.add(candidate)
+    return candidate
+  }
+  // 全撞完了：退回让操作系统挑（传端口 0 时 ssh 会自己选一个，但我们拿不到）。
+  // 这里宁可给一个高位端口也不再退到 18101 那个必撞的值。
+  const fallback = 18300 + (Date.now() % 500) * 10 + 1
+  sshPortsInUse.add(fallback)
+  return fallback
+}
+
 function startSshTunnel(tab) {
   stopSshTunnel(tab)
   const settings = tab.settings || {}
@@ -2040,7 +2327,11 @@ function startSshTunnel(tab) {
   const port = Number(settings.proxyPort || parsed.port) || 22
   const validHost = /^[a-zA-Z0-9](?:[a-zA-Z0-9.-]{0,178}[a-zA-Z0-9])?$/.test(host) || /^[0-9a-fA-F:]+$/.test(host)
   if (!validHost || !/^[a-zA-Z0-9._-]{1,64}$/.test(user) || port < 1 || port > 65535) return Promise.resolve()
-  const local = 18100 + (Number(tab.index) || 1)
+
+  // 本进程内给每个 tab 分配一个稳定的序号（只影响端口，不影响分区）。
+  if (!tab.sshOrdinal) tab.sshOrdinal = sshPortsInUse.size + 1
+  const local = pickSshPort(tab)
+  tab.sshPort = local
   settings.proxyLocal = '127.0.0.1:' + local
   const child = spawn('ssh', [
     '-N',
@@ -2049,17 +2340,71 @@ function startSshTunnel(tab) {
     '-o', 'BatchMode=yes',
     '-o', 'StrictHostKeyChecking=accept-new',
     '-o', 'ServerAliveInterval=30',
+    '-o', 'ExitOnForwardFailure=yes',
     '-l', user,
     '--', host
-  ], { stdio: 'ignore' })
+  ], { stdio: ['ignore', 'ignore', 'pipe'] })
   tab.sshProc = child
-  child.on('error', () => {
+
+  // stderr 必须接住：`ssh -D` 绑不上端口时只会往 stderr 说一句然后退出，
+  // 而 `stdio: 'ignore'` 会把它扔掉 —— 用户看到的就是"代理设好了但打不开网页"，
+  // 没有任何线索。接住它才能把真实原因写进日志。
+  let stderrTail = ''
+  if (child.stderr) {
+    child.stderr.on('data', chunk => {
+      stderrTail = (stderrTail + String(chunk)).slice(-600)
+    })
+  }
+
+  child.on('error', (err) => {
     if (tab.sshProc === child) tab.sshProc = null
+    if (clientLog) clientLog.warn('ssh-tunnel', '实例 ' + tab.id + ' 端口 ' + local + ' 启动失败: ' + (err && err.message))
   })
-  child.on('exit', () => {
+  child.on('exit', (code) => {
     if (tab.sshProc === child) tab.sshProc = null
+    sshPortsInUse.delete(local)
+    // code 0 是我们自己 kill 的（stopSshTunnel），不算异常。
+    if (code !== 0 && code !== null && clientLog) {
+      clientLog.warn('ssh-tunnel', '实例 ' + tab.id + ' 端口 ' + local + ' 退出 code=' + code +
+        ' stderr=' + stderrTail.trim().split('\n').slice(-2).join(' | '))
+    }
   })
-  return new Promise(resolve => setTimeout(resolve, 700))
+
+  // 等它把本地端口真正监听起来。
+  //
+  // 原来是死等 700ms 就 resolve —— 端口冲突 / 认证失败 / 主机不可达时，
+  // ssh 早就退出了，这里却照样当成功，于是 session 被写成一个指向
+  // **没有任何东西在监听**的本地端口，整条代理链路静默失效。
+  return waitForLocalPort(local, 2500).then(ok => {
+    if (!ok && clientLog) {
+      clientLog.warn('ssh-tunnel', '实例 ' + tab.id + ' 端口 ' + local + ' 2.5 秒内未监听' +
+        (stderrTail ? '，ssh 输出: ' + stderrTail.trim().split('\n').slice(-2).join(' | ') : ''))
+    }
+  })
+}
+
+/** 轮询直到本机端口可连接，或超时。 */
+function waitForLocalPort(port, timeoutMs) {
+  const net = require('node:net')
+  const deadline = Date.now() + timeoutMs
+  return new Promise(resolve => {
+    const attempt = () => {
+      const socket = net.connect({ host: '127.0.0.1', port: port })
+      let settled = false
+      const finish = ok => {
+        if (settled) return
+        settled = true
+        try { socket.destroy() } catch (e) {}
+        if (ok) return resolve(true)
+        if (Date.now() >= deadline) return resolve(false)
+        setTimeout(attempt, 120)
+      }
+      socket.setTimeout(400, () => finish(false))
+      socket.on('connect', () => finish(true))
+      socket.on('error', () => finish(false))
+    }
+    attempt()
+  })
 }
 
 // ── 带认证 SOCKS5 的本地中继生命周期 ──────────────────────────────────
@@ -2332,9 +2677,25 @@ function startTabLoad(tab) {
   if (!tab || !tab.view || !tab.view.webContents || tab.view.webContents.isDestroyed()) return
   // 新建线路 / 重启恢复走这里；修改已存在线路的代理走 updateTabSettings。
   // 两条路径都必须经过 applyTabProxy，否则又会退回"改了不生效"的老缺陷。
-  applyTabProxy(tab, tabProxyDeps()).finally(() => {
+  //
+  // ★ 代理没应用成功就绝不能继续 loadURL ★
+  //
+  // 这里原来是 `applyTabProxy(...).finally(() => { ...loadURL... })`，
+  // 没有 catch。applyTabProxy 抛错时（最典型：带认证的 SOCKS5 但本地中继
+  // 起不来，见 proxy-settings.js 里那句"绝不退回直连"）：
+  //
+  //   1. `.finally` 的回调照样执行 → 页面被 loadURL 打开；
+  //   2. 此时 session 上根本没有代理规则 → **走的是直连**；
+  //   3. 同时这条链的 rejection 没人接 → unhandledRejection。
+  //
+  // 用户的原始意图是"这个窗口必须走代理"，结果变成了"用真实 IP 直连"，
+  // 而且界面上看不出任何区别。proxy-settings.js 里守住的"绝不静默换出口"，
+  // 在这里被 finally 绕过去了。
+  //
+  // 改成 then/catch 两路：成功才继续装载，失败就把窗口画成错误页。
+  applyTabProxy(tab, tabProxyDeps()).then(() => {
     // 扩展承载的平台（LINE）：扩展必须先装进该分区，否则 chrome-extension:// 页面打不开。
-    ensurePlatformExtension(tab).catch(() => {}).then(() => {
+    return ensurePlatformExtension(tab).catch(() => {}).then(() => {
       if (!tab.view || !tab.view.webContents || tab.view.webContents.isDestroyed()) return
       // ★ 加载失败必须有兜底 ★
       //
@@ -2355,6 +2716,14 @@ function startTabLoad(tab) {
         })
       }
     })
+  }).catch(err => {
+    // 代理没装上。**不要** loadURL —— 那等于用真实出口访问。
+    const msg = (err && err.message) || String(err || '代理未能应用')
+    if (clientLog) {
+      clientLog.error('proxy', '实例 ' + tab.id + ' 代理应用失败，已阻止页面加载：' + msg)
+    }
+    // 用错误页把原因摆到用户眼前，并给他"重试"的路。
+    paintLoadError(tab, -102, '代理未能生效：' + msg + '（未加载页面，以免用真实网络出口访问）')
   })
 }
 
@@ -2855,14 +3224,25 @@ const ipcReg = require('./src/ipc/registrar').createIpcRegistrar({
 async function loginWithCredentials(username, password) {
   const previousCookies = cookieJar
   cookieJar = {}
-  const data = await api('/client/login', {
-    method: 'POST',
-    form: {
-      username: username,
-      password: password,
-      deviceId: deviceId()
-    }
-  })
+  let data
+  try {
+    data = await api('/client/login', {
+      method: 'POST',
+      form: {
+        username: username,
+        password: password,
+        deviceId: deviceId()
+      }
+    })
+  } catch (err) {
+    // api() 抛错（断网、超时、服务端回非 JSON）时，下面那个 `!data.success`
+    // 分支根本走不到 —— 异常直接穿透出去，cookieJar 永远停在 {}。
+    // 后果是：用户本来登着，点一次"登录"撞上网抖，当场被踢成未登录，
+    // 而且这一次请求的 cookie 已经清空了，连重试都带着空 jar 去打。
+    // 所以必须在这里把旧 cookie 放回去，再把原始错误原样抛给上层展示。
+    cookieJar = previousCookies
+    throw err
+  }
   if (!data || !data.success) {
     cookieJar = previousCookies
     return data
@@ -2930,7 +3310,13 @@ require('./src/ipc/tabs').registerTabsIpc({
     saveOpenApps,
     updateTabSettings,
     layoutViews,
-    relaunchAndExit: () => { app.relaunch(); app.exit(0) }
+    // ★ 不能直接 app.exit() ★ —— 它会**跳过 before-quit**，于是 Cookie / open-apps
+    // 全都不落盘。用户点「重启生效」就等于强制丢失所有平台登录态。
+    // 改成 app.quit()，让退出流程跑完（含 Cookie 落盘）再重启。
+    relaunchAndExit: () => {
+      app.relaunch()
+      app.quit()
+    }
   },
   env: { sealSettings, stripProxyFields, proxySettingsOf }
 })
@@ -3138,10 +3524,17 @@ app.whenReady().then(() => {
   installApplicationMenu()
   // 托盘要先于窗口建好：关闭拦截依赖 `tray` 是否为真来决定"隐藏还是退出"。
   createTray()
+  // ★ 启动时补刷一次 Cookie ★
+  //
+  // 上一次若是被强杀 / 断电 / OOM，磁盘上的 Cookie 会落后于用户最后一次操作 ——
+  // 而那时已经没有机会补救了。这里在开窗口之前把已有分区刷一遍，
+  // 把"上次丢的那点尾巴"固定下来（不影响本次登录，纯兜底）。
+  // 不 await：它是后台任务，不能拖慢启动。
+  flushAllCookies({ includeIdle: true }).catch(() => {})
   createWindow()
 })
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
   // 必须在最前面：后面 saveOpenApps / releaseSlot 都可能触发窗口操作，
   // 而那些操作若被 close 拦截当成"隐藏"，退出流程就会被自己吃掉。
   isQuitting = true
@@ -3153,6 +3546,12 @@ app.on('before-quit', () => {
   // 异步存储的队列必须在这里同步落盘：process 退出后定时器不会再有下一次机会，
   // 而 open-apps.json 决定用户下次打开看到哪些窗口。
   flushSyncStores()
+  // ★ 登录态落盘（修复「重启软件掉号」）★
+  //
+  // Chromium 的 Cookie 是异步写盘的，进程没了就等于没登录过。这里必须**同步**
+  // 等到刷完再放行退出 —— before-quit 是同步事件，只能用总线等待，
+  // 超时兜底（1.5s）防止某个分区卡死把退出手感拖成"点了没反应"。
+  try { flushCookiesBeforeQuit(event) } catch (e) {}
   // 关掉所有本地中继：它们是本进程内的监听端口，进程结束前清干净。
   try {
     relayPool.forEach(entry => { try { entry.relay.close() } catch (e) {} })
@@ -3168,6 +3567,9 @@ app.on('before-quit', () => {
   // 把缓冲区里的日志刷到磁盘 —— 正常退出时不能把最后几条丢掉，
   // 而"最后几条"往往正是退出前出的问题。
   try { if (clientLog) clientLog.flush() } catch (e) {}
+  // 幂等键代数是 1 秒节流落盘的；退出前强制刷一次。
+  // 漏了这一步，"刚点完重试就关掉 App → 再打开又是死键" 会重新出现。
+  try { transCacheApi.flushAttempts() } catch (e) {}
 })
 
 app.on('window-all-closed', () => {

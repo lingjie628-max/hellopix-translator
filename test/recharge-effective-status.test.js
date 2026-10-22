@@ -34,6 +34,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 const test = require('node:test')
+const { routeBlock } = require('./helpers/route-source')
 
 const {
   STATUS,
@@ -134,18 +135,24 @@ test('effectiveStatusSql：别名可省（商户端列表用的是无别名查�
 })
 
 test('后台列表：必须下发 effective_status，而不是只给原始 status', () => {
-  const source = fs.readFileSync(path.join(root, 'server/routes/production.js'), 'utf8')
-  const block = source.slice(
-    source.indexOf("router.get('/admin/recharges'"),
-    source.indexOf("router.get('/admin/translate/logs'")
-  )
+  // 路由已拆模块，用括号配平精确切出这一条，不再依赖下一条路由的位置
+  const block = routeBlock('get', '/admin/recharges')
+  assert.ok(block, '找不到 /admin/recharges')
   assert.match(block, /effective_status/, '后台充值列表没有下发 effective_status')
   assert.match(block, /effectiveStatusSql\('r'\)/, '后台列表应复用 effectiveStatusSql，而不是自己写 CASE')
 })
 
 test('后台统计：待支付必须区分「有效」与「惰性过期」', () => {
-  const source = fs.readFileSync(path.join(root, 'server/routes/production.js'), 'utf8')
-  const block = source.slice(source.indexOf("router.get('/admin/stats'"), source.indexOf('async function adminList'))
+  // 口径已搬进 services/dashboard-stats-service.js（路由只剩一行壳），
+  // 所以这里要把服务源码拼上 —— 只读路由壳会永远 red，
+  // 而这种红灯的修法往往变成删断言，守卫就没了。
+  const path = require('node:path')
+  const fs = require('node:fs')
+  const block = [
+    routeBlock('get', '/admin/stats') || '',
+    fs.readFileSync(path.join(__dirname, '..', 'server/services/dashboard-stats-service.js'), 'utf8')
+  ].join('\n')
+  assert.ok(block.trim(), '找不到 /admin/stats 的口径源码')
   assert.match(block, /AS recharge_pending\b/, '缺少有效待支付统计')
   assert.match(block, /AS recharge_pending_stale\b/, '缺少惰性过期统计')
   // 关键：有效待支付必须带时间条件，否则又变成数 status=0。
@@ -158,11 +165,8 @@ test('后台统计：待支付必须区分「有效」与「惰性过期」', ()
 })
 
 test('商户端列表：状态筛选必须按有效状态，不能直接比 status', () => {
-  const source = fs.readFileSync(path.join(root, 'server/routes/production.js'), 'utf8')
-  const block = source.slice(
-    source.indexOf("router.get('/userRecharge/getUserRecharge'"),
-    source.indexOf("router.get('/user/quote'")
-  )
+  const block = routeBlock('get', '/userRecharge/getUserRecharge')
+  assert.ok(block, '找不到 /userRecharge/getUserRecharge')
   assert.doesNotMatch(block, /clauses\.push\(`status=\$\{values\.length\}`\)/,
     '商户端还在直接按 status 筛选：这样筛"已过期"会得到 0 条，"待支付"会混进僵尸单')
   assert.match(block, /effectiveStatusSql\(''\)/, '状态筛选应走有效状态，而不是直接比 status')

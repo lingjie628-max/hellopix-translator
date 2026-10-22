@@ -1679,7 +1679,10 @@ test('0.1.28-图文发送：附件预览面板里打字，按回车必须被拦�
     assert.equal(prevented, true,
       '图文消息的发送必须被拦下（defaultPrevented）——没拦就是原文直接出网')
 
-    await sleep(200)
+    // ★ 不能写死 sleep(200) ★
+    // 全量跑（node --test test/，上千用例并发）时机器负载高，200ms 不够，
+    // 就成了"单跑必过、全量偶发红"的假失败。等到条件成立再断言。
+    await until(() => h.sent.length >= 1, 4000, '图文译文发出')
     assert.equal(h.translateCalls.length, 1, '必须发起 1 次翻译请求')
     assert.equal(h.translateCalls[0].text, '这张图很好看', '翻译的必须是 caption 正文')
     assert.deepEqual(h.sent, ['Image caption translated'], '发出的必须是译文，只能一条')
@@ -1696,7 +1699,8 @@ test('0.1.28-图文发送：焦点在 caption 框时点发送按钮，也必须�
 
     h.clickSendButton()
 
-    await sleep(200)
+    // 等待条件而不是定时长：全量并发时 200ms 可能不够（见上面那条的说明）。
+    await until(() => h.sent.length >= 1, 4000, '点发送后译文发出')
     assert.equal(h.translateCalls.length, 1,
       '点发送按钮也必须触发翻译（否则就是原文出网）')
     assert.equal(h.translateCalls[0].text, '这张图很好看', '翻译的必须是 caption 正文')
@@ -1716,7 +1720,7 @@ test('0.1.28-图文发送：附件场景下"媒体标题框"不该被误当成�
     h.doc.__editor.setModel('这张图很好看')
 
     h.pressEnter()
-    await sleep(200)
+    await until(() => h.translateCalls.length >= 1, 4000, '图文翻译请求发出')
     assert.equal(h.translateCalls.length, 1)
     assert.equal(h.translateCalls[0].text, '这张图很好看',
       '翻译的必须是 caption 框的正文，而不是媒体标题框里的文件名')
@@ -1760,7 +1764,7 @@ test('0.1.28-图文发送：焦点不在 caption 框（用户先打字后附加�
     assert.equal(ev.defaultPrevented, true,
       '即使焦点不在 caption 框，也要按"事件发生在哪个框"来拦 —— 否则原文直接出网')
 
-    await sleep(200)
+    await until(() => h.sent.length >= 1, 4000, '焦点不在 caption 时译文发出')
     assert.equal(h.translateCalls.length, 1, '必须发起 1 次翻译请求')
     assert.equal(h.translateCalls[0].text, '这张图很好看', '翻译的必须是 caption 正文')
     assert.deepEqual(h.sent, ['Image caption translated'], '发出的必须是译文')

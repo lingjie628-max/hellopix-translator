@@ -192,6 +192,12 @@ function createApiNet (deps) {
       causeCode === 'UND_ERR_HEADERS_TIMEOUT' ||
       causeCode === 'UND_ERR_BODY_TIMEOUT' ||
       (err && err.name === 'TimeoutError'))
+    // ★ 名单要与 translation-cache.js 的 isRetryableNetworkError 同步 ★
+    //
+    // 注意 `phase` 与"能不能重试"是**两件事**，不要混：
+    //   · ECONNRESET / EPIPE 发生在连接建立**之后**，phase 如实记 'response'；
+    //   · 但它们仍然可以安全重发 —— 复用同一幂等号时，服务端会返回已存结果，
+    //     不会重复扣费。判死的代价是真机上的"一次抖动就掉消息"。
     const connectLike = isConnectTimeout ||
       ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH',
         'ETIMEDOUT', 'ECONNABORTED'].indexOf(causeCode) >= 0

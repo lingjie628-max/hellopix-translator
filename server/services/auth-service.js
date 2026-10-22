@@ -3,6 +3,19 @@
 const { ApiError } = require('../lib/http')
 const password = require('../lib/password')
 
+/**
+ * 账号是否已到期。`null`/空串 = 无限期。
+ *
+ * 单独抽出来，是因为登录与每次请求都必须用**同一个**口径 ——
+ * 两处各写一遍，迟早一处改成 `<`、另一处还是 `<=`，边界上就会出现
+ * "刚登录说没过期，下一个请求又说过期"的鬼故事。
+ */
+function isExpired(expiresAt) {
+  if (!expiresAt) return false
+  const at = new Date(expiresAt).getTime()
+  return Number.isFinite(at) && at <= Date.now()
+}
+
 class AuthService {
   constructor(repository, security) {
     this.repository = repository
@@ -66,7 +79,7 @@ class AuthService {
       await this.recordLoginFailure(req, username, loginType, 'ACCOUNT_DISABLED')
       throw new ApiError(403, '账号已停用', 'ACCOUNT_DISABLED')
     }
-    if (session.parent.expiresAt && new Date(session.parent.expiresAt).getTime() <= Date.now()) {
+    if (isExpired(session.parent.expiresAt)) {
       await this.recordLoginFailure(req, username, loginType, 'ACCOUNT_EXPIRED')
       throw new ApiError(403, '账号已过期', 'ACCOUNT_EXPIRED')
     }
@@ -140,6 +153,12 @@ class AuthService {
     }
     const session = await this.repository.sessionAccount(securitySession.subjectId)
     if (!session || Number(session.account.status) !== 1 || Number(session.parent.status) !== 1) return null
+    // 到期判断必须放在**每次请求**上，而不是只在登录时做一次。
+    //
+    // 否则「到期」实际效果只是拦住下一次登录：已经登录的客户端把窗口挂着，
+    // 就能一直翻译下去 —— 用户只要不主动退出，到期对他没有任何约束。
+    // 子账号同理：主账号到期/停用，整个团队一起失效，不能只断主号那一条连接。
+    if (isExpired(session.parent.expiresAt)) return null
     return Object.assign({ securitySession }, session)
   }
 
@@ -160,9 +179,16 @@ class AuthService {
           '/site/packages', '/site/faqs', '/site/platforms',
           // 两步验证的第二步：此时还没有会话，靠一次性票据放行
           '/admin/login/totp',
-          '/user/captcha', '/user/emailCode', '/user/register', '/user/forgot',
-          '/order/selectOrderBySerialNumber', '/order/checkSharePwd',
-          '/orderDetails/shareOrder', '/orderDetails/getOrderFans', '/orderDetails/getTodayFansCount'
+          '/user/captcha', '/user/emailCode', '/user/register', '/user/forgot'
+          // 下面这几条曾经在这里，属于**从未实现**的旧项目官网接口：
+          //   /order/selectOrderBySerialNumber、/order/checkSharePwd、
+          //   /orderDetails/shareOrder、/orderDetails/getOrderFans、
+          //   /orderDetails/getTodayFansCount
+          //
+          // 它们全项目没有任何注册点，留在白名单里只有坏处：将来谁去补实现时，
+          // 会看见"它已经在 publicPaths 里了"，于是默认可以不加鉴权 ——
+          // 而按序列号查订单这类接口一旦真的公开，就是订单信息泄露。
+          // 要用就先实现，再按实际鉴权需求决定要不要加回来。
         ])
         if (publicPaths.has(path)) {
           req.pixPublic = true
@@ -177,6 +203,18 @@ class AuthService {
           // 否则 operator/admin 角色永远无法为自己的账号开启 2FA。
           // 这里只是豁免角色判断，登录态校验照旧（上面已经强制过）。
           if (path === '/admin/totp' || path.startsWith('/admin/totp/')) return next()
+          // ★ 角色口径（读代码时别再按旧注释理解）★
+          //
+          // 原注释只写了"仅限超级管理员"，容易被读成"operator 完全只读"。
+          // 真实规则是两层：
+          //
+          //   1. 命中 superOnly 前缀 → 不管什么方法，非 superadmin 一律 403
+          //      （所以 GET /admin/users、/admin/staff、/admin/subs 也挡住）
+          //   2. 除此之外 → 非 superadmin 只放行 GET/HEAD，写操作一律 403
+          //
+          // 也就是：operator 能看大部分列表，但碰不到账号管理与子账号管理，
+          // 更不能写。行为由 test/security.test.js 的
+          // "operator accounts are read-only" 钉住。
           const superOnly = ['/admin/staff', '/admin/users', '/admin/subs', '/admin/translate/grant']
           if (found.admin.role !== 'superadmin' &&
               (superOnly.some(prefix => path.startsWith(prefix)) || !['GET', 'HEAD'].includes(req.method))) {
@@ -200,4 +238,4 @@ class AuthService {
   }
 }
 
-module.exports = { AuthService }
+module.exports = { AuthService, isExpired }

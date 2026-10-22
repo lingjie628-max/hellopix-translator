@@ -18,6 +18,7 @@
  */
 
 const crypto = require('crypto')
+const { PREFIX } = require('../stores/redis-client')
 
 const CODE_TTL_SECONDS = 600          // 10 分钟
 const SEND_INTERVAL_SECONDS = 60      // 同一邮箱 60 秒内只能发一次
@@ -28,11 +29,17 @@ const MAX_ATTEMPTS = 5                // 同一验证码最多试 5 次
 class VerificationService {
   constructor(redis, prefix) {
     this.redis = redis
-    this.prefix = prefix || 'pix'
+    // 前缀必须与 stores/redis-client 同源。
+    //
+    // 这里原先写 `prefix || 'pix'`，而 ioredis 又配了 `keyPrefix: 'pix:'`，
+    // 线上键实际是 `pix:pix:verify:...`。改由 redis-client 统一提供后，
+    // 传入的 prefix 只需是空串即可（它会带尾部冒号，这里去掉再拼）。
+    const base = prefix === undefined ? PREFIX : String(prefix || '')
+    this.prefix = base ? base.replace(/:+$/, '') : ''
   }
 
   key(kind, ...parts) {
-    return [this.prefix, 'verify', kind, ...parts].join(':')
+    return (this.prefix ? this.prefix + ':' : '') + ['verify', kind, ...parts].join(':')
   }
 
   /** 掩码后的邮箱，仅用于日志与提示，避免明文进日志 */

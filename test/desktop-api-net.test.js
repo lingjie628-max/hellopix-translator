@@ -201,12 +201,18 @@ test('响应阶段超时（headers/body）→ NETWORK_TIMEOUT，且不自动重�
   assert.equal(out2.code, 'NETWORK_TIMEOUT', 'AbortSignal 整体超时应归为响应超时')
 })
 
-test('连接建立之后再断（ECONNRESET）→ 阶段是"等响应"，不可重试', () => {
+test('连接建立之后再断（ECONNRESET）→ 阶段如实记"等响应"，但仍可安全重试', () => {
   const api = loadNetApi(fakeUndiciLib())
   const out = api.classifyTransportError(netErr('ECONNRESET', 'TypeError', 'socket hang up'), { path: '/translate/run' })
   assert.equal(out.code, 'NETWORK_UNREACHABLE')
-  assert.equal(out.pix.phase, 'response', '连接已建立过，不该记成连接阶段失败')
-  assert.equal(api.isRetryableNetworkError(out), false, '是否送达不确定，不能自动重发')
+  assert.equal(out.pix.phase, 'response', '连接已建立过，phase 要如实反映，不该谎报成 connect')
+  // phase 与"能不能重试"是两件事。连接后断开确实"是否送达不确定"，
+  // 但重发**复用同一幂等号**，服务端命中已有预留会直接返回结果、不再扣费。
+  // 反过来判死的代价是真机验证过的"一次抖动就掉消息"。
+  assert.equal(api.isRetryableNetworkError(out), true,
+    '未拿到响应时，连接后断开也允许重发一次（幂等号兜底）')
+  // 但拿到响应头之后就绝对不许再来一次
+  assert.equal(api.isRetryableNetworkError({ code: 'NETWORK_UNREACHABLE', pix: Object.assign({}, out.pix, { gotResponse: true }) }), false)
 })
 
 test('失败会被记一条日志，字段齐全且不含任何凭据', () => {
@@ -231,11 +237,15 @@ test('isRetryableNetworkError：只放行"请求还没发出去"的连接类错�
   const api = loadNetApi(fakeUndiciLib())
   const mk = (code, pix) => { const e = new Error('x'); e.code = code; e.pix = pix; return e }
 
-  for (const c of ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'UND_ERR_CONNECT_TIMEOUT']) {
+  for (const c of ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'UND_ERR_CONNECT_TIMEOUT',
+    // 2026-10-21 扩充：这几个也是连接层失败。原先被 classify 归成"连不上"却不重试，
+    // 真机表现就是一次 socket 抖动 → 「网络异常，消息未发送」。
+    // 重发复用同一幂等号，服务端会返回已存结果，不会重复扣费。
+    'ECONNRESET', 'EPIPE', 'UND_ERR_SOCKET', 'UND_ERR_CLOSED']) {
     assert.equal(api.isRetryableNetworkError(mk('NETWORK_UNREACHABLE', { gotResponse: false, causeCode: c })), true, c)
   }
-  assert.equal(api.isRetryableNetworkError(mk('NETWORK_UNREACHABLE', { gotResponse: false, causeCode: 'ECONNRESET' })), false,
-    '连接建立之后才断，是否送达不确定')
+  assert.equal(api.isRetryableNetworkError(mk('NETWORK_UNREACHABLE', { gotResponse: false, causeCode: 'SOME_UNKNOWN_CODE' })), false,
+    '没见过的 code 保守当"不确定"，不重试')
   assert.equal(api.isRetryableNetworkError(mk('NETWORK_UNREACHABLE', { gotResponse: true, causeCode: 'ECONNREFUSED' })), false,
     '已拿到 HTTP 响应，不再是"没发出去"')
   assert.equal(api.isRetryableNetworkError(mk('NETWORK_TIMEOUT', { gotResponse: false, causeCode: 'UND_ERR_HEADERS_TIMEOUT' })), false,

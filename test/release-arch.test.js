@@ -213,6 +213,54 @@ test('siteInfo 按客户端架构下发 macOS 包：arm64 用户拿 arm64，不�
   assert.equal(intel.clientDownloads.windows, 'https://pixfanyi.com/downloads/HelloPix-Setup-0.1.9.exe')
 })
 
+test('siteInfo 的主下载按钮 clientDownloadUrl 也必须跟架构走', async () => {
+  // 被修的缺陷：clientDownloads.macos 已经按架构挑好了，但主按钮
+  // clientDownloadUrl 仍直接读后台设置 `downloads.client_url` —— 那是一条
+  // **不带架构**的静态地址。结果 Intel 用户点主按钮下到 arm64 包，
+  // 而页面上"其他版本"里明明列着正确的 x64。上面那条测试没覆盖到它。
+  const { CoreService } = require('../server/services/core-service')
+  const rows = [
+    { id: 26, release_group: 'macos', arch: 'x64', app: '', version: '1.1.1', url: 'https://pixfanyi.com/downloads/HelloPix-1.1.1-x64.dmg', enabled: true },
+    { id: 25, release_group: 'macos', arch: 'arm64', app: '', version: '1.1.1', url: 'https://pixfanyi.com/downloads/HelloPix-1.1.1-arm64.dmg', enabled: true },
+    { id: 20, release_group: 'windows', arch: 'x64', app: '', version: '1.1.1', url: 'https://pixfanyi.com/downloads/HelloPix-Setup-1.1.1.exe', enabled: true }
+  ]
+  const core = new CoreService({
+    // 后台手填的是 arm64 —— 正是线上那一份配置
+    async settings() { return { 'downloads.client_url': 'https://pixfanyi.com/downloads/HelloPix-1.1.1-arm64.dmg' } },
+    async query(sql) {
+      if (/FROM client_lines/.test(sql)) return { rows: [] }
+      if (/FROM client_releases/.test(sql)) return { rows }
+      throw new Error(`Unexpected SQL: ${sql}`)
+    }
+  }, { get() {}, set() {} }, {})
+
+  const arm = await core.siteInfo({ arch: 'arm64' })
+  const intel = await core.siteInfo({ arch: 'x64' })
+
+  assert.equal(arm.clientDownloadUrl, 'https://pixfanyi.com/downloads/HelloPix-1.1.1-arm64.dmg')
+  assert.equal(intel.clientDownloadUrl, 'https://pixfanyi.com/downloads/HelloPix-1.1.1-x64.dmg',
+    'Intel 用户点主下载按钮不能拿到 arm64 包')
+  // 主按钮与 clientDownloads.app 必须是同一个包，否则页面两处会打架
+  assert.equal(arm.clientDownloadUrl, arm.clientDownloads.app)
+  assert.equal(intel.clientDownloadUrl, intel.clientDownloads.app)
+})
+
+test('siteInfo 没有任何 macOS 登记时，主按钮退回后台手填的静态地址', async () => {
+  // 保留"后台填一个外链、一条记录都不登记"的用法：按钮不能变成空的。
+  const { CoreService } = require('../server/services/core-service')
+  const core = new CoreService({
+    async settings() { return { 'downloads.client_url': 'https://example.com/fallback.dmg' } },
+    async query(sql) {
+      if (/FROM client_lines/.test(sql)) return { rows: [] }
+      if (/FROM client_releases/.test(sql)) return { rows: [] }
+      throw new Error(`Unexpected SQL: ${sql}`)
+    }
+  }, { get() {}, set() {} }, {})
+
+  const info = await core.siteInfo({ arch: 'arm64' })
+  assert.equal(info.clientDownloadUrl, 'https://example.com/fallback.dmg')
+})
+
 test('arch 从请求一路传到 siteInfo —— 路由透传 + 客户端真的带上了 process.arch', () => {
   const route = fs.readFileSync(path.join(root, 'server/routes/production.js'), 'utf8')
   assert.match(route, /core\.siteInfo\(input\(req\)\)/, '路由必须把 input(req) 传给 siteInfo，否则 arch 永远是空的')
