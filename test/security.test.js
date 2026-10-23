@@ -169,6 +169,8 @@ test('admin session cannot be forged and sensitive writes require CSRF', async t
     method: 'POST',
     headers: {
       Cookie: cookieHeader(jar),
+      // 带上二次认证，确保这条测的是 CSRF 而不是被二次认证先拦下
+      'x-pix-reauth': 'admin123',
       'Content-Type': 'application/x-www-form-urlencoded'
     },
     body: new URLSearchParams({ id: '1', nickname: 'Blocked' })
@@ -180,6 +182,7 @@ test('admin session cannot be forged and sensitive writes require CSRF', async t
     headers: {
       Cookie: cookieHeader(jar),
       'X-CSRF-Token': decodeURIComponent(jar.pix_csrf),
+      'x-pix-reauth': 'admin123',
       'Content-Type': 'application/x-www-form-urlencoded'
     },
     body: new URLSearchParams({ id: '1', nickname: '超级管理员' })
@@ -257,6 +260,8 @@ test('translation balance is reserved before concurrent provider work', async t 
     headers: {
       Cookie: cookieHeader(adminJar),
       'X-CSRF-Token': decodeURIComponent(adminJar.pix_csrf),
+      // 改商户额度是高危能力（admin.money.write），要二次认证
+      'x-pix-reauth': 'admin123',
       'Content-Type': 'application/x-www-form-urlencoded'
     },
     body: new URLSearchParams({ id: '10002', versionId: '1', charBalance: '5' })
@@ -293,6 +298,7 @@ test('operator accounts are read-only for admin mutations', async t => {
     headers: {
       Cookie: cookieHeader(adminJar),
       'X-CSRF-Token': decodeURIComponent(adminJar.pix_csrf),
+      'x-pix-reauth': 'admin123',
       'Content-Type': 'application/x-www-form-urlencoded'
     },
     body: new URLSearchParams({
@@ -319,6 +325,9 @@ test('operator accounts are read-only for admin mutations', async t => {
     headers: {
       Cookie: cookieHeader(operatorJar),
       'X-CSRF-Token': decodeURIComponent(operatorJar.pix_csrf),
+      // 带上 operator 自己的密码：如果拿不到 403 而拿到 428，
+      // 说明"角色检查"被"二次认证"抢先了 —— 那 operator 只要补个密码就能过。
+      'x-pix-reauth': 'operator-pass',
       'Content-Type': 'application/x-www-form-urlencoded'
     },
     body: new URLSearchParams({ id: '1', status: '0' })
@@ -346,6 +355,8 @@ test('CSRF token must belong to the session type authorizing the route', async t
     headers: {
       Cookie: cookieHeader(mixedCookies),
       'X-CSRF-Token': decodeURIComponent(user.jar.pix_csrf),
+      // 二次认证用**超管自己的**密码：这样拒绝原因只能是 CSRF，而不是认证
+      'x-pix-reauth': 'admin123',
       'Content-Type': 'application/x-www-form-urlencoded'
     },
     body: new URLSearchParams({ id: '10001', status: '0' })

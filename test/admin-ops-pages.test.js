@@ -151,7 +151,12 @@ test('API 响应禁止浏览器缓存（否则后台会端出旧数据）', () =
 
   // 这个中间件必须挂在路由**之前**，否则响应已经生成，头加不上
   const guardAt = source.indexOf("app.use('/apis', (_req, res, next)")
-  const routerAt = source.indexOf("app.use('/apis', productionRouter(")
+  // 路由挂载可能写成内联 productionRouter({...})，也可能先赋给变量
+  // （2026-10-23 为挂 app.locals.pixRouter 改成了后者）
+  const routerAt = Math.max(
+    source.indexOf("app.use('/apis', productionRouter("),
+    source.indexOf("app.use('/apis', apiRouter)")
+  )
   assert.ok(guardAt > 0 && routerAt > guardAt, 'no-store 中间件必须注册在 productionRouter 之前')
 
   // 静态资源不能被一起关掉缓存 —— 那是应该缓存的

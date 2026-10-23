@@ -43,17 +43,63 @@ function harness ({ admin = null, user = null } = {}) {
   }
   svc.repository = {
     adminById: async () => admin,
-    sessionAccount: async () => user
+    sessionAccount: async () => user,
+    // 二次认证失败时中间件会写审计；桩里吞掉即可
+    audit: async () => {}
   }
+  // 二次认证：桩里按 "pix-pass"/"staff-pass" 明文比对，绕开真实哈希算法。
+  // 这里测的是"中间件会不会要求 reauth"，不是密码学。
+  svc.verify = async (encoded, supplied) => encoded === `hash:${supplied}`
   return svc
+}
+
+/**
+ * 造一个"假装已经挂好路由"的 router。
+ *
+ * 授权现在按能力表 + 路由模板判定，中间件必须能反查到模板，
+ * 所以测试里的 req.app.locals.pixRouter 不能省 —— 它正是生产里
+ * register-production-api.js 挂上去的那个对象。
+ */
+function routerWith (routes) {
+  const router = require('express').Router()
+  for (const [method, path] of routes) router[method.toLowerCase()](path, (_req, _res) => {})
+  return router
+}
+
+/** 测试里反复用到的几条路由，省得每个用例都自己造。 */
+let cachedDefault = null
+function defaultRouter () {
+  if (!cachedDefault) {
+    cachedDefault = routerWith([
+      ['POST', '/admin/staff/save'],
+      ['GET', '/admin/staff'],
+      ['POST', '/admin/users/save'],
+      ['POST', '/admin/users/delete'],
+      ['GET', '/admin/users'],
+      ['GET', '/admin/subs'],
+      ['POST', '/admin/settings/save'],
+      ['GET', '/admin/settings'],
+      ['GET', '/admin/stats'],
+      ['GET', '/admin/recharges'],
+      ['GET', '/admin/translate/logs'],
+      ['GET', '/team/info']
+    ])
+  }
+  return cachedDefault
 }
 
 /**
  * 跑一次中间件。
  * @returns {{status:number|null, next:boolean, type:string}}
  */
-async function run (svc, { path, method = 'POST', headers = {} }) {
-  const req = { path, method, headers, ip: '1.2.3.4' }
+async function run (svc, { path, method = 'POST', headers = {}, router }) {
+  const req = {
+    path,
+    method,
+    headers,
+    ip: '1.2.3.4',
+    app: { locals: { pixRouter: router || defaultRouter() } }
+  }
   const res = {}
   let status = null
   let passed = false
@@ -67,8 +113,8 @@ async function run (svc, { path, method = 'POST', headers = {} }) {
   return { status, next: passed, type: req.pixSessionType || (req.pixUser ? 'user' : '') }
 }
 
-const ADMIN = { id: 1, role: 'superadmin', status: 1, username: 'pix' }
-const OPERATOR = { id: 2, role: 'operator', status: 1, username: 'staff' }
+const ADMIN = { id: 1, role: 'superadmin', status: 1, username: 'pix', passwordHash: 'hash:pix-pass' }
+const OPERATOR = { id: 2, role: 'operator', status: 1, username: 'staff', passwordHash: 'hash:staff-pass' }
 const USER = {
   account: { id: 2, status: 1 },
   parent: { id: 2, status: 1, expiresAt: null }
@@ -117,9 +163,16 @@ test('operator 大写路径读 superOnly 接口 → 403', async () => {
 
 test('超管正常调用（大小写混用都可以）→ 放行', async () => {
   const svc = harness({ admin: ADMIN })
-  for (const path of ['/admin/staff', '/ADMIN/staff', '/admin/users/save']) {
-    const r = await run(svc, { path })
-    assert.equal(r.next, true, `${path} 应当放行超管`)
+  // 高危接口（改账号）要二次认证；读接口不需要
+  const cases = [
+    // 读管理员名单属于高危（名单本身就是攻击目标），要二次认证
+    ['GET', '/admin/staff', { 'x-pix-reauth': 'pix-pass' }],
+    ['GET', '/ADMIN/staff', { 'x-pix-reauth': 'pix-pass' }],
+    ['POST', '/admin/users/save', { 'x-pix-reauth': 'pix-pass' }]
+  ]
+  for (const [method, path, headers] of cases) {
+    const r = await run(svc, { path, method, headers })
+    assert.equal(r.next, true, `${method} ${path} 应当放行超管`)
     assert.equal(r.type, 'admin')
   }
 })
@@ -144,4 +197,53 @@ test('尾斜杠 + 大小写组合也不绕过', async () => {
   const r = await run(svc, { path: '/ADMIN/staff/save/' })
   assert.equal(r.next, false)
   assert.equal(r.status, 401)
+})
+
+// ── 高危能力要求二次认证 ───────────────────────────────────
+//
+// 光有会话不够：会话被偷（共享电脑没退出、XSS 拿到 cookie）时，
+// 攻击者本来可以直接用它建新超管。这里要求带 X-Pix-Reauth。
+
+test('建超管不带二次认证 → 428，不放行', async () => {
+  const svc = harness({ admin: ADMIN })
+  const r = await run(svc, { path: '/admin/staff/save', method: 'POST' })
+  assert.equal(r.next, false)
+  assert.equal(r.status, 428, '应当要求重新验证身份')
+})
+
+test('建超管带错误密码 → 401，不放行', async () => {
+  const svc = harness({ admin: ADMIN })
+  const r = await run(svc, {
+    path: '/admin/staff/save',
+    method: 'POST',
+    headers: { 'x-pix-reauth': 'wrong-password' }
+  })
+  assert.equal(r.next, false)
+  assert.equal(r.status, 401)
+})
+
+test('建超管带正确密码 → 放行', async () => {
+  const svc = harness({ admin: ADMIN })
+  const r = await run(svc, {
+    path: '/admin/staff/save',
+    method: 'POST',
+    headers: { 'x-pix-reauth': 'pix-pass' }
+  })
+  assert.equal(r.next, true)
+})
+
+test('只读的低危接口不要求二次认证（否则运营没法干活）', async () => {
+  const svc = harness({ admin: ADMIN })
+  for (const path of ['/admin/stats', '/admin/recharges', '/admin/translate/logs']) {
+    const r = await run(svc, { path, method: 'GET' })
+    assert.equal(r.next, true, `${path} 不该要求二次认证`)
+  }
+})
+
+test('读客户数据属于高危：即使超管也要二次认证', async () => {
+  const svc = harness({ admin: ADMIN })
+  const router = routerWith([['GET', '/admin/customers']])
+  const r = await run(svc, { path: '/admin/customers', method: 'GET', router })
+  assert.equal(r.next, false)
+  assert.equal(r.status, 428)
 })

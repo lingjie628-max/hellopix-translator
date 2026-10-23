@@ -92,7 +92,10 @@ test('tdesktop posts to the endpoint the server actually mounts', () => {
   const cppPath = posted[1]
 
   const register = read(REGISTER_API)
-  const mount = register.match(/app\.use\('([^']+)', productionRouter/)
+  // 兼容两种写法：直接内联 productionRouter({...})，或先赋给变量再 app.use。
+  // 2026-10-23 为了挂 app.locals.pixRouter 改成了后者，语义没变。
+  const mount = register.match(/app\.use\('([^']+)',\s*productionRouter\(/)
+    || register.match(/app\.use\('([^']+)',\s*apiRouter\)/)
   assert.ok(mount, '找不到 production 路由的挂载前缀')
   const routes = read(PRODUCTION_ROUTES)
   // production.js 里有多个 router.post，要取所有声明的路径，

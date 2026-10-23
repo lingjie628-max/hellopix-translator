@@ -2,6 +2,8 @@
 
 const { ApiError } = require('../lib/http')
 const password = require('../lib/password')
+const { capabilityFor, allows, HIGH_RISK_CAPS } = require('../lib/capabilities')
+const { matchRouteTemplate } = require('../lib/route-match')
 
 /**
  * 账号是否已到期。`null`/空串 = 无限期。
@@ -136,7 +138,41 @@ class AuthService {
       [admin.id, admin.username, req.ip || '', String(req.headers['user-agent'] || '').slice(0, 1000)]
     )
     await this.repository.audit(null, admin, action || '登录超管后台', '', req.ip)
+    // 异地/异常 IP 登录提醒。
+    // 2026-10-23 那次入侵：攻击者建了后门超管后立刻从**同一个 IP** 登录了 19 次，
+    // 但当时系统没有任何地方会"多看一眼"—— 审计日志只是被动记录。
+    // 这里在登录成功后主动比对历史 IP，第一次出现的新 IP 写一条醒目审计，
+    // 让运营在日志里一眼能看见。不阻断登录（出差换网很正常），只做标记。
+    await this.flagNewLoginIp(admin, req.ip)
     return admin
+  }
+
+  /**
+   * 如果这个 IP 是该管理员 30 天内没见过的，写一条"新 IP 登录"审计。
+   *
+   * 只在**成功登录**后调用，且失败不影响登录本身 —— 这是观测，不是门禁。
+   */
+  async flagNewLoginIp(admin, ip) {
+    try {
+      const address = String(ip || '').trim()
+      if (!address) return
+      // IP 是 inet 列，非法值会让 $2::inet 抛错（被下面的 catch 吞掉 = 静默失效）。
+      // 先用 JS 粗筛一遍形如 IP 的串，不合法直接跳过。
+      if (!/^[0-9a-fA-F:.]+$/.test(address)) return
+      const seen = await this.repository.query(
+        `SELECT 1 FROM login_logs
+          WHERE admin_id=$1 AND success=true AND login_ip=$2::inet
+            AND created_at > NOW() - INTERVAL '30 days'
+            AND id <> (SELECT MAX(id) FROM login_logs WHERE admin_id=$1 AND login_type='admin')
+          LIMIT 1`,
+        [admin.id, address]
+      )
+      if (seen && seen.rowCount) return
+      await this.repository.audit(null, admin, '新 IP 登录提醒', `IP ${address}（30 天内首次）`, ip, null)
+    } catch (error) {
+      // 观测失败不能把登录搞挂。记一笔到 stderr，运维能看到。
+      console.error('[auth] 新 IP 检测失败:', error.message)
+    }
   }
 
   async loginAdmin(req, res, data) {
@@ -215,22 +251,55 @@ class AuthService {
           // 否则 operator/admin 角色永远无法为自己的账号开启 2FA。
           // 这里只是豁免角色判断，登录态校验照旧（上面已经强制过）。
           if (lower === '/admin/totp' || lower.startsWith('/admin/totp/')) return next()
-          // ★ 角色口径（读代码时别再按旧注释理解）★
+
+          // ★ 授权：按能力表判定，未声明 = 拒绝 ★
           //
-          // 原注释只写了"仅限超级管理员"，容易被读成"operator 完全只读"。
-          // 真实规则是两层：
+          // 旧实现是 superOnly 前缀数组 + "非 GET 一律 403"。两个毛病：
+          //   1. 授权规则和路由定义分离 —— 新加接口默认落进"GET 放行"，
+          //      于是 19 个管理接口（全站客户名单、审计日志、运维脚本）
+          //      对 operator 完全敞开；
+          //   2. 前缀匹配 —— /admin/staff 与 /admin/staffx 被混为一谈。
           //
-          //   1. 命中 superOnly 前缀 → 不管什么方法，非 superadmin 一律 403
-          //      （所以 GET /admin/users、/admin/staff、/admin/subs 也挡住）
-          //   2. 除此之外 → 非 superadmin 只放行 GET/HEAD，写操作一律 403
-          //
-          // 也就是：operator 能看大部分列表，但碰不到账号管理与子账号管理，
-          // 更不能写。行为由 test/security.test.js 的
-          // "operator accounts are read-only" 钉住。
-          const superOnly = ['/admin/staff', '/admin/users', '/admin/subs', '/admin/translate/grant']
-          if (found.admin.role !== 'superadmin' &&
-              (superOnly.some(prefix => lower.startsWith(prefix)) || !['GET', 'HEAD'].includes(req.method))) {
+          // 新实现见 lib/capabilities.js：每个路由显式声明能力，
+          // 按 **METHOD + 路由模板** 精确查表，查不到就拒绝。
+          const template = matchRouteTemplate(req.app.locals.pixRouter, req.method, path)
+          const cap = template ? capabilityFor(req.method, template) : null
+          if (!cap) {
+            // fail-closed：没登记的路由不许走。这里抛 500 而不是 403，
+            // 因为它不是"用户没权限"，而是**服务端配置缺失** —— 必须
+            // 让它在开发/测试阶段就炸出来，绝不能静默放行。
+            // 兜底再判一次超级管理员，防止将来有人误删能力表后全站可写。
+            if (found.admin.role !== 'superadmin') {
+              throw new ApiError(403, '该操作仅限超级管理员', 'SUPERADMIN_REQUIRED')
+            }
+            const err = new Error(`路由未声明能力: ${req.method} ${template || path}`)
+            err.code = 'CAPABILITY_NOT_DECLARED'
+            throw err
+          }
+          const verdict = allows(found.admin, cap)
+          if (!verdict.allowed) {
             throw new ApiError(403, '该操作仅限超级管理员', 'SUPERADMIN_REQUIRED')
+          }
+          // ★ 高危能力的二次认证 ★
+          //
+          // 建超管、改商户密码、发额度、读客户名单 —— 这些一旦被滥用就是接管平台。
+          // 光靠会话不够：会话被偷（共享电脑没退出、XSS 拿到 cookie）时，
+          // 攻击者本来可以直接用它建一个新超管，把主人踢出去。
+          //
+          // 要求请求头带当前管理员的密码，等于把"你本人现在在这儿"再确认一次。
+          // 用 X-Pix-Reauth 传，不是 query —— query 会进 nginx access log。
+          if (HIGH_RISK_CAPS.has(cap)) {
+            // 用 headers 直接取，不依赖 req.get（Express 5 的 req.get 存在，
+            // 但测试桩/中间件复用场景未必有，少一个依赖少一处静默失效）
+            const raw = req.headers || {}
+            const reauth = String(raw['x-pix-reauth'] || '')
+            if (!reauth) {
+              throw new ApiError(428, '该操作需要重新验证身份', 'REAUTH_REQUIRED')
+            }
+            if (!(await this.verify(found.admin.passwordHash, reauth))) {
+              await this.repository.audit(null, found.admin, '二次认证失败', `${req.method} ${path}`, req.ip, null)
+              throw new ApiError(401, '身份验证失败', 'REAUTH_FAILED')
+            }
           }
           return next()
         }

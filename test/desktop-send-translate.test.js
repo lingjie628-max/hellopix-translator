@@ -289,6 +289,28 @@ async function settle (ms) {
 }
 
 /**
+ * 等「这次发送真的落地了」。
+ *
+ * 与 `untilSendFailure` 同一个道理：发送链路里有 `wait(50)` 和沉降轮询，
+ * 并行跑全量时机器一卡，固定等 200ms 就不够了 —— 表现为偶发假红
+ * （2026-10-23 审计时实测 6 轮里红过 1 次）。
+ *
+ * 等的是"发送链路彻底跑完"：要么真的发出去了，要么给出了失败提示。
+ * **注意不能只等 translateCalls 非空** —— 接口刚被调用时还没有 sent，
+ * 那样会立刻返回、断言抢跑（第一版就踩了这个坑，4 条立刻红）。
+ * 所以要求「调用已发生」且「不再有待处理动作」：sent>0 或失败提示出现。
+ *
+ * 真没发出去时照样超时变红，只是多等一会儿并给出明确原因 —— 不放宽断言。
+ */
+async function settleSend (h, timeoutMs) {
+  await until(
+    () => h.sent.length > 0 || !!h.doc.getElementById('pix-send-failure'),
+    timeoutMs == null ? 5000 : timeoutMs,
+    '发送链路没有落地（既没发出去，也没有失败提示）'
+  )
+}
+
+/**
  * 等「失败提示」真的画出来。
  *
  * 不能用固定 `settle(200)`：失败提示是在 `nativeSetComposer()`（原生写入 +
@@ -367,7 +389,7 @@ test('Enter 发送中文 → 只发 1 条英文译文', async () => {
   try {
     h.composer.textContent = '你好，今天下午三点开会'
     assert.equal(h.pressEnter(), true, 'Enter 必须被拦截')
-    await settle()
+    await settleSend(h)
     assert.equal(h.translateCalls.length, 1, '必须恰好调一次翻译接口')
     assert.deepEqual(h.sent, ['Let us meet at 3 PM today'], '对方只该收到一条英文')
     assert.equal(h.composer.textContent, '', '发送之后输入框应当被清空')
@@ -385,7 +407,7 @@ test('英语 → 中文（反向）：只发 1 条中文译文', async () => {
     })
     h.composer.dispatchEvent(ev)
     assert.equal(ev.defaultPrevented, true, 'Enter 必须被拦截')
-    await settle()
+    await settleSend(h)
     assert.equal(h.translateCalls.length, 1, '必须恰好调一次翻译接口')
     assert.equal(h.translateCalls[0].incoming, false, '仍然走的是发送（outgoing）路径')
     assert.deepEqual(h.sent, ['今天下午三点开会'], '对方只该收到一条中文译文')
@@ -398,7 +420,7 @@ test('点击发送按钮与 Enter 结果一致', async () => {
   try {
     h.composer.textContent = '你好，今天下午三点开会'
     assert.equal(h.clickSendButton(), true, '点发送按钮也必须被拦截')
-    await settle()
+    await settleSend(h)
     assert.equal(h.translateCalls.length, 1)
     assert.deepEqual(h.sent, ['Let us meet at 3 PM today'])
   } finally { h.close() }
@@ -411,7 +433,7 @@ test('群聊与私聊的发送路径结果一致', async () => {
     try {
       h.composer.textContent = '你好'
       h.pressEnter()
-      await settle()
+      await settleSend(h)
       outcomes.push({ calls: h.translateCalls.length, sent: h.sent.slice(), trigger: h.translateCalls.map(c => c.trigger) })
     } finally { h.close() }
   }
@@ -534,7 +556,9 @@ test('「重试翻译」成功 → 发译文；再次失败 → 仍然一个字�
     // 重试提示是「粘性」的（不会自己消失），所以要等的是"第二次翻译真的回来了"，
     // 不是"提示又出现了一次"。
     await until(() => h.translateCalls.length === 2, 3000, '重试真的再调一次接口')
-    await settle()
+    // 等到"第二次失败也处理完了"：只等接口被调用不够 —— 响应回来、写回输入框、
+    // 重新画提示都还在后面。并行跑全量时机器一卡，固定 settle() 就会抢跑。
+    await until(() => !!h.doc.getElementById('pix-send-failure'), 5000, '第二次失败提示重新画出来')
     assert.deepEqual(h.sent, [], '重试再失败也不能发原文')
     assert.equal(h.translateCalls.length, 2, '重试必须真的再调一次接口')
     assert.ok(h.doc.getElementById('pix-send-failure'), '仍然要给提示')
@@ -751,7 +775,12 @@ test('并发重复按 Enter 只产生一次请求（占位符硬闸去重）', a
     h.pressEnter()
     h.pressEnter()
     h.pressEnter()
-    await settle(500)
+    // slowMs=200 + 并行负载：固定 settle(500) 会偶发抢跑（实测 6 轮红 1 次）。
+    // 等"翻译真的落地"，然后**再多等一拍**确认没有第二发偷偷跟上来 ——
+    // 去重语义要求"只有一次"，所以必须给重复请求留出暴露的时间窗。
+    await until(() => h.translateCalls.length >= 1, 5000, '第一次翻译发出')
+    await until(() => h.sent.length >= 1, 5000, '译文发送完成')
+    await sleep(400)
     assert.equal(h.translateCalls.length, 1, '翻译进行中重复按 Enter 不能重复计费')
     assert.equal(h.sent.length, 1, '也不能重复发送')
   } finally { h.close() }

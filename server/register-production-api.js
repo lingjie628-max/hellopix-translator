@@ -69,14 +69,18 @@ function registerProductionApi(app, context, options) {
   })
 
   app.use('/apis', deps.security.originGuard)
-  app.use('/apis', productionRouter({
+  const apiRouter = productionRouter({
     repository,
     auth,
     core,
     customers,
     accounts,
     security: deps.security
-  }))
+  })
+  // 鉴权中间件要用它反查"当前请求命中了哪个路由模板"（按能力表判权限）。
+  // 必须在 app.use 之前挂上，否则第一批请求会拿到 undefined。
+  app.locals.pixRouter = apiRouter
+  app.use('/apis', apiRouter)
   app.use('/apis', sendError)
 
   if (!options || options.startReconciliation !== false) {

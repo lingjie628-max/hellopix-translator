@@ -4,6 +4,8 @@ const crypto = require('crypto')
 const verifyCode = require('./verifyCode')
 const translateApi = require('./translateApi')
 const { createSecurity, rateLimit } = require('../server/security')
+const { capabilityFor, allows, HIGH_RISK_CAPS } = require('../server/lib/capabilities')
+const { matchRouteTemplate } = require('../server/lib/route-match')
 const translateMemo = Object.create(null)
 
 function now() {
@@ -734,20 +736,11 @@ module.exports = function registerMock(app, options) {
     '/orderDetails/getTodayFansCount',
     '/orderDetails/jump'
   ])
-  const superadminPrefixes = [
-    '/admin/staff',
-    '/admin/settings',
-    '/admin/engines',
-    '/admin/verify',
-    '/admin/users',
-    '/admin/subs',
-    '/admin/translate/grant',
-    '/admin/versions',
-    '/admin/clients'
-  ]
-
   app.use('/apis', (req, res, next) => {
-    const pathname = String(req.path || '/').replace(/\/+$/, '') || '/'
+    let pathname = String(req.path || '/').replace(/\/+$/, '') || '/'
+    // 大小写归一：Express 路由匹配不区分大小写，鉴权若区分，
+    // /ADMIN/xxx 就会掉进商户分支 —— 这正是 2026-10-23 入侵的入口。
+    pathname = pathname.toLowerCase()
     if (publicApiPaths.has(pathname) || pathname === '/admin/login') {
       req.pixPublic = true
       return next()
@@ -758,15 +751,54 @@ module.exports = function registerMock(app, options) {
         res.status(401).json({ success: false, msg: '超管尚未登录' })
         return
       }
-      if (
-        (admin.role || 'superadmin') !== 'superadmin' &&
-        (
-          superadminPrefixes.some(prefix => pathname.startsWith(prefix)) ||
-          (!['GET', 'HEAD'].includes(req.method) && pathname !== '/admin/logout')
-        )
-      ) {
-        res.status(403).json({ success: false, msg: '该操作仅限超级管理员' })
+      // 两步验证是"每个管理员管自己的账号"，豁免角色判断
+      if (pathname === '/admin/totp' || pathname.startsWith('/admin/totp/')) {
+        req.pixAdmin = admin
+        req.pixSessionType = 'admin'
+        return next()
+      }
+      // ★ 与生产共用同一张能力表（server/lib/capabilities.js）★
+      //
+      // 这里此前有第二套规则：一个 superadminPrefixes 前缀数组 +
+      // "非 GET 一律 403"。生产修了、mock 没修，测试却跑在 mock 上 ——
+      // 等于生产那套新授权从来没被端到端验证过。两套口径必然漂移。
+      //
+      // 注意 mock 的路由是 `app.post('/apis/admin/...')` 这种**带前缀**注册，
+      // 而 app 级中间件里 req.path 已经被 Express 剥掉了 /apis（实测）。
+      // 所以要用 baseUrl + path 拼回完整路径去匹配路由模板。
+      const full = `${req.baseUrl || ''}${req.path || ''}`
+      const template = matchRouteTemplate(req.app, req.method, full)
+      const cap = template ? capabilityFor(req.method, template) : null
+      if (!cap) {
+        // 与生产同一个口径：未登记路由不是"没权限"，是**配置缺失**。
+        // 这里没有 mock 对应实现，回 501 比假装 403 更诚实 ——
+        // 403 会让人误以为权限配置正确，实际是测试打到了一个不存在的接口。
+        if ((admin.role || 'superadmin') !== 'superadmin') {
+          res.status(403).json({ success: false, code: 'SUPERADMIN_REQUIRED', msg: '该操作仅限超级管理员' })
+          return
+        }
+        res.status(501).json({ success: false, code: 'MOCK_ROUTE_MISSING', msg: `mock 未实现: ${req.method} ${full}` })
         return
+      }
+      if (!allows(admin, cap).allowed) {
+        res.status(403).json({ success: false, code: 'SUPERADMIN_REQUIRED', msg: '该操作仅限超级管理员' })
+        return
+      }
+      // ★ 高危能力的二次认证 —— 必须与生产一个口径 ★
+      //
+      // 生产在 auth-service.js 里要求 X-Pix-Reauth。mock 这里如果不同步，
+      // 所有端到端测试都会在"没带 reauth 也 200"的假绿上跑，
+      // 与 2026-10-23 那次"生产修了 mock 没修"是同一个错误。
+      if (HIGH_RISK_CAPS.has(cap)) {
+        const reauth = String((req.headers || {})['x-pix-reauth'] || '')
+        if (!reauth) {
+          res.status(428).json({ success: false, code: 'REAUTH_REQUIRED', msg: '该操作需要重新验证身份' })
+          return
+        }
+        if (!security.verifyPassword(admin, reauth)) {
+          res.status(401).json({ success: false, code: 'REAUTH_FAILED', msg: '身份验证失败' })
+          return
+        }
       }
       req.pixAdmin = admin
       req.pixSessionType = 'admin'
@@ -2465,6 +2497,56 @@ module.exports = function registerMock(app, options) {
     audit(req, '新建超管', query.username)
     okMsg(res, '超管账号已创建')
   })
+
+  // ── 补齐与生产对齐的 admin 路由 ───────────────────────────
+  //
+  // 2026-10-23 审计发现：能力表 52 条 admin 路由，mock 里缺 19 条。
+  // 测试全绿却测不到真实漏洞，就是因为"测试打到的接口根本不存在"。
+  // 这里补成最小可用实现，目的不是业务正确，而是让鉴权链路真的被走到。
+  //
+  // 数据是固定的假数据 —— 客户信息故意用明显的假名，避免被误当真实数据。
+
+  const fakeCustomers = [
+    { id: 1, name: '客户甲', merchantId: 10001, merchant: 'pix', tags: 'VIP', note: '' },
+    { id: 2, name: '客户乙', merchantId: 10002, merchant: 'demo', tags: '', note: '' }
+  ]
+
+  app.get('/apis/admin/customers', (req, res) => {
+    res.json(page(fakeCustomers, q(req)))
+  })
+  app.get('/apis/admin/customers/:id', (req, res) => {
+    const one = fakeCustomers.find(c => String(c.id) === String(req.params.id))
+    if (!one) { res.json({ success: 'error', msg: '客户不存在' }); return }
+    res.json({ success: 'success', obj: one })
+  })
+  app.get('/apis/admin/merge-candidates', (req, res) => res.json(page([], q(req))))
+  app.post('/apis/admin/merge-candidates/:id/resolve', (req, res) => okMsg(res, '已处理'))
+  app.get('/apis/admin/collisions', (req, res) => res.json(page([], q(req))))
+  app.get('/apis/admin/collision-settings', (req, res) => res.json({ success: 'success', obj: { window: 30 } }))
+  app.put('/apis/admin/collision-settings', (req, res) => okMsg(res, '已保存'))
+
+  app.post('/apis/admin/users/delete', (req, res) => okMsg(res, '已删除'))
+  app.post('/apis/admin/users/reclaim', (req, res) => okMsg(res, '已回收'))
+
+  app.get('/apis/admin/recharge-exceptions', (req, res) => res.json(page([], q(req))))
+  app.post('/apis/admin/recharge-exceptions/resolve', (req, res) => okMsg(res, '已处理'))
+
+  // 邮件配置：故意放一个明显的假地址，顺便验证脱敏不会漏
+  let mailConfig = { host: 'smtp.example.com', port: 465, user: 'alert@example.com', alertTo: 'owner@example.com', pass: 'secret' }
+  app.get('/apis/admin/mail', (req, res) => res.json({ success: 'success', obj: Object.assign({}, mailConfig, { pass: mailConfig.pass ? '******' : '' }) }))
+  app.post('/apis/admin/mail', (req, res) => {
+    mailConfig = Object.assign(mailConfig, q(req))
+    okMsg(res, '已保存')
+  })
+  app.post('/apis/admin/mail/test', (req, res) => okMsg(res, '测试邮件已发送'))
+
+  // 两步验证（self 能力，任何管理员都能操作自己的）
+  const totpState = Object.create(null)
+  app.get('/apis/admin/totp', (req, res) => res.json({ success: 'success', obj: { enabled: Boolean(totpState[req.pixAdmin && req.pixAdmin.id]) } }))
+  app.post('/apis/admin/totp/setup', (req, res) => res.json({ success: 'success', obj: { secret: 'JBSWY3DPEHPK3PXP' } }))
+  app.post('/apis/admin/totp/enable', (req, res) => { if (req.pixAdmin) totpState[req.pixAdmin.id] = true; okMsg(res, '已开启') })
+  app.post('/apis/admin/totp/disable', (req, res) => { if (req.pixAdmin) totpState[req.pixAdmin.id] = false; okMsg(res, '已关闭') })
+  app.post('/apis/admin/totp/recovery', (req, res) => res.json(page(['AAAA-BBBB', 'CCCC-DDDD'], q(req))))
 
   app.use('/apis', (req, res) => {
     res.status(404).json({ success: false, msg: '接口不存在' })
