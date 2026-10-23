@@ -84,18 +84,43 @@ curl -s -o /dev/null -w '%{http_code}\n' http://169.254.169.254/latest/meta-data
 
 **还没做的（建议）**：
 
-- 后台**不对外暴露公网入口**。用 VPN / 堡垒机 / Cloudflare Access，或者至少
-  在 Nginx 层对 `/apis/admin/` 加 IP 白名单：
+- 后台**不对外暴露公网入口**。用 VPN / 堡垒机 / Cloudflare Access，或者至少在
+  Nginx 层对 `/apis/admin/` 加 IP 白名单。
 
-```nginx
-location /apis/admin/ {
-    allow 1.2.3.4;      # 办公室固定 IP
-    allow 10.0.0.0/8;   # 内网 / VPN 段
-    deny all;
-    proxy_pass http://127.0.0.1:3000;
-    # ... 其余 proxy_set_header 保持与主 location 一致
-}
+仓库里已经把这套写好，**默认关闭**，建目录才启用：
+
+```bash
+sudo mkdir -p /etc/nginx/pix-admin-allow
+sudo cp deploy/nginx/admin-allowlist.conf.example \
+        /etc/nginx/pix-admin-allow/admin-allowlist.conf
+sudo vi /etc/nginx/pix-admin-allow/admin-allowlist.conf   # 填你自己的出口 IP
+sudo nginx -t && sudo systemctl reload nginx
 ```
+
+关掉（立刻回到全放行）：
+
+```bash
+sudo rm -rf /etc/nginx/pix-admin-allow && sudo nginx -t && sudo systemctl reload nginx
+```
+
+实测行为（用真 nginx 跑过，不是看文档猜的）：
+
+| 场景 | 结果 |
+|---|---|
+| 白名单目录不存在 | `nginx -t` 通过，后台接口 200 —— **不建就完全不影响线上** |
+| 目录存在、IP 不在名单 | 后台接口 403，其它接口不受影响 |
+| `/apis/ADMIN/...` 大写 | 403（nginx location 大小写不敏感） |
+| `/apis/admin%2f...`、`/apis/./admin/`、`/apis/admin/../admin/` | 403（nginx 先规范化） |
+| `/apis/admin`（无尾斜杠） | 301 → `/apis/admin/` → 403，不绕过 |
+
+两个设计细节，别改坏：
+
+1. 主配置用的是 `include /etc/nginx/pix-admin-allow/*.conf`（**通配符**）。
+   实测：通配符匹配不到文件时 nginx 当空操作；而 `include` 一个**具名**文件
+   不存在会 `[emerg]` 直接起不来。通配符是"不建就不影响"的前提。
+2. 目录必须是**专用**的。通配符会把目录里所有 `.conf` 都拼进 location，
+   实测过 `snippets/*.conf` 会把别人放的 `add_header` 也串进来。所以别往
+   `pix-admin-allow/` 里塞白名单以外的东西。
 
 这一条能挡住"会话被偷"之后的所有后台操作 —— 比任何应用层鉴权都直接。
 
@@ -128,8 +153,7 @@ curl -H 'X-Forwarded-For: 1.2.3.4' https://<你的域名>/apis/site/info
 | 新建 / 修改超管账号 | 攻击者干的第一件事 |
 | 同一账号连续登录失败 ≥ 5 次 | 暴力破解 |
 | 会话从一个网段跳到另一个网段 | 会话被偷（现在会直接作废，但要看得到） |
-| `/admin/*` 报错 `CAPABILITY_NOT_DECLARED` | fail-closed 兜住了一次未登记路由（说明有人加路由忘了登记能力，或被探测到不存在的能力） |
-| 新的登录 IP 首次出现 | 已在 `auth-service` 里做了审计，确保接上告警 |
+| `/admin/*` 报错 `CAPABILITY_NOT_DECLARED` | fail-closed 兜住了一次未登记路由（说明有人加路由忘了登记能力，或被探测到不存在的能力） || 新的登录 IP 首次出现 | 已在 `auth-service` 里做了审计，确保接上告警 |
 | 出站请求被 SSRF 拦截（`SSRF_BLOCKED`） | 说明真的有人在打 SSRF |
 | 二次认证失败 | 有人拿到了会话但没拿到密码 |
 

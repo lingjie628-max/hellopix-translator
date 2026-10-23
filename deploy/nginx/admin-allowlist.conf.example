@@ -1,0 +1,57 @@
+# 后台入口 IP 白名单（可选，默认关闭）
+#
+# ## 为什么单独一个文件
+#
+# 主配置 deploy/nginx/hello-pix.conf 是**版本控制的模板**，每个部署改的是
+# server_name / 证书路径这类少量值。IP 白名单恰恰是每台机器都不一样的东西
+# （办公室出口 IP 会变、VPN 段各不相同），塞进模板里会导致：
+#
+#   · 每次同步模板都要手工合并，早晚被覆盖
+#   · 别人 clone 下来跑起来，发现后台打不开，还不知道为什么
+#
+# 所以拆出来：**目录不存在 = 不启用白名单**，行为与原来完全一致。
+# 想让后台只对特定网段开放，就在服务器上建这个目录和文件，然后 reload。
+#
+# ## 用法
+#
+#   sudo mkdir -p /etc/nginx/pix-admin-allow
+#   sudo cp deploy/nginx/admin-allowlist.conf.example \
+#           /etc/nginx/pix-admin-allow/admin-allowlist.conf
+#   sudo vi /etc/nginx/pix-admin-allow/admin-allowlist.conf   # 填你自己的 IP
+#   sudo nginx -t && sudo systemctl reload nginx
+#
+# 关掉（回到全放行）：
+#
+#   sudo rm -rf /etc/nginx/pix-admin-allow
+#   sudo nginx -t && sudo systemctl reload nginx
+#
+# ⚠️ 这个目录**只放白名单**。主配置用的是 `include /etc/nginx/pix-admin-allow/*.conf`，
+#    目录里任何 .conf 都会被原样拼进 location —— 别往里放 add_header 之类的东西。
+#
+# ## ⚠️ 上线前必须确认的事
+#
+# 1. **你自己的出口 IP 一定要在列表里**。否则 reload 的瞬间你自己也进不去。
+#    先在服务器上 `curl ifconfig.me` 拿公网 IP，或用浏览器的 whatismyip 查。
+# 2. **动态 IP（家宽 / 4G）不要用**。运营商一换段你就被锁在外面，
+#    只能在服务器上改配置救回来。这类情况改用 VPN 或 Cloudflare Access。
+# 3. 白名单只挡 `/apis/admin/`。后台**页面**（/index.html、/admin 路由）
+#    仍然是公开可访问的 —— 它能打开登录页，但没有 API 权限什么也做不了。
+#    如果连登录页都不想暴露，把下面 location 里的 `/apis/admin/`
+#    改成 `~ ^/(apis/admin/|admin)` 即可（会同时挡页面，注意 SPA 回退）。
+#
+# ## 为什么值得做
+#
+# 应用层的鉴权（能力表、fail-closed、二次认证、TOTP）防的是"没有权限"。
+# 这一层防的是"**有权限但不是你**" —— 会话被偷、密码泄露、CSP 之外的
+# 未知 XSS、浏览器插件劫持 cookie，这些情况下应用层已经认定他是合法超管了，
+# 只有网络位置还能说话。这是最后一道真正独立的防线。
+
+# 允许的地址。写你自己 + 内网/VPN 段。
+# 注意 allow 是"命中即放行"，顺序有意义，deny all 必须放最后。
+allow 127.0.0.1;          # 本机（运维脚本 / 健康检查）
+allow ::1;
+allow 10.0.0.0/8;         # 内网 / VPN（按你的实际网段改）
+allow 172.16.0.0/12;
+allow 192.168.0.0/16;
+# allow 203.0.113.45;     # ← 你的固定公网出口 IP，换成真的
+deny all;
