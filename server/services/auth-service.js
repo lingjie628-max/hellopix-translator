@@ -165,7 +165,19 @@ class AuthService {
   middleware() {
     return async (req, res, next) => {
       try {
+        // ★ 鉴权必须按**小写**判断，与 Express 路由匹配口径一致 ★
+        //
+        // 2026-10-23 真实入侵：Express 路由默认大小写不敏感，`/ADMIN/staff/save`
+        // 照样命中 `/admin/staff/save` 的 handler；但这里原来拿**原始大小写**的
+        // `req.path` 做 startsWith('/admin/')，判不出来，于是落进下面的商户分支。
+        // 攻击者只要注册一个普通商户账号，就能用 `/ADMIN/...` 调超管接口：
+        //   04:33:21 /apis/ADMIN/staff/save → 403（当时用的是 /admin/...）
+        //   04:33:48 /apis/ADMIN/staff/save → 200（改成大写，绕过成功，建了后门超管）
+        // 中间隔了 27 秒，就是在试大小写。
+        //
+        // 大小写只用于**分类**，不改写路径本身 —— 下游按原样处理。
         const path = String(req.path || '').replace(/\/+$/, '') || '/'
+        const lower = path.toLowerCase()
         const publicPaths = new Set([
           '/site/info', '/client/lines', '/login', '/client/login', '/admin/login',
           // 崩溃日志上报：**必须公开**。
@@ -190,11 +202,11 @@ class AuthService {
           // 而按序列号查订单这类接口一旦真的公开，就是订单信息泄露。
           // 要用就先实现，再按实际鉴权需求决定要不要加回来。
         ])
-        if (publicPaths.has(path)) {
+        if (publicPaths.has(lower)) {
           req.pixPublic = true
           return next()
         }
-        if (path.startsWith('/admin/')) {
+        if (lower.startsWith('/admin/')) {
           const found = await this.resolve(req, 'admin')
           if (!found) throw new ApiError(401, '超管尚未登录', 'ADMIN_AUTH_REQUIRED')
           req.pixAdmin = found.admin
@@ -202,7 +214,7 @@ class AuthService {
           // 两步验证是"每个管理员管自己的账号"，不该被角色限制挡住 ——
           // 否则 operator/admin 角色永远无法为自己的账号开启 2FA。
           // 这里只是豁免角色判断，登录态校验照旧（上面已经强制过）。
-          if (path === '/admin/totp' || path.startsWith('/admin/totp/')) return next()
+          if (lower === '/admin/totp' || lower.startsWith('/admin/totp/')) return next()
           // ★ 角色口径（读代码时别再按旧注释理解）★
           //
           // 原注释只写了"仅限超级管理员"，容易被读成"operator 完全只读"。
@@ -217,14 +229,14 @@ class AuthService {
           // "operator accounts are read-only" 钉住。
           const superOnly = ['/admin/staff', '/admin/users', '/admin/subs', '/admin/translate/grant']
           if (found.admin.role !== 'superadmin' &&
-              (superOnly.some(prefix => path.startsWith(prefix)) || !['GET', 'HEAD'].includes(req.method))) {
+              (superOnly.some(prefix => lower.startsWith(prefix)) || !['GET', 'HEAD'].includes(req.method))) {
             throw new ApiError(403, '该操作仅限超级管理员', 'SUPERADMIN_REQUIRED')
           }
           return next()
         }
         const found = await this.resolve(req, 'user')
         if (!found) throw new ApiError(401, '请先登录', 'AUTH_REQUIRED')
-        if ((path.startsWith('/client/') || req.headers['x-pix-device']) &&
+        if ((lower.startsWith('/client/') || req.headers['x-pix-device']) &&
             String(found.securitySession.deviceId || '') !== String(req.headers['x-pix-device'] || '')) {
           throw new ApiError(401, '客户端设备凭证无效', 'DEVICE_MISMATCH')
         }

@@ -41,10 +41,12 @@
           </div>
         </el-form-item>
         <el-form-item label="告警收件地址">
-          <el-input v-model="form.alertTo" placeholder="ops@yourdomain.com" style="width:280px"></el-input>
+          <el-input v-model="form.alertTo" :placeholder="alertToPlaceholder" style="width:280px"></el-input>
           <div class="hint">
             服务异常、备份失败、磁盘告急会发到这里。**不填就没有告警** ——
-            出问题时只能等用户投诉才知道
+            出问题时只能等用户投诉才知道。
+            <br>
+            <b>出于隐私保护，这里只显示打码后的地址。留空保存 = 保持原值不变。</b>
           </div>
         </el-form-item>
         <el-form-item label="发件人名称">
@@ -99,7 +101,9 @@ export default {
       saving: false,
       testing: false,
       testTo: '',
-      testResult: null
+      testResult: null,
+      // 打码后的现有告警地址，只用于 placeholder 提示，不参与提交
+      alertToPlaceholder: 'ops@yourdomain.com'
     }
   },
   mounted() { this.load() },
@@ -107,14 +111,26 @@ export default {
     load() {
       this.getRequest('/admin/mail').then(resp => {
         if (!resp) return
-        Object.assign(this.form, resp.data)
+        // alertTo 服务端返回的是**打码值**（li***@gmail.com），不能当真实地址回填，
+        // 否则管理员改个端口一保存，数据库里存的就变成打码串，告警邮件全部退回。
+        // 打码值只放在 placeholder 里提示"现在配的是谁"，输入框保持空 = 不改。
+        const maskedAlertTo = resp.data.alertTo || ''
+        const { alertTo: _omit, ...rest } = resp.data
+        Object.assign(this.form, rest)
+        this.form.alertTo = ''
+        this.alertToPlaceholder = maskedAlertTo
+          ? `当前：${maskedAlertTo}（留空则不变）`
+          : 'ops@yourdomain.com'
         this.configured = !!resp.data.configured
         this.missing = resp.data.missing || []
       })
     },
     save() {
       this.saving = true
-      this.postRequest('/admin/mail', this.form).then(resp => {
+      // 空字符串在后端表示"保持原值"（见 content.js 的 alertTo 处理）
+      const payload = { ...this.form }
+      if (!payload.alertTo) delete payload.alertTo
+      this.postRequest('/admin/mail', payload).then(resp => {
         if (!resp) return
         this.configured = !!resp.data.configured
         this.$message({ type: 'success', message: '已保存' })

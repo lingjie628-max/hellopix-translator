@@ -81,6 +81,26 @@ function readAlertTo(settings) {
 }
 
 /**
+ * 告警收件地址的打码形式，用于**返回给前端展示**。
+ *
+ * 2026-10-23 入侵复盘：攻击者拿到超管权限后 `GET /admin/mail`，直接读到了
+ * `alertTo: "lingjie628@gmail.com"` —— 那是业主私人邮箱，拿去一搜就是真名。
+ * 前端只需要确认"告警发给谁、配没配"，不需要完整地址。
+ *
+ * `lingjie628@gmail.com` → `li***@gmail.com`
+ * 本地部分只留前两位，域名保留（域名是运营信息，不算隐私）。
+ */
+function maskEmail(address) {
+  const raw = String(address || '').trim()
+  const at = raw.lastIndexOf('@')
+  if (at <= 0) return raw ? '***' : ''
+  const local = raw.slice(0, at)
+  const domain = raw.slice(at)
+  const keep = local.length <= 2 ? 1 : 2
+  return local.slice(0, keep) + '***' + domain
+}
+
+/**
  * SMTP 错误码 → 人话。
  *
  * nodemailer 把底层错误原样抛出来，`err.message` 里可能带着服务器应答，
@@ -276,7 +296,7 @@ class Mailer {
 }
 
 module.exports = {
-  Mailer, readConfig, readAlertTo, esc,
+  Mailer, readConfig, readAlertTo, maskEmail, esc,
   describeSmtpError, validEmail, setting, objectSetting,
   SMTP_ERROR_REASONS
 }

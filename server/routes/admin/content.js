@@ -8,7 +8,7 @@
  */
 
 const { asyncRoute, input, pagination, ApiError } = require('../../lib/http')
-const { objectSetting, readAlertTo } = require('../../lib/mailer')
+const { objectSetting, readAlertTo, maskEmail } = require('../../lib/mailer')
 
 function registerAdminContent(router, ctx) {
   const { repo, customers, accounts } = ctx
@@ -27,7 +27,9 @@ function registerAdminContent(router, ctx) {
       pass: smtp.pass ? '********' : '',
       from: smtp.from || '',
       fromName: smtp.fromName || 'Hello Pix',
-      alertTo: readAlertTo(settings),
+      // 只返回打码地址：前端只需要确认"告警发给谁"，不需要完整邮箱。
+      // 完整地址永远是业主的私人邮箱，泄露一次就等于泄露真名。
+      alertTo: maskEmail(readAlertTo(settings)),
       configured: cfg.configured,
       missing: cfg.missing
     })
@@ -57,12 +59,24 @@ function registerAdminContent(router, ctx) {
         ['mail.smtp', JSON.stringify(smtp), 'SMTP 服务器配置'], client
       )
       // 告警收件地址单独存：它可以在 SMTP 还没配好之前就先填上，
-      // 而巡检脚本正是靠它把"服务挂了"这类消息发出去
-      await repo.query(
-        `INSERT INTO app_settings(key,value,description) VALUES($1,$2::jsonb,$3)
-         ON CONFLICT (key) DO UPDATE SET value=$2::jsonb`,
-        ['mail.alert_to', JSON.stringify(String(data.alertTo || '').trim()), '运维告警收件地址'], client
-      )
+      // 而巡检脚本正是靠它把"服务挂了"这类消息发出去。
+      //
+      // ★ 不传该字段 = 保持原值，不是清空 ★
+      //
+      // 前端现在拿到的是**打码地址**（li***@gmail.com），它不再回填输入框：
+      // 管理员只改端口时，payload 里根本没有 alertTo。原来这里
+      // `String(data.alertTo || '')` 会把它存成空串，告警从此发不出去，
+      // 而且界面上看不出来 —— 只有真出事时才暴露。
+      // 想清空就明确传空串 `""`（前端"留空保持不变"依赖这个区分）。
+      const alertToGiven = data.alertTo !== undefined
+      const alertTo = String(data.alertTo || '').trim()
+      if (alertToGiven) {
+        await repo.query(
+          `INSERT INTO app_settings(key,value,description) VALUES($1,$2::jsonb,$3)
+           ON CONFLICT (key) DO UPDATE SET value=$2::jsonb`,
+          ['mail.alert_to', JSON.stringify(alertTo), '运维告警收件地址'], client
+        )
+      }
       await repo.audit(client, req.pixAdmin, '修改邮件服务配置',
         smtp.host + ' / ' + smtp.from, req.ip, { type: 'settings' })
     })

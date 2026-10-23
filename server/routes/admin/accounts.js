@@ -228,16 +228,36 @@ function registerAdminUsers(router, ctx) {
     if (data.id) {
       const hash = data.password ? await auth.hash(data.password) : null
       const result = await repo.query(
-        'UPDATE admins SET nickname=COALESCE($2,nickname),password_hash=COALESCE($3,password_hash),role=COALESCE($4,role),updated_at=NOW() WHERE id=$1 RETURNING id',
+        'UPDATE admins SET nickname=COALESCE($2,nickname),password_hash=COALESCE($3,password_hash),role=COALESCE($4,role),updated_at=NOW() WHERE id=$1 RETURNING id,username,role',
         [data.id, data.nickname || null, hash, data.role || null]
       )
       if (!result.rows[0]) throw new ApiError(404, '账号不存在', 'ADMIN_NOT_FOUND')
       if (hash) await security.revokeSubject('admin', data.id)
+      // ★ 改管理员账号必须留痕 ★
+      //
+      // 2026-10-23 入侵复盘：攻击者用 /ADMIN/staff/save 建了两个后门超管，
+      // audit_logs 里**一条记录都没有** —— 因为没有写。事后只能靠
+      // admins.created_at 的时间戳反推，差一步就查不出来。
+      //
+      // 这里只记"谁动了谁、改了哪几项"，密码一律不落库。
+      const changed = [
+        data.nickname ? 'nickname' : null,
+        hash ? 'password' : null,
+        data.role ? `role→${data.role}` : null
+      ].filter(Boolean).join(',') || '无变更'
+      await repo.audit(null, req.pixAdmin, '修改超管账号', `${result.rows[0].username}（${changed}）`, req.ip, {
+        type: 'admin', id: Number(data.id)
+      })
     } else {
-      await repo.query(
-        `INSERT INTO admins(username,password_hash,nickname,role) VALUES($1,$2,$3,$4)`,
+      const created = await repo.query(
+        `INSERT INTO admins(username,password_hash,nickname,role) VALUES($1,$2,$3,$4) RETURNING id,username,role`,
         [data.username, await auth.hash(data.password), data.nickname || data.username, data.role || 'operator']
       )
+      const row = created.rows[0]
+      // 新建超管是最高危操作，必须记到最细：新账号、角色、来源 IP。
+      await repo.audit(null, req.pixAdmin, '新建超管账号', `${row.username}（role=${row.role}）`, req.ip, {
+        type: 'admin', id: Number(row.id)
+      })
     }
     ok(res, data.id ? '已更新' : '超管账号已创建')
   }))
