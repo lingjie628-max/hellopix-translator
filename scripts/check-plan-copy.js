@@ -70,6 +70,17 @@ function quotaFromHighlights(highlights) {
   return null
 }
 
+/**
+ * 文案里有没有「不限」字样。
+ *
+ * 不限字符的套餐不能靠"写一个大数字"来表达 —— 客户会拿它比单价，
+ * 而那个数字其实是发放量，比出来的结果毫无意义。所以文案必须是
+ * 「不限字符」这种明确说法，由本函数校验。
+ */
+function hasUnlimitedClaim(highlights) {
+  return (highlights || []).some(raw => /不限|无限|unlimited/i.test(String(raw)))
+}
+
 /** 单位价（每百万字符）。价格或额度缺失返回 null —— 不可能比。 */
 function unitPricePerMillion(price, chars) {
   const p = Number(price)
@@ -144,7 +155,7 @@ async function main() {
   )).rows
 
   const packages = (await pool.query(
-    `SELECT id,title,sort_order,price,included_chars,highlights,clients,catalog_version
+    `SELECT id,title,sort_order,price,included_chars,chars_unlimited,highlights,clients,catalog_version
        FROM packages WHERE active=true ORDER BY sort_order,id`
   )).rows
 
@@ -212,7 +223,22 @@ async function main() {
      * 和渠道声明是同一个病：**卖点与权益对不上，客户是付了钱才发现的**。
      */
     const claimed = quotaFromHighlights(pkg.highlights)
-    if (claimed === null) {
+    if (pkg.chars_unlimited) {
+      // 不限字符的套餐：文案必须写「不限」，不能写一个数字。
+      //
+      // 写数字的话客户会拿它和别的档比单价 —— 而那个"额度"其实是发放量，
+      // 不是承诺上限，比出来的单价毫无意义，还会把阶梯校验带偏。
+      if (!hasUnlimitedClaim(pkg.highlights)) {
+        violations.push({
+          pkg: pkg.title,
+          claim: '字符额度',
+          detail: '这一档是「不限字符」，但卡片文案里没有出现「不限」字样'
+        })
+        console.log('    ✗ 不限套餐的文案里没有「不限」')
+      } else {
+        console.log('    ✓ 文案标注「不限字符」')
+      }
+    } else if (claimed === null) {
       violations.push({
         pkg: pkg.title,
         claim: '字符额度',
@@ -239,6 +265,9 @@ async function main() {
    * 这类错误纯靠人眼看三组数字对不出来，必须机器算了才拦得住。
    */
   const priced = packages
+    // 不限字符的档排除：它的 included_chars 是发放量（5 亿），
+    // 除以价格会得到一个低得离谱的单位价，把整条阶梯判成"断了"。
+    .filter(p => !p.chars_unlimited)
     .map(p => ({ title: p.title, price: Number(p.price), chars: Number(p.included_chars) }))
     .filter(p => unitPricePerMillion(p.price, p.chars) !== null)
     .sort((a, b) => a.price - b.price)

@@ -386,7 +386,7 @@ function productionRouter(context) {
       // 不要写驼峰别名：Postgres 会把未加引号的别名折叠成小写
       // （portUnlimited → portunlimited），mapRow 的下划线转换就接不上了。
       // 直接用原列名，交给 mapRow 统一转成 portLimit / portUnlimited / includedChars。
-      `SELECT code,title,subtitle,price,port_limit,port_unlimited,included_chars,highlights,clients,features
+      `SELECT code,title,subtitle,price,port_limit,port_unlimited,included_chars,chars_unlimited,highlights,clients,features
        FROM packages WHERE active=true ORDER BY sort_order,id`
     )
     res.json({ success: true, rows: mapRows(result.rows) })

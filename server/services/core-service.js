@@ -259,7 +259,10 @@ class CoreService {
       // 直接删掉会让还在读它的老客户端拿到 undefined。等确认无调用方后再摘。
       subQuota: number(pack.subQuota),
       subQuotaAdded: number(pack.subQuota),
-      chars: number(pack.includedChars) * qty
+      chars: number(pack.includedChars) * qty,
+      // 「不限字符」是**展示语义**：前端据此把 "500000000" 显示成「不限」，
+      // 而不是让商户去数九个零。发放量仍然是 chars，扣费路径不受影响。
+      charsUnlimited: Boolean(pack.charsUnlimited)
     }
   }
 

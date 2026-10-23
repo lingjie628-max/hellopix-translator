@@ -217,20 +217,25 @@ export default {
       return String(pack.title || '').replace('Hello Pix ', '')
     },
     displayChars(pack) {
+      // 「不限」要显示成不限。给它填的 5 亿是发放量，不是卖点数字 ——
+      // 印在卡片上客户只会觉得莫名其妙，还会去算一个没有意义的单价。
+      if (pack.charsUnlimited) return '不限'
       const n = Number(pack.chars || 0)
       if (n >= 10000 && n % 10000 === 0) return (n / 10000) + '万'
       return String(n)
     },
     /** 相对入门档的字符倍数（仅整数倍显示），与官网定价卡共用一份算法 */
     multipleOf(pack, index) {
+      if (pack.charsUnlimited) return null
       const base = (this.version || [])[0]
-      if (!base || index === 0) return null
+      if (!base || index === 0 || base.charsUnlimited) return null
       return charsMultiple(base.chars, pack.chars)
     },
     /** 「较基础版省 X%」：基准是套餐列表第 0 项（入门档），自己跟自己比返回 null */
     saveOf(pack, index) {
+      if (pack.charsUnlimited) return null
       const base = (this.version || [])[0]
-      if (!base || index === 0) return null
+      if (!base || index === 0 || base.charsUnlimited) return null
       return savingVsBase(base.price, base.chars, pack.price, pack.chars)
     },
     isCurrent(pack) {

@@ -20,7 +20,10 @@
         <template slot-scope="scope">{{ currencySymbol }} {{ scope.row.price }}</template>
       </el-table-column>
       <el-table-column label="字符" width="100">
-        <template slot-scope="scope">{{ (scope.row.chars || 0) / 10000 }} 万</template>
+        <template slot-scope="scope">
+          <span v-if="scope.row.charsUnlimited" class="unlimited-tag">不限</span>
+          <template v-else>{{ (scope.row.chars || 0) / 10000 }} 万</template>
+        </template>
       </el-table-column>
       <!--
         单位价列：这一列的存在就是为了让"阶梯非单调"自己暴露出来。
@@ -30,7 +33,9 @@
       -->
       <el-table-column label="单位价" width="150">
         <template slot-scope="scope">
-          <span :class="{ 'unit-bad': !unitOk(scope.row) }">{{ unitOf(scope.row) || '—' }}</span>
+          <!-- 不限字符的套餐没有"每百万字多少钱"这回事，硬算出来是误导 -->
+          <span v-if="scope.row.charsUnlimited" class="unit-na">—</span>
+          <span v-else :class="{ 'unit-bad': !unitOk(scope.row) }">{{ unitOf(scope.row) || '—' }}</span>
         </template>
       </el-table-column>
       <el-table-column label="子账号" width="80">
@@ -77,7 +82,21 @@
           <el-input-number v-model="form.price" :min="0" :precision="2" :step="10"></el-input-number>
           <span class="unit-tip">{{ currencyName }}（{{ currencySymbol }}）· 币种在「系统设置 → 价格货币」切换</span>
         </el-form-item>
-        <el-form-item label="字符数"><el-input-number v-model="form.chars" :min="0" :step="150000"></el-input-number></el-form-item>
+        <el-form-item label="字符数">
+          <el-checkbox v-model="form.charsUnlimited" style="margin-right:12px">不限字符</el-checkbox>
+          <!--
+            勾了「不限」仍然要填发放量，但它不再是"承诺上限"：
+            到账的是这个数（够一个人用一辈子），展示上会显示成「不限」。
+            不给它一个具体值的话，扣费路径就得处理"余额是无穷大"，
+            那会给每一次扣费判断加一个特例分支 —— 不值得。
+          -->
+          <el-input-number v-model="form.chars" :min="0" :step="150000"
+                           :disabled="!!form.charsUnlimited"></el-input-number>
+          <div class="unit-tip">
+            勾选「不限字符」时，这里填的是<b>实际发放量</b>（建议 5 亿），
+            客户看到的是「不限」，不会被这个数字限制。
+          </div>
+        </el-form-item>
         <el-form-item label="子账号额度">
           <el-input-number v-model="form.subQuota" :min="0" :step="1"></el-input-number>
           <span class="unit-tip">
@@ -159,6 +178,18 @@ export default {
     })
     this.load()
   },
+  watch: {
+    /**
+     * 勾上「不限字符」时自动填一个发放量。
+     *
+     * 5 亿是刻意选的：一个单人商户按每天翻 10 万字算，能用 13 年。
+     * 它**不是**上限承诺 —— 真有人翻到 5 亿，那说明这个套餐定价
+     * 已经严重不符合实际用量，该重新审价，而不是让系统替他兜着。
+     */
+    'form.charsUnlimited'(val) {
+      if (val && !Number(this.form.chars)) this.form.chars = 500000000
+    }
+  },
   methods: {
     nameOf(id) {
       const item = this.engineList.find(e => e.id === id)
@@ -176,7 +207,14 @@ export default {
      * 与 `npm run check:plan-copy` 的单调性校验是同一个判据。
      */
     unitOk(row) {
+      // 不限字符的套餐排除在阶梯比较之外。
+      //
+      // 它的 included_chars 是"发放量"（5 亿），拿去除价格会得到一个
+      // 低得离谱的单位价 —— 于是比它便宜的那一档会被判成"阶梯断了"，
+      // 整张表飘红。这不是配置错了，是拿错了分母。
+      if (row.charsUnlimited) return true
       const priced = this.rows
+        .filter(r => !r.charsUnlimited)
         .map(r => ({ row: r, unit: unitPricePerMillion(r.price, r.chars), price: Number(r.price) }))
         .filter(x => x.unit !== null)
         .sort((a, b) => a.price - b.price)

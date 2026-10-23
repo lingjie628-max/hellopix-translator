@@ -185,12 +185,16 @@
             <p class="sub">{{ p.subtitle }}</p>
             <div class="amount"><em>{{ currencySymbol }}</em>{{ formatPrice(p.price) }}</div>
             <p class="quota">
-              含 {{ formatChars(p.includedChars) }}字符
+              <template v-if="p.charsUnlimited">不 限 字 符</template>
+              <template v-else>含 {{ formatChars(p.includedChars) }}字符</template>
               <!--
                 倍数角标，替代此前那一行批发单价。
                 单价是**批发口径**，写出来等于把加价倍数摊给客户看，
                 也让产品像"一层 API 转售"。改成比"拿到多少"：
                 同样一眼读出阶梯，但不替客户做那一步除法。
+
+                不限字符的档不出倍数也不出"省 X%"：分母是无穷，
+                任何比值都没有意义，硬算出来只会是 Infinity 或一串乱数。
               -->
               <em class="mult" v-if="multipleOf(p, i)">基础版 {{ multipleOf(p, i) }} 倍</em>
             </p>
@@ -439,14 +443,17 @@ export default {
     },
     /** 相对入门档的字符倍数（仅整数倍显示），与商户充值页共用一份算法 */
     multipleOf(pkg, index) {
+      // 不限字符的档没有"几倍"可言 —— 分母是无穷
+      if (pkg.charsUnlimited) return null
       const base = (this.packages || [])[0]
-      if (!base || index === 0) return null
+      if (!base || index === 0 || base.charsUnlimited) return null
       return charsMultiple(base.includedChars, pkg.includedChars)
     },
     /** 「较基础版省 X%」—— 折扣口径，不涉及单位价 */
     saveOf(pkg, index) {
+      if (pkg.charsUnlimited) return null
       const base = (this.packages || [])[0]
-      if (!base || index === 0) return null
+      if (!base || index === 0 || base.charsUnlimited) return null
       return savingVsBase(base.price, base.includedChars, pkg.price, pkg.includedChars)
     },
     /**

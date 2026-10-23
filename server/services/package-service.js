@@ -139,6 +139,20 @@ class PackageService {
         ? true
         : unknownBool(data.portUnlimited, 'portUnlimited') === true,
       chars: nonNegativeInt(data.chars || data.includedChars),
+      /**
+       * 不限字符。
+       *
+       * 只影响**展示与购买语义**，不改变发放逻辑：到账的仍然是
+       * `included_chars` 那个数（不限套餐会配一个极大的值）。
+       * 扣费路径完全不需要知道"不限"这回事 —— 那才是它该保持的样子。
+       *
+       * 用 unknownBool 而不是 Boolean()：表单传的是字符串 "true" / "false"，
+       * `Boolean('false') === true`，那会把每一档都变成不限。
+       */
+      charsUnlimited: data.charsUnlimited === undefined || data.charsUnlimited === null ||
+        data.charsUnlimited === ''
+        ? false
+        : unknownBool(data.charsUnlimited, 'charsUnlimited') === true,
       price: nonNegativeNumber(data.price),
       // 套餐自带的子账号额度。企业账号不受它限制，
       // 但对个人账号它是 `users.sub_quota` 的发放来源（结算买套餐、新建商户两处都取它）。
@@ -169,20 +183,20 @@ class PackageService {
         const updated = await this.repo.query(
           `UPDATE packages SET title=$2,subtitle=$3,port_limit=$4,port_unlimited=$5,included_chars=$6,
                   price=$7,clients=$8::jsonb,features=$9::jsonb,sort_order=$10,sub_quota=$11,
-                  updated_at=NOW()
+                  chars_unlimited=$12, updated_at=NOW()
            WHERE id=$1 RETURNING id`,
           [packageId, fields.title, fields.subtitle, fields.portLimit, fields.portUnlimited,
             fields.chars, fields.price, JSON.stringify(fields.clients), JSON.stringify(fields.features),
-            fields.sortOrder, fields.subQuota], client
+            fields.sortOrder, fields.subQuota, fields.charsUnlimited], client
         )
         if (!updated.rows[0]) throw new ApiError(404, '套餐不存在', 'PACKAGE_NOT_FOUND')
       } else {
         const inserted = await this.repo.query(
-          `INSERT INTO packages(code,title,subtitle,port_limit,port_unlimited,included_chars,price,clients,features,sort_order,sub_quota)
-           VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11) RETURNING id`,
+          `INSERT INTO packages(code,title,subtitle,port_limit,port_unlimited,included_chars,price,clients,features,sort_order,sub_quota,chars_unlimited)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12) RETURNING id`,
           [code, fields.title, fields.subtitle, fields.portLimit, fields.portUnlimited,
             fields.chars, fields.price, JSON.stringify(fields.clients), JSON.stringify(fields.features),
-            fields.sortOrder, fields.subQuota], client
+            fields.sortOrder, fields.subQuota, fields.charsUnlimited], client
         )
         packageId = inserted.rows[0].id
       }
