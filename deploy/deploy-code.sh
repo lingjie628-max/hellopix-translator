@@ -106,71 +106,28 @@ mkdir -p "$STAGE"
 #      部署成功后立刻删除 —— 否则每部署一次就在 /opt 里留一整份
 #      server+dist+node_modules，磁盘只会单向涨。
 #   3. 切换完先校验新代码语法，再重启服务；校验失败就地回滚。
-tar -czf - -C "$STAGE" server migrations dist scripts 2>/dev/null \
-  | ssh -p "$SSH_PORT" -i "$SSH_KEY" \
-      -o BatchMode=yes -o ConnectTimeout=30 -o StrictHostKeyChecking=no \
-      "root@$SSH_HOST" "
-set -e; export LC_ALL=C.UTF-8
-BAK=$APP/.bak
-rm -rf \$BAK $APP/.incoming
-mkdir -p \$BAK $APP/.incoming
-tar -C $APP/.incoming -xzf -
-
-rollback() {
-  set +e   # 回滚途中任何一步失败都要继续把后面的目录移回来，不能被 set -e 中途打断
-  echo '  ✖ 部署失败，开始回滚' >&2
-  for d in server migrations dist scripts; do
-    if [ -d \$BAK/\$d ]; then
-      rm -rf $APP/\$d
-      mv \$BAK/\$d $APP/\$d || echo \"  ⚠ 回滚 \$d 失败，备份仍在 \$BAK/\$d\" >&2
-    fi
-  done
-  rm -rf \$BAK $APP/.incoming
-  systemctl restart hello-pix || true
-  echo '  ⚠ 已回滚到部署前版本' >&2
-  exit 1
+#   4. **生产独有文件必须保留**（2026-10-23 的教训，见下方 PRESERVE）。
+# 远端脚本走 scp 过去，不用内联字符串。
+#
+# 为什么改成这样：原先远端脚本内联在这个双引号里，每个变量都得写 \$VAR，
+# 漏一个就会被**本地** shell 提前展开。2026-10-23 我加的保留逻辑漏了几个
+# 反斜杠，本地 `$f` 未绑定 → set -u 直接退出 → tar 管道没建立 →
+# 部署中断、服务躺了 3 分钟。而报错指向的是本地那行 ssh，真正的问题在
+# 40 行之外，排查成本远高于收益。
+#
+# 现在远端脚本是独立文件 deploy/remote-deploy.sh，scp 到临时路径后执行：
+#   · 不需要任何转义
+#   · 可以做 shellcheck / bash -n
+#   · stdin 归 tar 用，不再和脚本抢
+REMOTE_SCRIPT=/tmp/.pix-remote-deploy.sh
+scp -q -P "$SSH_PORT" -i "$SSH_KEY" \
+    -o BatchMode=yes -o ConnectTimeout=30 -o StrictHostKeyChecking=no \
+    deploy/remote-deploy.sh "root@$SSH_HOST:$REMOTE_SCRIPT" || {
+  echo "✖ 推送部署脚本失败" >&2
+  exit 4
 }
 
-for d in server migrations dist scripts; do
-  # 新包里没有这个目录就不动它（原来的行为），但旧目录必须先搬进 \$BAK
-  [ -d $APP/.incoming/\$d ] || continue
-  if [ -d $APP/\$d ]; then
-    if ! mv $APP/\$d \$BAK/\$d; then echo \"搬不动 $APP/\$d\" >&2; rollback; fi
-  fi
-  if ! mv $APP/.incoming/\$d $APP/\$d; then rollback; fi
-done
-
-# 语法校验：搬家过程的半成品会在这里直接炸出来，而不是等到服务重启
-# 注意：别写成 `node --check \$f || { echo ...; node --check \$f; rollback; }` ——
-# 花括号组里的第二条 node 失败会顶掉整个组的返回值，set -e 抢在 rollback 之前就退出，
-# 备份原地不动、新代码留在线上。必须用 if 块明确控制。
-for f in $APP/server/*.js $APP/server/**/*.js $APP/scripts/*.js; do
-  [ -f \$f ] || continue
-  if ! node --check \$f >/dev/null 2>&1; then
-    echo \"语法错误: \$f\" >&2
-    node --check \$f || true
-    rollback
-  fi
-done
-
-# 属主与权限必须修回来：服务以 hello-pix 用户运行
-chown -R root:root $APP/server $APP/migrations $APP/dist $APP/scripts 2>/dev/null || true
-chown root:root $APP && chmod 755 $APP
-find $APP/server $APP/migrations $APP/scripts -type f -exec chmod 644 {} + 2>/dev/null || true
-find $APP/dist -type f -exec chmod 644 {} + 2>/dev/null || true
-find $APP/dist -type d -exec chmod 755 {} + 2>/dev/null || true
-cd $APP; set -a; . /etc/hello-pix/hello-pix.env; set +a
-chmod 755 $APP/scripts/*.js 2>/dev/null || true
-
-# 迁移失败不再被 || true 吞掉：库结构对不上就别重启，直接回滚
-node scripts/migrate.js up 2>&1 | grep -E 'MIGRATION|Error' || true
-systemctl restart hello-pix
-sleep 5
-if [ \"\$(systemctl is-active hello-pix)\" != active ]; then
-  journalctl -u hello-pix -n 30 --no-pager | sed 's/^/  /' >&2
-  rollback
-fi
-rm -rf \$BAK $APP/.incoming
-echo \"  服务: \$(systemctl is-active hello-pix)\"
-ls -ld $APP | sed 's/^/  /'
-"
+tar -czf - -C "$STAGE" server migrations dist scripts 2>/dev/null \
+  | ssh -p "$SSH_PORT" -i "$SSH_KEY" \
+    -o BatchMode=yes -o ConnectTimeout=30 -o StrictHostKeyChecking=no \
+    "root@$SSH_HOST" "APP=$APP bash $REMOTE_SCRIPT; rc=\$?; rm -f $REMOTE_SCRIPT; exit \$rc"
