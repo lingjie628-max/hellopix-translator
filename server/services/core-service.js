@@ -12,6 +12,7 @@ const { PREFIX: redisPrefix } = require('../stores/redis-client')
 const { RedisTranslationCache } = require('../stores')
 const catalog = require('../lib/client-catalog')
 const translationRouter = require('./translation-router')
+const { trimTrailingDot } = require('../lib/trailing-dot')
 
 function number(value, fallback) {
   const parsed = Number(value)
@@ -1027,7 +1028,12 @@ class CoreService {
       throw new ApiError(502, (result && result.msg) || '翻译服务暂不可用', 'TRANSLATE_FAILED')
     }
 
-    const translated = String(result.text || '').trim()
+    // 句末句点收口：模型爱给短句补句点（"在吗" → "Are you there."）。
+    // 必须在**写缓存之前**处理 —— 否则缓存里存的还是带点的版本，
+    // 后面每次命中都会把点再发出去，清一次等于没清。
+    // 也必须在**退款判定之前**处理 —— 否则 "OK." vs 原文 "OK"
+    // 会被判成"翻译有变化"而照常扣费。
+    const translated = trimTrailingDot(parsed.text, String(result.text || '').trim())
     // 可退款 = 没翻出东西 / 翻出来跟原文一样（大小写不敏感）。
     // 这些情况下不该扣字符 —— 用户没拿到价值。
     // 注意 cached 命中时即使"一样"也不退：那是缓存里的历史结果，字符早就扣过了。
