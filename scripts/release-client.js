@@ -107,26 +107,44 @@ async function main () {
   })
 
   try {
+    const osArg = arg('os', 'Windows')
+    const archArg = arg('arch', 'x64')
+
+    /**
+     * 查重必须带上 os / arch。
+     *
+     * ★ 2026-10-23 的真事故 ★
+     *
+     * 原来是 `WHERE version=$1 AND app=$2` —— 同一版本号只能有一条记录。
+     * 发 1.2.2 时按 Windows → macOS x64 → macOS arm64 顺序跑了三次，
+     * 后两次走了"找到已有记录"分支，把 **Windows 那条的 sha256 覆盖成了
+     * arm64 dmg 的哈希**。os/arch/url 仍是 Windows/exe，哈希却是 mac 包的 ——
+     * 所有 Windows 客户端下载后校验必然失败，整条更新通道静默失效，
+     * 而库里的数据看起来"有记录、有哈希"，肉眼查不出来。
+     *
+     * 现在按四元组查重：不同平台/架构是**不同的发布物**，必须各占一行。
+     */
     const existing = await pool.query(
-      'SELECT id, url, version, sha256, min_version FROM client_releases WHERE version=$1 AND app=$2 ORDER BY id DESC LIMIT 1',
-      [version, appId]
+      'SELECT id, url, version, os, arch, sha256, min_version FROM client_releases WHERE version=$1 AND app=$2 AND os=$3 AND arch=$4 ORDER BY id DESC LIMIT 1',
+      [version, appId, osArg, archArg]
     )
 
     if (existing.rows[0]) {
       const row = existing.rows[0]
-      console.log(`\n找到已有记录 #${row.id}（${row.version}）`)
+      console.log(`\n找到已有记录 #${row.id}（${row.version} ${row.os}/${row.arch}）`)
       if (row.sha256 && row.sha256 !== sha256) {
         console.warn(`⚠ 该记录原哈希为 ${row.sha256.slice(0, 16)}…，将被覆盖为新的哈希`)
-        console.warn('  如果是同一个版本号换了安装包，建议改用新的补丁版本号 ——')
+        console.warn('  如果确实是同一个安装包被重新打过，建议改用新的补丁版本号 ——')
         console.warn('  否则已经下载过旧包的客户端不会重下（版本号相同）')
       }
       if (dryRun) {
         console.log(`[dry-run] 将更新 #${row.id}：sha256=${sha256.slice(0, 16)}…，min_version=${minVersion || row.min_version || version}`)
         return
       }
+      // url 一起更新：换域名 / 换文件名时不至于库里还指着一个 404 的地址
       await pool.query(
-        'UPDATE client_releases SET sha256=$2, min_version=$3, updated_at=NOW() WHERE id=$1',
-        [row.id, sha256, minVersion || row.min_version || version]
+        'UPDATE client_releases SET sha256=$2, min_version=$3, url=COALESCE($4, url), updated_at=NOW() WHERE id=$1',
+        [row.id, sha256, minVersion || row.min_version || version, urlArg || null]
       )
       console.log(`已更新 #${row.id}`)
       return
@@ -149,8 +167,8 @@ async function main () {
        VALUES('desktop', $1, $2, $3, $4, $5, $6, true, $7, $8, $9) RETURNING id`,
       [
         arg('title', `Hello Pix ${version}`),
-        arg('os', 'Windows'),
-        arg('arch', 'x64'),
+        osArg,
+        archArg,
         appId,
         version,
         urlArg,
