@@ -30,6 +30,17 @@ const BACKUP_DIR = '/var/backups/hello-pix'
 const BACKUP_MAX_AGE_HOURS = 26      // 每日备份，超过 26 小时说明昨天没跑成功
 const DISK_MAX_PERCENT = 85
 const SILENCE_HOURS = 1
+/**
+ * 邮件实发探测的间隔。
+ *
+ * 每 10 分钟发一封测试信，一天 144 封 —— Resend 免费额度直接烧穿，
+ * 还可能被判滥用。6 小时一次 = 一天 4 封，足够在半天内发现故障，
+ * 又不至于骚扰供应商。
+ *
+ * 注意：配置完整性（pass 为空/域名丢了）那层**每轮都查**，
+ * 不受这个间隔限制 —— 它不联网、不花钱，没有理由放过。
+ */
+const MAIL_PROBE_INTERVAL_HOURS = 6
 
 /**
  * 充值异常告警阈值。
@@ -141,6 +152,117 @@ async function checkPartitions(pool) {
     return { ok: false, detail: `缺少当月分区 ${name} —— 消息写入会直接失败且不报错` }
   }
   return { ok: true }
+}
+
+// ---------------------------------------------------------------------------
+// 邮件通道（注册与找回密码的唯一自主途径）
+// ---------------------------------------------------------------------------
+
+/**
+ * 邮件通道健康检查。
+ *
+ * ## 2026-10-23 为什么加这条
+ *
+ * 入侵者 pxroot3860 在 11:45~11:46 连改 12 次邮件配置，最后一次把
+ * `mail.smtp` 的 `pass` 提交成空串 —— **真实 API Key 被覆盖**。
+ *
+ * 结果：`POST /user/emailCode` 恒返回 503「邮件服务尚未配置」，
+ * **注册与找回密码全废**。而当时巡检每 10 分钟跑一次、每次都报"正常"：
+ * 它检查服务/磁盘/备份/分区/充值异常，**唯独没看邮件还能不能发**。
+ *
+ * 这个功能坏掉的表现极其安静：没人会来投诉"我注册不了"，
+ * 他们只是关掉网页走了。损失的是**转化率**，不是待办事项。
+ *
+ * ## 为什么用"真发一封信"而不是 verify()
+ *
+ * `transporter.verify()` 只验证「连得上 + 认证过」。
+ * 它测不出这几种真实故障：
+ *   · API Key 被吊销或额度耗尽 → 认证可能仍通过，发信才 4xx
+ *   · 发件域名 SPF/DKIM 掉了 → 连接认证全过，投递被拒
+ *   · 收件人被服务商拉黑
+ *
+ * 而这次的事故恰恰是"连认证都还没到"（pass 为空）。
+ * 所以分两层：
+ *
+ *   第一层 `configured`：pass/host/user/from 任何一个为空 → 直接判死。
+ *            这一步不花任何网络成本，也不会给供应商发信。
+ *   第二层 `sendTest` ：真发一封到告警邮箱（顺带验证收件通道）。
+ *
+ * 第二层有频率限制 —— 见 MAIL_PROBE_INTERVAL_HOURS。每 10 分钟发一封
+ * 测试信，一天 144 封，供应商那边会直接把我们当滥用。
+ *
+ * @param {object} pool
+ * @param {{force?:boolean}} [options] force=true 时不看频率（手工排障用）
+ */
+async function checkMail(pool, options) {
+  const opts = options || {}
+  const deps = opts.deps || {}
+  const Mailer = deps.Mailer || require('../server/lib/mailer').Mailer
+  const readAlertTo = deps.readAlertTo || require('../server/lib/mailer').readAlertTo
+  const ProductionRepository = deps.ProductionRepository
+    || require('../server/repositories/production-repository').ProductionRepository
+  const stateFile = opts.stateFile || '/var/lib/hello-pix-mail-probe.json'
+
+  const repo = new ProductionRepository(pool)
+  const settings = await repo.settings()
+  const mailer = new Mailer(repo)
+  const cfg = await mailer.config()
+
+  // 第一层：配置完整性。不花钱、不联网，每次巡检都跑。
+  if (!cfg.configured) {
+    return {
+      ok: false,
+      detail: `邮件服务未配置，缺少：${cfg.missing.join('、')}`
+        + '。注册与找回密码会全部失败（user/emailCode 返回 503）'
+    }
+  }
+
+  // 第二层：真发信。按频率限制，避免把供应商惹毛。
+  const alertTo = readAlertTo(settings)
+  if (!alertTo) {
+    // 没有收件地址就没法探活；但这本身也是个隐患 ——
+    // 告警发不出去，等于这道防线哑了。
+    return {
+      ok: false,
+      detail: '已配置 SMTP 但 mail.alert_to（告警收件地址）为空 —— 真出故障时告警发不出去'
+    }
+  }
+
+  const STATE_FILE = stateFile
+  let state = {}
+  try { state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) } catch (_e) { state = {} }
+  const lastOk = Number(state.lastOkAt || 0)
+  const lastTry = Number(state.lastTryAt || 0)
+  const intervalMs = (opts.force ? 0 : MAIL_PROBE_INTERVAL_HOURS * 3600 * 1000)
+
+  if (!opts.force && lastTry && Date.now() - lastTry < intervalMs) {
+    const hoursAgo = ((Date.now() - lastTry) / 3600000).toFixed(1)
+    return { ok: true, detail: `上次探测 ${hoursAgo} 小时前通过，本轮跳过实发` }
+  }
+
+  let result
+  try {
+    result = await mailer.sendTest(alertTo)
+  } catch (e) {
+    result = { ok: false, code: 'PROBE_ERROR', msg: String((e && e.message) || e).slice(0, 160) }
+  }
+
+  state.lastTryAt = Date.now()
+  if (result.ok) state.lastOkAt = Date.now()
+  state.lastResult = { ok: !!result.ok, code: result.code || '', at: state.lastTryAt }
+  try {
+    fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true })
+    fs.writeFileSync(STATE_FILE, JSON.stringify(state))
+  } catch (_e) { /* 状态存不下来不该让检查本身失败 */ }
+
+  if (!result.ok) {
+    return {
+      ok: false,
+      detail: `发信失败（阶段 ${result.stage || 'unknown'}${result.code ? ' / ' + result.code : ''}）：`
+        + `${result.msg || ''}。注册与找回密码现在不可用`
+    }
+  }
+  return { ok: true, detail: `测试信已投递至 ${alertTo}` }
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +411,15 @@ async function main() {
     } catch (e) {
       problems.push(['充值异常检查失败', String(e.message || e).slice(0, 120)])
     }
+
+    // 邮件通道。同上，单独 try。
+    try {
+      const mail = await checkMail(pool)
+      if (!mail.ok) problems.push(['邮件通道故障', mail.detail])
+      else if (mail.detail) console.log('邮件通道: ' + mail.detail)
+    } catch (e) {
+      problems.push(['邮件通道检查失败', String(e.message || e).slice(0, 120)])
+    }
   } catch (e) {
     problems.push(['数据库不可连', String(e.message || e).slice(0, 120)])
   } finally {
@@ -316,6 +447,30 @@ async function main() {
     console.log('（--dry 模式，不发邮件）\n' + lines.join('\n'))
     return
   }
+
+  // 先把告警落到本地文件与 stdout。
+  //
+  // ## 为什么要抢在发信之前
+  //
+  // 告警本身走 SMTP。当故障**就是邮件通道坏了**的时候，
+  // 这条告警的发送必然也失败 —— 于是"邮件坏了"这件事永远不会有人知道。
+  // cron 会把本脚本的 stderr 投进邮件，也一并失败。
+  //
+  // 所以顺序必须是：先落盘 + 打 stdout（systemd journald 收走），
+  // 再尝试发邮件。发不出去也不会丢。
+  //
+  // 查：journalctl -u hello-pix-alert --since -48h | grep MAIL-ALERT
+  //     cat /var/lib/hello-pix-alerts.log
+  const stamp = new Date().toISOString()
+  const plain = fresh.map(([k, d]) => `[MAIL-ALERT ${stamp}] ${k}: ${d}`)
+  for (const l of plain) console.error(l)
+  try {
+    fs.mkdirSync('/var/lib', { recursive: true })
+    fs.appendFileSync('/var/lib/hello-pix-alerts.log', plain.join('\n') + '\n')
+  } catch (e) {
+    console.error('告警落盘失败:', e.message)
+  }
+
   try {
     await sendAlert('【Hello Pix 告警】' + fresh.map(p => p[0]).join(' / '), lines)
     console.log('告警邮件已发送')
@@ -333,6 +488,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  checkMail,
   checkRechargeExceptions,
   RECHARGE_OPEN_MAX,
   RECHARGE_OPEN_MAX_HOURS,
