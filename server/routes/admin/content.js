@@ -55,7 +55,7 @@ function registerAdminContent(router, ctx) {
     await repo.transaction(async client => {
       await repo.query(
         `INSERT INTO app_settings(key,value,description) VALUES($1,$2::jsonb,$3)
-         ON CONFLICT (key) DO UPDATE SET value=$2::jsonb`,
+         ON CONFLICT (key) DO UPDATE SET value=$2::jsonb, updated_at=NOW()`,
         ['mail.smtp', JSON.stringify(smtp), 'SMTP 服务器配置'], client
       )
       // 告警收件地址单独存：它可以在 SMTP 还没配好之前就先填上，
@@ -73,7 +73,7 @@ function registerAdminContent(router, ctx) {
       if (alertToGiven) {
         await repo.query(
           `INSERT INTO app_settings(key,value,description) VALUES($1,$2::jsonb,$3)
-           ON CONFLICT (key) DO UPDATE SET value=$2::jsonb`,
+           ON CONFLICT (key) DO UPDATE SET value=$2::jsonb, updated_at=NOW()`,
           ['mail.alert_to', JSON.stringify(alertTo), '运维告警收件地址'], client
         )
       }

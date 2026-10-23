@@ -247,3 +247,59 @@ test('读客户数据属于高危：即使超管也要二次认证', async () =>
   assert.equal(r.next, false)
   assert.equal(r.status, 428)
 })
+
+// ── 公开接口白名单：大小写口径必须与查询一致 ───────────────────────────
+//
+// 2026-10-23 排障：`POST /user/emailCode` 一律 401，注册与找回密码的
+// "获取验证码"按钮点下去就提示"请先登录"。
+//
+// 根因：白名单里的键写成驼峰 '/user/emailCode'，而查询用的是
+// req.path.toLowerCase()（'/user/emailcode'）。两个永远撞不上 ——
+// 含大写字母的公开接口**全部失效**。
+//
+// 这类 bug 特别阴：白名单看起来"有这一条"，代码也"查了白名单"，
+// 唯独两边的字符串规范化口径不一致。所以既要修，也要钉住。
+
+const { PUBLIC_PATHS } = require('../server/services/auth-service')
+
+test('公开白名单的每一个键都必须是全小写', () => {
+  // 查询用的是小写路径，任何含大写的键都是死条目。
+  // auth-service.js 模块加载时也会自检一次（抛错），这里再钉一遍，
+  // 让"谁加了驼峰键"在测试输出里直接点名。
+  const bad = [...PUBLIC_PATHS].filter(p => p !== p.toLowerCase())
+  assert.deepEqual(bad, [], `这些白名单键含大写，永远不会命中：${bad.join(', ')}`)
+})
+
+test('发邮箱验证码必须免登录（否则注册与找回密码全废）', async () => {
+  const svc = harness()   // 没有 admin，也没有 user —— 未登录访客
+  for (const path of ['/user/emailCode', '/user/EMAILCODE', '/user/EmailCode']) {
+    const r = await run(svc, { path, method: 'POST' })
+    assert.equal(r.next, true, `${path} 应该免登录放行，实际 status=${r.status}`)
+  }
+})
+
+test('其他公开接口同样不受大小写影响', async () => {
+  const svc = harness()
+  const cases = [
+    ['/user/captcha', 'POST'],
+    ['/user/register', 'POST'],
+    ['/user/forgot', 'POST'],
+    ['/site/info', 'GET'],
+    ['/client/crash-report', 'POST'],
+    ['/admin/login', 'POST']
+  ]
+  for (const [path, method] of cases) {
+    const r = await run(svc, { path, method })
+    assert.equal(r.next, true, `${method} ${path} 被拦了`)
+  }
+})
+
+test('白名单不能顺带把后台接口放开（免登录 ≠ 免鉴权）', async () => {
+  const svc = harness()
+  const r = await run(svc, { path: '/user/emailcode', method: 'POST' })
+  assert.equal(r.next, true)
+  // 后台接口在同一个中间件里，仍然必须要求超管会话
+  const admin = await run(svc, { path: '/admin/staff', method: 'GET' })
+  assert.equal(admin.next, false)
+  assert.equal(admin.status, 401)
+})

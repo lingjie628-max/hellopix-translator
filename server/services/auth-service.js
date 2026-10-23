@@ -6,6 +6,57 @@ const { capabilityFor, allows, HIGH_RISK_CAPS } = require('../lib/capabilities')
 const { matchRouteTemplate } = require('../lib/route-match')
 
 /**
+ * 不需要登录就能访问的接口（精确路径）。
+ *
+ * ## ★ 必须全部小写 ★
+ *
+ * 2026-10-23 排障：这里原本是中间件里临时 `new Set([...])`，键写的是
+ * 驼峰（`'/user/emailCode'`），而查询用的是 `req.path.toLowerCase()`。
+ * 小写的 `/user/emailcode` 撞不上驼峰的 `/user/emailCode`，于是：
+ *
+ *   POST /user/emailCode → 401 AUTH_REQUIRED
+ *
+ * 表现就是「注册 / 找回密码的获取验证码按钮一直提示请先登录」。
+ * 含大写字母的公开接口**全部**失效，只是当时没人把这几条串起来看。
+ *
+ * 现在提到模块级（顺带省掉每个请求重建一次 Set），并且：
+ *   · 键一律小写
+ *   · 模块加载时自检一次，有含大写的键直接抛错，不让它上线
+ *
+ * ## 白名单里该放什么
+ *
+ * 判据：**没有会话也必须能用**，且泄露风险由别的手段兜住。
+ * 放进来之前先问：未登录的人调它，能拿到什么、能做什么？
+ */
+const PUBLIC_PATHS = new Set([
+  '/site/info', '/client/lines', '/login', '/client/login', '/admin/login',
+  // 崩溃日志上报：**必须公开**。
+  //
+  // 闪退最常发生在启动阶段 —— 那时还没登录，甚至登录页都没渲染出来。
+  // 若要鉴权，"启动即闪退"这批最有价值的日志反而一份都收不到，
+  // 而它们恰恰是排查的重点。滥用风险由 IP 限流（20 次/小时）兜住，
+  // 而且落库前会按 crash/memory 白名单再过滤一次。
+  '/client/crash-report',
+  // 官网内容：未登录的访客必须能看到
+  '/site/packages', '/site/faqs', '/site/platforms',
+  // 两步验证的第二步：此时还没有会话，靠一次性票据放行
+  '/admin/login/totp',
+  // 发邮箱验证码 / 注册 / 找回密码：都是"还没有账号或进不去账号"的场景。
+  // 发信的两道限流在路由层与 VerificationService 里，建号/改密要图形验证码。
+  '/user/captcha', '/user/emailcode', '/user/register', '/user/forgot'
+])
+
+// 自检：有含大写的键直接炸，别等线上 401 才发现。
+//
+// 这个断言刻意放在模块顶层而不是测试里：它保证**任何**加载这个模块的路径
+// （服务、脚本、测试）都会先过一遍，而不是"测试跑到了才发现"。
+for (const p of PUBLIC_PATHS) {
+  if (p !== p.toLowerCase()) {
+    throw new Error(`PUBLIC_PATHS 含大写键 '${p}'：查询用的是小写路径，这条永远不会命中`)
+  }
+}
+
+/**
  * 是否强制超管绑定两步验证。
  *
  * 每次求值而不是模块加载时缓存 —— 测试要能在同一进程里切换这个开关，
@@ -261,31 +312,7 @@ class AuthService {
         // 大小写只用于**分类**，不改写路径本身 —— 下游按原样处理。
         const path = String(req.path || '').replace(/\/+$/, '') || '/'
         const lower = path.toLowerCase()
-        const publicPaths = new Set([
-          '/site/info', '/client/lines', '/login', '/client/login', '/admin/login',
-          // 崩溃日志上报：**必须公开**。
-          //
-          // 闪退最常发生在启动阶段 —— 那时还没登录，甚至登录页都没渲染出来。
-          // 若要鉴权，"启动即闪退"这批最有价值的日志反而一份都收不到，
-          // 而它们恰恰是排查的重点。滥用风险由 IP 限流（20 次/小时）兜住，
-          // 而且落库前会按 crash/memory 白名单再过滤一次。
-          '/client/crash-report',
-          // 官网内容：未登录的访客必须能看到
-          '/site/packages', '/site/faqs', '/site/platforms',
-          // 两步验证的第二步：此时还没有会话，靠一次性票据放行
-          '/admin/login/totp',
-          '/user/captcha', '/user/emailCode', '/user/register', '/user/forgot'
-          // 下面这几条曾经在这里，属于**从未实现**的旧项目官网接口：
-          //   /order/selectOrderBySerialNumber、/order/checkSharePwd、
-          //   /orderDetails/shareOrder、/orderDetails/getOrderFans、
-          //   /orderDetails/getTodayFansCount
-          //
-          // 它们全项目没有任何注册点，留在白名单里只有坏处：将来谁去补实现时，
-          // 会看见"它已经在 publicPaths 里了"，于是默认可以不加鉴权 ——
-          // 而按序列号查订单这类接口一旦真的公开，就是订单信息泄露。
-          // 要用就先实现，再按实际鉴权需求决定要不要加回来。
-        ])
-        if (publicPaths.has(lower)) {
+        if (PUBLIC_PATHS.has(lower)) {
           req.pixPublic = true
           return next()
         }
@@ -388,4 +415,4 @@ class AuthService {
   }
 }
 
-module.exports = { AuthService, isExpired }
+module.exports = { AuthService, isExpired, PUBLIC_PATHS }

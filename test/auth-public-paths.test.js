@@ -26,49 +26,35 @@ const path = require('node:path')
 const test = require('node:test')
 
 const root = path.join(__dirname, '..')
-const authService = fs.readFileSync(path.join(root, 'server', 'services', 'auth-service.js'), 'utf8')
-
-/** 从 middleware 里切出 publicPaths 那个数组字面量（注释已剥掉）。 */
-function extractPublicPaths () {
-  const start = authService.indexOf('const publicPaths = new Set([')
-  assert.ok(start >= 0, 'auth-service.js 里找不到 publicPaths —— 改名了？测试要同步更新')
-  const open = authService.indexOf('[', start)
-  let depth = 0
-  let end = -1
-  for (let i = open; i < authService.length; i++) {
-    if (authService[i] === '[') depth++
-    else if (authService[i] === ']') {
-      depth--
-      if (depth === 0) { end = i + 1; break }
-    }
-  }
-  assert.ok(end > open, 'publicPaths 数组没配平')
-  return stripComments(authService.slice(open, end))
-}
 
 /**
- * 剥掉 // 与 /* *\/ 注释。
+ * 取白名单。
  *
- * 不剥的话，注释里引用的路径（比如"原来这里写过 /order/xxx"）会被当成
- * 真实条目 —— 说明文字把自己写成了被测对象。
+ * 2026-10-23 改成**直接 require 拿 Set**，不再从源码里正则抠。
+ *
+ * 原来靠 `indexOf('const publicPaths = new Set([')` 定位，于是：
+ *   · 变量一改名就断（这次把它提到模块级常量就断了 4 个测试）
+ *   · 源码格式一变就断
+ *   · 抠出来的字节到底是不是"运行时真正在用的那份"，只能靠人眼保证
+ *
+ * 直接拿运行时对象还有个额外好处：模块加载时的"键必须全小写"自检
+ * 也会在测试里跑到，等于顺带验了一遍自检没被绕过。
  */
-function stripComments (src) {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[^:])\/\/.*$/gm, '$1')
-}
+const { PUBLIC_PATHS } = require(path.join(root, 'server', 'services', 'auth-service'))
 
-/** 从一段源码字面量里取出所有路径字符串。 */
-function pathsIn (literal) {
-  return [...literal.matchAll(/['"`]([^'"`]+)['"`]/g)]
-    .map(m => m[1])
-    .filter(p => p.startsWith('/'))
+function extractPublicPaths () {
+  return [...PUBLIC_PATHS]
 }
 
 /**
  * 收集全项目所有已注册的路由路径。
  *
  * 只看 server/routes 与 server/register-production-api.js —— 那才是真正的注册面。
+ *
+ * **统一转小写**：白名单的查询口径是 `req.path.toLowerCase()`，
+ * 而注册面里写的是驼峰（`router.post('/user/emailCode')`）。
+ * 不转的话，白名单里小写的 '/user/emailcode' 会被误判成"死条目" ——
+ * 明明是同一件事，两个口径不一致。
  */
 function collectRegisteredPaths () {
   const files = []
@@ -87,14 +73,14 @@ function collectRegisteredPaths () {
     const src = fs.readFileSync(file, 'utf8')
     // 同时匹配 router.get('/x') 与 router.get(`/x`)；参数化路径保留原样。
     for (const m of src.matchAll(/router\.(get|post|put|delete|patch|all)\(\s*['"`]([^'"`]+)['"`]/g)) {
-      registered.add(m[2].replace(/\/+$/, '') || '/')
+      registered.add((m[2].replace(/\/+$/, '') || '/').toLowerCase())
     }
   }
   return registered
 }
 
 test('公空白名单里的每一条都必须真的注册过', () => {
-  const listed = pathsIn(extractPublicPaths())
+  const listed = extractPublicPaths()
   const registered = collectRegisteredPaths()
 
   const dead = listed.filter(p => !registered.has(p))
@@ -113,7 +99,7 @@ test('★ 旧的订单类公开路径不得回到白名单里', () => {
     '/orderDetails/getOrderFans',
     '/orderDetails/getTodayFansCount'
   ]
-  const listed = new Set(pathsIn(extractPublicPaths()))
+  const listed = new Set(extractPublicPaths())
 
   for (const p of banned) {
     assert.equal(listed.has(p), false,
@@ -122,12 +108,12 @@ test('★ 旧的订单类公开路径不得回到白名单里', () => {
 })
 
 test('白名单不能为空（否则所有接口都需要登录，登录接口自己也会被拦）', () => {
-  const listed = pathsIn(extractPublicPaths())
+  const listed = extractPublicPaths()
   assert.ok(listed.length >= 5, '连登录接口都不在白名单里，用户永远登不进来')
 })
 
 test('登录类接口必须在白名单里', () => {
-  const listed = new Set(pathsIn(extractPublicPaths()))
+  const listed = new Set(extractPublicPaths())
   for (const p of ['/login', '/client/login', '/admin/login', '/admin/login/totp']) {
     assert.equal(listed.has(p), true, p + ' 不在白名单里，这条路径永远 401')
   }
