@@ -1634,6 +1634,23 @@ class CoreService {
       ? `当前系统架构（${arch || '未知'}）暂无对应的安装包`
       : (row.version ? '' : '暂无可用版本')
 
+    const url = row.url || (app || archBlocked ? '' : setting(settings, 'downloads.client_url', ''))
+
+    // 签名清单：只有"这条记录本身带 sha256 且服务端配了私钥"才下发。
+    //
+    // 注意这里用的是 `row` 而不是上面那个可能回退到通用配置的 `url` ——
+    // 通用配置 `downloads.client_url` 是一个**没有对应哈希**的兜底地址，
+    // 给它签名等于给一个我们没算过哈希的包背书。宁可不下发清单。
+    const { buildManifest } = require('../lib/update-signing')
+    const manifest = buildManifest(row, {
+      appId: row.app || 'com.hellopix.desktop',
+      channel: 'stable',
+      onError: error => {
+        // 私钥配错时更新通道会整条失效，必须立刻在日志里能看到
+        console.error('[findUpdate] 更新清单签名失败：', error.message)
+      }
+    })
+
     return {
       success: true,
       compatible: !archBlocked,
@@ -1641,10 +1658,13 @@ class CoreService {
       version: row.version || '',
       // 架构不匹配时**不给兜底下载地址** —— 那个地址指向的同样是不匹配的包。
       // 只有"这个系统压根没有发布记录"时才退回通用配置。
-      url: row.url || (app || archBlocked ? '' : setting(settings, 'downloads.client_url', '')),
+      url,
       title: row.title || '',
       os: row.os || '',
-      app: row.app || app
+      app: row.app || app,
+      // 新版客户端优先读 manifest 并验签；老客户端忽略这个字段，
+      // 继续走上面的 version/url + 域名白名单，两边都能用。
+      manifest
     }
   }
 

@@ -139,8 +139,11 @@ test('找不到匹配架构的版本时，不返回任何下载地址', () => {
   const block = source.slice(at, source.indexOf('async listClientReleases(', at))
 
   assert.match(block, /const archBlocked = /, '缺少架构不匹配的判定')
-  assert.match(block, /url: row\.url \|\| \(app \|\| archBlocked \? '' :/,
+  // url 先算成局部变量再返回（签名清单那块需要区分「记录自带的地址」
+  // 和「通用兜底地址」）。断言这条语义：架构不匹配时兜底地址必须为空。
+  assert.match(block, /const url = row\.url \|\| \(app \|\| archBlocked \? '' :/,
     '架构不匹配时必须把 url 置空 —— 兜底地址指向的同样是不匹配的包')
+  assert.match(block, /^\s{6}url,$/m, '返回体必须带上算好的 url')
   assert.match(block, /compatible: !archBlocked/, '缺少 compatible 字段')
   assert.match(block, /reason/, '缺少 reason，客户端无法区分"没有新版本"和"架构不匹配"')
 })

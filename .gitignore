@@ -95,3 +95,14 @@ desktop/vendor/
 
 # 测试运行器每次跑完写的汇总报告（机器相关、时间戳变化，无归档价值）
 .tmp-test-report.json
+
+# 更新签名私钥（scripts/update-keygen.js 生成）。
+# 泄露 = 攻击者能给所有用户推任意安装包，且我们的签名校验会一路放行 ——
+# 它验的正是这把私钥签出来的东西。只允许放在构建机 / 服务器环境变量里。
+update-signing.key
+*.pem
+
+# 生成密钥时整个 ./keys 目录一起忽略：公钥已经写进
+# desktop/src/update/trusted-keys.js（那里才是唯一可信来源），
+# 目录里再放一份只会让人误以为"改这个文件就能换钥"。
+keys/

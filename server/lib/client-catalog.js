@@ -51,6 +51,11 @@ function publicRelease(row) {
     app: row.app || '',
     version: row.version,
     url: String(row.url).trim(),
+    // 签名相关：只暴露「有没有哈希 / 下限版本」，**不暴露 signature 本身**。
+    // 清单是 /client/update 现签现发的；这里多带一份存库的签名，只会在
+    // 轮换密钥后产生"两个签名都合法但不一样"的困惑。
+    sha256: row.sha256 || '',
+    minVersion: row.min_version || '',
     note: row.note || ''
   }
 }
