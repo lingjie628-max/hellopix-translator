@@ -1,6 +1,20 @@
 <template>
   <div class="admin-page">
-    <el-alert v-if="!configured" type="error" :closable="false" show-icon style="margin-bottom:16px">
+    <!--
+      ★ 读取失败必须与"未配置"区分开 ★
+      两者都表现为表单空白，但结论完全相反：
+      一个是"去填一份配置"，另一个是"别动，配置好好的，是读取出了问题"。
+      混在一起会让人去覆盖一份正确的配置。
+    -->
+    <el-alert v-if="loadError" type="warning" :closable="false" show-icon style="margin-bottom:16px">
+      <template slot="title">读不到当前配置 —— 下面的表单是空的，不代表没配</template>
+      <div class="tip-body">
+        原因：{{ loadError }}<br>
+        <b>请勿直接保存</b>，否则会用空值覆盖线上正在生效的配置。
+        先刷新页面重试；仍有问题查服务端日志。
+      </div>
+    </el-alert>
+    <el-alert v-else-if="!configured" type="error" :closable="false" show-icon style="margin-bottom:16px">
       <template slot="title">邮件服务未配置 —— 商户无法注册、无法找回密码</template>
       <div class="tip-body">
         缺：{{ missing.join('、') || '未知' }}。<br>
@@ -98,6 +112,8 @@ export default {
       form: { host: '', port: 465, secure: true, user: '', pass: '', from: '', fromName: 'Hello Pix', alertTo: '' },
       configured: false,
       missing: [],
+      loading: false,
+      loadError: '',
       saving: false,
       testing: false,
       testTo: '',
@@ -109,6 +125,8 @@ export default {
   mounted() { this.load() },
   methods: {
     load() {
+      this.loading = true
+      this.loadError = ''
       this.getRequest('/admin/mail').then(resp => {
         if (!resp) return
         // alertTo 服务端返回的是**打码值**（li***@gmail.com），不能当真实地址回填，
@@ -123,9 +141,24 @@ export default {
           : 'ops@yourdomain.com'
         this.configured = !!resp.data.configured
         this.missing = resp.data.missing || []
-      })
+      }).catch(err => {
+        // ★ 读取失败必须**显式说出来**，不能让它看起来像"没配置" ★
+        //
+        // 2026-10-23：GET /admin/mail 因为二次认证判定错误回 428，
+        // 前端在 `if (!resp) return` 处静默返回，表单保持初始空值，
+        // 顶部红条显示"邮件服务未配置 / 缺：未知"。
+        // 运维看到这页会以为配置丢了，实际库里数据完好（vlen=179）。
+        //
+        // 空表单 + "未配置" 是最坏的误导：它会让人去重填一份已经正确的配置。
+        this.loadError = (err && err.response && err.response.data && err.response.data.msg)
+          || (err && err.message) || '加载失败'
+      }).finally(() => { this.loading = false })
     },
     save() {
+      // 读不到现有配置时禁止保存：表单是空的，提交等于把线上配置清空。
+      if (this.loadError) {
+        return this.$message({ type: 'warning', message: '尚未成功读取现有配置，请先刷新页面，避免用空值覆盖' })
+      }
       this.saving = true
       // 空字符串在后端表示"保持原值"（见 content.js 的 alertTo 处理）
       const payload = { ...this.form }

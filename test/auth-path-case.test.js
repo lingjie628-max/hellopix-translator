@@ -240,12 +240,26 @@ test('只读的低危接口不要求二次认证（否则运营没法干活）',
   }
 })
 
-test('读客户数据属于高危：即使超管也要二次认证', async () => {
+/**
+ * 2026-10-23 改：原来这条断言"读客户数据即使超管也要 428"。
+ *
+ * 那个规则在实践中是坏的：后台客户档案页打开就空白，运维以为数据没了。
+ * 读操作的保护交给**角色**（operator 拿不到 admin.data.customers），
+ * 二次认证只留给会改状态的操作。详见 capabilities.js 的 requiresReauth。
+ */
+test('读客户数据：超管放行，但不要求二次认证', async () => {
   const svc = harness({ admin: ADMIN })
   const router = routerWith([['GET', '/admin/customers']])
   const r = await run(svc, { path: '/admin/customers', method: 'GET', router })
+  assert.equal(r.next, true)
+})
+
+test('读客户数据：operator 仍然被角色挡住', async () => {
+  const svc = harness({ admin: { id: 2, role: 'operator', username: 'staff' } })
+  const router = routerWith([['GET', '/admin/customers']])
+  const r = await run(svc, { path: '/admin/customers', method: 'GET', router })
   assert.equal(r.next, false)
-  assert.equal(r.status, 428)
+  assert.equal(r.status, 403)
 })
 
 // ── 公开接口白名单：大小写口径必须与查询一致 ───────────────────────────

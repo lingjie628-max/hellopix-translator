@@ -4,7 +4,7 @@ const crypto = require('crypto')
 const verifyCode = require('./verifyCode')
 const translateApi = require('./translateApi')
 const { createSecurity, rateLimit } = require('../server/security')
-const { capabilityFor, allows, HIGH_RISK_CAPS } = require('../server/lib/capabilities')
+const { capabilityFor, allows, requiresReauth } = require('../server/lib/capabilities')
 const { matchRouteTemplate } = require('../server/lib/route-match')
 const translateMemo = Object.create(null)
 
@@ -803,7 +803,10 @@ module.exports = function registerMock(app, options) {
       // 生产在 auth-service.js 里要求 X-Pix-Reauth。mock 这里如果不同步，
       // 所有端到端测试都会在"没带 reauth 也 200"的假绿上跑，
       // 与 2026-10-23 那次"生产修了 mock 没修"是同一个错误。
-      if (HIGH_RISK_CAPS.has(cap)) {
+      //
+      // 生产走 requiresReauth（只挡写操作）。这里原来直接判 HIGH_RISK_CAPS，
+      // 于是 GET /admin/customers 在 mock 里仍要 428 —— 正是这次要修的行为。
+      if (requiresReauth(req.method, cap)) {
         const reauth = String((req.headers || {})['x-pix-reauth'] || '')
         if (!reauth) {
           res.status(428).json({ success: false, code: 'REAUTH_REQUIRED', msg: '该操作需要重新验证身份' })

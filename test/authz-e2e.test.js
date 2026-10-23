@@ -35,6 +35,15 @@ async function get (base, jar, path) {
   return request(base, `/apis${path}`, { headers: { Cookie: cookieHeader(jar) } })
 }
 
+/** 不带二次认证的 POST —— 用来验证"写操作必须 428"。 */
+async function post (base, jar, path, body) {
+  return request(base, `/apis${path}`, {
+    method: 'POST',
+    headers: { Cookie: cookieHeader(jar), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {})
+  })
+}
+
 /**
  * 带二次认证的 GET。
  *
@@ -202,17 +211,30 @@ test('superadmin 同一批敏感接口照常可用（没把超管一起误伤）
   }
 })
 
-test('超管不带二次认证访问高危接口 → 428（不是静默放行）', async t => {
+/**
+ * 2026-10-23 改：原来这里把 GET 也列进"必须 428"。
+ *
+ * 那条规则让后台的客户档案、商户列表、审计日志、邮件设置页面全部空白，
+ * 运维看到的是"数据没了 / 配置丢了"。现在二次认证只挡写操作，
+ * 读操作靠角色（operator 拿不到这些能力）。
+ */
+test('超管不带二次认证访问高危**写**接口 → 428（不是静默放行）', async t => {
   const api = await startApi()
   t.after(api.close)
   const superJar = await login(api.base, 'admin', 'admin123')
 
-  for (const path of ['/admin/customers', '/admin/staff', '/admin/mail', '/admin/logs']) {
-    const res = await get(api.base, superJar, path)
+  for (const path of ['/admin/staff/save', '/admin/users/resetPassword', '/admin/mail']) {
+    const res = await post(api.base, superJar, path, {})
     assert.equal(res.status, 428, `${path} 应当要求二次认证（实际 ${res.status}）`)
   }
 
-  // 低危只读接口不该被要求
+  // 读接口不该被要求 —— 前端不可能为"打开页面"去输密码
+  for (const path of ['/admin/customers', '/admin/staff', '/admin/mail', '/admin/logs']) {
+    const res = await get(api.base, superJar, path)
+    assert.equal(res.status, 200, `${path} 是只读接口，不该要求二次认证（实际 ${res.status}）`)
+  }
+
+  // 低危只读接口同样不该被要求
   for (const path of ['/admin/stats', '/admin/recharges']) {
     const res = await get(api.base, superJar, path)
     assert.equal(res.status, 200, `${path} 不该要求二次认证（实际 ${res.status}）`)

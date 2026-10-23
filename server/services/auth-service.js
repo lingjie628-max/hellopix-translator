@@ -2,7 +2,7 @@
 
 const { ApiError } = require('../lib/http')
 const password = require('../lib/password')
-const { capabilityFor, allows, HIGH_RISK_CAPS } = require('../lib/capabilities')
+const { capabilityFor, allows, requiresReauth } = require('../lib/capabilities')
 const { matchRouteTemplate } = require('../lib/route-match')
 
 /**
@@ -378,13 +378,24 @@ class AuthService {
           }
           // ★ 高危能力的二次认证 ★
           //
-          // 建超管、改商户密码、发额度、读客户名单 —— 这些一旦被滥用就是接管平台。
+          // 建超管、改商户密码、发额度 —— 这些一旦被滥用就是接管平台。
           // 光靠会话不够：会话被偷（共享电脑没退出、XSS 拿到 cookie）时，
           // 攻击者本来可以直接用它建一个新超管，把主人踢出去。
           //
           // 要求请求头带当前管理员的密码，等于把"你本人现在在这儿"再确认一次。
           // 用 X-Pix-Reauth 传，不是 query —— query 会进 nginx access log。
-          if (HIGH_RISK_CAPS.has(cap)) {
+          //
+          // ★ 只对写操作强制 ★
+          //
+          // 2026-10-23 事故：这里原本对**所有**高危能力强制，包括 GET。
+          // 于是 `GET /admin/mail`、`GET /admin/users`、`GET /admin/customers`
+          // 等 11 个只读接口全部回 428，前端从不带密码 → 后台对应页面永久空白。
+          // 表现是"配置丢了""数据没了"，实际是权限判定找错了对象：
+          // 打开页面看一眼，和不带密码的人不该是同一档风险。
+          //
+          // 读操作的保护交给角色（operator 本来就拿不到这些能力），
+          // 写操作继续强制二次认证。
+          if (requiresReauth(req.method, cap)) {
             // 用 headers 直接取，不依赖 req.get（Express 5 的 req.get 存在，
             // 但测试桩/中间件复用场景未必有，少一个依赖少一处静默失效）
             const raw = req.headers || {}

@@ -58,7 +58,8 @@ const OPERATOR_CAPS = new Set([
  *   admin = 动管理员账号本身
  *   secret = 能读到密钥/邮箱等敏感配置
  *
- * 标了 `HIGH_RISK_CAPS` 的能力除了角色校验，还要求**重新认证**。
+ * 标了 `HIGH_RISK_CAPS` 的能力除了角色校验，还要求**写操作当场重新认证**
+ * （见 `requiresReauth`：GET/HEAD/OPTIONS 不要求 —— 打开页面看一眼不该要密码）。
  */
 const ROUTE_CAPS = {
   // ── 管理员账号本身 ───────────────────────────────────────
@@ -77,7 +78,18 @@ const ROUTE_CAPS = {
   // ── 全局设置 / 敏感配置 ──────────────────────────────────
   'GET /admin/settings': 'admin.write.settings',        // 返回全站配置原文
   'POST /admin/settings/save': 'admin.write.settings',
-  'GET /admin/mail': 'admin.secret.mail',               // SMTP 配置
+  // ★ 读写必须拆开 ★
+  //
+  // 原来 GET/POST 共用 `admin.secret.mail`，而它在 HIGH_RISK_CAPS 里，
+  // 于是**只是打开邮件设置页**就要求带 X-Pix-Reauth（管理员密码）。
+  // 前端从不带，接口回 428，表单全空白 —— 后台显示"邮件服务未配置 / 缺：未知"，
+  // 而库里数据完好。运维看着这页会以为配置丢了，实际是权限判定错了对象。
+  //
+  // 读：返回的 pass 是 '********' 打码，alertTo 是打码地址，不泄露任何密钥。
+  //     给它单独的只读能力，operator 不在 OPERATOR_CAPS 里，仍然拿不到。
+  // 写：改 SMTP 配置等于能劫持全部验证邮件（收走注册验证码 = 接管账号），
+  //     必须保持高危 + 二次认证。
+  'GET /admin/mail': 'admin.read.mail',
   'POST /admin/mail': 'admin.secret.mail',
   'POST /admin/mail/test': 'admin.secret.mail',
   'GET /admin/verify': 'admin.write.settings',
@@ -142,10 +154,10 @@ const ROUTE_CAPS = {
  * 高危能力：除了角色，还要求**当场重新认证**。
  *
  * 理由：这些能力一旦被滥用就是接管平台。会话被偷（XSS、共享电脑没退出）
- * 时，攻击者不该能直接用它建新超管。
+ * 时，攻击者不该能直接用它建新超管、改商户密码。
  *
- * 目前只登记、尚未强制执行 —— 强制需要前端配合弹出重新输密码的框，
- * 属于下一阶段。先把它标出来，任何调用点都能一眼看出哪些是高危。
+ * **只对写操作强制**（`requiresReauth` 里按方法区分）。早期版本对 GET 也强制，
+ * 导致 11 个只读接口回 428、后台页面全空白 —— 详见 requiresReauth 的注释。
  */
 const HIGH_RISK_CAPS = new Set([
   'admin.admin.write',
@@ -156,6 +168,35 @@ const HIGH_RISK_CAPS = new Set([
   'admin.secret.audit',
   'admin.data.customers'
 ])
+
+/**
+ * 除能力校验之外，这次调用是否还需要**当场二次认证**（带密码重证）。
+ *
+ * ## 规则：只看写操作
+ *
+ * 高危能力的原始构想是防「会话被偷」—— 攻击者拿到一个还活着的 cookie，
+ * 不该能建超管、改商户密码。这些动作有个共同点：**会改变系统状态**。
+ *
+ * 而 `GET /admin/mail`、`GET /admin/users`、`GET /admin/customers` 这类
+ * 只是把数据读出来展示。它们确实敏感（所以能力本身仍然只有超管拿得到），
+ * 但要求每次翻页都输密码并不现实 —— 2026-10-23 的后果是所有相关页面
+ * 直接 428 空白，运维误以为数据丢了。
+ *
+ * 换句话说：
+ *   · 角色校验  = 防「权限不够的人」（operator / 未登录）
+ *   · 二次认证  = 防「有权限但会话被偷」（写操作才值得付出输密码的代价）
+ *
+ * @param {string} method HTTP 方法
+ * @param {string} cap    该路由声明的能力
+ * @returns {boolean}
+ */
+function requiresReauth (method, cap) {
+  if (!HIGH_RISK_CAPS.has(cap)) return false
+  const m = String(method || '').toUpperCase()
+  // HEAD / OPTIONS 是探测，不是动作
+  if (m === 'GET' || m === 'HEAD' || m === 'OPTIONS') return false
+  return true
+}
 
 /**
  * 查一个路由需要什么能力。
@@ -193,5 +234,6 @@ module.exports = {
   OPERATOR_CAPS,
   HIGH_RISK_CAPS,
   capabilityFor,
+  requiresReauth,
   allows
 }

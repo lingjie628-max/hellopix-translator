@@ -25,7 +25,7 @@ const assert = require('node:assert/strict')
 const express = require('express')
 
 const {
-  ROUTE_CAPS, OPERATOR_CAPS, HIGH_RISK_CAPS, capabilityFor, allows
+  ROUTE_CAPS, OPERATOR_CAPS, HIGH_RISK_CAPS, capabilityFor, requiresReauth, allows
 } = require('../server/lib/capabilities')
 const { matchRouteTemplate } = require('../server/lib/route-match')
 
@@ -278,4 +278,83 @@ test('非法 IP / 空 IP 直接跳过，不去打数据库', async () => {
   await svc.flagNewLoginIp({ id: 1 }, '')
   await svc.flagNewLoginIp({ id: 1 }, 'not-an-ip')
   assert.equal(queried, 0, '非法 IP 不该进 SQL（$2::inet 会抛错，等于静默失效）')
+})
+
+// ── 读 / 写 高危分级 ─────────────────────────────────────
+
+/**
+ * 2026-10-23 事故：`GET /admin/mail` 和 `POST /admin/mail` 共用
+ * `admin.secret.mail`，而它在 HIGH_RISK_CAPS 里 —— 于是**只是打开邮件设置页**
+ * 也要带 X-Pix-Reauth（管理员密码）。
+ *
+ * 前端从不带，接口回 428，表单全空白，页面显示"邮件服务未配置 / 缺：未知"，
+ * 而库里 SMTP 配置完好（vlen=179）。运维会以为配置丢了。
+ *
+ * 这里守的规则：**只读接口不该要求二次认证；改动密钥的接口必须要求。**
+ */
+
+test('读邮件配置不要求二次认证（否则打开设置页就 428）', () => {
+  const cap = capabilityFor('GET', '/admin/mail')
+  assert.ok(cap, 'GET /admin/mail 必须声明能力')
+  assert.equal(HIGH_RISK_CAPS.has(cap), false,
+    `GET /admin/mail 用的是高危能力 ${cap}，会导致后台整页空白`)
+})
+
+test('写邮件配置仍然要求二次认证（能劫持全部验证邮件 = 接管账号）', () => {
+  const cap = capabilityFor('POST', '/admin/mail')
+  assert.ok(cap, 'POST /admin/mail 必须声明能力')
+  assert.equal(HIGH_RISK_CAPS.has(cap), true)
+})
+
+test('发测试信仍是高危：它按调用方给的地址真发信，等于免费发信通道', () => {
+  const cap = capabilityFor('POST', '/admin/mail/test')
+  assert.ok(cap)
+  assert.equal(HIGH_RISK_CAPS.has(cap), true)
+})
+
+test('读邮件配置的能力不给 operator（SMTP 与告警邮箱是超管的东西）', () => {
+  const cap = capabilityFor('GET', '/admin/mail')
+  assert.equal(OPERATOR_CAPS.has(cap), false)
+  assert.equal(allows(OPERATOR, cap).allowed, false)
+  assert.equal(allows(SUPER, cap).allowed, true)
+})
+
+test('通用不变量：所有只读 GET 都不要求二次认证（否则页面永久空白）', () => {
+  const offenders = []
+  for (const [route, cap] of Object.entries(ROUTE_CAPS)) {
+    if (!route.startsWith('GET ')) continue
+    if (!requiresReauth('GET', cap)) continue
+    offenders.push(`${route} → ${cap}`)
+  }
+  assert.deepEqual(offenders, [],
+    '这些 GET 路由要求二次认证，前端无法带密码，会导致页面对应区域永久空白：\n' + offenders.join('\n'))
+})
+
+test('通用不变量：所有写操作若命中高危能力，必须要求二次认证', () => {
+  const offenders = []
+  for (const [route, cap] of Object.entries(ROUTE_CAPS)) {
+    if (!/^(POST|PUT|DELETE|PATCH) /.test(route)) continue
+    if (!HIGH_RISK_CAPS.has(cap)) continue
+    if (requiresReauth(route.split(' ')[0], cap)) continue
+    offenders.push(`${route} → ${cap}`)
+  }
+  assert.deepEqual(offenders, [], offenders.join('\n'))
+})
+
+test('requiresReauth：写入要求、读取豁免、探测豁免', () => {
+  const secret = 'admin.secret.mail'
+  assert.equal(requiresReauth('POST', secret), true)
+  assert.equal(requiresReauth('PUT', secret), true)
+  assert.equal(requiresReauth('DELETE', secret), true)
+  assert.equal(requiresReauth('GET', secret), false)
+  assert.equal(requiresReauth('HEAD', secret), false)
+  assert.equal(requiresReauth('OPTIONS', secret), false)
+  // 非高危能力，无论什么方法都不需要
+  assert.equal(requiresReauth('POST', 'admin.read.faq'), false)
+  // 大小写不敏感：Express 路由本身不分大小写，判定不能比路由严
+  assert.equal(requiresReauth('post', secret), true)
+})
+
+test('读用的能力不被写操作复用（否则一改读的档位就漏了写）', () => {
+  assert.notEqual(capabilityFor('GET', '/admin/mail'), capabilityFor('POST', '/admin/mail'))
 })
