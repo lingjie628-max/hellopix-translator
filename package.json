@@ -1,6 +1,6 @@
 {
   "name": "hello-pix",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "description": "Hello Pix 翻译软件",
   "engines": {

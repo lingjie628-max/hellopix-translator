@@ -21,6 +21,9 @@
 
 const MAX_TRANSLATE_CHARS = 5000
 
+// 与服务端同一份实现（desktop/shared），避免两边规则分叉。
+const { trimTrailingDot } = require('../../shared/trailing-dot')
+
 /**
  * 把上游/网络异常归一成渲染层能识别的错误码。
  *
@@ -177,14 +180,24 @@ function registerTranslateIpc (deps) {
       ' trigger=' + (trigger || '-'))
 
     const hit = actions.getTransCached(from, to, engine, text)
-    if (hit) return { success: true, translation: hit, cached: true }
+    if (hit) {
+      // 本地缓存兜底：句点清理上线前存进去的旧译文还是带点的版本。
+      // 不清一次的话，这些句子会**永远**命中旧缓存，用户以为没修好。
+      // 清理后再写回缓存，下次命中就干净了。
+      const cleaned = trimTrailingDot(text, hit)
+      if (cleaned !== hit) actions.putTransCached(from, to, engine, text, cleaned)
+      return { success: true, translation: cleaned, cached: true }
+    }
 
     try {
       // requestTranslate 内部处理"上一轮请求号已终结"：换号重发一次再返回。
       // 这条路径不吞错 —— 服务端的 {success:false, code, msg} 原样上抛，
       // 由 guest-inject 的 notifyTranslateIssue() 显示成人话。
       const data = await actions.requestTranslate(text, from, to, engine, trigger)
-      const out = String((data && (data.translation || data.text)) || '').trim()
+      // 服务端已经清过句点，这里再兜一次是为了防御**旧服务端**：
+      // 用户可能连着还没升级的后端，或者请求打到了缓存中间层。
+      // 客户端多删一次的成本是零（幂等），代价远小于把带点的译文写进本地缓存。
+      const out = trimTrailingDot(text, String((data && (data.translation || data.text)) || '').trim())
       if (data && data.success && out) {
         actions.putTransCached(from, to, engine, text, out)
         // 反向缓存：把译文按"反过来翻"的键存一份。回译时直接命中，
@@ -196,6 +209,15 @@ function registerTranslateIpc (deps) {
       // "用户再次点击（新号）"。
       if (data && typeof data === 'object') {
         try { data.requestId = actions.transRequestId(text, from, to, engine) } catch (e) {}
+      }
+      // ★ 必须把清理后的 out 写回 data.translation ★
+      //
+      // 踩过的坑：上面算了 out、也写进了缓存，但这里直接 `return data`，
+      // 渲染层拿到的还是服务端原始响应 —— 缓存干净、屏幕上有句点，
+      // 两边不一致，而且看起来像"服务端修了客户端没修"。
+      // 单测（translate-dot-cache.test.js）就是从这里抓到的。
+      if (data && typeof data === 'object' && data.translation !== undefined && out) {
+        data.translation = out
       }
       return data
     } catch (e) {

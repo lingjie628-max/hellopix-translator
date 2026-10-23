@@ -12,7 +12,8 @@ const { PREFIX: redisPrefix } = require('../stores/redis-client')
 const { RedisTranslationCache } = require('../stores')
 const catalog = require('../lib/client-catalog')
 const translationRouter = require('./translation-router')
-const { trimTrailingDot } = require('../lib/trailing-dot')
+// 与服务端共用同一份实现，客户端缓存兜底也用它 —— 见 desktop/shared/trailing-dot.js
+const { trimTrailingDot } = require('../../desktop/shared/trailing-dot')
 
 function number(value, fallback) {
   const parsed = Number(value)

@@ -8,7 +8,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 
-const { trimTrailingDot, trailingDotRemovable } = require('../server/lib/trailing-dot')
+const { trimTrailingDot, trailingDotRemovable } = require('../desktop/shared/trailing-dot')
 
 test('原文没有句末标点、译文多了句点 → 删掉', () => {
   const cases = [
