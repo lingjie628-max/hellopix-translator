@@ -17,6 +17,34 @@ function appendCookie(res, value) {
   res.setHeader('Set-Cookie', current ? [].concat(current, value) : value)
 }
 
+/**
+ * 取 IP 的上位网段：IPv4 取 /24，IPv6 取 /48。
+ *
+ * 用于会话 IP 绑定：网段变了说明"换了地方"，作废会话强制重新登录；
+ * 同一网段内换 IP（运营商重拨、手机切基站）不踢人 —— 那是把安全做成骚扰。
+ *
+ * 取 /48 而不是 /64：同一运营商给一个用户分配的前缀常在 /48~/64 之间浮动。
+ *
+ * 放在模块顶层（而不是 createSecurity 闭包里），这样 redis-security.js
+ * 也能复用**同一份**实现 —— 两份实现迟早会漂移。
+ */
+function ipPrefix(raw) {
+  const ip = String(raw || '').trim().toLowerCase()
+  if (!ip) return ''
+  // Express 在 trust proxy 下会给出 "::ffff:1.2.3.4" 这种映射形式
+  const v4 = ip.replace(/^::ffff:/, '')
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(v4)) {
+    const parts = v4.split('.')
+    return parts.slice(0, 3).join('.') + '.0/24'
+  }
+  if (ip.includes(':')) {
+    const groups = ip.split(':').filter(Boolean).slice(0, 3)
+    if (!groups.length) return ''
+    return groups.join(':') + '::/48'
+  }
+  return ''
+}
+
 function timingEqual(a, b) {
   const left = Buffer.from(String(a))
   const right = Buffer.from(String(b))
@@ -70,7 +98,7 @@ function createSecurity(options) {
     return parts.join('; ')
   }
 
-  function createSession(res, type, subjectId, config) {
+  function createSession(req, res, type, subjectId, config) {
     const cfg = config || {}
     if (sessions.size >= 10_000) {
       const now = Date.now()
@@ -87,6 +115,9 @@ function createSecurity(options) {
       subjectId: String(subjectId),
       csrf,
       deviceId: String(cfg.deviceId || ''),
+      // 会话绑定的 IP 前缀（/24 或 /48）。为空表示不绑定。
+      // 用前缀而不是完整 IP：家宽/运营商会换 IP，绑太死会把正常用户踢下线。
+      ipPrefix: ipPrefixOf(req && req.ip),
       expiresAt: Date.now() + ttl
     })
     appendCookie(res, cookie(cookieNames[type], token, { httpOnly: true, maxAge: ttl }))
@@ -103,7 +134,32 @@ function createSecurity(options) {
       sessions.delete(token)
       return null
     }
+    // ★ 会话 IP 绑定 ★
+    //
+    // 2026-10-23 入侵：攻击者建了后门超管后在同一个 IP 下连续操作 19 次，
+    // 而会话本身对 IP 没有任何约束 —— 只要 cookie 被拿到（XSS、共享电脑、
+    // 中间件日志），谁拿都能用。
+    //
+    // 这里比对上位网段而不是完整 IP：运营商换 IP、手机切基站都很常见，
+    // 绑完整 IP 会把正常运营也踢下线。网段变化才说明"换了地方"。
+    // IP 变了直接作废会话，强制重新登录 —— 登录时正好会走二次认证/TOTP。
+    if (session.ipPrefix && req && req.ip) {
+      const prefix = ipPrefixOf(req.ip)
+      if (prefix && prefix !== session.ipPrefix) {
+        sessions.delete(token)
+        return null
+      }
+    }
     return session
+  }
+
+  /**
+   * 取 IP 的上位网段：IPv4 取 /24，IPv6 取 /48。
+   *
+   * 取 /48 而不是 /64：同一运营商给一个用户分配的前缀常在 /48~/64 之间浮动。
+   */
+  function ipPrefixOf(raw) {
+    return ipPrefix(raw)
   }
 
   function destroySession(req, res, type) {
@@ -160,6 +216,7 @@ function createSecurity(options) {
   return {
     cookieNames,
     parseCookies,
+    ipPrefixOf,
     hashPassword,
     verifyPassword,
     createSession,
@@ -205,4 +262,4 @@ function rateLimit(options) {
   }
 }
 
-module.exports = { createSecurity, rateLimit, hashPassword, verifyPassword }
+module.exports = { createSecurity, rateLimit, hashPassword, verifyPassword, ipPrefixOf: ipPrefix }

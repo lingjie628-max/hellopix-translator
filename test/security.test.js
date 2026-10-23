@@ -197,7 +197,7 @@ test('production cookies carry secure attributes', () => {
     setHeader: (name, value) => headers.set(name, value)
   }
   const security = createSecurity({ production: true })
-  security.createSession(response, 'user', 10001, { remember: true })
+  security.createSession({ ip: '203.0.113.7' }, response, 'user', 10001, { remember: true })
   const values = headers.get('Set-Cookie')
   assert.ok(values.some(value => value.startsWith('__Host-pix_user=')))
   assert.ok(values.some(value => value.includes('HttpOnly')))

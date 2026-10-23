@@ -757,6 +757,14 @@ module.exports = function registerMock(app, options) {
         req.pixSessionType = 'admin'
         return next()
       }
+      // ★ 与生产同一口径：强制两步验证（开关同样是 PIX_REQUIRE_ADMIN_TOTP）★
+      const requireTotp = ['1', 'true', 'yes'].includes(
+        String(process.env.PIX_REQUIRE_ADMIN_TOTP || '').toLowerCase()
+      )
+      if (requireTotp && !admin.totpEnabled && pathname !== '/admin/logout') {
+        res.status(403).json({ success: false, code: 'TOTP_SETUP_REQUIRED', msg: '请先绑定两步验证后再使用管理后台' })
+        return
+      }
       // ★ 与生产共用同一张能力表（server/lib/capabilities.js）★
       //
       // 这里此前有第二套规则：一个 superadminPrefixes 前缀数组 +
@@ -767,6 +775,12 @@ module.exports = function registerMock(app, options) {
       // 而 app 级中间件里 req.path 已经被 Express 剥掉了 /apis（实测）。
       // 所以要用 baseUrl + path 拼回完整路径去匹配路由模板。
       const full = `${req.baseUrl || ''}${req.path || ''}`
+      // 登出永远可用：不碰数据，但被 TOTP 强制挡下时也得能退出
+      if (pathname === '/admin/logout') {
+        req.pixAdmin = admin
+        req.pixSessionType = 'admin'
+        return next()
+      }
       const template = matchRouteTemplate(req.app, req.method, full)
       const cap = template ? capabilityFor(req.method, template) : null
       if (!cap) {
@@ -841,7 +855,7 @@ module.exports = function registerMock(app, options) {
     const session = found.session
     const account = session.account
     security.destroySession(req, res, 'user')
-    security.createSession(res, 'user', account.id, { remember: !!query.remember })
+    security.createSession(req, res, 'user', account.id, { remember: !!query.remember })
     db.logins.unshift({
       account: account.username,
       loginType: session.kind === 'sub' ? '子账号后台' : '商户后台',
@@ -977,7 +991,7 @@ module.exports = function registerMock(app, options) {
     }
     takeDevice(session.account, deviceId)
     security.destroySession(req, res, 'user')
-    security.createSession(res, 'user', session.account.id, { deviceId, remember: true })
+    security.createSession(req, res, 'user', session.account.id, { deviceId, remember: true })
     db.logins.unshift({
       account: session.account.username,
       loginType: '客户端',
@@ -1813,7 +1827,7 @@ module.exports = function registerMock(app, options) {
       return
     }
     security.destroySession(req, res, 'admin')
-    security.createSession(res, 'admin', admin.id, { remember: false })
+    security.createSession(req, res, 'admin', admin.id, { remember: false })
     audit(req, '登录超管后台', admin.username)
     res.json({ success: true, msg: '登录成功', obj: { username: admin.username, nickname: admin.nickname, role: admin.role || 'superadmin' } })
   })

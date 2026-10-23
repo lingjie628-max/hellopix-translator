@@ -39,7 +39,7 @@ function createRedisSecurity(options) {
     return parts.join('; ')
   }
 
-  async function createSession(res, type, subjectId, config) {
+  async function createSession(req, res, type, subjectId, config) {
     const cfg = config || {}
     const token = crypto.randomBytes(32).toString('base64url')
     const csrfToken = crypto.randomBytes(24).toString('base64url')
@@ -48,7 +48,10 @@ function createRedisSecurity(options) {
       type,
       subjectId: String(subjectId),
       csrf: csrfToken,
-      deviceId: String(cfg.deviceId || '')
+      deviceId: String(cfg.deviceId || ''),
+      // 与 memory 版同一套 IP 绑定规则 —— 生产走的是这一份，
+      // 只改 security.js 不改这里，等于线上没加固（2026-10-23 的教训）。
+      ipPrefix: memorySecurity.ipPrefixOf(req && req.ip)
     }, ttl)
     appendCookie(res, cookie(cookieNames[type], token, { httpOnly: true, maxAge: ttl }))
     appendCookie(res, cookie(cookieNames.csrf, csrfToken, {
@@ -62,7 +65,18 @@ function createRedisSecurity(options) {
 
   async function resolveSession(req, type) {
     const token = memorySecurity.parseCookies(req)[cookieNames[type]]
-    return token ? sessionStore.get(token, type) : null
+    const session = token ? await sessionStore.get(token, type) : null
+    if (!session) return null
+    // 会话 IP 绑定：网段变了就作废，强制重新登录。
+    // 只比上位网段（IPv4 /24、IPv6 /48），运营商换 IP 不会误伤。
+    if (session.ipPrefix && req && req.ip) {
+      const prefix = memorySecurity.ipPrefixOf(req.ip)
+      if (prefix && prefix !== session.ipPrefix) {
+        await sessionStore.delete(token, type, session.subjectId)
+        return null
+      }
+    }
+    return session
   }
 
   async function destroySession(req, res, type) {

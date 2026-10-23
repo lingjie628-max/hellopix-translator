@@ -6,6 +6,17 @@ const { capabilityFor, allows, HIGH_RISK_CAPS } = require('../lib/capabilities')
 const { matchRouteTemplate } = require('../lib/route-match')
 
 /**
+ * 是否强制超管绑定两步验证。
+ *
+ * 每次求值而不是模块加载时缓存 —— 测试要能在同一进程里切换这个开关，
+ * 缓存成常量就只能重启进程才能测到另一条分支。
+ */
+function requireAdminTotp () {
+  const value = String(process.env.PIX_REQUIRE_ADMIN_TOTP || '').toLowerCase()
+  return value === '1' || value === 'true' || value === 'yes'
+}
+
+/**
  * 账号是否已到期。`null`/空串 = 无限期。
  *
  * 单独抽出来，是因为登录与每次请求都必须用**同一个**口径 ——
@@ -61,8 +72,44 @@ class AuthService {
           req.ip || '', String(req.headers['user-agent'] || '').slice(0, 1000),
           String(req.headers['x-pix-device'] || '').slice(0, 255) || null]
       )
+      // 超管登录连续失败 → 写一条审计告警。
+      //
+      // 2026-10-23 入侵里没有"暴力破解"这一步（对方是直接建后门超管），
+      // 但把这条路补上：任何人在撞超管密码，运营应该能在日志里看见，
+      // 而不是等被人撞开了才发现。阈值取 5 次 —— 正常人不会连续输错 5 次。
+      if (loginType === 'admin') {
+        await this.alertRepeatedAdminFailures(req, account)
+      }
     } catch (error) {
       console.error('Failed to persist login failure:', error.message)
+    }
+  }
+
+  /**
+   * 超管登录在同一 IP 下 15 分钟内失败 ≥5 次时，写一条审计。
+   *
+   * 只在"刚好达到阈值"时写一次（第 5 次），不是每次都写 ——
+   * 否则攻击者刷 200 次就灌 195 条重复审计，把真正的告警埋掉。
+   */
+  async alertRepeatedAdminFailures(req, account) {
+    try {
+      const address = String((req && req.ip) || '').trim()
+      if (!address || !/^[0-9a-fA-F:.]+$/.test(address)) return
+      const result = await this.repository.query(
+        `SELECT COUNT(*)::int AS n FROM login_logs
+          WHERE login_type='admin' AND success=false
+            AND login_ip=$1::inet
+            AND created_at > NOW() - INTERVAL '15 minutes'`,
+        [address]
+      )
+      const count = Number(result && result.rows && result.rows[0] && result.rows[0].n) || 0
+      if (count !== 5) return
+      await this.repository.audit(null, { id: null, username: 'system' },
+        '超管登录连续失败告警',
+        `IP ${address} 在 15 分钟内失败 ${count} 次（最近尝试账号：${String(account || '').slice(0, 64)}）`,
+        address, null)
+    } catch (error) {
+      console.error('[auth] 失败登录告警写入失败:', error.message)
     }
   }
 
@@ -94,7 +141,7 @@ class AuthService {
       await this.repository.query(`UPDATE ${table} SET bound_device=$2 WHERE id=$1`, [session.account.id, deviceId])
     }
     await this.security.destroySession(req, res, 'user')
-    await this.security.createSession(res, 'user', this.subject(session.kind, session.account.id), {
+    await this.security.createSession(req, res, 'user', this.subject(session.kind, session.account.id), {
       remember: clientMode || Boolean(data.remember),
       deviceId
     })
@@ -127,7 +174,7 @@ class AuthService {
   /** 凭据（含第二因子）都通过后，才真正发放会话并记账 */
   async startAdminSession(req, res, admin, action) {
     await this.security.destroySession(req, res, 'admin')
-    await this.security.createSession(res, 'admin', admin.id, { remember: false })
+    await this.security.createSession(req, res, 'admin', admin.id, { remember: false })
     await this.repository.query(
       `UPDATE admins SET last_login_at=NOW(),updated_at=NOW() WHERE id=$1`,
       [admin.id]
@@ -252,6 +299,24 @@ class AuthService {
           // 这里只是豁免角色判断，登录态校验照旧（上面已经强制过）。
           if (lower === '/admin/totp' || lower.startsWith('/admin/totp/')) return next()
 
+          // ★ 强制两步验证（可开关，默认关闭）★
+          //
+          // 2026-10-23 入侵：攻击者建的后门超管**没开 TOTP**，登录一路畅通，
+          // 之后 19 次操作全部放行。TOTP 当时是"可选项"，等于没有。
+          //
+          // 但直接强制会酿成事故：线上现有超管如果都没绑 TOTP，
+          // 代码一上线所有人立刻进不去后台 —— 拿可用性换来的不是安全，是停机。
+          // 所以默认**关闭**，由运维先确认线上状态、逐个绑定后再打开：
+          //
+          //   PIX_REQUIRE_ADMIN_TOTP=1   → 未绑 TOTP 的超管只能访问绑定接口
+          //
+          // 打开后的行为：没绑 TOTP 仍能登录（否则没法自助绑定），
+          // 但除 TOTP 绑定接口和登出外，其它管理接口一律拒绝。
+          // 后门账号即使建起来也寸步难行：它必须先绑 TOTP，而绑定动作会写审计。
+          if (requireAdminTotp() && !found.admin.totpEnabled && lower !== '/admin/logout') {
+            throw new ApiError(403, '请先绑定两步验证后再使用管理后台', 'TOTP_SETUP_REQUIRED')
+          }
+
           // ★ 授权：按能力表判定，未声明 = 拒绝 ★
           //
           // 旧实现是 superOnly 前缀数组 + "非 GET 一律 403"。两个毛病：
@@ -262,6 +327,10 @@ class AuthService {
           //
           // 新实现见 lib/capabilities.js：每个路由显式声明能力，
           // 按 **METHOD + 路由模板** 精确查表，查不到就拒绝。
+          //
+          // 登出是例外：它不碰任何数据，却必须永远可用 ——
+          // 否则被 TOTP 强制挡下的管理员连"退出"都做不到。
+          if (lower === '/admin/logout') return next()
           const template = matchRouteTemplate(req.app.locals.pixRouter, req.method, path)
           const cap = template ? capabilityFor(req.method, template) : null
           if (!cap) {
