@@ -38,19 +38,67 @@ try {
 
 const AGENTS = new Map()
 
+// 出站 URL 校验。注意：outbound-guard 只依赖 dns，不依赖本文件，无循环引用。
+const { checkOutboundUrl, blockedV4Reason, blockedV6Reason } = require('./outbound-guard')
+
+/**
+ * 共享的底层连接器。`connect` 覆盖里要复用它，否则每次建连都新建一个
+ * 连接器实例，既慢又会丢 undici 的连接选项。
+ */
+let BASE_CONNECTOR = null
+function baseConnector () {
+  if (BASE_CONNECTOR) return BASE_CONNECTOR
+  if (!undici || typeof undici.buildConnector !== 'function') return null
+  try {
+    // buildConnector 必须显式给选项，否则内部解构 undefined 直接抛
+    BASE_CONNECTOR = undici.buildConnector({})
+  } catch (e) {
+    BASE_CONNECTOR = null
+  }
+  return BASE_CONNECTOR
+}
+
 /** 按域名懒建 agent —— 只给真正用到的厂商建，不预先占资源。 */
 function agentFor (origin) {
   if (!undici || !undici.Agent) return null
   let agent = AGENTS.get(origin)
   if (agent) return agent
-  agent = new undici.Agent({
+
+  const connector = baseConnector()
+  const options = {
     // 翻译是"一串短请求打同一个域名"。8 条连接足够扛住并发，
     // 再多只是多开握手、并不会更快。
     connections: 8,
     // 空闲连接留 60s：翻译请求是阵发的（用户连续发几条），
     // 关太早等于每次都要重新握手。
     pipelining: 1
-  })
+  }
+
+  // ★ 连接层 IP 校验（SSRF 第三道闸）★
+  //
+  // 前两道（保存时校验、fetch 前校验）都是"先解析、后请求"，中间始终存在
+  // DNS rebinding 的 TOCTOU 窗口：攻击者的域名先解析到公网 IP 通过校验，
+  // 几毫秒后 fetch 自己再解析时变成本机/内网地址。
+  //
+  // 这一层在**真正建 TCP 连接**时拿到 undici 实际要连的那个 IP 再判一次。
+  // 拿到的是内核要连的地址，不存在"再来一次解析"的空隙。
+  //
+  // TLS/SNI 完全不受影响：只读 opts.host 做判定，不改写任何连接参数，
+  // 证书校验仍按原主机名进行。
+  if (connector) {
+    options.connect = (opts, callback) => {
+      const ip = String((opts && opts.host) || '')
+      const reason = ip.includes(':') ? blockedV6Reason(ip) : blockedV4Reason(ip)
+      if (reason) {
+        const error = new Error(`出站连接被拦截：${ip} 属于禁止网段（${reason}）`)
+        error.code = 'SSRF_BLOCKED'
+        return callback(error)
+      }
+      return connector(opts, callback)
+    }
+  }
+
+  agent = new undici.Agent(options)
   AGENTS.set(origin, agent)
   return agent
 }
@@ -61,9 +109,21 @@ function agentFor (origin) {
  * 语义与 `globalThis.fetch` 完全一致，只是在能建池的时候挂上 dispatcher。
  * **绝不抛"池建不出来"的错** —— 那种情况直接退化成裸 fetch。
  */
-function pooledFetch (input, init) {
+async function pooledFetch (input, init) {
   const url = typeof input === 'string' ? input : (input && input.url)
   if (!url) return globalThis.fetch(input, init)
+  // ★ 出站目标校验（SSRF 第二道闸）★
+  //
+  // 保存通道时已经校验过一次（routes/admin/clients.js），但那不够：
+  // 攻击者可以让域名先解析到公网 IP 通过校验，之后再改成内网 IP
+  // （DNS rebinding）。所以**真正发请求前**必须用这次的解析结果再判一次。
+  //
+  // 放在这里而不是各个适配器里：这是所有出站请求的唯一出口，
+  // 一处收口，将来新加的厂商适配器自动被覆盖。
+  const verdict = await checkOutboundUrl(url)
+  if (!verdict.ok) {
+    throw new Error(`出站请求被拦截：${verdict.reason}`)
+  }
   let agent = null
   try {
     agent = agentFor(new URL(url).origin)

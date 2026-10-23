@@ -200,7 +200,26 @@ function createSecurity(options) {
     res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
     res.setHeader('Cross-Origin-Opener-Policy', 'same-origin')
     const connectSrc = production ? "'self'" : "'self' http: https: ws: wss:"
-    res.setHeader('Content-Security-Policy', `default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ${connectSrc}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`)
+    // CSP 说明：
+    //   script-src 'self'   —— 不许内联脚本、不许外部脚本源，XSS 落地即哑火
+    //   object-src 'none'   —— 不许 <object>/<embed>，堵住老式插件执行路径
+    //   frame-src 'none'    —— 本站不嵌任何第三方 iframe
+    //   base-uri 'self'     —— 防止 <base> 劫持把相对路径全导走
+    //   form-action 'self'  —— 表单不许往站外提交（防钓鱼式改写）
+    const csp = [
+      "default-src 'self'",
+      "img-src 'self' data: https:",
+      "style-src 'self' 'unsafe-inline'",
+      "script-src 'self'",
+      `connect-src ${connectSrc}`,
+      "object-src 'none'",
+      "frame-src 'none'",
+      "frame-ancestors 'none'",
+      "base-uri 'self'",
+      "form-action 'self'",
+      'upgrade-insecure-requests'
+    ].join('; ')
+    res.setHeader('Content-Security-Policy', csp)
     next()
   }
 

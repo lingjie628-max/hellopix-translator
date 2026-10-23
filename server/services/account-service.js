@@ -122,17 +122,36 @@ class AccountService {
 
     await this.consumeCaptcha(data)
 
-    // 先查重再验码：验证码是一次性的，若先验码再因重名失败，
-    // 用户得重新收一次码才能改用户名 —— 体验很差
+    // ★ 用户枚举修复：查重必须放在**验证码校验之后** ★
+    //
+    // 原顺序是「查重 → 验码」，注释里写的是"怕用户重名失败后要重收一次码"。
+    // 但代价太大了：查重在验码之前，意味着**不需要邮箱验证码**就能知道
+    // 某个用户名/邮箱是否注册过 ——
+    //
+    //   POST /user/register {userName:'admin', ...任意图形验证码}
+    //     → 409 USERNAME_TAKEN   ⇒ 这个账号真实存在
+    //   POST /user/register {email:'ceo@x.com', ...}
+    //     → 409 EMAIL_TAKEN      ⇒ 这个邮箱真实存在
+    //
+    // 图形验证码一次一换也挡不住：OCR 一次成本几毛钱，批量跑一遍常见用户名
+    // 就能拿到全站商户清单，再和 /user/forgot 拼出「账号 ↔ 邮箱」映射，
+    // 直接做定向钓鱼和撞库。这正是"多个低危组合成高危"。
+    //
+    // 修复后顺序：验码 → 查重。拿到验证码的人本来就有这个邮箱的控制权，
+    // 让他知道"这个邮箱注册过"是合理的；没有验证码的人什么也探不到。
+    //
+    // 体验上的顾虑已经不存在：verify 失败时**不消耗**验证码（见
+    // VerificationService.verify 的 CODE_MISMATCH 分支），重名失败也只
+    // 烧掉一次性图形码，换个图形码重提即可，不用重收邮件。
+    const check = await this.verification.verify(email, 'register', data.code)
+    if (!check.ok) throw new ApiError(400, this.codeMessage(check), check.reason)
+
     if (await this.repo.userByUsername(username)) {
       throw new ApiError(409, '该账号已被注册', 'USERNAME_TAKEN')
     }
     if (await this.repo.userByEmail(email)) {
       throw new ApiError(409, '该邮箱已被注册', 'EMAIL_TAKEN')
     }
-
-    const check = await this.verification.verify(email, 'register', data.code)
-    if (!check.ok) throw new ApiError(400, this.codeMessage(check), check.reason)
 
     const trialChars = await this.trialChars()
     const created = await this.repo.createUser({

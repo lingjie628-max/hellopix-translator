@@ -11,6 +11,7 @@ const { asyncRoute, input, pagination, page, ok, ApiError } = require('../../lib
 const { encryptSecret, credentialsKeyReady, KEY_ENV } = require('../../lib/credentials')
 const { providers, channelStatus } = require('../../services/translation-provider')
 const { bool } = require('../../services/core-service')
+const { checkOutboundUrl } = require('../../lib/outbound-guard')
 
 /**
  * 布尔字段：字面量解析，认不出就 400。
@@ -142,6 +143,20 @@ function registerAdminClients(router, ctx) {
     const endpoint = String(data.endpoint || '').trim()
     if (endpoint && !/^https:\/\//.test(endpoint)) {
       throw new ApiError(400, '接口地址必须是 https:// 开头', 'BAD_ENDPOINT')
+    }
+    // ★ SSRF 防护 ★
+    //
+    // 只校验 https:// 是不够的：攻击者（或拿到超管会话的人）可以把地址
+    // 指向 169.254.169.254 读云元数据、指向 127.0.0.1 打内网、
+    // 或指向自己的服务器把 apiKey 一起收走。
+    //
+    // 见 lib/outbound-guard.js：解析域名后逐个 IP 判断是否落在禁止网段。
+    // 注意这里只是**第一道**闸；真正发起请求前还会再验一次（防 DNS rebinding）。
+    if (endpoint) {
+      const verdict = await checkOutboundUrl(endpoint)
+      if (!verdict.ok) {
+        throw new ApiError(400, `接口地址不被允许：${verdict.reason}`, 'ENDPOINT_BLOCKED')
+      }
     }
 
     // 密钥非空才更新；留空表示保持原值（前端占位符就是这么写的）

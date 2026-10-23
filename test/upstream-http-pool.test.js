@@ -43,10 +43,29 @@ test('pooledFetch：合法 URL 会带上 dispatcher（否则等于没连池）',
   })
 })
 
-test('pooledFetch：非法 URL 退化成裸 fetch，不抛', async () => {
+test('pooledFetch：非法 URL 必须被拦，不能穿透到裸 fetch', async () => {
+  // 语义变更（SSRF 防护）：以前非法 URL 直接退化成裸 fetch。
+  // 现在 outbound-guard 会先判——无法解析的目标不允许出站，
+  // 否则就是一条"用畸形 URL 绕到裸 fetch 再打内网"的旁路。
   await withFakeFetch(null, async (calls) => {
-    await pool.pooledFetch('not-a-url', { method: 'GET' })
-    assert.equal(calls.length, 1)
+    await assert.rejects(
+      () => pool.pooledFetch('not-a-url', { method: 'GET' }),
+      /出站请求被拦截/
+    )
+    assert.equal(calls.length, 0, '被拦截后不应真的发出请求')
+  })
+})
+
+test('pooledFetch：内网目标必须被拦', async () => {
+  await withFakeFetch(null, async (calls) => {
+    for (const url of [
+      'https://169.254.169.254/latest/meta-data/',
+      'https://127.0.0.1:443/',
+      'https://[::ffff:127.0.0.1]/'
+    ]) {
+      await assert.rejects(() => pool.pooledFetch(url, { method: 'GET' }), /出站请求被拦截/)
+    }
+    assert.equal(calls.length, 0)
   })
 })
 
