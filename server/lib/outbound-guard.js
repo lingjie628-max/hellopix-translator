@@ -221,7 +221,11 @@ const TRUSTED_VENDOR_HOSTS = [
   'api.anthropic.com',
   'api.x.ai',
   'api.mistral.ai',
+  // MiniMax 有两个域名：老的是 api.minimax.chat，线上 engines 表里配的是
+  // api.minimaxi.com。两个都留着 —— 只列一个的话，将来谁在后台启用这条线
+  // 就会被 SSRF 闸门拦下，而且报的错是"出站被拦截"，大概率被误判成"被封"。
   'api.minimax.chat',
+  'api.minimaxi.com',
   'api.moonshot.cn',
   'open.bigmodel.cn',
   'dashscope.aliyuncs.com',

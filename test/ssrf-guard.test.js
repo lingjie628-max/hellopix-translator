@@ -174,6 +174,32 @@ test('SSRF：厂商白名单命中时不查 DNS（断开外网也能翻译）', 
   assert.equal(isTrustedVendor('api.deepseek.com.attacker.net'), false)
 })
 
+test('SSRF：生产 engines 表里的每一个 endpoint 都必须能过闸', async () => {
+  // 这条是上线前的护栏。SSRF 闸门一旦误伤，表现是"翻译全部失败"，
+  // 而错误信息是"出站请求被拦截"，很容易被误判成"厂商封了我们"。
+  //
+  // 清单来自生产库 `SELECT provider,endpoint FROM engines` 的实际值。
+  // 以后新增厂商时，这里要同步加一行 —— 加了但白名单没加，这条就会红。
+  const { _clearDnsCache } = require('../server/lib/outbound-guard')
+  _clearDnsCache()
+  const PRODUCTION_ENDPOINTS = {
+    claude: 'https://api.anthropic.com/v1',
+    deepseek: 'https://api.deepseek.com',
+    doubao: 'https://ark.cn-beijing.volces.com/api/v3',
+    glm: 'https://open.bigmodel.cn/api/paas/v4',
+    google: 'https://translation.googleapis.com/language/translate/v2',
+    gpt: 'https://api.openai.com/v1',
+    grok: 'https://api.x.ai/v1',
+    kimi: 'https://api.moonshot.cn/v1',
+    minimax: 'https://api.minimaxi.com/v1',
+    mistral: 'https://api.mistral.ai/v1'
+  }
+  for (const [name, url] of Object.entries(PRODUCTION_ENDPOINTS)) {
+    const verdict = await checkOutboundUrl(url)
+    assert.equal(verdict.ok, true, `引擎 ${name} 的 ${url} 被误拦：${verdict.reason}`)
+  }
+})
+
 test('SSRF：DNS 解析到内网地址时被拦（rebinding 前置）', async () => {
   // 用一个必然解析到回环的名字。若环境无 DNS，这条应跳过而不是假绿。
   let resolved = true
