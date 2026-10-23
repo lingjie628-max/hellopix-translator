@@ -111,21 +111,49 @@ test('app:version 返回当前版本', () => {
   assert.equal(handlers['app:version']({}), '1.0.0')
 })
 
-test('app:checkUpdate 只接受信任域名下的下载地址', async () => {
+/**
+ * 域名白名单这一层单独测。
+ *
+ * 用降级模式（`PIX_ALLOW_UNSIGNED_UPDATE=1`）跑：下面两条断言关心的是
+ * 「地址过不过白名单」，不是「清单有没有签名」。签名那一层由
+ * test/update-signature.test.js 覆盖，两层各测各的，互不掩盖。
+ */
+test('app:checkUpdate 只接受信任域名下的下载地址（白名单层）', async () => {
+  process.env.PIX_ALLOW_UNSIGNED_UPDATE = '1'
   const { handlers } = harness({
     apiResult: () => ({ success: true, version: '2.0.0', url: 'https://evil.com/x.dmg' })
   })
   const r = await handlers['app:checkUpdate']({})
+  delete process.env.PIX_ALLOW_UNSIGNED_UPDATE
   assert.equal(r.remote, '2.0.0')
   assert.equal(r.url, '', '不信任的下载地址必须丢弃')
 })
 
-test('app:checkUpdate 接受信任域名', async () => {
+test('app:checkUpdate 接受信任域名（白名单层）', async () => {
+  process.env.PIX_ALLOW_UNSIGNED_UPDATE = '1'
   const { handlers } = harness({
     apiResult: () => ({ success: true, version: '2.0.0', url: 'https://download.example.com/x.dmg' })
   })
   const r = await handlers['app:checkUpdate']({})
+  delete process.env.PIX_ALLOW_UNSIGNED_UPDATE
   assert.equal(r.url, 'https://download.example.com/x.dmg')
+})
+
+/**
+ * 严格模式：没签名清单就**不给下载地址**。
+ *
+ * 这条是新增行为的护栏。默认（没设 PIX_ALLOW_UNSIGNED_UPDATE）必须严格，
+ * 否则「服务端还没升级」会被静默当成「可以降级」，加签名就白加了。
+ */
+test('app:checkUpdate 默认严格：没有签名清单就不给下载地址', async () => {
+  delete process.env.PIX_ALLOW_UNSIGNED_UPDATE
+  const { handlers } = harness({
+    apiResult: () => ({ success: true, version: '2.0.0', url: 'https://download.example.com/x.dmg' })
+  })
+  const r = await handlers['app:checkUpdate']({})
+  assert.equal(r.success, true)
+  assert.equal(r.url, '', '没有签名清单时绝不能给下载地址')
+  assert.ok(r.msg, '要告诉用户为什么不能下载')
 })
 
 test('app:checkUpdate 网络失败时仍回传本地版本（界面要能显示当前版本）', async () => {

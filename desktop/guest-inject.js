@@ -40,9 +40,71 @@ const pixBridge = {
   })
 }
 
+/**
+ * 上报"焦点是否在可编辑区域"。
+ *
+ * ## 为什么需要这个
+ *
+ * 主进程的 `before-input-event` 是**同步**回调，来不及 `executeJavaScript`
+ * 去问页面"现在光标在哪"。而 Ctrl+Z 到底该谁处理，恰恰取决于这个：
+ *
+ *   · 光标在输入框 → 必须放行给页面。Slack / Discord / WhatsApp 的撤销栈
+ *     比 Chromium 默认的更懂上下文（能撤回一次"引用回复"、一次粘贴的多行），
+ *     被我们拦下就废了。
+ *   · 光标在普通区域 → 页面没得撤销，我们接管，否则按键毫无反应。
+ *
+ * 所以用 capture 阶段监听 focusin/focusout 维护一个布尔值，变化时通过
+ * `reportEditableFocus` 推给主进程缓存。监听器挂在 window 上，
+ * **capture: true** 才能在被页面 stopPropagation 之前拿到。
+ *
+ * ## 为什么不用 input 事件
+ *
+ * contenteditable 的 div 不触发 focus 时的 `isContentEditable` 变化，
+ * 有些页面（WhatsApp 的聊天列表）用 tabindex 做键盘导航，
+ * 那些地方 focus 了但不可编辑 —— 必须真的检查 isContentEditable / tagName。
+ */
+function isEditableTarget (el) {
+  if (!el || !el.nodeType || el.nodeType !== 1) return false
+  try {
+    if (el.isContentEditable) return true
+    const tag = String(el.tagName || '').toUpperCase()
+    if (tag === 'TEXTAREA') return true
+    if (tag === 'INPUT') {
+      // input 里也有不可编辑的类型：勾选框、按钮、颜色选择器
+      const type = String(el.type || 'text').toLowerCase()
+      return !/^(button|checkbox|radio|file|submit|reset|image|range|color)$/.test(type)
+    }
+  } catch (e) {}
+  return false
+}
+
+function installEditableReporter () {
+  let last = null
+  const report = editable => {
+    if (editable === last) return
+    last = editable
+    try { ipcRenderer.send('edit:editableFocus', editable) } catch (e) {}
+  }
+  // focusin 冒泡，capture 阶段最先收到 —— 页面想拦也拦不住
+  window.addEventListener('focusin', event => report(isEditableTarget(event.target)), true)
+  // focusout 时 target 已经不可靠（可能已 remove），用 relatedTarget 或直接查 activeElement
+  window.addEventListener('focusout', () => {
+    // 延迟一拍：focusout 之后焦点会立刻落到新元素，那一刻才是真实状态
+    setTimeout(() => report(isEditableTarget(document.activeElement)), 0)
+  }, true)
+  // 页面切换（WhatsApp 在会话间跳转时整个挂在 #app 下重建）
+  window.addEventListener('hashchange', () => {
+    setTimeout(() => report(isEditableTarget(document.activeElement)), 0)
+  }, true)
+}
+
 ;(() => {
   if (window.__helloPixChat) return true
   window.__helloPixChat = true
+
+  // 焦点上报：主进程判断 Ctrl+Z 该不该拦，全靠它（见 installEditableReporter）。
+  // 出错不能拖垮翻译主线，所以单独 try。
+  try { installEditableReporter() } catch (e) {}
 
   const cache = new Map()
   const pending = new Map()

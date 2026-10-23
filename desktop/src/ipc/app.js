@@ -14,8 +14,16 @@
  * 带代理模板，用户不用清配置。
  */
 
+const { resolveRelease } = require('../update/verify-release')
+const { configured: SIGNING_CONFIGURED } = require('../update/trusted-keys')
+
 function registerAppIpc (deps) {
   const { reg, actions, env } = deps
+
+  // 签名公钥没注入时，只有显式关闭才允许降级到白名单模式。
+  // 默认严格：没公钥 = 拿不到更新，而不是「谁都能推更新」。
+  const allowLegacy = process.env.PIX_ALLOW_UNSIGNED_UPDATE === '1'
+  const state = { warnedMissingKey: false }
 
   reg.handle('app:platforms', async () => {
     try {
@@ -58,15 +66,67 @@ function registerAppIpc (deps) {
 
   reg.handle('app:version', () => env.APP_VERSION)
 
+  /**
+   * 检查更新。
+   *
+   * ## 两道防线，顺序不能反
+   *
+   *   1. **验签**（src/update/verify-release.js）：服务端下发的清单必须带
+   *      Ed25519 签名，证明这份清单和里面那个安装包的哈希确实出自我们。
+   *      这道防线不依赖服务端健康 —— 服务器被攻破也签不出来。
+   *   2. **域名白名单**：签过名也不代表地址可以随便放。签名只管「内容没被改」，
+   *      万一哪天发布流程出错把外部域名的包签进去，白名单兜底。
+   *
+   * 两道都过才把 url 交给渲染层。任何一道不过一律返回空 url ——
+   * 空 url 在渲染层显示为「已检测到新版本但不可下载」，不会静默引导用户。
+   *
+   * ## 返回结构保持不变
+   *
+   * `{success, local, remote, url, msg}` —— 渲染层（collision-update.js）
+   * 依赖这个形状，加字段可以，改形状要同步改前端。这里只加 `signed` 供排查。
+   */
   reg.handle('app:checkUpdate', async () => {
     const local = env.APP_VERSION
     try {
       const data = await actions.api('/client/update?os=' + process.platform + '&arch=' + process.arch)
-      const remote = String((data && (data.version || (data.obj && data.obj.version))) || '')
-      const candidate = String((data && (data.url || (data.obj && data.obj.url))) || '')
-      // 下载地址必须过信任名单：服务端被劫持时不能把用户引到任意域名
-      const url = env.isAllowedExternalUrl(candidate, env.DOWNLOAD_HOSTS) ? candidate : ''
-      return { success: true, local: local, remote: remote, url: url }
+
+      // 没内置公钥时，严格模式下所有更新都会被拒 —— 这通常是构建时忘了注入，
+      // 不是用户的问题。说一次就够了，别每次点「检查更新」都刷同一条日志。
+      if (!SIGNING_CONFIGURED && !allowLegacy && !state.warnedMissingKey) {
+        state.warnedMissingKey = true
+        if (actions.log) actions.log('error', 'update', '客户端未内置更新公钥，所有更新将被拒绝（构建时忘记注入？）')
+      }
+
+      const resolved = resolveRelease(data, {
+        appId: 'com.hellopix.desktop',
+        currentVersion: local,
+        channel: 'stable',
+        allowLegacy,
+        logger: actions.log || (() => {})
+      })
+
+      if (resolved.status === 'rejected') {
+        // remote 传下去，别清零 —— 见下面白名单那段的长注释，
+        // 理由一模一样：有新版但不可下载 ≠ 已是最新。
+        return { success: true, local: local, remote: resolved.remote || '', url: '', signed: false, msg: resolved.reason }
+      }
+
+      // 下载地址必须过信任名单：服务端被劫持时不能把用户引到任意域名。
+      //
+      // 只清 url、**保留 remote**：渲染层用 remote > local 判断「有新版本」，
+      // 再把 url 缺省当作「已检测到新版本，但安装包尚未发布」。把 remote 也
+      // 清掉会让界面显示「当前已是最新版本」，用户以为不用管了 —— 这是误导，
+      // 因为他手上确实不是最新版。
+      const url = env.isAllowedExternalUrl(resolved.url, env.DOWNLOAD_HOSTS) ? resolved.url : ''
+
+      return {
+        success: true,
+        local: local,
+        remote: resolved.remote,
+        url: url,
+        sha256: resolved.sha256 || '',
+        signed: resolved.status === 'hardened'
+      }
     } catch (e) {
       return { success: false, local: local, msg: e.message || '无法检查更新' }
     }

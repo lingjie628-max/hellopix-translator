@@ -38,6 +38,7 @@ const { readPageText } = require('./src/translate/probe-page')
 const loadErrorPage = require('./src/stability/load-error-page')
 const instanceSlot = require('./src/window/instance-slot')
 const backgroundMode = require('./src/window/background-mode')
+const zoomLib = require('./src/window/zoom')
 const hiddenTabs = require('./src/window/hidden-tabs')
 const {
   csvHosts,
@@ -2796,25 +2797,192 @@ function bridgeEnabledFor(item) {
    两者都到位才能真正复制。）
 
    ## 修法（两条独立通道，互为兜底）
-   1. **应用菜单**：给 macOS 装一份含编辑角色的标准菜单（Linux/Windows 用
-      `setMenu(null)` + 快捷键事件，见下）。
+   1. **应用菜单**：装一份含编辑角色的标准菜单（含「视图」组：缩放/刷新/开发者工具）。
+   **所有平台都注册** —— 2026-10-23 修正：原来非 macOS 直接 `setMenu(null)`，
+   结果「视图」里的 Ctrl+R / Ctrl+= / Ctrl+0 在 Windows 上完全没注册上，
+   因为菜单项 accelerator 只有挂在真实应用菜单上才会被处理。
+   菜单栏仍然靠窗口的 `setMenuBarVisibility(false)` 隐藏，观感不变。
    2. **WebContentsView 级 before-input-event + 右键菜单**：在每个 view 上直接
-      接住 Cmd/Ctrl+C/V/X/A，调用 webContents 的编辑命令。这条路**不依赖菜单**，
+      接住 Cmd/Ctrl+C/V/X/A/Z，调用 webContents 的编辑命令。这条路**不依赖菜单**，
       是最稳的兜底 —— 菜单在某些平台/打包方式下可能被系统吞掉，这条不会。
+      （右键菜单见 installEditSupport，图片场景单独处理。）
    --------------------------------------------------------------------------- */
 
 /** 对某个 webContents 执行一次编辑动作，带可用性保护。 */
+/**
+ * 执行一个编辑命令。
+ *
+ * 所有命令都先检查 webContents 上真有这个方法 —— Electron 各版本、各平台
+ * 支持的方法不完全一致（`pasteAndMatchStyle` 在旧版本里叫
+ * `replaceMisspelling` 的兄弟 `pasteAndMatchStyle`，但 LTSC 版本可能没有）。
+ * 没有就返回 false，让调用方**不吞掉按键**，交给页面自己处理。
+ */
 function runEditCommand(wc, action) {
   if (!wc || (typeof wc.isDestroyed === 'function' && wc.isDestroyed())) return false
   try {
-    if (action === 'copy' && typeof wc.copy === 'function') return wc.copy(), true
-    if (action === 'paste' && typeof wc.paste === 'function') return wc.paste(), true
-    if (action === 'cut' && typeof wc.cut === 'function') return wc.cut(), true
-    if (action === 'selectAll' && typeof wc.selectAll === 'function') return wc.selectAll(), true
+    if (typeof wc[action] === 'function') {
+      wc[action]()
+      return true
+    }
   } catch (e) {
     if (clientLog) clientLog.warn('edit', action + ' 失败：' + ((e && e.message) || e))
   }
   return false
+}
+
+/**
+ * 把一张网络图片复制到系统剪贴板。
+ *
+ * ## 为什么要自己下载
+ *
+ * `webContents.copy()` 复制的是**当前选区**。图片灯箱里没有选区，
+ * 调它什么都不会发生 —— 而用户右键点「复制图片」时期待的是
+ * "这张图在我的剪贴板里、可以直接粘进微信"。
+ *
+ * ## 为什么走主进程 net 而不是页面 fetch
+ *
+ * WhatsApp 的图片 URL 带会话凭据，页面里 fetch 会带上 cookie 正常工作；
+ * 但主进程这边拿到的是**同一个 session 的 net 请求**，凭据一样在
+ * （见 `session.defaultSession`）。用主进程的好处是不依赖页面上下文 ——
+ * 灯箱关掉、页面跳走都不影响已经发起的下载。
+ *
+ * @returns {Promise<boolean>}
+ */
+async function copyImageToClipboard (wc, url) {
+  try {
+    const buf = await downloadAsBuffer(wc, url)
+    if (!buf || !buf.length) return false
+    const image = electron.nativeImage.createFromBuffer(buf)
+    if (!image || image.isEmpty()) return false
+    electron.clipboard.writeImage(image)
+    return true
+  } catch (e) {
+    if (clientLog) clientLog.warn('context-menu', '复制图片失败：' + ((e && e.message) || e))
+    return false
+  }
+}
+
+/**
+ * 图片另存为。
+ *
+ * 扩展名从 Content-Type 或 URL 里推断；两者都拿不到就退回 png ——
+ * 保存一个没有扩展名的文件，Windows 上双击打不开，用户会以为存坏了。
+ */
+async function saveImageAs (win, url) {
+  try {
+    const buf = await downloadAsBuffer(win && win.webContents, url)
+    if (!buf || !buf.length) return false
+    const ext = imageExtOf(url, buf)
+    const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+    const result = await electron.dialog.showSaveDialog(win, {
+      title: '保存图片',
+      defaultPath: path.join(electron.app.getPath('downloads'), `pix-image-${stamp}.${ext}`),
+      filters: [{ name: '图片', extensions: [ext, 'png', 'jpg', 'webp', 'gif'] }]
+    })
+    if (result.canceled || !result.filePath) return false
+    await fs.promises.writeFile(result.filePath, buf)
+    return true
+  } catch (e) {
+    if (clientLog) clientLog.warn('context-menu', '保存图片失败：' + ((e && e.message) || e))
+    return false
+  }
+}
+
+/** 在新窗口里打开原图（双击看细节、或想拖到别的软件里）。 */
+function openImageInNewWindow (url) {
+  try {
+    const w = new electron.BrowserWindow({
+      width: 1000, height: 760, title: '图片预览', autoHideMenuBar: true,
+      webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true }
+    })
+    w.loadURL(url)
+    return true
+  } catch (e) {
+    if (clientLog) clientLog.warn('context-menu', '打开图片失败：' + ((e && e.message) || e))
+    return false
+  }
+}
+
+/**
+ * 全局唯一的「焦点可编辑」路由。
+ *
+ * guest-inject 在每个实例页面里推 `edit:editableFocus`。如果每个 view 各自
+ * `ipcMain.on` 一次，会踩两个坑：
+ *   1. 监听器数量随打开的窗口数增长，Electron 到 10 个就开始警告泄漏；
+ *   2. 闭包捕获的是注册时的那个 `wc`，后来的窗口全被写到第一个窗口头上，
+ *      于是"在第二个窗口的输入框里按 Ctrl+Z"判断错误。
+ *
+ * 所以只注册一次，按 `event.sender` 找回真正对应的 webContents。
+ * 标记直接挂在 webContents 上（`__pixEditableFocus`），
+ * 页面销毁时随之消失，不用手动清理。
+ */
+let editableFocusRouterInstalled = false
+function installEditableFocusRouter () {
+  if (editableFocusRouterInstalled) return
+  editableFocusRouterInstalled = true
+  try {
+    ipcMain.on('edit:editableFocus', (event, editable) => {
+      const wc = event && event.sender
+      if (!wc) return
+      try { wc.__pixEditableFocus = !!editable } catch (e) {}
+    })
+  } catch (e) {
+    if (clientLog) clientLog.warn('edit', '装焦点路由失败：' + ((e && e.message) || e))
+  }
+}
+
+/**
+ * 下载一个 URL 成 Buffer。
+ *
+ * 用 webContents 所属 session 发请求：WhatsApp 的图片是
+ * `blob:` 或带签名的 https，凭据绑在那个 session 上。
+ */
+function downloadAsBuffer (wcOrWin, url) {
+  return new Promise((resolve, reject) => {
+    const ses = (wcOrWin && wcOrWin.session) || electron.session.defaultSession
+    const request = electron.net.request({ url, session: ses, useSessionCookies: true })
+    const chunks = []
+    let total = 0
+    const MAX = 64 * 1024 * 1024   // 64MB 封顶：再大就不是聊天图片了
+    request.on('response', response => {
+      if (response.statusCode >= 400) {
+        reject(new Error('HTTP ' + response.statusCode))
+        request.abort()
+        return
+      }
+      response.on('data', chunk => {
+        total += chunk.length
+        if (total > MAX) { request.abort(); reject(new Error('图片超过 64MB')); return }
+        chunks.push(chunk)
+      })
+      response.on('end', () => resolve(Buffer.concat(chunks)))
+      response.on('error', reject)
+    })
+    request.on('error', reject)
+    request.end()
+  })
+}
+
+/** 从 data URL 的 mime 或 URL 后缀推断图片格式。 */
+function imageExtOf (url, buf) {
+  const dataMime = /^data:image\/([a-z0-9.+-]+)/i.exec(String(url || ''))
+  if (dataMime) return normalizeExt(dataMime[1])
+  const urlExt = /\/([a-z0-9]{2,5})(?:[?#]|$)/i.exec(String(url || ''))
+  if (urlExt && /^(png|jpe?g|webp|gif|bmp|avif)$/i.test(urlExt[1])) return normalizeExt(urlExt[1])
+  // 魔数兜底：没有扩展名时靠文件头判断，比猜准
+  if (buf && buf.length > 12) {
+    if (buf[0] === 0x89 && buf[1] === 0x50) return 'png'
+    if (buf[0] === 0xff && buf[1] === 0xd8) return 'jpg'
+    if (buf.slice(0, 4).toString('latin1') === 'GIF8') return 'gif'
+    if (buf.slice(8, 12).toString('latin1') === 'WEBP') return 'webp'
+  }
+  return 'png'
+}
+
+function normalizeExt (ext) {
+  const e = String(ext || '').toLowerCase()
+  if (e === 'jpeg') return 'jpg'
+  return /^(png|jpg|webp|gif|bmp|avif)$/.test(e) ? e : 'png'
 }
 
 /**
@@ -2826,24 +2994,126 @@ function runEditCommand(wc, action) {
 function installEditSupport(view) {
   const wc = view && view.webContents
   if (!wc) return
-  // 1) 键盘：Cmd/Ctrl+C/V/X/A。用 before-input-event 在**输入进入页面前**接住，
-  //    避免被宿主网页自己的 keydown 处理器吞掉（WhatsApp 等会拦一部分快捷键）。
+  // 焦点可编辑状态由 guest-inject 的 installEditableReporter 推送（见 Ctrl+Z 那段）。
+  // 监听器**全局只注册一次**（见 installEditableFocusRouter），这里只管读。
+  installEditableFocusRouter()
+  // 1) 键盘：编辑类快捷键用 before-input-event 在**输入进入页面前**接住，
+  //    避免被宿主网页自己的 keydown 处理器吞掉（WhatsApp 等会拦一部分）。
+  //
+  //    ★ 哪些该拦、哪些不该拦 ★
+  //
+  //    只拦**编辑命令**（复制/粘贴/撤销…）和**应用自己的功能**（切换标签、
+  //    放大页面）。绝不拦宿主网页的编辑快捷键 —— 比如 WhatsApp 的 Ctrl+B
+  //    不是"加粗"，它网页里压根没有这个快捷键；真正给文字加粗的方式是
+  //    在输入框里打 `*文字*`，那是 WhatsApp 自己的 Markdown 语法，
+  //    由页面处理，我们拦下来反而会把星号吞掉。
   wc.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return
     const mod = process.platform === 'darwin' ? input.meta : input.control
     if (!mod || input.alt) return
     const key = String(input.key || '').toLowerCase()
+
+    // 撤销 / 重做。
+    //
+    // ★ 结论：Ctrl+Z 一律**放行**，我们不再接管 ★
+    //
+    // 走过一圈弯路，说清楚为什么：
+    //
+    // Slack、Discord、WhatsApp、Telegram 的输入框都自带撤销栈，而且比
+    // Chromium 默认的更懂上下文（撤回一次引用回复、一次多行粘贴）。
+    // 一旦我们在 before-input-event 里拦下 Ctrl+Z 再调 wc.undo()，
+    // 页面自己的栈就永远收不到这个键 —— 用户会感觉"撤销只退一步就废了"。
+    //
+    // 而如果改成"只在输入框外才拦"，就得分清焦点在不在输入框里。
+    // 那需要页面主动上报（guest-inject），可 LINE 的扩展版是
+    // chrome-extension:// 页面、根本不挂 guest-inject（见 bridgeEnabledFor），
+    // 没上报 = 永久当成"在输入框外" = 在 LINE 的聊天框里按 Ctrl+Z 被我们抢走。
+    //
+    // 与其做一个一半平台判断错误的"聪明"逻辑，不如老老实实放行：
+    //   · 在输入框里 → 页面撤销，行为完全正确（这是 99% 的使用场景）；
+    //   · 在普通文字上 → 页面没有撤销栈，按键无效果。而这本身也没损失，
+    //     因为网页正文原本就没有"撤销选中"这种操作。
+    //
+    // 保留下面的 redo（Ctrl+Y / Cmd+Shift+Z）兜底：有些页面（尤其 Windows 上的
+    // 输入法组合输入）会吞掉 Shift+Z，此时由我们补一次。
+    // 但只在焦点不在输入框时补，避免和页面自己的重做打架。
+    if (key === 'z') return
+    if (key === 'y' && !input.shift && process.platform !== 'darwin') {
+      if (!wc.__pixEditableFocus) { if (runEditCommand(wc, 'redo')) event.preventDefault() }
+      return
+    }
     if (key === 'c') { if (runEditCommand(wc, 'copy')) event.preventDefault() }
-    else if (key === 'v') { if (runEditCommand(wc, 'paste')) event.preventDefault() }
-    else if (key === 'x') { if (runEditCommand(wc, 'cut')) event.preventDefault() }
+    else if (key === 'v') {
+      // Ctrl/Cmd+Shift+V = 粘贴为纯文本。
+      // WhatsApp 里粘贴带格式的富文本会把字体样式一起带进去，很难看。
+      if (input.shift) { if (runEditCommand(wc, 'pasteAndMatchStyle')) event.preventDefault() }
+      else if (runEditCommand(wc, 'paste')) event.preventDefault()
+    } else if (key === 'x') { if (runEditCommand(wc, 'cut')) event.preventDefault() }
     else if (key === 'a') { if (runEditCommand(wc, 'selectAll')) event.preventDefault() }
   })
   // 2) 右键菜单：WebContentsView 默认不弹系统菜单。用户习惯右键复制/粘贴，
   //    缺了它会以为"复制功能坏了"。
+  //
+  //    ★ 图片必须单独处理 ★
+  //
+  //    2026-10-23 实测：在 WhatsApp 里点开一张图片放大后右键，**什么都不弹**。
+  //    原因就是这里 —— 判断条件只有 `selectionText` / `isEditable` 两个：
+  //    图片灯箱里既没有选中文字，也不是输入框，于是 template 为空、
+  //    函数在 `if (!template.length) return` 处直接退出。
+  //
+  //    而"看图"恰恰是最需要右键的场景：保存、复制、用系统看图工具打开。
+  //    用户在这里右键没反应，会以为整个应用的右键都坏了。
   wc.on('context-menu', (_event, params) => {
     const template = []
     const hasSelection = !!(params && params.selectionText)
     const isEditable = !!(params && params.isEditable)
+    const mediaType = params && params.mediaType
+    const srcURL = String((params && params.srcURL) || '')
+    const isImage = mediaType === 'image' || /^data:image\//i.test(srcURL) ||
+      (mediaType === 'none' && /^blob:/i.test(srcURL))
+    // 背景图（CSS background-image）：WhatsApp 的灯箱有时用 div 铺图，
+    // params.mediaType 会是 'none'，但 `params.frameURL` 里的页面自己是知道的。
+    // 这种情况拿不到 srcURL，只能给"保存/复制"以外的通用项，见下面的 fallback。
+
+    // ── 图片优先 ──────────────────────────────────────────
+    // 顺序刻意放在最前：图片上不该出现"粘贴"，那会让菜单看起来像输入框的菜单。
+    if (isImage) {
+      const isDataUrl = /^data:/i.test(srcURL)
+      if (srcURL && !isDataUrl) {
+        template.push({
+          label: '复制图片',
+          accelerator: 'CmdOrCtrl+C',
+          click: () => copyImageToClipboard(wc, srcURL)
+        })
+        template.push({
+          label: '图片另存为…',
+          click: () => saveImageAs(win, srcURL)
+        })
+        template.push({
+          label: '在新窗口打开图片',
+          click: () => openImageInNewWindow(srcURL)
+        })
+      } else if (srcURL) {
+        // data: URL 只有几百 KB 上限，存下来多半是一张缩略图占位，
+        // 不如让用户直接复制走。
+        template.push({
+          label: '复制图片',
+          accelerator: 'CmdOrCtrl+C',
+          click: () => copyImageToClipboard(wc, srcURL)
+        })
+      }
+      // 能同时选中文字+图片的页面很少，但真有就补上
+      if (hasSelection) {
+        template.push({ type: 'separator' })
+        template.push({ label: '复制文字', accelerator: 'CmdOrCtrl+C', click: () => runEditCommand(wc, 'copy') })
+      }
+      template.push({ type: 'separator' })
+      template.push({ label: '重新加载', click: () => { try { wc.reload() } catch (e) {} } })
+      Menu.buildFromTemplate(template).popup({ window: win })
+      return
+    }
+
+    // ── 文字 / 输入框 ─────────────────────────────────────
     if (hasSelection) {
       template.push({ label: '复制', accelerator: 'CmdOrCtrl+C', click: () => runEditCommand(wc, 'copy') })
     }
@@ -2855,9 +3125,59 @@ function installEditSupport(view) {
       template.push({ type: 'separator' })
       template.push({ label: '全选', accelerator: 'CmdOrCtrl+A', click: () => runEditCommand(wc, 'selectAll') })
     }
-    if (!template.length) return
+    // ★ 兜底：任何情况下都给出"重新加载"★
+    //
+    // 原来 template 为空就 return，等于空白处右键毫无反应 ——
+    // 用户会怀疑应用卡死了。给一个永远可用的项，比什么都不弹好。
+    if (!template.length) {
+      template.push({ label: '重新加载', click: () => { try { wc.reload() } catch (e) {} } })
+    }
     Menu.buildFromTemplate(template).popup({ window: win })
   })
+}
+
+/**
+ * 当前正在显示的那个 webContents。
+ *
+ * 主页（没用任何实例）时返回 null —— 主页是渲染层 HTML，缩放它没有意义，
+ * 菜单项会静默失败而不是去缩标签栏。
+ */
+function activeWebContents () {
+  if (showHome) return null
+  const tab = tabs.find(t => t.id === activeId)
+  return (tab && tab.view && tab.view.webContents) || null
+}
+
+/** 缩放当前窗口，步长与右键菜单共用（见 src/window/zoom.js）。 */
+function changeActiveZoom (delta) {
+  return zoomLib.changeZoom(activeWebContents(), delta)
+}
+
+/** 刷新当前窗口。hard=true 跳过缓存。 */
+function reloadActive (hard) {
+  const wc = activeWebContents()
+  if (!wc) return false
+  try {
+    if (hard && typeof wc.reloadIgnoringCache === 'function') wc.reloadIgnoringCache()
+    else wc.reload()
+    return true
+  } catch (e) {
+    if (clientLog) clientLog.warn('view', '刷新失败：' + ((e && e.message) || e))
+    return false
+  }
+}
+
+/** 开/关当前窗口的开发者工具。 */
+function toggleDevToolsActive () {
+  const wc = activeWebContents()
+  if (!wc) return false
+  try {
+    if (wc.isDevToolsOpened()) wc.closeDevTools()
+    else wc.openDevTools({ mode: 'detach' })
+    return true
+  } catch (e) {
+    return false
+  }
 }
 
 /**
@@ -2865,16 +3185,24 @@ function installEditSupport(view) {
  *
  * macOS：必须有一份含编辑角色的菜单 —— 否则 Cmd+C/V/A 不会转发到聚焦的
  * webContents（这是 Electron 在 macOS 上的既有行为，不是 bug）。
- * 保留应用菜单（含退出、隐藏、窗口切换）+ 编辑菜单（撤销/剪切/复制/粘贴/全选）。
+ * 保留应用菜单（含退出、隐藏、窗口切换）+ 编辑菜单（撤销/剪切/复制/粘贴/全选）+ 视图菜单。
  *
- * Windows/Linux：菜单栏用 `setMenu(null)` 隐藏（与既有观感一致），编辑快捷键
- * 完全由 installEditSupport 的 before-input-event 负责。
+ * Windows/Linux：菜单栏仍然隐藏（`win.setMenuBarVisibility(false)` 而不是
+ * `setMenu(null)`），但**菜单本身要留着** ——
+ *
+ * ★ 这是 2026-10-23 修的一个真问题 ★
+ *
+ * 原来非 macOS 直接 `setMenu(null)`，结果是「视图」菜单里那些 accelerator
+ * （Ctrl+R 刷新、Ctrl+= 放大、Ctrl+0 复位）**在 Windows 上根本不注册**。
+ * 菜单项里的 accelerator 只有挂在真实应用菜单上才会被 Electron 处理；
+ * 设置成 null 之后，这些键全部哑火。
+ *
+ * 所以现在：Windows/Linux 保留菜单对象（快捷键生效），但把菜单栏藏起来
+ * （观感和以前一样）。用户按 Alt 仍能唤出菜单栏，多一条退路。
  */
 function installApplicationMenu() {
-  if (process.platform !== 'darwin') {
-    try { Menu.setApplicationMenu(null) } catch (e) {}
-    return
-  }
+  // 非 macOS 也不能 return —— 见上面的说明，会丢快捷键。
+  // 真正隐藏菜单栏在窗口创建之后（window.setMenuBarVisibility），见调用处。
   const template = [
     {
       label: app.name,
@@ -2898,6 +3226,27 @@ function installApplicationMenu() {
         { role: 'copy', label: '复制' },
         { role: 'paste', label: '粘贴' },
         { role: 'selectAll', label: '全选' }
+      ]
+    },
+    {
+      label: '视图',
+      submenu: [
+        { label: '放大页面', accelerator: 'CmdOrCtrl+Plus', click: () => changeActiveZoom(zoomLib.STEP) },
+        { label: '缩小页面', accelerator: 'CmdOrCtrl+-', click: () => changeActiveZoom(-zoomLib.STEP) },
+        { label: '实际大小', accelerator: 'CmdOrCtrl+0', click: () => zoomLib.resetZoom(activeWebContents()) },
+        { type: 'separator' },
+        { label: '刷新当前窗口', accelerator: 'CmdOrCtrl+R', click: () => reloadActive() },
+        { label: '强制刷新', accelerator: 'CmdOrCtrl+Shift+R', click: () => reloadActive(true) },
+        ...(process.env.NODE_ENV !== 'production' || safeModeDisablesBridge()
+          ? [
+              { type: 'separator' },
+              {
+                label: '开发者工具',
+                accelerator: process.platform === 'darwin' ? 'Alt+Cmd+I' : 'Ctrl+Shift+I',
+                click: () => toggleDevToolsActive()
+              }
+            ]
+          : [])
       ]
     },
     {
@@ -3338,7 +3687,14 @@ require('./src/ipc/app').registerAppIpc({
     readPresets: () => readJson(userFile('app-presets.json'), {}),
     writePresets: all => writeJson(userFile('app-presets.json'), all),
     trustedTabSender,
-    accountSlug
+    accountSlug,
+    // 更新通道的验签结果要落盘：验签失败说明有人在动更新通道，
+    // 不能只弹个 toast 就过去了，事后要能从日志里翻出来。
+    log: (level, channel, msg) => {
+      if (!clientLog) return
+      const fn = clientLog[level] || clientLog.info
+      if (typeof fn === 'function') fn.call(clientLog, channel, msg)
+    }
   },
   env: {
     APP_VERSION,

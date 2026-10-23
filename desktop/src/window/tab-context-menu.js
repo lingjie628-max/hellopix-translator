@@ -1,5 +1,10 @@
 'use strict'
 
+// 缩放钳位/步长，与主进程「视图」菜单共用同一套（见 src/window/zoom.js）。
+// 放模块顶层而不是 createTabContextMenu 里：menuTemplate 是独立导出的
+// 纯函数，测试会直接调它，闭包里的变量在那里够不着。
+const zoomLib = require('./zoom')
+
 /**
  * 顶部标签栏的右键菜单。
  *
@@ -76,9 +81,9 @@ function menuTemplate (ctx) {
   }
 
   const changeZoom = delta => {
-    // 钳在 0.5 ~ 2，并且保留两位 —— 否则反复点会出现 1.3000000000000003
-    const current = Number(wc.getZoomFactor()) || 1
-    wc.setZoomFactor(Number(Math.min(2, Math.max(0.5, current + delta)).toFixed(2)))
+    // 钳位与步长见 src/window/zoom.js —— 快捷键也走同一套，
+    // 免得"右键放大"和"Cmd+= 放大"步长不一致
+    zoomLib.changeZoom(wc, delta)
   }
 
   // ★ 当前是否就是正在显示的窗口 ★
