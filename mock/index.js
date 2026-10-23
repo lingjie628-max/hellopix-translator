@@ -2056,7 +2056,8 @@ module.exports = function registerMock(app, options) {
   // 没有任何创建入口，保留 @/admin/orders 只会让 mock 与生产的路由表不一致。
   app.get('/apis/admin/packages', (req, res) => {
     if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
-    res.json(db.versions)
+    // 与生产的 `WHERE active=true` 保持一致：下架的套餐不该再出现在列表里
+    res.json(db.versions.filter(v => v.active !== false))
   })
   app.post('/apis/admin/packages/save', (req, res) => {
     if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
@@ -2088,9 +2089,55 @@ module.exports = function registerMock(app, options) {
           pack.highlights = typeof query.highlights === 'string' ? JSON.parse(query.highlights) : query.highlights
         } catch (e) {}
       }
+      if (query.sortOrder !== undefined && query.sortOrder !== '') pack.sortOrder = Number(query.sortOrder)
+    } else {
+      // 新建。生产那边是 `data.id ? 更新 : 插入`，mock 原来只处理更新，
+      // 于是"新增套餐"在 e2e 里永远静默无效 —— 假绿。
+      const code = String(query.code || '').toLowerCase()
+      if (!/^[a-z][a-z0-9_-]{1,63}$/.test(code)) {
+        res.status(400).json({ code: 'BAD_PACKAGE_CODE', msg: '套餐标识不合法' })
+        return
+      }
+      if (!String(query.title || '').trim()) {
+        res.status(400).json({ code: 'PACKAGE_TITLE_REQUIRED', msg: '套餐名称不能为空' })
+        return
+      }
+      const parse = (v, fallback) => {
+        if (v === undefined) return fallback
+        try { return typeof v === 'string' ? JSON.parse(v) : v } catch (e) { return fallback }
+      }
+      const nextId = db.versions.reduce((m, v) => Math.max(m, Number(v.id) || 0), 0) + 1
+      db.versions.push({
+        id: nextId,
+        code,
+        title: String(query.title).trim(),
+        subtitle: String(query.subtitle || ''),
+        price: Number(query.price) || 0,
+        chars: Number(query.chars) || 0,
+        subQuota: Number(query.subQuota) || 0,
+        sortOrder: Number(query.sortOrder) || 0,
+        engines: parse(query.engines, []),
+        clients: parse(query.clients, {}),
+        features: parse(query.features, {})
+      })
     }
-    audit(req, '保存套餐', pack ? pack.title : '')
-    okMsg(res, '套餐已保存')
+    audit(req, pack ? '保存套餐' : '新建套餐', pack ? pack.title : String(query.title || ''))
+    okMsg(res, pack ? '套餐已保存' : '套餐已创建')
+  })
+  // 下架（软删）：置 active=false，不删行 —— 历史订单还引用着它的名称与价格
+  app.post('/apis/admin/packages/retire', (req, res) => {
+    if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
+    const query = q(req)
+    const pack = db.versions.find(v => String(v.id) === String(query.id))
+    if (!pack) { res.status(404).json({ code: 'PACKAGE_NOT_FOUND', msg: '套餐不存在' }); return }
+    const others = db.versions.filter(v => v !== pack && v.active !== false)
+    if (others.length < 1) {
+      res.status(409).json({ code: 'LAST_PACKAGE', msg: '这是最后一个在售套餐' })
+      return
+    }
+    pack.active = false
+    audit(req, '下架套餐', pack.title)
+    okMsg(res, `已下架「${pack.title}」`)
   })
   app.get('/apis/admin/recharges', (req, res) => {
     if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }

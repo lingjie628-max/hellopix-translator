@@ -1,7 +1,19 @@
 <template>
   <div class="admin-page">
+    <!--
+      新增入口。后端很早就能创建（package-service.js 里 `data.id ? 更新 : 插入`），
+      但前端只做了「编辑」，于是套餐种类实际被写死成初始那三档 ——
+      想涨价、想加个企业档，都只能改库。
+    -->
+    <div class="toolbar">
+      <el-button type="primary" icon="el-icon-plus" @click="create">新增套餐</el-button>
+      <span class="toolbar-tip">
+        新增的套餐会立刻出现在官网定价页和商户充值页（按「排序」从小到大排列）。
+      </span>
+    </div>
     <el-table :data="rows" border stripe>
       <el-table-column prop="id" label="ID" width="60"></el-table-column>
+      <el-table-column prop="code" label="标识" width="120"></el-table-column>
       <el-table-column prop="title" label="套餐" width="160"></el-table-column>
       <!-- 货币单位跟随后台「系统设置 → 价格货币」，不再写死"元" -->
       <el-table-column :label="'价格(' + currencyName + ')'" width="120">
@@ -39,15 +51,27 @@
                   style="margin: 0 4px 4px 0">{{ nameOf(id) }}<template v-if="!wiredOf(id)">（未接通）</template></el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="90">
+      <el-table-column label="操作" width="150">
         <template slot-scope="scope">
           <el-button type="text" @click="edit(scope.row)">编辑</el-button>
+          <el-button type="text" class="danger-text" @click="retire(scope.row)">下架</el-button>
         </template>
       </el-table-column>
     </el-table>
-    <el-dialog title="编辑套餐" :visible.sync="visible" width="620px">
+    <el-dialog :title="isNew ? '新增套餐' : '编辑套餐'" :visible.sync="visible" width="620px">
       <el-form :model="form" label-width="90px">
-        <el-form-item label="名称"><el-input v-model="form.title"></el-input></el-form-item>
+        <el-form-item label="标识">
+          <el-input v-model="form.code" :disabled="!isNew" placeholder="例如 pro / vip_360d"
+                    style="width:260px"></el-input>
+          <!--
+            标识创建后不可改：它可能已经被订单快照、结算逻辑、官网文案引用。
+            改名字是安全的，改标识等于换了个东西。
+          -->
+          <div class="unit-tip">
+            2-64 位小写字母/数字/下划线/横线，以字母开头。<b>创建后不能改</b>。
+          </div>
+        </el-form-item>
+        <el-form-item label="名称"><el-input v-model="form.title" placeholder="例如 专业版"></el-input></el-form-item>
         <el-form-item label="说明"><el-input v-model="form.subtitle"></el-input></el-form-item>
         <el-form-item label="价格">
           <el-input-number v-model="form.price" :min="0" :precision="2" :step="10"></el-input-number>
@@ -59,6 +83,12 @@
           <span class="unit-tip">
             该档套餐可开的子账号数。买这一档充值到账时会写进商户的额度；
             企业账号不受此限制。
+          </span>
+        </el-form-item>
+        <el-form-item label="排序">
+          <el-input-number v-model="form.sortOrder" :min="0" :step="10"></el-input-number>
+          <span class="unit-tip">
+            官网定价页按这个从小到大排。一般按价格从低到高，填 10 / 20 / 30 即可。
           </span>
         </el-form-item>
         <el-form-item label="客户端">
@@ -117,6 +147,7 @@ export default {
     return {
       rows: [],
       visible: false,
+      isNew: false,
       form: { features: {}, engines: [], clients: {} },
       featureList: FEATURES,
       engineList: []
@@ -170,7 +201,32 @@ export default {
     load() {
       this.getRequest('/admin/packages').then(resp => { if (resp) this.rows = resp.data })
     },
+    /**
+     * 新建：给一份空表单。
+     *
+     * 刻意**不带 id**，`save()` 里会据此走插入分支。
+     * 排序默认取"最后一个 + 10"，新增的档位自然排在末尾 ——
+     * 绝大多数情况你要加的正是更贵的那一档。
+     */
+    create() {
+      const last = this.rows.reduce((max, r) => Math.max(max, Number(r.sortOrder) || 0), 0)
+      this.isNew = true
+      this.form = {
+        code: '',
+        title: '',
+        subtitle: '',
+        price: 0,
+        chars: 0,
+        subQuota: 0,
+        sortOrder: last + 10,
+        engines: [],
+        clients: { standalone: 0, mobile: 0, counter: 0 },
+        features: {}
+      }
+      this.visible = true
+    },
     edit(row) {
+      this.isNew = false
       this.form = Object.assign({}, row, {
         features: Object.assign({}, row.features || {}),
         engines: (row.engines || []).slice(),
@@ -179,15 +235,46 @@ export default {
       this.visible = true
     },
     save() {
-      this.postRequest('/admin/packages/save', Object.assign({}, this.form, {
+      const payload = Object.assign({}, this.form, {
         features: JSON.stringify(this.form.features || {}),
         engines: JSON.stringify(this.form.engines || []),
         clients: JSON.stringify(this.form.clients || {})
-      })).then(resp => {
+      })
+      // ★ 新建必须把 id 剥掉 ★
+      //
+      // 后端的判据就是 `data.id ? 更新 : 插入`。`this.form` 是浅拷贝自某个
+      // row 的话（比如先点编辑又点新增但表单没重置），残留的 id 会让
+      // "新增"变成"覆盖掉那个已有套餐"，而且响应还会提示"套餐已创建"之外的信息 ——
+      // 数据已经错了，提示再准也没用。
+      if (this.isNew) delete payload.id
+      this.postRequest('/admin/packages/save', payload).then(resp => {
+        if (!resp) return
         this.$message.success(resp.data.msg)
         this.visible = false
         this.load()
       })
+    },
+    /**
+     * 下架（软删）。
+     *
+     * 不做物理删除：已买过这一档的商户，历史订单、账单、已发的字符额度
+     * 都还引用着它的 title/price。硬删会让历史记录变成空白。
+     * 置 active=false 后，官网定价页、商户充值页、新购入口都不再出现它。
+     */
+    retire(row) {
+      this.$confirm(
+        `下架「${row.title}」？\n\n` +
+        '下架后：官网定价页、充值页不再显示这一档，新用户买不到。\n' +
+        '已经买过它的商户不受影响，历史订单照常显示。',
+        '下架套餐',
+        { type: 'warning', confirmButtonText: '下架', cancelButtonText: '取消' }
+      ).then(() => {
+        return this.postRequest('/admin/packages/retire', { id: row.id })
+      }).then(resp => {
+        if (!resp) return
+        this.$message.success(resp.data.msg || '已下架')
+        this.load()
+      }).catch(() => { /* 用户取消 */ })
     }
   }
 }

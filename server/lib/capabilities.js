@@ -140,6 +140,7 @@ const ROUTE_CAPS = {
   // ── 站点内容 / 套餐 ──────────────────────────────────────
   'GET /admin/packages': 'admin.read.package',
   'POST /admin/packages/save': 'admin.money.write',      // 改价格
+  'POST /admin/packages/retire': 'admin.money.write',    // 下架 = 影响可售商品
   'GET /admin/faqs': 'admin.read.faq',
   'POST /admin/faqs/save': 'admin.write.content',
   'GET /admin/links': 'admin.read.faq',

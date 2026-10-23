@@ -204,6 +204,59 @@ class PackageService {
       return packageId
     })
   }
+
+  /**
+   * 下架套餐（软删）。
+   *
+   * ## 为什么不物理删除
+   *
+   * `orders` / `recharges` / 商户的已发字符额度都还引用着这一档的
+   * title 和 price。硬删之后，历史订单详情里那一栏会变成空白 ——
+   * 用户三个月后回看账单，会看到一条「套餐：（空）」。
+   *
+   * 而 `packages.active` 这个字段本来就在用：
+   * 官网定价页、商户充值页、管理端列表全部 `WHERE active=true`。
+   * 置 false 就够了，不需要新功能，只需要一个入口。
+   *
+   * ## 至少要留一档在售
+   *
+   * 全部下架 = 官网没有任何可买的东西，充值页空白。
+   * 这和"只剩一个超管"是同一类护栏：系统必须保持可用。
+   *
+   * @returns {Promise<string>} 被下架的套餐名称
+   */
+  async retire(data, actor, ip) {
+    const id = Number(data && data.id)
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new ApiError(400, '缺少套餐 ID', 'PACKAGE_ID_REQUIRED')
+    }
+
+    return this.repo.transaction(async client => {
+      // 锁住这一行，避免两个管理员同时下架最后两档
+      const found = await this.repo.query(
+        'SELECT id,title,active FROM packages WHERE id=$1 FOR UPDATE', [id], client
+      )
+      const pkg = found.rows[0]
+      if (!pkg) throw new ApiError(404, '套餐不存在', 'PACKAGE_NOT_FOUND')
+      if (!pkg.active) return String(pkg.title)
+
+      const left = await this.repo.query(
+        'SELECT count(*)::int AS n FROM packages WHERE active=true AND id<>$1', [id], client
+      )
+      if (Number(left.rows[0].n) < 1) {
+        throw new ApiError(409,
+          '这是最后一个在售套餐，下架后充值页会空白。请先新建一个替档。',
+          'LAST_PACKAGE')
+      }
+
+      await this.repo.query(
+        'UPDATE packages SET active=false, updated_at=NOW() WHERE id=$1', [id], client
+      )
+      await this.repo.audit(client, actor, '下架套餐', String(pkg.title), ip,
+        { type: 'package', id })
+      return String(pkg.title)
+    })
+  }
 }
 
 module.exports = { PackageService, CODE_PATTERN, parseJsonColumn, nonNegativeInt }

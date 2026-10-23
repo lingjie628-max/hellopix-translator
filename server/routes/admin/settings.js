@@ -44,6 +44,11 @@ function registerAdminSettings(router, ctx) {
     ok(res, input(req).id ? '套餐已更新' : '套餐已创建', { id: saved })
   }))
 
+  router.post('/admin/packages/retire', asyncRoute(async (req, res) => {
+    const title = await packages.retire(input(req), req.pixAdmin, req.ip)
+    ok(res, `已下架「${title}」`)
+  }))
+
   router.get('/admin/settings', asyncRoute(async (_req, res) => {
     res.json(await settings.read())
   }))

@@ -203,6 +203,7 @@ const EXPECTED = [
   'GET /admin/fans',
   'GET /admin/packages',
   'POST /admin/packages/save',
+  'POST /admin/packages/retire',
   'GET /admin/settings',
   'POST /admin/settings/save',
   'GET /admin/verify',
