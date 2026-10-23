@@ -105,24 +105,43 @@ for f in "$APP"/server/*.js "$APP"/server/**/*.js "$APP"/scripts/*.js; do
   fi
 done
 
-# 属主与权限：服务以 hello-pix 用户运行
+# ── 权限与属主：必须放在**迁移与服务重启之前** ───────────────────────
+#
+# 2026-10-23 两次生产中断都跟"权限在最后才修"有关：
+#
+#   第一次：scripts/preflight.sh 被整目录替换删掉 → systemd 203/EXEC
+#   第二次：`find ... -exec chmod 644` 把 .sh 的执行位也抹了 → 又 203/EXEC
+#
+# 第二次之所以没被更早发现，是因为修权限的代码排在"加载 env"**之后**，
+# 而测试环境没有 /etc/hello-pix/hello-pix.env，`set -a; .` 一失败整段
+# 就断了，后面的 chmod 全都没执行。生产上要是 env 文件出问题，
+# 同样会发生"服务起不来了，而修权限的代码永远走不到"。
+#
+# 所以：先修权限，再碰 env，再迁移，最后重启。
 chown -R root:root "$APP/server" "$APP/migrations" "$APP/dist" "$APP/scripts" 2>/dev/null || true
-chown root:root "$APP" && chmod 755 "$APP"
+chown root:root "$APP" 2>/dev/null || true
+chmod 755 "$APP" 2>/dev/null || true
 
 find "$APP/server" "$APP/migrations" -type f -exec chmod 644 {} + 2>/dev/null || true
 # scripts/ 不能一刀切 644：里面有被 systemd 直接 exec 的 .sh（preflight.sh
-# 是 ExecStartPre）。统一 644 会让它失去执行位 → systemd 报 203/EXEC →
-# 服务起不来。2026-10-23 第二次中断的直接原因就是这条。
+# 是 ExecStartPre）。统一 644 会让它失去执行位 → 203/EXEC → 服务起不来。
 find "$APP/scripts" -type f -exec chmod 644 {} + 2>/dev/null || true
 find "$APP/scripts" -type f -name '*.sh' -exec chmod 755 {} + 2>/dev/null || true
 find "$APP/dist" -type f -exec chmod 644 {} + 2>/dev/null || true
 find "$APP/dist" -type d -exec chmod 755 {} + 2>/dev/null || true
 
-# 环境变量要在 migrate 之前加载（migrate 需要 DATABASE_URL）
-set -a
-# shellcheck disable=SC1091
-. /etc/hello-pix/hello-pix.env
-set +a
+# 环境变量要在 migrate 之前加载（migrate 需要 DATABASE_URL）。
+#
+# 缺失时**不静默**：迁移会因此失败，而失败的样子是"导入了一半"，
+# 比直接报错更难查。宁可在这里明确说"env 文件不见了"。
+if [ -r /etc/hello-pix/hello-pix.env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . /etc/hello-pix/hello-pix.env
+  set +a
+else
+  echo "  ⚠ 读不到 /etc/hello-pix/hello-pix.env —— 迁移多半会失败" >&2
+fi
 chmod 755 "$APP"/scripts/*.js 2>/dev/null || true
 chmod 755 "$APP"/scripts/*.sh 2>/dev/null || true
 
@@ -131,7 +150,9 @@ cd "$APP"
 node scripts/migrate.js up 2>&1 | grep -E 'MIGRATION|Error' || true
 
 systemctl restart hello-pix
-sleep 5
+# 等待启动的秒数可配：测试里设 0，生产默认 5。
+# 否则每跑一次部署测试就要空等 5 秒 × 4 个用例。
+sleep "${POST_RESTART_WAIT:-5}"
 if [ "$(systemctl is-active hello-pix)" != active ]; then
   journalctl -u hello-pix -n 30 --no-pager | sed 's/^/  /' >&2
   rollback

@@ -111,6 +111,11 @@ function registerAdminAuth(router, ctx) {
       res.json({
         success: true,
         obj: {
+          // id 必须回：前端要靠它判断"正在编辑的是不是自己"，
+          // 才能正确锁住「唯一超管不能降级自己」那个选项。
+          // 不回的话前端只能靠 username 猜，而 username 不区分大小写，
+          // 猜错一次就锁不住 —— 这类"看起来有保护其实没生效"最危险。
+          id: Number(admin.id),
           username: admin.username,
           nickname: admin.nickname,
           role: admin.role || 'superadmin',
@@ -129,6 +134,8 @@ function registerAdminAuth(router, ctx) {
       success: true,
       usedRecovery: !!usedRecovery,
       obj: {
+        // 同 /admin/login：id 是前端判断"在编辑自己"的依据
+        id: Number(admin.id),
         username: admin.username,
         nickname: admin.nickname,
         role: admin.role || 'superadmin',

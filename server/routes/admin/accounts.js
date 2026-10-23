@@ -14,6 +14,7 @@ const { mapRow, mapRows } = require('../../repositories/production-repository')
 const { number, bool } = require('../../services/core-service')
 const { STATUS: RECHARGE_STATUS, assertTransition } = require('../../services/recharge-state')
 const purge = require('../../lib/merchant-purge')
+const { saveStaff } = require('../../services/staff-service')
 
 function registerAdminUsers(router, ctx) {
   const { repo, auth, security } = ctx
@@ -224,42 +225,23 @@ function registerAdminUsers(router, ctx) {
   }))
 
   router.post('/admin/staff/save', asyncRoute(async (req, res) => {
+    // 规则全部在 services/staff-service.js，这里只做收发。
+    //
+    // ★ 为什么把这一段抽走 ★
+    //
+    // 原本是 `INSERT ... role=$4`，$4 来自 `data.role || 'operator'` ——
+    // role 完全由客户端决定，只靠数据库 CHECK 兜着。CHECK 只保证
+    // "是这 4 个字面量之一"，不保证"该不该给这个角色"。
+    //
+    // 2026-10-23 入侵者正是靠这条建了两个后门超管。那一轮补的是
+    // "二次认证 + 审计"，这次补的是第三条：**凭什么是超管**。
+    // 现在有四条铁律：角色白名单、必须有第二个超管才能动自己、
+    // 不能把超管数量抹到 0、新建必留审计。细节见服务文件头。
     const data = input(req)
-    if (data.id) {
-      const hash = data.password ? await auth.hash(data.password) : null
-      const result = await repo.query(
-        'UPDATE admins SET nickname=COALESCE($2,nickname),password_hash=COALESCE($3,password_hash),role=COALESCE($4,role),updated_at=NOW() WHERE id=$1 RETURNING id,username,role',
-        [data.id, data.nickname || null, hash, data.role || null]
-      )
-      if (!result.rows[0]) throw new ApiError(404, '账号不存在', 'ADMIN_NOT_FOUND')
-      if (hash) await security.revokeSubject('admin', data.id)
-      // ★ 改管理员账号必须留痕 ★
-      //
-      // 2026-10-23 入侵复盘：攻击者用 /ADMIN/staff/save 建了两个后门超管，
-      // audit_logs 里**一条记录都没有** —— 因为没有写。事后只能靠
-      // admins.created_at 的时间戳反推，差一步就查不出来。
-      //
-      // 这里只记"谁动了谁、改了哪几项"，密码一律不落库。
-      const changed = [
-        data.nickname ? 'nickname' : null,
-        hash ? 'password' : null,
-        data.role ? `role→${data.role}` : null
-      ].filter(Boolean).join(',') || '无变更'
-      await repo.audit(null, req.pixAdmin, '修改超管账号', `${result.rows[0].username}（${changed}）`, req.ip, {
-        type: 'admin', id: Number(data.id)
-      })
-    } else {
-      const created = await repo.query(
-        `INSERT INTO admins(username,password_hash,nickname,role) VALUES($1,$2,$3,$4) RETURNING id,username,role`,
-        [data.username, await auth.hash(data.password), data.nickname || data.username, data.role || 'operator']
-      )
-      const row = created.rows[0]
-      // 新建超管是最高危操作，必须记到最细：新账号、角色、来源 IP。
-      await repo.audit(null, req.pixAdmin, '新建超管账号', `${row.username}（role=${row.role}）`, req.ip, {
-        type: 'admin', id: Number(row.id)
-      })
-    }
-    ok(res, data.id ? '已更新' : '超管账号已创建')
+    const result = await saveStaff({ repo, auth, security }, data, req.pixAdmin, req.ip)
+    ok(res, result.created
+      ? `超管账号 ${result.username} 已创建（${result.role}）`
+      : '已更新')
   }))
 
   router.post('/admin/users/save', asyncRoute(async (req, res) => {
