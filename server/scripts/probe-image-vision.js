@@ -33,9 +33,17 @@
 const { Pool } = require('pg')
 const creds = require('../lib/credentials')
 
-/** 一张 1x1 的真 PNG；用来验证"能不能收图"，内容不需要有意义。 */
+/**
+ * 一张 8x8 的纯白 PNG。
+ *
+ * ★ 为什么不是 1x1 ★
+ * 2026-10-25 实测：grok-4.3 拒收 1x1，报
+ *   "Image dimensions 1x1 are too small. Both width and height must be
+ *    at least 8 pixels."
+ * 探"能不能收图"却因为图太小被拒，结论会被污染。8x8 是各家普遍接受的最小尺寸。
+ */
 const TINY_PNG =
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+  'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAFUlEQVR4nGP8//8/AzbAhFV00EoAAFbUAw037MyjAAAAAElFTkSuQmCC'
 
 /**
  * 读一张本地图片并识别它的文字 —— 验证"能收图"之外的**识别质量**。
@@ -256,12 +264,30 @@ async function probe (engine) {
 
   const detail = text.slice(0, 400)
 
-  // 关键区分：哪些错误说明"不支持视觉"，哪些只是别的问题
+  /**
+   * 关键区分：哪些错误说明"不支持视觉"，哪些只是别的问题。
+   *
+   * ★ 2026-10-25 踩到的坑 ★
+   * 原先用 /image|vision|multimodal/i 粗匹配，结果 grok-4.3 因为
+   * "Image dimensions 1x1 are too small. Both width and height must be
+   *  at least 8 pixels." 被判成"不支持看图" —— 它**支持**，只是嫌测试图太小。
+   *
+   * 把"图太小"报成"不支持视觉"，等于告诉用户"这通道用不了图片翻译"，
+   * 用户就不会再试了。所以判据必须只认**明确说不行**的那些词，
+   * 并且把"尺寸/体积不足"单独识别出来。
+   */
   if (res.status === 400 || res.status === 422) {
-    if (/image|vision|multimodal|content.*type|unsupported.*content/i.test(detail)) {
+    // 尺寸/体积不足 → 换张图就能过，与能力无关
+    if (/too small|too large|dimensions|resolution|size limit|at least \d+ ?(px|pixel)/i.test(detail)) {
+      return { verdict: 'NEED_BIGGER_IMAGE', model: engine.model, status: res.status, detail, ms }
+    }
+    // 明确说"这类内容/图片输入不被支持"。
+    // 注意排除"上传的图片格式无效"这类 —— 那是图本身的问题（而且不同厂商
+    // 对 webp/gif 的支持差异很大），不能证明它没有视觉能力。
+    if (/unsupported (content|input) type|does not support (image|vision|multimodal)|vision.*not (supported|available)|image (input )?is not supported/i.test(detail)) {
       return { verdict: 'NOT_SUPPORTED', model: engine.model, status: res.status, detail, ms }
     }
-    return { verdict: 'UNKNOWN', reason: '400 但原因与图片无关：' + detail, ms }
+    return { verdict: 'UNKNOWN', reason: '400 但原因与视觉能力无关：' + detail, ms }
   }
   if (res.status === 401 || res.status === 403) {
     return { verdict: 'UNKNOWN', reason: '凭据被拒（401/403），与视觉能力无关', ms }
@@ -279,6 +305,7 @@ function label (v) {
   switch (v) {
     case 'SUPPORTED': return '✅ 支持看图'
     case 'NOT_SUPPORTED': return '❌ 不支持看图'
+    case 'NEED_BIGGER_IMAGE': return '❓ 未得出结论（图太小，不是能力问题）'
     default: return '❓ 未得出结论'
   }
 }
@@ -309,7 +336,7 @@ async function main () {
   }
 
   console.log('接口：POST <endpoint>/chat/completions（带 image_url 分段）')
-  console.log('图片：1x1 PNG（只为验证"能不能收图"，内容无意义）')
+  console.log('图片：8x8 纯白 PNG（只为验证"能不能收图"，内容无意义）')
   console.log('')
 
   for (const r of rows) {
