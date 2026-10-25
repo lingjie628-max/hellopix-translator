@@ -32,6 +32,21 @@
 function createWebViewFactory (deps) {
   const { electron, state, libs, env } = deps
 
+  /**
+   * WebRTC 防泄漏。
+   *
+   * 优先用注入的 libs（这样测试、以及 main.js 的日志能接进去）；
+   * 没注入就直接 require 本地实现 —— **安全增强不该有能力拖垮窗口创建**，
+   * 更不能因为少注入一个函数就让整个实例窗口建不出来。
+   */
+  function webrtcGuardOf (wc) {
+    let fn = libs && libs.applyWebRtcGuard
+    if (typeof fn !== 'function') {
+      try { fn = require('../proxy/webrtc-guard').applyWebRtcGuard } catch (e) { return false }
+    }
+    try { return !!fn(wc) } catch (e) { return false }
+  }
+
   function createWebView (partition, settings, item, homeUrl, tabInfo) {
     const ses = electron.session.fromPartition(partition)
     ses.setUserAgent(env.CHROME_UA)
@@ -59,6 +74,17 @@ function createWebViewFactory (deps) {
     if (typeof view.setBorderRadius === 'function') view.setBorderRadius(0)
     if (typeof view.setBackgroundColor === 'function') view.setBackgroundColor('#081628')
     view.webContents.setUserAgent(env.CHROME_UA)
+    // ★ WebRTC 防泄漏 ★ 每个 view 单独设 —— 这个 API 挂在 webContents 上，
+    // 不在 session 上。不设的话 ICE candidate 会把内网地址和真实公网 IP
+    // 一起漏出去，代理等于没设。实测证据见 src/proxy/webrtc-guard.js 文件头。
+    if (!webrtcGuardOf(view.webContents)) {
+      try {
+        if (typeof libs.logWarn === 'function') {
+          libs.logWarn('proxy', '实例 ' + (tabInfo && tabInfo.id ? tabInfo.id : '?') +
+            ' 未能设置 WebRTC 防泄漏策略，WebRTC 可能暴露真实 IP')
+        }
+      } catch (e) {}
+    }
     view.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
 
     const guardNavigation = (event, targetUrl) => {

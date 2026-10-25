@@ -3281,7 +3281,9 @@ const webViewFactory = require('./src/window/web-view').createWebViewFactory({
     pushPrefsToGuest,
     paintLoadError,
     installEditSupport,
+    applyWebRtcGuard: require('./src/proxy/webrtc-guard').applyWebRtcGuard,
     logError: (channel, msg) => { if (clientLog) clientLog.error(channel, msg) },
+    logWarn: (channel, msg) => { if (clientLog) clientLog.warn(channel, msg) },
     logGuestTrace: msg => { if (clientLog) clientLog.info('guest-trace', msg) },
     logGuestWarn: msg => { if (clientLog) clientLog.warn('guest', msg) }
   },

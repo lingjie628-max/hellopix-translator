@@ -1,7 +1,7 @@
 {
   "name": "hello-pix-desktop",
   "productName": "Hello Pix",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "private": true,
   "description": "Hello Pix 桌面客户端",
   "author": "Hello Pix",
@@ -29,7 +29,8 @@
     "bench:send": "env -u ELECTRON_RUN_AS_NODE electron scripts/bench-send-timing.js",
     "bench:translate:live": "env -u ELECTRON_RUN_AS_NODE electron scripts/bench-translate-live.js",
     "fetch:line-ext": "node scripts/fetch-line-ext.js",
-    "verify:line-ext": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-line-ext-electron.js"
+    "verify:line-ext": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-line-ext-electron.js",
+    "verify:egress": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-proxy-egress.js"
   },
   "devDependencies": {
     "electron": "^33.2.1",

@@ -73,7 +73,12 @@ test('第 2 层（主进程）：每个 WebContentsView 都装上了编辑支持
   // createWebView 已迁到 src/window/web-view.js
   const webViewSrc = fs.readFileSync(
     path.join(root, 'desktop', 'src', 'window', 'web-view.js'), 'utf8')
-  const src = (webViewSrc.match(/function createWebView[\s\S]*?\n  \}/) || [''])[0]
+  // 用「函数签名开头」截到「缩进回到 2 空格的花括号」，不会被文件里
+  // 其它同级函数（比如紧随其后的 helper）提前截断 —— 那样断言会假红。
+  const startAt = webViewSrc.indexOf('function createWebView (')
+  assert.ok(startAt >= 0, '找不到 createWebView')
+  const endAt = webViewSrc.indexOf('\n  }', startAt)
+  const src = webViewSrc.slice(startAt, endAt + 4)
   assert.ok(src.length > 0, '找不到 createWebView')
   assert.match(src, /installEditSupport\(view\)/, 'createWebView 没有给 view 装编辑支持')
   // 实例创建必须来自这个工厂，不能有人在别处自己 new 一个
