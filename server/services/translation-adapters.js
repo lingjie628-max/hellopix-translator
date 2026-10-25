@@ -776,5 +776,8 @@ module.exports = {
   callParamsOf,
   estimateTokens,
   normalizeUsage,
-  inputLimitError
+  inputLimitError,
+  // 输出长度字段名的判定。图片翻译也要用 —— 两边各写一份的话，
+  // 迟早出现"文本翻译记住了 gpt-5 要用 max_completion_tokens、图片翻译忘了"。
+  maxTokensFieldFor
 }

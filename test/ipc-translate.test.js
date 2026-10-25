@@ -12,13 +12,16 @@
 
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { registerTranslateIpc, errorCodeOf, MAX_TRANSLATE_CHARS } =
+const { registerTranslateIpc, errorCodeOf, MAX_TRANSLATE_CHARS, clearImageCache } =
   require('../desktop/src/ipc/translate')
 
 function harness (opts) {
   const o = opts || {}
   const handlers = {}
   const unsafe = new Set()
+  // 同步通道的守卫函数（channel → isTrusted），与 handlers 分开存：
+  // 它们的调用语义不同（返回 null 而不是 Promise），混在一起容易被忽视。
+  const sync = new Map()
   const logged = []
   const cache = new Map()
   const calls = []
@@ -33,7 +36,10 @@ function harness (opts) {
   registerTranslateIpc({
     reg: {
       handle: (ch, fn) => { handlers[ch] = fn },
-      handleUnsafe: (ch, fn) => { handlers[ch] = fn; unsafe.add(ch) }
+      handleUnsafe: (ch, fn) => { handlers[ch] = fn; unsafe.add(ch) },
+      // 同步通道（translate:imageUiSource）—— 客页 preload 在启动阶段
+      // 同步向主进程要 UI 源码，走 sendSync 对应的 ipcMain.on。
+      handleSync: (ch, fn, isTrusted) => { handlers[ch] = fn; sync.set(ch, isTrusted) }
     },
     state,
     actions: {
@@ -53,6 +59,14 @@ function harness (opts) {
         insertTextLines: (wc, text) => ({ ok: true, lines: text.split('\n').length })
       },
       log: (ch, msg) => { logged.push([ch, msg]) },
+      // 取图：测试通过 o.image 控制返回内容，o.extract 控制成败。
+      // extractImage 的调用次数要能数出来 —— 缓存命中时**不能**再取图，
+      // 这是验证"缓存真的省了上游调用"的唯一办法。
+      extractImage: async () => {
+        calls.push(['extractImage'])
+        if (o.extract) return o.extract
+        return { ok: true, image: o.image || 'AAAA', mime: 'image/png', from: 'lightbox' }
+      },
       getTransCached: (f, t, e, text) => cache.get([f, t, e, text].join('|')),
       putTransCached: (f, t, e, text, out) => { cache.set([f, t, e, text].join('|'), out) },
       transRequestId: () => 'rid-1',
@@ -69,7 +83,7 @@ function harness (opts) {
       pickLang: (v, d) => v || d
     }
   })
-  return { handlers, unsafe, logged, calls, cache, tabs, state }
+  return { handlers, unsafe, sync, logged, calls, cache, tabs, state }
 }
 
 test('客页通道必须显式走 handleUnsafe（否则注册器会拿 isMainSender 卡死它们）', () => {
@@ -254,4 +268,77 @@ test('composer 在 webContents 已销毁时返回 NO_WEB_CONTENTS', () => {
   const r = handler['translate:composerSelectAllDelete']({ sender: { trusted: true } })
   assert.equal(r.ok, false)
   assert.equal(r.reason, 'NO_WEB_CONTENTS')
+})
+
+// ---------------------------------------------------------------------------
+// 图片翻译的本地缓存
+//
+// 图片单价远高于文本，缓存是省钱的关键；但**缓存键错了比没缓存更坏**：
+// 用户切了目标语言却拿到旧语言的译文，而且不报错，看起来像"切换没生效"。
+// ---------------------------------------------------------------------------
+
+/** 模拟一次会话：同一张图、不同目标语言。 */
+async function translateTwice (firstTo, secondTo) {
+  // 模块级缓存跨用例共享，必须显式清空 —— 否则上一个用例留下的图会被命中，
+  // 用例看起来"没请求上游"，实际是命中了别人的结果。
+  clearImageCache()
+  let upstream = 0
+  const h = harness({
+    image: 'SAMEIMAGE',
+    apiResult: async () => {
+      upstream++
+      return { success: true, ok: true, blocks: [{ source: 'hi', target: 'T' + upstream }] }
+    }
+  })
+  const call = (to) => h.handlers['translate:image']({}, { to })
+  const a = await call(firstTo)
+  const b = await call(secondTo)
+  return { a, b, upstream }
+}
+
+test('图片缓存：同一张图 + 同一语言 → 第二次命中缓存，不再打上游', async () => {
+  const { a, b, upstream } = await translateTwice('zh', 'zh')
+  assert.equal(a.success, true)
+  assert.equal(b.success, true)
+  assert.equal(b.cached, true)
+  assert.equal(upstream, 1, '同一张图同一语言不该打第二次上游（那是白花钱）')
+})
+
+test('图片缓存：换了目标语言必须重新翻译（不能回旧语言的译文）', async () => {
+  const { a, b, upstream } = await translateTwice('zh', 'en')
+  assert.equal(a.success, true)
+  assert.equal(b.success, true)
+  assert.equal(b.cached, undefined, '换语言命中旧缓存 = 用户看到中文却以为切成了英文')
+  assert.equal(upstream, 2, '换语言必须真的请求上游')
+})
+
+test('图片缓存：不传 to 与传 zh 视为同一语言（否则白打一次上游）', async () => {
+  const { b, upstream } = await translateTwice('zh', undefined)
+  assert.equal(b.cached, true, 'to 缺省等价于 zh，应命中缓存')
+  assert.equal(upstream, 1)
+})
+
+test('图片翻译：失败结果不进缓存（下次重试必须真的重试）', async () => {
+  clearImageCache()
+  let upstream = 0
+  const h = harness({
+    image: 'X',
+    apiResult: async () => {
+      upstream++
+      throw Object.assign(new Error('boom'), { code: 'IMAGE_TRANSLATE_FAILED' })
+    }
+  })
+  const r1 = await h.handlers['translate:image']({}, { to: 'zh' })
+  const r2 = await h.handlers['translate:image']({}, { to: 'zh' })
+  assert.equal(r1.success, false)
+  assert.equal(r2.success, false)
+  assert.equal(upstream, 2, '失败不该被缓存成"成功结果"')
+})
+
+test('图片翻译：取图失败按原因给不同提示，不统一说"翻译失败"', async () => {
+  const h = harness({ extract: { ok: false, reason: 'TAINTED_CANVAS' } })
+  const r = await h.handlers['translate:image']({}, { to: 'zh' })
+  assert.equal(r.success, false)
+  assert.equal(r.code, 'TAINTED_CANVAS')
+  assert.match(r.msg, /跨域/)
 })

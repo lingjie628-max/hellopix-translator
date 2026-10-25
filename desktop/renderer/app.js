@@ -667,7 +667,8 @@ clearEnabled.onclick = async () => {
   const label = ids.length > 1
     ? '将关闭 ' + ids.length + ' 个窗口'
     : '将关闭「' + enabledName(lastTabs.find(t => t.id === ids[0])) + '」'
-  if (!(await confirmAction(label, '关闭后需要重新登录才能再次打开。'))) return
+  // 说"重新扫码"而不是"重新登录"：关掉后是新分区，cookie 没了（见 tabs.js 的 confirmCloseTab）。
+  if (!(await confirmAction(label, '关闭后这些窗口的登录状态会被清除，重新打开需要用手机重新扫码登录。'))) return
   const count = ids.length
   ids.forEach(id => window.pix.close(id))
   checkedIds = {}

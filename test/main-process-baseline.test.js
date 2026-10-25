@@ -96,6 +96,10 @@ const BASELINE_CHANNELS = [
   'proxy:detect', 'shell:open', 'site:info',
   'translate:bridgeStatus', 'translate:composerInsertText',
   'translate:composerSelectAllDelete', 'translate:engines', 'translate:guestPrefs',
+  // 图片翻译：translate:image 走 ipcMain.handle（主界面发起），
+  // translate:imageUiSource 是 sendSync（客页 preload 启动时取 UI 源码，
+  // 因为 sandbox:true 读不到本地文件）。
+  'translate:image', 'translate:imageUiSource',
   'translate:run', 'translate:savePrefs'
 ]
 

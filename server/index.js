@@ -95,6 +95,19 @@ async function createRuntime(options) {
   const app = express()
   app.disable('x-powered-by')
   app.set('trust proxy', 'loopback')
+  /**
+   * ★ 图片翻译的专属 body 解析（必须排在全局 256kb 之前）★
+   *
+   * 全局是 `express.json({ limit: '256kb' })` —— 那是**防止大 body 打爆内存**
+   * 的安全设置，不能为了图片整体放开。而一张聊天截图 base64 后动辄 1~5MB，
+   * 不放宽的话 /translate/image 会被 express 直接 413，功能等于不可用。
+   *
+   * 所以只给这一个路径放宽到 16MB（与 core.translateImage 里 12MB 的
+   * base64 换算上限对齐，留一点 JSON 包装的余量），其余路由仍旧 256kb。
+   *
+   * `type: 'application/json'` 显式指定，避免把别的内容类型也吃掉。
+   */
+  app.use('/apis/translate/image', express.json({ limit: '16mb', type: 'application/json' }))
   app.use(express.urlencoded({ extended: false, limit: '256kb' }))
   app.use(express.json({ limit: '256kb' }))
 

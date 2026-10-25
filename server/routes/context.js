@@ -103,6 +103,29 @@ function buildContext(context) {
     translateAccount: limit('translate-account', 120, 60_000, req =>
       req.pixUser ? `${req.pixUser.kind}:${req.pixUser.account.id}` : 'missing'
     ),
+    /**
+     * 图片翻译的独立额度。
+     *
+     * ## 为什么不与文本共用 translateAccount
+     *
+     * 一次图片翻译的成本是纯文本的**几十到几百倍**：要传一张最高 1600px 的图
+     * （prompt 动辄 1000+ token），还要生成"原文 + 译文"两份内容。
+     * 而 token 单价是同一个模型、同一个价目表。
+     *
+     * 共用 120 次/分钟意味着：一个脚本每分钟刷 120 张图，账单是文本的几十倍，
+     * 而限额毫不知情 —— 这就是"限额在但没起作用"。
+     *
+     * 20 次/分钟的依据：正常用户看一张图点一次翻译，一分钟翻 20 张已经远超
+     * 实际使用（实测连续点 5 张大约 15~40 秒）。真需要更多的人，改这个数字即可，
+     * 但必须是**独立**的数，而不是搭文本的便车。
+     *
+     * IP 维度也单独给：图片请求 body 大（几 MB），同一 IP 高频请求本身
+     * 就是带宽/内存压力，不该和文本共享 180 次的门槛。
+     */
+    translateImageIp: limit('translate-image-ip', 40, 60_000),
+    translateImageAccount: limit('translate-image-account', 20, 60_000, req =>
+      req.pixUser ? `${req.pixUser.kind}:${req.pixUser.account.id}` : 'missing'
+    ),
     // 崩溃日志上报：每 IP 每小时 20 次。
     // 客户端正常一年也传不了几次（只在异常退出后的下次启动传一次），
     // 这个额度只用于挡住刷接口，不会误伤真实用户。

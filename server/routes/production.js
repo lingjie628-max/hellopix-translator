@@ -43,6 +43,9 @@ function productionRouter(context) {
   const registerLimit = limits.register
   const translateIpLimit = limits.translateIp
   const translateAccountLimit = limits.translateAccount
+  // 图片翻译的独立限额（成本是文本的几十到几百倍，不能共用额度）
+  const translateImageIpLimit = limits.translateImageIp
+  const translateImageAccountLimit = limits.translateImageAccount
   const crashReportLimit = limits.crashReport
   router.use(auth.middleware())
   // 下单业务逻辑在 services/recharge-order-service.js，路由只负责拼响应
@@ -328,6 +331,19 @@ function productionRouter(context) {
   const translate = asyncRoute(async (req, res) => {
     res.json(await core.translate(req.pixUser, input(req), req.get('Idempotency-Key')))
   })
+  /**
+   * 图片翻译。
+   *
+   * 用**独立**的限额（不是文本那两道）—— 一次图片的成本是纯文本的几十到
+   * 几百倍，挂同一份额度等于限额失效。理由与数字依据见 routes/context.js。
+   *
+   * 不要求 Idempotency-Key：图片翻译没有"字符预留"可退，重放一次只是
+   * 多花一次 token；客户端本来也不会自动重试（见 desktop 侧的调用）。
+   */
+  const translateImage = asyncRoute(async (req, res) => {
+    res.json(await core.translateImage(req.pixUser, input(req)))
+  })
+  router.post('/translate/image', translateImageIpLimit, translateImageAccountLimit, translateImage)
   router.post('/translate/run', translateIpLimit, translateAccountLimit, translate)
   router.post('/translate', translateIpLimit, translateAccountLimit, translate)
 

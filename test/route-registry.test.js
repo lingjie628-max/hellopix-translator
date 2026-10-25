@@ -143,6 +143,9 @@ const EXPECTED = [
   'POST /team/device/reset',
   'GET /translate/engines',
   'POST /translate/engines/active',
+  // 图片翻译。注册顺序必须与 production.js 一致：它排在 /translate/run 之前，
+  // 因为它是独立路径（/translate/image），不与其他 translate 路由抢匹配。
+  'POST /translate/image',
   'POST /translate/run',
   'POST /translate',
   'POST /customer/ingest',

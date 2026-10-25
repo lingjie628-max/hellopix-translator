@@ -1234,7 +1234,13 @@ async function api(pathname, opts) {
     if (csrf) headers['X-CSRF-Token'] = csrf
   }
   let body
-  if (options.form) {
+  if (options.json !== undefined) {
+    // ★ JSON body ★
+    // 图片翻译需要（base64 里全是 + / =，urlencoded 会被二次编码且体积膨胀）。
+    // 与 form 互斥：同时给了就按 json 走，不拼一个半 form 半 json 的怪物。
+    headers['Content-Type'] = 'application/json'
+    body = JSON.stringify(options.json)
+  } else if (options.form) {
     headers['Content-Type'] = 'application/x-www-form-urlencoded'
     body = new URLSearchParams(options.form).toString()
   }
@@ -2991,6 +2997,8 @@ function normalizeExt (ext) {
  * 为什么在 **view 层** 而不是主窗口：快捷键必须作用在**聚焦的那个
  * webContents** 上。多开时可能有多个 view，只有当前聚焦的一个该响应。
  */
+const { buildContextMenuTemplate } = require('./src/window/context-menu-template')
+
 function installEditSupport(view) {
   const wc = view && view.webContents
   if (!wc) return
@@ -3064,76 +3072,144 @@ function installEditSupport(view) {
   //    而"看图"恰恰是最需要右键的场景：保存、复制、用系统看图工具打开。
   //    用户在这里右键没反应，会以为整个应用的右键都坏了。
   wc.on('context-menu', (_event, params) => {
-    const template = []
-    const hasSelection = !!(params && params.selectionText)
-    const isEditable = !!(params && params.isEditable)
-    const mediaType = params && params.mediaType
-    const srcURL = String((params && params.srcURL) || '')
-    const isImage = mediaType === 'image' || /^data:image\//i.test(srcURL) ||
-      (mediaType === 'none' && /^blob:/i.test(srcURL))
-    // 背景图（CSS background-image）：WhatsApp 的灯箱有时用 div 铺图，
-    // params.mediaType 会是 'none'，但 `params.frameURL` 里的页面自己是知道的。
-    // 这种情况拿不到 srcURL，只能给"保存/复制"以外的通用项，见下面的 fallback。
-
-    // ── 图片优先 ──────────────────────────────────────────
-    // 顺序刻意放在最前：图片上不该出现"粘贴"，那会让菜单看起来像输入框的菜单。
-    if (isImage) {
-      const isDataUrl = /^data:/i.test(srcURL)
-      if (srcURL && !isDataUrl) {
-        template.push({
-          label: '复制图片',
-          accelerator: 'CmdOrCtrl+C',
-          click: () => copyImageToClipboard(wc, srcURL)
-        })
-        template.push({
-          label: '图片另存为…',
-          click: () => saveImageAs(win, srcURL)
-        })
-        template.push({
-          label: '在新窗口打开图片',
-          click: () => openImageInNewWindow(srcURL)
-        })
-      } else if (srcURL) {
-        // data: URL 只有几百 KB 上限，存下来多半是一张缩略图占位，
-        // 不如让用户直接复制走。
-        template.push({
-          label: '复制图片',
-          accelerator: 'CmdOrCtrl+C',
-          click: () => copyImageToClipboard(wc, srcURL)
-        })
-      }
-      // 能同时选中文字+图片的页面很少，但真有就补上
-      if (hasSelection) {
-        template.push({ type: 'separator' })
-        template.push({ label: '复制文字', accelerator: 'CmdOrCtrl+C', click: () => runEditCommand(wc, 'copy') })
-      }
-      template.push({ type: 'separator' })
-      template.push({ label: '重新加载', click: () => { try { wc.reload() } catch (e) {} } })
-      Menu.buildFromTemplate(template).popup({ window: win })
-      return
-    }
-
-    // ── 文字 / 输入框 ─────────────────────────────────────
-    if (hasSelection) {
-      template.push({ label: '复制', accelerator: 'CmdOrCtrl+C', click: () => runEditCommand(wc, 'copy') })
-    }
-    if (isEditable) {
-      template.push({ label: '剪切', accelerator: 'CmdOrCtrl+X', click: () => runEditCommand(wc, 'cut') })
-      template.push({ label: '粘贴', accelerator: 'CmdOrCtrl+V', click: () => runEditCommand(wc, 'paste') })
-    }
-    if (hasSelection || isEditable) {
-      template.push({ type: 'separator' })
-      template.push({ label: '全选', accelerator: 'CmdOrCtrl+A', click: () => runEditCommand(wc, 'selectAll') })
-    }
-    // ★ 兜底：任何情况下都给出"重新加载"★
+    // ★ 诊断留痕 ★
     //
-    // 原来 template 为空就 return，等于空白处右键毫无反应 ——
-    // 用户会怀疑应用卡死了。给一个永远可用的项，比什么都不弹好。
-    if (!template.length) {
-      template.push({ label: '重新加载', click: () => { try { wc.reload() } catch (e) {} } })
-    }
-    Menu.buildFromTemplate(template).popup({ window: win })
+    // 2026-10-25 用户报"点开图片放大后右键没反应"。代码里图片分支写得是齐的，
+    // 说明**事件给过来的参数不是我们以为的那样**。没有参数就永远只能猜
+    // （上一版注释猜"灯箱用 div 铺背景图"，但那只是猜）。
+    //
+    // 这行把每次右键的真实参数落盘。只记关键字段，不记 selectionText 全文
+    // （可能是用户聊天内容）。拿到真实参数后再决定怎么改，别凭空猜第二次。
+    try {
+      if (clientLog) {
+        clientLog.info('context-menu', JSON.stringify({
+          mediaType: params && params.mediaType,
+          srcURL: String((params && params.srcURL) || '').slice(0, 120),
+          hasSelection: !!(params && params.selectionText),
+          isEditable: !!(params && params.isEditable),
+          x: params && params.x,
+          y: params && params.y,
+          canSaveImage: !!(params && params.editFlags && params.editFlags.canSaveImage)
+        }))
+      }
+    } catch (e) {}
+
+    // 决策部分在纯函数里（见 src/window/context-menu-template.js 文件头）：
+    // 它只决定"显示哪些项"，副作用全部由这里的回调注入。
+    const template = buildContextMenuTemplate(params, {
+      copyImage: () => copyImageToClipboard(wc, String((params && params.srcURL) || '')),
+      saveImage: () => saveImageAs(win, String((params && params.srcURL) || '')),
+      openImage: () => openImageInNewWindow(String((params && params.srcURL) || '')),
+      saveFromPage: () => saveImageFromPage(wc, win),
+      copyText: () => runEditCommand(wc, 'copy'),
+      cut: () => runEditCommand(wc, 'cut'),
+      paste: () => runEditCommand(wc, 'paste'),
+      selectAll: () => runEditCommand(wc, 'selectAll'),
+      reload: () => { try { wc.reload() } catch (e) {} }
+    })
+    popupMenu(template)
   })
+}
+
+/**
+ * 弹出右键菜单 —— 统一入口。
+ *
+ * ## 为什么不直接 `Menu.popup({ window: win })`
+ *
+ * `win` 已销毁时（用户正在关窗口、或切换账号时重建窗口）传一个坏句柄，
+ * Electron 在部分平台上会**静默失败**：菜单不出现，也不报错。
+ * 用户看到的就是"右键没反应"，而日志里什么都没有 —— 正是这次的症状。
+ *
+ * 所以：
+ *   · 没显式指定 window 时，Electron 会挂到**当前焦点窗口**上，多开时更准；
+ *   · 全程 try/catch 并落日志，真出错至少能查。
+ *
+ * @param {Array} template Menu.buildFromTemplate 的模板
+ */
+function popupMenu (template) {
+  if (!template || !template.length) return
+  try {
+    const menu = Menu.buildFromTemplate(template)
+    const alive = win && typeof win.isDestroyed === 'function' && !win.isDestroyed()
+    menu.popup(alive ? { window: win } : {})
+  } catch (e) {
+    if (clientLog) clientLog.warn('context-menu', '右键菜单弹出失败：' + ((e && e.message) || e))
+  }
+}
+
+/**
+ * 从当前页面"猜"一张正在显示的图片并存下来。
+ *
+ * ## 为什么必须有这条路
+ *
+ * 右键菜单的图片操作全都依赖 `params.srcURL`。但灯箱可能用
+ * background-image 或 canvas 显示图片 —— 那时 srcURL 是空串，
+ * 所有图片操作都点不到（见 context-menu-template.js 的兜底分支）。
+ *
+ * ## 为什么走隔离世界而不是 executeJavaScript
+ *
+ * 这是**远程页面**（WhatsApp Web）。在页面自己的 world 里执行脚本，
+ * 等于把主进程代码放进页面脚本能窥探、能篡改的环境 —— 安全测试明令禁止
+ * （test/desktop-security.test.js + test/desktop-probe-page.test.js）。
+ *
+ * 隔离世界的约束：
+ *   · 与页面脚本的 world 完全分离，页面读不到也改不了；
+ *   · 执行的必须是**写死的常量表达式**，不接受任何来自页面/网络的数据；
+ *   · 只返回一串图片 URL（字符串），不构成 IPC 桥。
+ * 返回值只是一张图的位置，拿它去下载——不涉及任何回传执行能力。
+ */
+/**
+ * 「翻译图片」注入脚本的缓存。
+ *
+ * null = 还没读过（懒加载）；'' = 读失败过（不再反复重试，避免每次开 tab 都抛一次）。
+ */
+let imageUiSourceCache = null
+
+async function saveImageFromPage (wc, parentWin) {
+  if (!wc || typeof wc.executeJavaScriptInIsolatedWorld !== 'function') return false
+  if (typeof wc.isDestroyed === 'function' && wc.isDestroyed()) return false
+  // ★ 常量脚本，不接受拼接输入 ★
+  const SNIFF = `
+    (() => {
+      const vw = innerWidth, vh = innerHeight
+      const visibleArea = (el) => {
+        const r = el.getBoundingClientRect()
+        const w = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0))
+        const h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0))
+        return w * h
+      }
+      let best = null
+      for (const img of document.images) {
+        const url = img.currentSrc || img.src
+        if (!url) continue
+        const area = visibleArea(img)
+        if (area > 0 && (!best || area > best.area)) best = { area, url }
+      }
+      if (best) return best.url
+      let bg = null
+      for (const el of document.querySelectorAll('*')) {
+        const cs = getComputedStyle(el)
+        const bi = cs.backgroundImage
+        if (!bi || bi === 'none') continue
+        const m = bi.match(/url\\\\(["']?([^"')]+)["']?\\\\)/)
+        if (!m) continue
+        const area = visibleArea(el)
+        if (area > 0 && (!bg || area > bg.area)) bg = { area, url: m[1] }
+      }
+      return bg ? bg.url : ''
+    })()
+  `
+  try {
+    const raw = await wc.executeJavaScriptInIsolatedWorld(999, [{ code: SNIFF }])
+    const value = Array.isArray(raw) ? raw[0] : raw
+    const url = String(value === undefined || value === null ? '' : value).trim()
+    // 只认 http(s)/blob/data —— 别的地方来的字符串一律不碰
+    if (!/^(https?:\/\/|blob:|data:)/i.test(url)) return false
+    return await saveImageAs(parentWin, url)
+  } catch (e) {
+    if (clientLog) clientLog.warn('context-menu', '保存页面图片失败：' + ((e && e.message) || e))
+    return false
+  }
 }
 
 /**
@@ -3627,7 +3703,37 @@ require('./src/ipc/translate').registerTranslateIpc({
     getTransCached,
     putTransCached,
     transRequestId,
-    requestTranslate
+    requestTranslate,
+    // 取客页当前预览的图片（base64）。实现见 src/translate/preview-image.js。
+    // 必须在页面上下文里取材 —— 理由见该文件头部（blob:/凭据/CORS）。
+    extractImage: () => {
+      const wc = activeWebContents()
+      if (!wc) return Promise.resolve({ ok: false, reason: 'NO_ACTIVE_VIEW' })
+      return require('./src/translate/preview-image').extractPreviewImage(wc, {
+        log: msg => { if (clientLog) clientLog.warn('image-trans', msg) }
+      })
+    },
+    /**
+     * 「翻译图片」UI 的源码（给 preload 用）。
+     *
+     * 客页是 sandbox:true，preload 读不到本地文件，只能由这里读好交给它。
+     * 懒加载 + 缓存：源码几十 KB，只读一次。
+     *
+     * 这就是一个纯字符串，不含任何密钥，所以可以直接给；
+     * 但仍要求**只有我们自己的客页**能取（见 translate.js 里的 sender 校验），
+     * 否则任意第三方页面嵌进来也能拿到我们的 UI 源码。
+     */
+    imageUiSource: () => {
+      if (imageUiSourceCache !== null) return imageUiSourceCache
+      try {
+        const { buildImageTranslateScript } = require('./src/translate/image-translate-ui')
+        imageUiSourceCache = buildImageTranslateScript({ buttonText: '翻译图片' })
+      } catch (e) {
+        if (clientLog) clientLog.warn('image-trans', 'UI 源码加载失败：' + ((e && e.message) || e))
+        imageUiSourceCache = ''
+      }
+      return imageUiSourceCache
+    }
   },
   env: { tabPrefs, stripEmoji, stripBusyMarks, pickLang }
 })

@@ -975,6 +975,9 @@ button {
   font-size: 12px;
   line-height: 1.65;
   color: var(--c-label);
+  /* 文案里用 \n 分段（比如"会清登录态"和"重启不受影响"要分开说），
+     不加这条换行会被当成空格，三句话挤成一坨反而看不清重点。 */
+  white-space: pre-line;
 }
 .confirm-actions {
   display: flex;

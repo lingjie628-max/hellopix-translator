@@ -37,6 +37,16 @@ const pixBridge = {
   nativeComposerInsertText: (text, linewise) => ipcRenderer.invoke('translate:composerInsertText', {
     text: String(text == null ? '' : text),
     linewise: !!linewise
+  }),
+  // ---------------------------------------------------------------------
+  // 图片翻译。
+  //
+  // 只传"翻成什么语言"，**图片本身不从这里传** —— 图片在客页里，
+  // 由主进程自己回来取（见 src/translate/preview-image.js）。
+  // 这样图片字节在进程间只搬一次（客页 → 主进程），不用再经过渲染层。
+  // ---------------------------------------------------------------------
+  translateImage: payload => ipcRenderer.invoke('translate:image', {
+    to: String((payload && payload.to) || 'zh')
   })
 }
 
@@ -4673,7 +4683,61 @@ function installEditableReporter () {
     document.addEventListener('keydown', onKeyDown, true)
     document.addEventListener('beforeinput', onBeforeInput, true)
     document.addEventListener('click', onClick, true)
+    installImageTranslate(pix)
     schedule()
+  }
+
+  /**
+   * 安装「翻译图片」按钮。
+   *
+   * ## 为什么源码要从主进程取，不能直接 require
+   *
+   * 客页 webPreferences 是 `sandbox: true`（见 src/window/web-view.js）——
+   * preload 在这个模式下**只能 require('electron')**，读不到本地的
+   * src/translate/image-translate-ui.js。所以源码由主进程读进来、
+   * 用 IPC 交给这里。
+   *
+   * 用 sendSync 而不是 await：boot() 是 async 的，但这里不需要异步 ——
+   * 同步拿一次字符串（几十 KB）开销可以忽略，换来的是"安装时机确定"，
+   * 不用管 async 竞态。
+   *
+   * ## 为什么用 new Function 而不是 eval
+   *
+   * `new Function` 不继承当前作用域，避免和本文件里上百个同名局部变量
+   * （prefs / schedule / scan …）撞车。
+   *
+   * ## 桥怎么交给它
+   *
+   * 页面里的那一段拿不到 pixBridge（它在 preload 作用域里）。所以先把
+   * 回调挂到 window 上，注入的脚本再按名字取。
+   * 用带 __pix 前缀的名字，且**只挂这一个函数** —— 不挂 pixBridge 本身，
+   * 否则页面 JS 就能直接调所有 IPC。
+   */
+  function installImageTranslate(pix) {
+    try {
+      if (!pix || typeof pix.translateImage !== 'function') return
+      if (window.__pixImageTranslateInstalled) return
+
+      window.__pixTranslateImage = payload => {
+        try {
+          return pix.translateImage({ to: (payload && payload.to) || (prefs && prefs.langMine) || 'zh' })
+        } catch (e) {
+          return Promise.resolve({ success: false, msg: String((e && e.message) || e) })
+        }
+      }
+      window.__pixImageLang = (prefs && prefs.langMine) || 'zh'
+
+      let code = ''
+      try {
+        code = ipcRenderer.sendSync('translate:imageUiSource') || ''
+      } catch (e) {
+        code = ''
+      }
+      if (!code) return
+      new Function(code)()
+    } catch (e) {
+      // 静默失败：这是附加功能，不能因为它拖垮翻译主线。
+    }
   }
 
   const obs = new MutationObserver(schedule)

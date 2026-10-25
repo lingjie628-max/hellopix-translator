@@ -1,5 +1,7 @@
 'use strict'
 
+const crypto = require('crypto')
+
 /**
  * 翻译相关 IPC。
  *
@@ -47,8 +49,82 @@ function errorCodeOf (e) {
   return 'TRANSLATE_FAILED'
 }
 
+/**
+ * 图片翻译的本地结果缓存。
+ *
+ * ## 为什么要缓存
+ *
+ * 用户关掉面板再点一次「翻译图片」是很自然的动作。没有缓存的话，
+ * 每点一次就真金白银打一次视觉模型 —— 而图片单价远高于文本，
+ * 文本那边早有 translation-cache，图片不该更差。
+ *
+ * ## 为什么是 LRU + 容量上限，而不是无界 Map
+ *
+ * 一张图翻译结果里有几十段文字（每段几十到几百字节），本身不大，
+ * 但用户一天翻几百张图也正常。无界增长会在长时间运行后变成内存泄漏 ——
+ * 这个软件是常驻的（多开用户全天挂着）。
+ *
+ * 200 条足够覆盖"回看最近翻过的图"，最旧的一条被挤掉。
+ *
+ * ## 为什么键是内容哈希不是图片地址
+ *
+ * WhatsApp 的图每次打开都可能是新的 blob: 地址，但字节一样。
+ * 按地址缓存等于永远命中不了；按内容哈希才能真的复用。
+ */
+const IMAGE_CACHE_MAX = 200
+const imageCache = new Map()
+
+function imageHash (base64) {
+  return crypto.createHash('sha256').update(String(base64 || '')).digest('hex')
+}
+
+function imageCacheGet (hash) {
+  if (!imageCache.has(hash)) return null
+  const value = imageCache.get(hash)
+  // LRU：命中后挪到末尾，让最久没用的排在前面被淘汰
+  imageCache.delete(hash)
+  imageCache.set(hash, value)
+  return value
+}
+
+function imageCachePut (hash, value) {
+  imageCache.delete(hash)
+  imageCache.set(hash, value)
+  while (imageCache.size > IMAGE_CACHE_MAX) {
+    const oldest = imageCache.keys().next()
+    if (oldest.done) break
+    imageCache.delete(oldest.value)
+  }
+}
+
+/**
+ * 取图失败原因 → 用户能看懂的话。
+ *
+ * ## 为什么不能统一回"翻译失败"
+ *
+ * 这些失败用户要做的事完全不同：
+ *   · NO_IMAGE / IMAGE_TOO_SMALL → 先点开图片再点按钮（操作问题）
+ *   · TAINTED_CANVAS            → 这张图取不出来，让他直接截图发图（能力边界）
+ *   · NO_ACTIVE_VIEW            → 没打开任何聊天窗口（操作问题）
+ *
+ * 合并成一句，用户只能反复点同一个按钮。
+ */
+function extractReasonText (reason) {
+  switch (String(reason || '')) {
+    case 'NO_ACTIVE_VIEW': return '请先打开一个聊天窗口'
+    case 'NO_IMAGE': return '没找到图片，请先点开图片预览'
+    case 'IMAGE_TOO_SMALL': return '图片太小了，请点开大图再试'
+    case 'TAINTED_CANVAS': return '这张图受跨域保护，取不到内容；可以先截图再发图翻译'
+    case 'LOAD_FAILED': return '图片还没加载完，稍等一下再试'
+    default: return '没取到图片，请重试'
+  }
+}
+
 function registerTranslateIpc (deps) {
-  const { reg, state, actions, env } = deps
+  const { state, actions, env } = deps
+  // reg 单独取：handleSync 内部要互相调用，整个对象传下去比解构安全
+  // （解构方法再调用会丢 this，这里虽然没用 this，但别给后人埋坑）。
+  const reg = deps.reg
 
   // ---- 主界面调用 ----
 
@@ -67,6 +143,89 @@ function registerTranslateIpc (deps) {
       return await actions.api('/translate/engines')
     } catch (e) {
       return { success: false, rows: [] }
+    }
+  })
+
+  /**
+   * 图片翻译。
+   *
+   * ## 为什么渲染层只发"翻哪个 tab"，不发图片数据
+   *
+   * 图片不在渲染层手里 —— 它在**客页**里（blob/远程 URL，只在该页面进程有效）。
+   * 让渲染层去要图，就得再开一条"渲染层 ← 客页"的通道，等于把图片字节
+   * 在进程间搬两趟。所以这里由主进程直接向客页取（actions.extractImage），
+   * 拿到 base64 就地发请求。
+   *
+   * ## 为什么不重试
+   *
+   * 和文本翻译不同，图片没有字符预留可退，重试一次就是**多花一次 token**。
+   * 失败就把原因原样给用户（尤其是 NO_VISION —— 那是要换通道，不是要重试）。
+   */
+  reg.handle('translate:image', async (event, payload) => {
+    const data = payload || {}
+    if (typeof actions.extractImage !== 'function') {
+      return { success: false, code: 'NOT_SUPPORTED', msg: '当前版本不支持图片翻译' }
+    }
+
+    // ① 从客页取图（缩放 + 转 base64 都在页面里完成）
+    const shot = await actions.extractImage()
+    if (!shot || !shot.ok) {
+      return {
+        success: false,
+        code: shot && shot.reason ? shot.reason : 'EXTRACT_FAILED',
+        msg: extractReasonText(shot && shot.reason)
+      }
+    }
+
+    // ② 查缓存：同一张图（内容哈希相同）翻译过就直接给结果。
+    //
+    // 为什么必须有：用户关掉面板再点一次「翻译图片」是很自然的动作
+    // （看完忘了、或者想再看一遍）。没有缓存的话，每点一次就真金白银
+    // 打一次视觉模型 —— 而图片的单价远高于文本，文本那边早就有
+    // translation-cache 了，图片不该更差。
+    //
+    // ★ 键必须含目标语言 ★
+    // 只按图片哈希的话，用户把目标语言从中文切到英文、再点同一张图，
+    // 会拿到**中文的旧结果** —— 而且是静默的，用户以为切换没生效。
+    // 语言也要先归一化：上游不传 `to` 时按 'zh' 处理（见 core.translateImage），
+    // 否则 '' 和 'zh' 会占两份缓存、白打一次上游。
+    const to = String(data.to || 'zh')
+    const hash = imageHash(to + '\u0000' + shot.image)
+    const cached = imageCacheGet(hash)
+    if (cached) {
+      return Object.assign({}, cached, { success: true, cached: true, size: shot.from || '' })
+    }
+
+    // ③ 发后端
+    try {
+      const out = await actions.api('/translate/image', {
+        method: 'POST',
+        // 图片是几 MB 的大 body，必须给足总超时 —— 默认值会在慢网下先超时。
+        // 注意字段名是 totalTimeoutMs（api() 里的总超时），不是 timeoutMs。
+        totalTimeoutMs: 60000,
+        // ★ 必须传 json，不能传 form ★
+        // form 走 application/x-www-form-urlencoded：图片 base64 里的 + / =
+        // 会被 URL 编码再解码，体积膨胀 ~3 倍，且服务端 express.json 不认这种
+        // Content-Type。json 走 application/json，与路由层的解析器对齐。
+        json: {
+          image: shot.image,
+          mime: shot.mime || 'image/jpeg',
+          to: to,
+          engine: data.engine || ''
+        }
+      })
+      // 只缓存成功结果。失败不缓存 —— 下次用户重试应该真的重试。
+      if (out && out.ok !== false) {
+        imageCachePut(hash, { blocks: out.blocks || [], text: out.text || '', model: out.model || '' })
+      }
+      return Object.assign({ success: true, size: shot.from || '' }, out || {})
+    } catch (e) {
+      return {
+        success: false,
+        code: (e && e.code) || 'IMAGE_TRANSLATE_FAILED',
+        msg: (e && e.message) || '图片翻译失败',
+        size: shot.from || ''
+      }
     }
   })
 
@@ -94,6 +253,22 @@ function registerTranslateIpc (deps) {
   })
 
   // ---- 客页调用（handleUnsafe + trustedTabSender 自校验）----
+
+  /**
+   * 「翻译图片」UI 源码（同步）。
+   *
+   * 客页是 sandbox:true，preload 读不到本地文件，只能向这里要。
+   * 用 sendSync 是因为它在 preload 启动阶段同步返回，不引入 async 竞态。
+   *
+   * 守卫用 trustedTabSender 而不是 isMainSender —— 发起方是**客页的
+   * preload**（WebContentsView），本来就不是主界面。
+   *
+   * 返回的是纯 UI 字符串（CSS + 状态机），不含任何凭据，所以给客页是安全的。
+   */
+  reg.handleSync('translate:imageUiSource', () => {
+    if (typeof actions.imageUiSource !== 'function') return ''
+    return actions.imageUiSource()
+  }, sender => Boolean(actions.trustedTabSender(sender)))
 
   reg.handleUnsafe('translate:guestPrefs', event => {
     const tab = actions.trustedTabSender(event.sender)
@@ -226,4 +401,11 @@ function registerTranslateIpc (deps) {
   })
 }
 
-module.exports = { registerTranslateIpc, errorCodeOf, MAX_TRANSLATE_CHARS }
+module.exports = {
+  registerTranslateIpc,
+  errorCodeOf,
+  MAX_TRANSLATE_CHARS,
+  // 测试用：图片缓存是模块级状态，用例之间会互相污染（上一张图的结果
+  // 被下一个用例命中）。导出清空入口，让每个用例从干净状态出发。
+  clearImageCache: () => imageCache.clear()
+}

@@ -56,9 +56,51 @@ function createIpcRegistrar (deps) {
     ipcMain.handle(channel, (event, ...args) => fn(event, ...args))
   }
 
+  /**
+   * 同步 handler（对应渲染/预加载侧的 `ipcRenderer.sendSync`）。
+   *
+   * ## 为什么需要它
+   *
+   * 沙箱里的 preload（`sandbox: true`）只能 require('electron')，读不到
+   * 本地文件。要让 preload 拿到"由主进程读进来的本地资源"，最直接的办法
+   * 就是 sendSync —— 它在 preload 启动阶段**同步**返回，不引入 async 竞态。
+   *
+   * ## 为什么守卫要可选
+   *
+   * 主界面来的同步调用用 isMainSender；**客页 preload** 来的不是主界面
+   * （它是 WebContentsView），用 isMainSender 会一律拒掉 —— 那个功能会
+   * 静默失效。所以这里接受调用方传入的 isTrusted。
+   *
+   * ## 必须遵守的三条
+   *
+   *   1. **一定** setReturnValue：任何分支都不能漏，否则渲染进程会一直挂着；
+   *   2. 只返回**不含密钥的静态资源**，绝不在这里读用户数据/凭据；
+   *   3. 宁可返回 null 也不要抛 —— 同步通道抛错的表现是整个页面卡住。
+   */
+  function handleSync (channel, fn, isTrusted) {
+    assertUnique(channel)
+    ipcMain.on(channel, (event, ...args) => {
+      let value = null
+      try {
+        const trusted = typeof isTrusted === 'function'
+          ? isTrusted(event)
+          : isMainSender(event)
+        if (!trusted) {
+          try { rejectUntrustedSender() } catch (e) {}
+        } else {
+          value = fn(event, ...args)
+        }
+      } catch (e) {
+        value = null
+      }
+      try { event.returnValue = value } catch (e) {}
+    })
+  }
+
   return {
     handle,
     handleUnsafe,
+    handleSync,
     channels: () => [...registered]
   }
 }

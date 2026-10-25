@@ -35,7 +35,10 @@ function harness ({ cache = null, upstream = null } = {}) {
 
   const reg = {
     handle: (name, fn) => { handlers[name] = fn },
-    handleUnsafe: (name, fn) => { handlers[name] = fn }
+    handleUnsafe: (name, fn) => { handlers[name] = fn },
+    // 同步通道（translate:imageUiSource）。本用例不涉及它，给个空壳
+    // 让 registerTranslateIpc 能跑完即可。
+    handleSync: (name, fn) => { handlers[name] = fn }
   }
 
   registerTranslateIpc({

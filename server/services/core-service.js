@@ -787,6 +787,128 @@ class CoreService {
   }
 
   /**
+   * 图片翻译。
+   *
+   * ## 为什么不复用 translate() 的整条链路
+   *
+   * `translate()` 的核心是**按字符预留 / 结算**：先扣住 N 个字符的额度，
+   * 翻译成功再按实际产出结算，失败退全款。这套机制是为文本设计的 ——
+   * 图片没有"字符数"，硬套的话要么按图估算一个假字符数（计费口径就乱了），
+   * 要么把预留逻辑改成两套（以后必然分叉出错）。
+   *
+   * 所以图片**不参与字符计费**，只受两件事约束：
+   *   1. 套餐权益：必须和文本走同一个 `resolveTranslateEngine`（四种拒绝语义
+   *      必须一致 —— 用户看到"未包含"就该升级，看到"已下架"就该换通道）；
+   *   2. 频率限额：路由层用**独立的** imageLimit（见 production.js）。
+   *      不能和文本共用同一个额度：一次图片的 token 成本是纯文本的几十到
+   *      几百倍，共用 120 次/分钟的额度意味着刷图片能把上游账单推到几十倍。
+   *
+   * ## ★ 成本必须落台账（这一条是血的教训）★
+   *
+   * 2026-10-11 出过 DeepSeek 成本记 0 的事故：适配器把厂商返回的 usage 丢了，
+   * 成本表上整条通道显示"几乎零成本"，还带着 `cost_verified=true`，
+   * 于是月度对账凭空少一整块。
+   *
+   * 图片翻译的**单价远高于文本**，漏记的后果比那次更严重。所以这里
+   * 只要真打了上游（result.ok 且非缓存）就调 `recordUpstreamUsage`，
+   * 把上游给的 usage 原样落库。它已支持 `reservation = null` 与
+   * `translateLogId = null`（图片没有字符预留、也不写 translate_logs）。
+   *
+   * @param {object} session 登录会话
+   * @param {object} data    { image: base64, mime, to, engine }
+   */
+  async translateImage(session, data) {
+    const raw = String((data && data.image) || '').trim()
+    if (!raw) throw new ApiError(400, '没有收到图片', 'IMAGE_REQUIRED')
+
+    // base64 体积换算：每 4 个字符 3 字节。先挡掉明显过大的请求，
+    // 免得把几十 MB 的 body 一路带到上游。
+    const bytes = Math.floor(raw.length * 3 / 4)
+    if (bytes > 12 * 1024 * 1024) {
+      throw new ApiError(413, '图片太大，请换一张小一点的', 'IMAGE_TOO_LARGE')
+    }
+
+    const to = String((data && data.to) || 'zh')
+    if (!/^[a-z]{2,3}(?:-[a-z0-9]{2,8})?$/i.test(to)) {
+      throw new ApiError(400, '语言参数无效', 'BAD_LANGUAGE')
+    }
+
+    // ★ 通道解析必须与文本一致 ★
+    // 这里传 data（含 engine 字段）而不是空对象，用户选的就是用户选的；
+    // 绝不在图片场景偷偷换成 GPT —— 那是"静默切换供应商"。
+    const resolved = await this.resolveTranslateEngine(session, data, {})
+
+    const credentials = await this.engineCredentials(resolved.engine.id)
+    const started = Date.now()
+    const result = await this.translator.translateImage(resolved.engine, {
+      image: raw,
+      mime: String((data && data.mime) || 'image/jpeg'),
+      to: to
+    }, {
+      allowPublicNetwork: this.allowPublicNetwork,
+      credentials
+    })
+
+    const elapsed = Date.now() - started
+    try {
+      console.log('IMAGE_TRANS engine=' + resolved.engine.id +
+        ' len=' + raw.length +
+        ' ms=' + elapsed +
+        ' ok=' + Boolean(result && result.ok) +
+        ' model=' + ((result && result.model) || '-'))
+    } catch (e) { /* 日志失败不能影响翻译 */ }
+
+    if (!result || !result.ok) {
+      // NO_VISION 用 400 而不是 502：这不是上游故障，是**用户所选通道不支持**，
+      // 客户端据此引导"换成 GPT"，而不是提示"稍后重试"。
+      const code = (result && result.code) || 'IMAGE_TRANSLATE_FAILED'
+      const status = code === 'NO_VISION' ? 400 : 502
+      throw new ApiError(status, (result && result.msg) || '图片翻译暂不可用', code)
+    }
+
+    /*
+     * ★ 成本落台账 ★
+     *
+     * 只要真打了上游就记一条。失败路径（上面已 throw）不记 —— 上游没返回
+     * usage 时记 0 只会污染成本表，而失败本来就不产生有效用量。
+     *
+     * reservation 传 null：图片没有字符预留。recordUpstreamUsage 支持这一点
+     * （translation_usage.reservation_id 可空），它也会按 usage 里的 token
+     * 数用**真实单价**算成本，而不是走字符兜底。
+     *
+     * 记不上账**不能**让翻译失败：用户图都翻完了，不该因为记账报错而拿不到结果。
+     * 但必须喊出来 —— 静默记不上就是下一次"成本凭空少一块"。
+     */
+    try {
+      await this.recordUpstreamUsage(null, {
+        reservation: null,
+        engine: resolved.engine,
+        result: result,
+        session: session,
+        translateLogId: null,
+        from: 'auto',
+        to: to,
+        durationMs: elapsed
+      })
+    } catch (e) {
+      try {
+        console.error('IMAGE_TRANS 成本台账写入失败 engine=' + resolved.engine.id +
+          ' model=' + ((result && result.model) || '-') +
+          ' err=' + ((e && e.message) || e))
+      } catch (inner) { /* 日志本身不能抛 */ }
+    }
+
+    return {
+      ok: true,
+      blocks: result.blocks || [],
+      text: result.text || '',
+      model: result.model || '',
+      usage: result.usage || null,
+      ms: elapsed
+    }
+  }
+
+  /**
    * ① 入参校验与规范化。
    *
    * 纯函数式：只读 session/data，不碰库、不碰锁。所以能早失败，

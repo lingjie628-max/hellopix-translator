@@ -38,8 +38,19 @@ const {
   doubaoAdapter, kimiAdapter, glmAdapter, mistralAdapter, minimaxAdapter
 } = require('./translation-adapters-llm')
 const { awsAdapter } = require('./translation-adapters-aws')
+const imageTranslator = require('./translation-image')
+const { NOT_VISION_MSG } = require('./translation-image')
 
 const DEFAULT_TIMEOUT_MS = 8000
+/**
+ * 图片翻译的兜底超时。
+ *
+ * 纯文本翻译 8s 足够；图片要先"看图"再生成，实测普遍 8~20s
+ * （图越大越慢，模型还要产出原文+译文两份内容）。
+ * 给 45s 是为了让正常请求不被打断，而不是鼓励慢通道 ——
+ * 通道里配了 timeoutMs 就一律以配置为准（见 translateImage）。
+ */
+const IMAGE_TIMEOUT_MS = 45000
 
 function detectLang(text) {
   const value = String(text || '')
@@ -664,10 +675,65 @@ async function translate(engine, payload, options) {
   })
 }
 
+/**
+ * 图片翻译。
+ *
+ * ## 为什么只走 GPT
+ *
+ * 图片翻译需要**视觉模型**。现有通道里只有 GPT（`openAiCompatible` +
+ * `image_url` 多模态消息）具备这个能力；DeepL / Papago / 牛翻译都是
+ * 纯文本专用接口，Gemini 虽有视觉但当前实现只发文本。
+ *
+ * 所以这里做的是：**校验用户在用的通道是不是 GPT**，不是就明确告诉他
+ * 换成 GPT —— 而不是把一个看不懂图的问题伪装成"翻译失败"让用户去查网络。
+ *
+ * ## 与 translate() 共享的三条约束
+ *
+ *   1. 通道必须存在且 enabled（关闭的通道不能因为换了接口就绕过）；
+ *   2. 用同一个池化 fetch（裸 fetch 每次重做 TLS 握手，见 translate 的注释）；
+ *   3. 超时取通道配置，夹在同一个区间。
+ */
+async function translateImage (engine, payload, options) {
+  const id = engine && engine.id
+  if (id !== 'gpt') {
+    const name = (engine && engine.name) || id || '当前通道'
+    return {
+      ok: false,
+      code: 'NO_VISION',
+      msg: NOT_VISION_MSG + '（你现在用的是「' + name + '」）'
+    }
+  }
+  const provider = providers[id]
+  if (!provider) return { ok: false, msg: '通道不存在' }
+  if (!engine.enabled) return { ok: false, msg: `${engine.name || id} 已关闭` }
+
+  const configuredTimeout = Number((engine.callParams || {}).timeoutMs)
+  const settings = Object.assign({
+    allowPublicNetwork: false,
+    fetch: pooledFetch,
+    // 图片翻译比纯文本慢得多（要看图 + 生成长译文），超时给宽松一档，
+    // 但仍受通道自己的配置约束 —— 用户/我们在后台调小就按小的来。
+    timeoutMs: Number.isFinite(configuredTimeout) && configuredTimeout > 0
+      ? configuredTimeout
+      : Math.max(DEFAULT_TIMEOUT_MS, IMAGE_TIMEOUT_MS)
+  }, options || {})
+
+  if (typeof settings.fetch !== 'function') {
+    return { ok: false, msg: '运行环境缺少 fetch 实现' }
+  }
+
+  try {
+    return await imageTranslator.translateImage(engine, payload || {}, settings)
+  } catch (error) {
+    return { ok: false, msg: `GPT 图片翻译调用异常：${(error && error.message) || error}` }
+  }
+}
+
 module.exports = {
   detectLang,
   countBillableChars,
   translate,
+  translateImage,
   providers,
   channelStatus
 }

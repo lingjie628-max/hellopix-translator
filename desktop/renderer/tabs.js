@@ -20,7 +20,17 @@ function confirmCloseTab(tab) {
   const name = String((tab && (tab.name || tab.title)) || '这个窗口')
   return confirmAction(
     '关闭「' + name + '」？',
-    '窗口将停止运行，需要重新登录才能再次打开。若只是想让它歇着，可以用右键菜单里的「挂起」，登录状态会保留。',
+    // ★ 必须说清"扫码"，不能只写"重新登录" ★
+    //
+    // 关掉的窗口再打开时分配的是**全新分区**（open-platform.js 里 usedCount
+    // 只增不减），没有 cookie，等于一台新设备 —— 只能拿手机重新扫码，
+    // 点「登录」是没用的。写"重新登录"会让用户以为账号密码还在。
+    //
+    // 同时要区分"重启软件"：那个走 restoreOneApp 复用原分区，登录态保留，
+    // 不然用户会以为关都不敢关。
+    '关闭后这个窗口的登录状态会被清除，重新打开需要用手机重新扫码登录。\n' +
+    '重启软件不影响，只有重新打开这个窗口才需要扫码。\n' +
+    '只是想让它歇着的话，用右键菜单里的「挂起」，登录状态会保留。',
     '关闭窗口'
   )
 }
@@ -60,7 +70,8 @@ async function closePlatformTabs(command) {
   }  const platformName = platformLabelOf(platform) || platform
   const label = '将关闭 ' + visible.length + ' 个「' + platformName + '」窗口'
   // 数量写进文案：用户点之前就得知道会关掉几个，而不是点完才后悔。
-  if (!(await confirmAction(label, '关闭后需要重新登录才能再次打开。'))) return
+  // 说"重新扫码"而不是"重新登录"：关掉后是新分区，cookie 没了（见 confirmCloseTab）。
+  if (!(await confirmAction(label, '关闭后这些窗口的登录状态会被清除，重新打开需要用手机重新扫码登录。'))) return
   const ids = visible.map(tab => tab.id)
   ids.forEach(id => window.pix.close(id))
   ids.forEach(id => { delete checkedIds[id] })
