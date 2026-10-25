@@ -180,6 +180,23 @@ async function createRuntime(options) {
     res.sendFile(path.join(dist, 'index.html'))
   })
   app.use((err, _req, res, _next) => {
+    /**
+     * body 超限必须回 413，不能落进下面那句「服务器内部错误」。
+     *
+     * express.json 的 PayloadTooLargeError 带 `type: 'entity.too.large'`
+     * 与 `status: 413`；原先没识别它，于是**任何超限请求都回 500**。
+     * 后果是客户端分不清"我把图发太大了"和"服务挂了" —— 前者用户该换张小图，
+     * 后者用户该稍后重试，提示反了只会让他反复点。
+     *
+     * 图片翻译尤其需要这条：16MB 上限是它唯一会撞到的边界。
+     */
+    if (err && (err.type === 'entity.too.large' || err.status === 413 || err.statusCode === 413)) {
+      // 不打印 stack —— 这是客户端问题不是服务故障，打出来只会淹没真错误
+      if (!res.headersSent) {
+        res.status(413).json({ success: false, code: 'PAYLOAD_TOO_LARGE', msg: '内容太大，请换小一点的图片' })
+      }
+      return
+    }
     console.error(err && err.stack ? err.stack : err)
     if (!res.headersSent) res.status(500).json({ success: false, msg: '服务器内部错误' })
   })
