@@ -44,6 +44,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms))
 const fs = require('fs')
 const root = path.join(__dirname, '..')
 const mainSrc = fs.readFileSync(path.join(root, 'main.js'), 'utf8')
+/**
+ * ★ 被测函数已迁出 main.js ★
+ *
+ * 提交 1934970 把代理探测整段搬进了 src/proxy/detect.js。
+ * 本脚本原先还在 main.js 里找 `function probeTextWithProxy(...)`，
+ * 于是启动就抛"找不到源码片段"—— **这条链的验收脚本整整坏了一段时间而没人发现**。
+ * 别再让它依赖文件位置：直接从业务模块切。
+ */
+const detectSrc = fs.readFileSync(path.join(root, 'src/proxy/detect.js'), 'utf8')
 const relaySrc = fs.readFileSync(path.join(root, 'src/proxy/socks-relay.js'), 'utf8')
 
 /** 按花括号配对切出函数/对象字面量的真身。 */
@@ -80,29 +89,160 @@ function buildDetect () {
     try { return JSON.parse(text) } catch (e) { return null }
   }
 
-  // ---- 真身：probeTextWithProxy（整段切出）----
-  const probeFnSrc = sliceBlock(mainSrc, 'function probeTextWithProxy(ses, url, creds)')
+  /**
+   * ★ 直接 require 真模块，不再从源码里切函数 ★
+   *
+   * 老做法（sliceBlock 按签名切源码）有两个致命弱点，都已经实际发生了：
+   *   1. 函数一搬家（1934970 迁进 src/proxy/detect.js）脚本就崩，
+   *      而且是"找不到源码片段"这种**看起来像脚本问题**的崩溃，很容易被忽略；
+   *   2. 签名里的空格一改（`f(a)` → `f (a)`）就匹配不上。
+   *
+   * 直接 require + 注入真依赖，验的就是**线上跑的那份代码**。
+   * 切源码唯一的价值是"跑的是不是同一份"，而 require 天然满足这一点。
+   */
+  const logs = []
+  const { createProxyDetect } = require(path.join(root, 'src/proxy/detect.js'))
+  const detect = createProxyDetect({
+    electron: { BrowserWindow, session },
+    maps: { probeWindows, proxyAuthByWebContents },
+    libs: {
+      createSocksRelay,
+      precheckSocks5: require(path.join(root, 'src/proxy/socks-relay.js')).precheckSocks5,
+      proxyTargetOf,
+      proxyAuthOf,
+      proxyRulesOf,
+      readPageText,
+      parseJsonSafe,
+      lookupIpGeo: async (ip) => ({ ip, country: 'Testland', region: '', city: '', loc: '', timezone: '', zip: '' })
+    },
+    io: {
+      // 把日志收进数组，既能断言"有没有落日志"，也不会污染真机日志文件
+      log: () => ({ info: (ch, msg) => logs.push([ch, msg]) }),
+      noteProxyIp: () => 0
+    },
+    env: { PROBE_TIMEOUT_MS }
+  })
+  detect.logs = logs
+  detect.PROBE_TIMEOUT_MS = PROBE_TIMEOUT_MS
+  return detect
+}
 
-  // ---- 真身：detectProxyNode（整段切出）----
-  const detectFnSrc = sliceBlock(mainSrc, 'async function detectProxyNode(payload)')
+/**
+ * 起一个「**真能工作**」的假 SOCKS5 节点（无认证）：完成握手 → CONNECT →
+ * 真的把目标 TCP 连上并双向转发。
+ *
+ * ## 为什么必须补这一个（原先 6 个场景全是失败路径）
+ *
+ * 老脚本只验证"坏节点要快速失败"，**没有任何一条验证"好节点能不能检测出 IP"**。
+ * 而用户报的是"检测不出来"，一个可能正是：成功路径在某处断了 ——
+ * 失败路径全绿也完全遮住这种缺陷。
+ *
+ * 这里不伪造 IP，而是让 Chromium 真的经这个节点去访问 api.ipify.org。
+ * 能不能出结果取决于整条链路（session.setProxy → Chromium → SOCKS 握手 →
+ * TLS → 读页面 → 解析 IP），正是用户实际走的那条。
+ */
+function startWorkingSocks5 () {
+  const stats = { connections: 0, relays: 0 }
+  const sockets = new Set()
+  const server = net.createServer(socket => {
+    stats.connections++
+    sockets.add(socket)
+    socket.on('error', () => {})
+    socket.on('close', () => sockets.delete(socket))
+    let stage = 'greet'
+    let buffer = Buffer.alloc(0)
 
-  const factory = new Function(
-    'BrowserWindow', 'session', 'createSocksRelay', 'precheckSocks5', 'proxyTargetOf', 'proxyAuthOf',
-    'proxyRulesOf', 'readPageText', 'parseJsonSafe', 'PROBE_TIMEOUT_MS',
-    'probeWindows', 'proxyAuthByWebContents', 'lookupIpGeo', 'noteProxyIp',
-    `${probeFnSrc}\n${detectFnSrc}\nreturn { detectProxyNode, probeTextWithProxy, PROBE_TIMEOUT_MS }`
-  )
+    socket.on('data', chunk => {
+      buffer = Buffer.concat([buffer, chunk])
 
-  const { precheckSocks5 } = require(path.join(root, 'src/proxy/socks-relay.js'))
+      if (stage === 'greet') {
+        // VER NMETHODS METHODS...
+        if (buffer.length < 2) return
+        const n = buffer[1]
+        if (buffer.length < 2 + n) return
+        const methods = buffer.slice(2, 2 + n)
+        buffer = buffer.slice(2 + n)
+        // 只接受"无认证"；客户端没提就拒绝（真实节点的行为）
+        if (!methods.includes(0x00)) {
+          socket.write(Buffer.from([0x05, 0xFF]))
+          return socket.destroy()
+        }
+        socket.write(Buffer.from([0x05, 0x00]))
+        stage = 'request'
+        return drain()
+      }
 
-  return factory(
-    BrowserWindow, session, createSocksRelay, precheckSocks5, proxyTargetOf, proxyAuthOf,
-    proxyRulesOf, readPageText, parseJsonSafe, PROBE_TIMEOUT_MS,
-    probeWindows, proxyAuthByWebContents,
-    // geo 查询与历史记录与本验收无关，打桩（它们会发真网络请求）
-    async (ip) => ({ ip, country: 'Testland', region: '', city: '', loc: '', timezone: '', zip: '' }),
-    () => 0
-  )
+      drain()
+    })
+
+    function drain () {
+      if (stage !== 'request') return
+      // VER CMD RSV ATYP DST.ADDR DST.PORT
+      if (buffer.length < 4) return
+      if (buffer[0] !== 0x05) return socket.destroy()
+      const cmd = buffer[1]
+      const atyp = buffer[3]
+      let offset = 4
+      let host = ''
+      if (atyp === 0x01) {
+        if (buffer.length < offset + 4 + 2) return
+        host = Array.from(buffer.slice(offset, offset + 4)).join('.')
+        offset += 4
+      } else if (atyp === 0x03) {
+        if (buffer.length < offset + 1) return
+        const len = buffer[offset]
+        if (buffer.length < offset + 1 + len + 2) return
+        host = buffer.slice(offset + 1, offset + 1 + len).toString()
+        offset += 1 + len
+      } else if (atyp === 0x04) {
+        if (buffer.length < offset + 16 + 2) return
+        host = Array.from(buffer.slice(offset, offset + 16)).join(':')
+        offset += 16
+      } else {
+        return socket.destroy()
+      }
+      const port = buffer.readUInt16BE(offset)
+      offset += 2
+      buffer = buffer.slice(offset)
+      stage = 'relay'
+
+      if (cmd !== 0x01) {
+        // 只支持 CONNECT
+        socket.write(Buffer.from([0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]))
+        return socket.destroy()
+      }
+
+      const upstream = net.connect(port, host, () => {
+        stats.relays++
+        socket.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]))
+        if (buffer.length) upstream.write(buffer)
+        buffer = Buffer.alloc(0)
+        socket.pipe(upstream)
+        upstream.pipe(socket)
+      })
+      upstream.on('error', () => {
+        try { socket.write(Buffer.from([0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0])) } catch (e) {}
+        socket.destroy()
+      })
+      sockets.add(upstream)
+      upstream.on('close', () => sockets.delete(upstream))
+      socket.on('close', () => { try { upstream.destroy() } catch (e) {} })
+    }
+  })
+
+  return new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      resolve({
+        port: server.address().port,
+        stats,
+        close () {
+          for (const s of sockets) { try { s.destroy() } catch (e) {} }
+          return new Promise(r => server.close(() => r()))
+        }
+      })
+    })
+  })
 }
 
 /** 起一个「假 SOCKS5 上游」，按 mode 控制行为。返回 { port, close, stats }。 */
@@ -277,7 +417,39 @@ async function main () {
     await up.close()
   }
 
-  // ---- 场景 6：★最关键★ 一轮坏节点检测之后，新开实例的翻译桥必须仍能起来 ----
+  // ---- 场景 6：★成功路径★ 节点**正常**时必须真的检测出 IP ----
+  //
+  // 前面 5 个场景全在验"坏节点要快速失败"。但用户报的是**检测不出来**，
+  // 如果成功路径断了，失败路径全绿也照样遮住缺陷 —— 这是覆盖面的大洞。
+  //
+  // 这里起一个真能完成 SOCKS5 握手的本地节点，让 Chromium 真的经它去访问
+  // api.ipify.org。断言的是"最终拿到了一个 IP"，即用户点完检测该看到的结果。
+  {
+    const up = await startWorkingSocks5()
+    const built = buildDetect()
+    let outcome
+    const t0 = Date.now()
+    try {
+      outcome = await withTimeout(
+        built.detectProxyNode(settingsFor(up.port)).catch(e => ({ threw: String(e && e.message) })),
+        built.PROBE_TIMEOUT_MS * 3,
+        '场景6 成功路径'
+      )
+    } catch (e) {
+      outcome = { hung: true, err: e.message }
+    }
+    const ms = Date.now() - t0
+
+    check('场景6 正常节点：必须真的检测出 IP（这是用户该看到的结果）',
+      !outcome.hung && outcome.result && outcome.result.success === true && !!outcome.result.ip,
+      { ms, result: outcome.result, relays: up.stats.relays })
+    check('场景6 正常节点：必须落预检日志（否则线上出问题只能靠截图猜）',
+      Array.isArray(built.logs) && built.logs.some(l => String(l[1]).startsWith('precheck ')),
+      { logs: built.logs })
+    await up.close()
+  }
+
+  // ---- 场景 7：★最关键★ 一轮坏节点检测之后，新开实例的翻译桥必须仍能起来 ----
   //
   // 这条锁的是用户实际报的两个症状的**因果**：
   //   「节点检测一直正在检测」→（老实现会把渲染进程基础设施弄坏）→
@@ -299,7 +471,7 @@ async function main () {
     } catch (e) {
       detectResult = { hung: true, error: String(e && e.message) }
     }
-    check('场景6 前置：坏节点检测必须按时返回失败（不弄坏应用）',
+    check('场景7 前置：坏节点检测必须按时返回失败（不弄坏应用）',
       detectResult && detectResult.success === false, detectResult)
 
     // 再新建一个带真 preload 的 view —— 模拟用户新开一个 WhatsApp 实例
@@ -315,11 +487,16 @@ async function main () {
       }
     }) } catch (e) { view = null }
     if (!view) {
-      check('场景6 能新建 WebContentsView', false, 'WebContentsView 创建失败')
+      check('场景7 能新建 WebContentsView', false, 'WebContentsView 创建失败')
     } else {
       holder.contentView.addChildView(view)
       const events = []
-      view.webContents.on('preload-error', () => events.push('preload-error'))
+      view.webContents.on('preload-error', (_e, preloadPath, error) => {
+        // 不能只记"发生过"—— 要把路径和原因记下来，否则线上真出问题
+        // 又只能拿着一张截图猜（这条链已经吃过一次这个亏）。
+        events.push('preload-error')
+        console.error('[verify] preload-error:', preloadPath, error && (error.stack || error.message || error))
+      })
       view.webContents.on('did-finish-load', () => events.push('did-finish-load'))
       view.webContents.on('did-fail-load', () => events.push('did-fail-load'))
       view.webContents.on('render-process-gone', () => events.push('render-process-gone'))
@@ -330,9 +507,9 @@ async function main () {
       } catch (e) { loaded = false }
       // 给 preload 一点执行时间
       await sleep(600)
-      check('场景6 坏节点检测之后，新实例仍能加载页面（不卡死）',
+      check('场景7 坏节点检测之后，新实例仍能加载页面（不卡死）',
         loaded === true && events.includes('did-finish-load'), { loaded, events })
-      check('场景6 新实例的 preload 没有装载失败（翻译桥能起来）',
+      check('场景7 新实例的 preload 没有装载失败（翻译桥能起来）',
         !events.includes('preload-error'), { events })
     }
     await up.close()
@@ -350,6 +527,20 @@ async function main () {
 }
 
 app.whenReady().then(async () => {
+  /**
+   * ★ 必须挡住"最后一个窗口关闭 → 进程退出" ★
+   *
+   * Electron 默认行为：没有窗口时进程直接退。而本脚本前半段的探测会在
+   * 场景结束时销毁它开的隐藏窗口 —— 于是跑到场景 5 之后进程就**静默退出**，
+   * 退出码 0，后面的场景 6/7 一次都没跑过。
+   *
+   * 表现极具欺骗性：输出到场景 5 戛然而止，看起来"全绿"，实际是
+   * **一半的断言从未执行**。这正是"验收脚本不能当护身符"的活例子。
+   */
+  app.on('window-all-closed', () => {
+    // 什么都不做 —— 让事件循环活着，等 main() 自己 app.exit()
+  })
+
   let code = 2
   try {
     code = await main()
