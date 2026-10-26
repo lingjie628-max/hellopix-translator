@@ -705,6 +705,56 @@ function installEditableReporter () {
     var URL_HINT_RE = /\b(?:https?:\/\/|www\.)/i
     // 占位符回填。容忍模型把 [[1]] 写成 [[ 1 ]] 或 [ [1] ]。
     var PLACEHOLDER_RE = /\[\[\s*(\d+)\s*\]\]/g
+    /**
+     * emoji 占位符。**刻意与 URL 用不同的括号形态**。
+     *
+     * ## 为什么不能复用 [[n]]
+     *
+     * 同一个 `[[1]]` 在模型眼里分不出"这是网址"还是"这是表情"。一旦编号
+     * 撞上，回填就会把表情塞到网址的位置、或反过来 —— 那比丢表情更糟，
+     * 因为它会**发错内容**。
+     *
+     * `{{e1}}` 是独立的命名空间：两套占位符永远不会互相匹配。
+     *
+     * ## 为什么用"字母 + 数字"而不是纯数字
+     *
+     * 模型偶尔会把 `[[1]]` 里的数字算进去（比如自作主张改成 [[2]]）。
+     * `{{e1}}` 带个 `e` 前缀，被模型当成"某种标记"而不是"序号"的概率更高，
+     * 回填失败的几率也就更低；且回填失败时有下面的兜底。
+     */
+    var EMOJI_SLOT_RE = /\{\{\s*e\s*(\d+)\s*\}\}/gi
+    /**
+     * 一个 emoji 的完整范围。
+     *
+     * ## 为什么这么长
+     *
+     * "一个 emoji"远不是一个码点：
+     *   · 😂            → Extended_Pictographic，1 个码点
+     *   · 👍🏽           → 基础字符 + 肤色修饰符（Emoji_Modifier）
+     *   · ❤️            → 基础字符 + 变体选择符 U+FE0F（少了它就成了黑白符号）
+     *   · 1️⃣            → 数字 + FE0F + 组合用键帽 U+20E3
+     *   · 👨‍👩‍👧          → 三个 emoji 用零宽连接符 U+200D 串起来
+     *   · 🇧🇷            → 两个 Regional Indicator 组成一面旗
+     *
+     * 只匹配 Extended_Pictographic 会把 👍🏽 拆成"👍 + 🏽"，回填时贴出一堆
+     * 零散修饰符。所以这里按"整个序列"匹配，一次吃干净。
+     */
+    var EMOJI_SEQ_RE = new RegExp(
+      '(?:' +
+        // 国旗：两个 Regional Indicator
+        '[\\u{1F1E6}-\\u{1F1FF}]{2}' +
+        '|' +
+        // 通用 emoji 序列：基础字符 (+ 变体选择符)? (+ 肤色)? (ZWJ + 后续)*
+        '(?:\\p{Extended_Pictographic}|\\p{Emoji_Presentation})' +
+        '(?:[\\uFE0F\\uFE0E])?' +
+        '(?:[\\u{1F3FB}-\\u{1F3FF}])?' +
+        '(?:(?:\\u200D)(?:\\p{Extended_Pictographic})(?:[\\uFE0F])?(?:[\\u{1F3FB}-\\u{1F3FF}])?)*' +
+        '|' +
+        // 键帽序列：数字/#/* + FE0F? + 组合用键帽
+        '[0-9#*][\\uFE0F]?\\u20E3' +
+      ')',
+      'gu'
+    )
 
     // 图标字体类名。WhatsApp 新设计系统把 read/delivered 勾渲染成
     // class/data-icon="wds-ic-read" 的元素，某些构建下这段类名会作为文本被带出来
@@ -883,6 +933,84 @@ function installEditableReporter () {
       for (var i = 0; i < list.length; i++) if (!used[i]) missing.push(list[i])
       if (!missing.length) return out
       return (out.replace(/\s+$/, '') + '\n' + missing.join('\n')).trim()
+    }
+
+    /**
+     * 把正文里的 emoji 换成 `{{e1}}` 占位符，返回 { masked, emojis }。
+     *
+     * ## 为什么不是"直接删掉"（这正是要修的 bug）
+     *
+     * 老实现是 `stripEmoji(text)` —— 送去翻译**之前**就把表情删了。
+     * 表情没进接口，自然也没进译文，发出去的整句话里表情就没了。
+     * 用户看到的是"翻译不错，但吃掉了我的 emoji"。
+     *
+     * ## 为什么也不让模型自己保留
+     *
+     * 把 😂 原样送进模型，等于赌它"原样吐回来"。实测不可靠：
+     * 有的模型会换成 😆，有的会在中文译文中把它挪到句首，有的直接省掉。
+     * 而表情是**用户亲手选的语气**，不许任何人改写 —— 所以必须由我们
+     * 自己保管、自己回填，模型连看都别看到。
+     *
+     * ## 与 URL 的关系
+     *
+     * 调用顺序是 `maskUrls` 之后再 `maskEmoji`。两者占位符形态不同
+     * （[[n]] vs {{en}}），互不干扰，回填顺序也不敏感。
+     */
+    function maskEmoji(text) {
+      var emojis = []
+      var masked = String(text == null ? '' : text).replace(EMOJI_SEQ_RE, function (match) {
+        emojis.push(match)
+        return '{{e' + emojis.length + '}}'
+      })
+      return { masked: masked, emojis: emojis }
+    }
+
+    /**
+     * 把译文里的 `{{en}}` 换回原始 emoji。
+     *
+     * ## 模型把占位符弄丢了怎么办
+     *
+     * 这种情况必须兜住，否则又回到"吃表情"。策略按顺序：
+     *
+     *   1. 占位符还在原位 → 换回，位置最准确；
+     *   2. 占位符还在但顺序乱了（模型重排句子）→ 按编号逐个换回，
+     *      位置跟着占位符走 —— 至少表情还在；
+     *   3. 占位符整个没了 → **按原顺序追加到末尾**。
+     *
+     * 第 3 条刻意不猜位置：表情插错地方比追加到末尾更容易造成误解
+     * （例如把 😂 插进"我很生气"后面）。追加到末尾虽然位置不完美，
+     * 但语义不会反过来。
+     *
+     * 与 restoreUrls 的取舍一致：宁可位置不完美，也不能让用户的内容消失。
+     */
+    function restoreEmoji(translated, emojis) {
+      var list = emojis || []
+      var text = String(translated == null ? '' : translated)
+      if (!list.length) return text
+      var used = {}
+      var out = text.replace(EMOJI_SLOT_RE, function (all, n) {
+        var i = Number(n) - 1
+        if (!(i >= 0 && i < list.length)) return all
+        used[i] = true
+        return list[i]
+      })
+      // 兜底：模型没吐回来的表情，按原顺序补在末尾
+      var missing = []
+      for (var i = 0; i < list.length; i++) if (!used[i]) missing.push(list[i])
+      if (!missing.length) return out
+      return (out.replace(/\s+$/, '') + ' ' + missing.join('')).trim()
+    }
+
+    /**
+     * 一句话里有没有"可翻译的正文"（去掉 emoji / URL / 占位符之后还有东西）。
+     *
+     * 纯表情消息不该触发翻译：既没有可翻的字，又会白花一次额度。
+     * 老实现靠 stripEmoji 判空，现在 emoji 变成占位符了，判据要跟着改。
+     */
+    function hasEmojiOnly(text) {
+      var raw = String(text == null ? '' : text).trim()
+      if (!raw) return false
+      return !raw.replace(EMOJI_SEQ_RE, '').trim()
     }
 
     function extractUrls(text) {
@@ -1281,10 +1409,17 @@ function installEditableReporter () {
      */
     function parseForTranslation(root) {
       var parsed = parseMessage(root)
-      var masked = maskUrls(parsed.messageText)
+      // ★ 先保管 emoji，再保管 URL ★
+      //
+      // 表情必须和网址一样"抽出来、占个位、原样放回"：直接送进模型
+      // 就等于赌它不改写。用户亲手选的语气符号，不许被翻译改写。
+      // 两者占位符形态不同（{{en}} / [[n]]），互不干扰。
+      var emojiMasked = maskEmoji(parsed.messageText)
+      var masked = maskUrls(emojiMasked.masked)
       var out = {}
       for (var key in parsed) if (Object.prototype.hasOwnProperty.call(parsed, key)) out[key] = parsed[key]
       out.urls = masked.urls
+      out.emojis = emojiMasked.emojis
       out.sourceText = masked.masked
       out.translatable = hasTranslatableText(masked.masked)
       return out
@@ -1359,6 +1494,8 @@ function installEditableReporter () {
       isDeliveryOnly: isDeliveryOnly,
       maskUrls: maskUrls,
       restoreUrls: restoreUrls,
+      maskEmoji: maskEmoji,
+      restoreEmoji: restoreEmoji,
       extractUrls: extractUrls,
       hasTranslatableText: hasTranslatableText,
       detectPlatform: detectPlatform,
@@ -1450,7 +1587,7 @@ function installEditableReporter () {
     if (!res || !res.out) return null
     // 保留引擎元数据：调用方要把它标在译文框上（见 markTransEngine）。
     return {
-      out: MessageParser.restoreUrls(res.out, parsed.urls),
+      out: MessageParser.restoreEmoji(MessageParser.restoreUrls(res.out, parsed.urls), parsed.emojis),
       engine: res.engine || '',
       engineName: res.engineName || '',
       routed: res.routed || null
@@ -2396,7 +2533,7 @@ function installEditableReporter () {
         hideSendFailureNotice()
         // 用户可能在失败后又改了输入框：以**当前内容**为准重新走一遍。
         const now = readComposer(box).trim() || raw
-        const again = MessageParser.maskUrls(stripEmoji(now))
+        const again = MessageParser.maskUrls(MessageParser.maskEmoji(now).masked)
         // ★ 重试 = 一次**全新的发送动作** ★
         //   必须换新的 sendActionId、把 phase 归零、清掉上一轮所有残留。
         //   老实现直接复用同一个 sendActionId 和残留的 'translating' phase，
@@ -2512,7 +2649,13 @@ function installEditableReporter () {
   function translateTextDetailed(text, incoming, trigger) {
     // 先摘占位符再送：占位符是"我们自己的状态"，不是用户内容。
     // 万一它漏到这一步（写回失败 / 扫描竞态），绝不能进翻译接口。
-    const cleaned = stripEmoji(MessageParser.stripBusy(text))
+    //
+    // ★ emoji 不在这里剥 ★
+    // 老实现顺手 stripEmoji 了，于是接收方向的翻译也丢表情。
+    // 现在表情由 maskEmoji 换成 {{en}} 占位符，送进接口的是占位符而不是
+    // 表情本身 —— 模型看不到它，也就改不动它。占位符是 ASCII，
+    // 不影响 ESTIMATE/字符计费口径。
+    const cleaned = MessageParser.maskEmoji(MessageParser.stripBusy(text)).masked
     if (!cleaned) return Promise.resolve({ ok: false, code: 'EMPTY_TEXT', out: '' })
     const key = (incoming ? 'in:' : 'out:') + cleaned
     if (cache.has(key)) return Promise.resolve({ ok: true, out: cache.get(key), code: '', cached: true })
@@ -2977,7 +3120,7 @@ function installEditableReporter () {
     // ---- 第四步：用稳定身份重新定位再渲染 ----
     // 身份 = data-id（哪一行）+ path（行内哪一段正文）。两者都必须在**重新
     // 查询的当前 DOM** 上验证通过，才允许绘制；任何一步对不上就 fail-closed。
-    const translated = MessageParser.restoreUrls(res.out, parsed.urls)
+    const translated = MessageParser.restoreEmoji(MessageParser.restoreUrls(res.out, parsed.urls), parsed.emojis)
     const curRow = findRowByKey(key)
     if (!curRow) {
       trace('TRANSLATION_RENDER_TARGET_MISSING', { messageId: key.value || '-', reason: 'row_not_found' })
@@ -3400,11 +3543,21 @@ function installEditableReporter () {
       return { busy: true }
     }
     if (isEmojiOnly(trimmed)) return null
-    const forApi = stripEmoji(trimmed)
-    if (!forApi) return null
+    // ★ emoji 不再剥离，改成占位符保管 ★
+    //
+    // 老实现是 `stripEmoji(trimmed)`：表情在**送进接口之前**就被删了，
+    // 所以译文里当然没有，发出去的整句话里表情就没了 ——
+    // 用户看到的是"翻译不错，但吃掉了我的 emoji"。
+    //
+    // 现在换成 maskEmoji：表情原地换成 {{e1}}，翻译完在 finalText 里
+    // 原样换回来。模型根本看不到表情，也就改不动它。
+    const emojiMasked = MessageParser.maskEmoji(trimmed)
+    const forApi = emojiMasked.masked
+    if (!forApi.trim()) return null
     // URL 抽出来单独保管：翻译时用占位符顶替，发出去的时候原样放回 ——
     // 网址一旦被模型改写就点不开了。纯 URL 消息直接原样发送，不调翻译接口。
     const masked = MessageParser.maskUrls(forApi)
+    masked.emojis = emojiMasked.emojis
     if (!MessageParser.hasTranslatableText(masked.masked)) return null
     // 目标语言与原文同语种时不必翻译 —— 但**判据必须保守**。
     //
@@ -3493,7 +3646,7 @@ function installEditableReporter () {
       const raw = readComposer(box)
       let masked = { masked: raw, urls: [] }
       try {
-        masked = MessageParser.maskUrls(stripEmoji(MessageParser.stripBusy(raw)))
+        masked = MessageParser.maskUrls(MessageParser.maskEmoji(MessageParser.stripBusy(raw)).masked)
       } catch (e) {}
       // 占位符残留的兜底还原：同样走**原生输入**（这是崩溃兜底路径，
       // 不允许因为"反正要失败了"就退回页面内改 DOM）。
@@ -3573,7 +3726,12 @@ function installEditableReporter () {
     }
     const finalText = out === masked.masked
       ? raw
-      : MessageParser.restoreUrls(out, masked.urls)
+      // 回填顺序：先 URL 再 emoji。
+      //
+      // 两套占位符形态不同（[[n]] / {{en}}），理论上顺序无关；但先 URL
+      // 是有意的 —— URL 一旦丢了就是"链接点不开"，比表情位置不完美严重，
+      // 让它在更早一轮拿到最准确的位置。
+      : MessageParser.restoreEmoji(MessageParser.restoreUrls(out, masked.urls), masked.emojis)
     // ★ 不收起提示，而是切到「正在发送…」★
     //   译文已经拿到，但**还没发出去**。老实现在这里直接 hideSendBusy()，
     //   于是原生输入 + 沉降 + 发送这段界面空白，用户会以为卡住而反复按回车。

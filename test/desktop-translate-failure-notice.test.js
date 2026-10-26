@@ -96,7 +96,13 @@ function mountTranslate(opts) {
     src + '\nreturn translateTextDetailed'
   )(
     t => t,
-    { stripBusy: t => t },
+    {
+      stripBusy: t => t,
+      // 直通版 maskEmoji：本文件验的是"服务端失败会不会弹提示"，
+      // emoji 的保管与回填由 test/emoji-preserved.test.js 单独钉住。
+      // 但**必须提供** —— 少一个方法就是 TypeError，整个函数都跑不起来。
+      maskEmoji: t => ({ masked: t, emojis: [] })
+    },
     cache,
     new Map(),
     o.api || (() => ({ translate: () => Promise.resolve({ success: false, code: 'INSUFFICIENT_CHARS', msg: '字符余额不足' }) })),
