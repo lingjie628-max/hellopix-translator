@@ -228,8 +228,27 @@ async function runProxyDetect() {
   }
   addProxyDetectBtn.disabled = true
   setDetectMsg('正在检测节点…')
+  /**
+   * ★ 渲染层必须自己兜底超时 ★
+   *
+   * 原实现直接 `await window.pix.detectProxy(...)`，**没有任何超时**：
+   * 主进程一旦因为任何原因不回（历史真因：归属地查询的 net 请求没有超时，
+   * body 不结束就永远挂着），这里就永远停在"正在检测节点…"，
+   * 按钮也永远是禁用的 —— 用户只能重开软件。
+   *
+   * 主进程那侧已经补了超时（sessionGetText），但这里的兜底仍然要有：
+   * 界面的可用性不能依赖"另一侧一定守约"。
+   * 主进程内部各步之和（预检 8s + 两个探测各 15s + 归属地 5s）留足余量。
+   */
+  const DETECT_TIMEOUT_MS = 60000
+  let timer = null
   try {
-    const resp = await window.pix.detectProxy(readAddSettings())
+    const resp = await Promise.race([
+      window.pix.detectProxy(readAddSettings()),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('DETECT_TIMEOUT')), DETECT_TIMEOUT_MS)
+      })
+    ])
     if (!resp || !resp.success) {
       setDetectMsg((resp && resp.msg) || '检测失败', 'err')
       return
@@ -242,8 +261,14 @@ async function runProxyDetect() {
       geoHistory.textContent = '检测到该 IP 最近在本软件使用过：' + formatProxyTime(resp.history.at)
     }
   } catch (e) {
-    setDetectMsg('检测失败，请检查节点是否可用', 'err')
+    // 超时要说清楚是超时，别让用户以为是节点坏了
+    if (e && e.message === 'DETECT_TIMEOUT') {
+      setDetectMsg('检测超时（' + Math.round(DETECT_TIMEOUT_MS / 1000) + ' 秒无响应），请换个节点或稍后重试', 'err')
+    } else {
+      setDetectMsg('检测失败，请检查节点是否可用', 'err')
+    }
   } finally {
+    if (timer) clearTimeout(timer)
     addProxyDetectBtn.disabled = false
   }
 }

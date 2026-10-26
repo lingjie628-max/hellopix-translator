@@ -2531,16 +2531,61 @@ app.on('login', (event, webContents, details, authInfo, callback) => {
   callback(creds.user, creds.pass)
 })
 
-function sessionGetText(ses, url) {
+/**
+ * 用 net 模块取一个 URL 的文本。
+ *
+ * ## ★ 必须有超时 ★（这是"节点检测永远正在检测"的根因）
+ *
+ * 原实现只有 `req.on('error', reject)`，**没有任何超时，也不 abort**。
+ * 而 Electron 的 `net.request` 里，"连接超时"会被当成 error 报出来，
+ * 但**"响应头回来了、body 却一直不结束"不会报 error** ——
+ * 那个 Promise 就永远挂着。链路上表现为：
+ *
+ *   节点检测成功 → 拿到 IP → await lookupIpGeo → await sessionGetText
+ *   → 永不返回 → IPC 不回 → 渲染层永远停在"正在检测节点…"
+ *
+ * 用户看到的就是"节点明明是好的，就是半天检测不出来"，而且**连错误都没有**。
+ *
+ * 归属地用的第三方（ipinfo.io / ipwho.is / db-ip.com）在国内经常被墙或
+ * 半死不活，正好踩中这个形态。所以这里按"总时长"封顶：
+ * 到点先 abort（打断真正的 socket），再以错误结束 —— 让上层进入
+ * "查不到归属地但检测照常成功"的分支，而不是把整个检测拖死。
+ */
+const SESSION_GET_TEXT_TIMEOUT_MS = 5000
+
+function sessionGetText(ses, url, timeoutMs) {
+  const limit = Number(timeoutMs) > 0 ? Number(timeoutMs) : SESSION_GET_TEXT_TIMEOUT_MS
   return new Promise((resolve, reject) => {
-    const req = net.request({ method: 'GET', url: url, session: ses, redirect: 'follow' })
+    let settled = false
+    let timer = null
+    let req = null
+    const finish = (fn, arg) => {
+      if (settled) return
+      settled = true
+      if (timer) { clearTimeout(timer); timer = null }
+      fn(arg)
+    }
+    const abortNow = (reason) => {
+      try { if (req && typeof req.abort === 'function') req.abort() } catch (e) {}
+      finish(reject, new Error(reason))
+    }
+    timer = setTimeout(() => abortNow('归属地查询超时（' + limit + 'ms 未完成）'), limit)
+    try {
+      req = net.request({ method: 'GET', url: url, session: ses, redirect: 'follow' })
+    } catch (e) {
+      return finish(reject, e)
+    }
     let body = ''
     req.on('response', res => {
       res.on('data', chunk => { body += chunk })
-      res.on('end', () => resolve(body))
+      res.on('end', () => finish(resolve, body))
+      // 响应体的 error / aborted 同样要收口，否则同样会挂住
+      res.on('error', e => finish(reject, e))
+      res.on('aborted', () => finish(reject, new Error('响应被中止')))
     })
-    req.on('error', reject)
-    req.end()
+    req.on('error', e => finish(reject, e))
+    // abort() 之后会触发 error，但 finish 有幂等保护，不会重复 settle
+    try { req.end() } catch (e) { finish(reject, e) }
   })
 }
 

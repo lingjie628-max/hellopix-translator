@@ -238,16 +238,43 @@ function createProxyDetect (deps) {
           tried: (pre && pre.tried) || []
         }
       }
-      const geo = await libs.lookupIpGeo(ip, settings.proxyChannel || 'dbip')
-      geo.ip = geo.ip || ip
-      const usedAt = io.noteProxyIp(ip)
-      return {
-        success: true,
-        ip: ip,
-        geo: geo,
-        history: usedAt ? { at: usedAt } : null
+      /**
+       * ★ 归属地查询绝不阻塞检测结论 ★
+       *
+       * 走到这里说明节点**已经证明可用**（真的经它取到了 IP）。
+       * 归属地只是锦上添花，它的上游（ipinfo.io / ipwho.is / db-ip.com）
+       * 在国内经常被墙或半死不活。
+       *
+       * sessionGetText 那层已补超时，但这里再加一道硬上限：
+       * 万一将来换实现、或某个通道卡在别处，也绝不让"节点已经能用"这件事
+       * 被一个查询归属地的请求拖成"永远正在检测"。
+       */
+      let geo = { ip: ip }
+      try {
+        const GEO_DEADLINE_MS = 6000
+        let geoTimer = null
+        geo = await Promise.race([
+          libs.lookupIpGeo(ip, settings.proxyChannel || 'dbip'),
+          new Promise(resolve => {
+            geoTimer = setTimeout(() => {
+              logProxy('geo 查询超过 ' + GEO_DEADLINE_MS + 'ms，跳过归属地，不影响检测结论')
+              resolve({ ip: ip })
+            }, GEO_DEADLINE_MS)
+          })
+        ]).finally(() => { if (geoTimer) clearTimeout(geoTimer) })
+      } catch (e) {
+        logProxy('geo 查询异常（不影响检测结论）：' + ((e && e.message) || String(e)))
+        geo = { ip: ip }
       }
-    } finally {
+      if (!geo || typeof geo !== 'object') geo = { ip: ip }
+      geo.ip = geo.ip || ip
+    const usedAt = io.noteProxyIp(ip)
+    return {
+      success: true,
+      ip: ip,
+      geo: geo,
+      history: usedAt ? { at: usedAt } : null
+    }    } finally {
       // 探测用的 session 必须清干净：它是共享 partition，
       // 残留的代理规则会影响下一次探测。
       try { await ses.clearStorageData() } catch (ignore) {}
