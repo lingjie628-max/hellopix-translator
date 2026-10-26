@@ -219,7 +219,18 @@ function productionRouter(context) {
     }
     const result = await repo.list('subs', { where: clauses.join(' AND '), values, limit: paging.size, offset: paging.offset })
     result.rows.forEach(row => { delete row.passwordHash })
-    res.json(page(result.rows, result.total, paging))
+    /**
+     * ★ 补 bound 布尔位（与 /admin/subs 同一口径）★
+     *
+     * `repo.list` 只做 mapRows（bound_device → boundDevice），不会产生 `bound`。
+     * 后台列表那边已经因为同一件事踩过坑（「电脑」列恒显示"未绑定"，
+     * 因为 mock 的 enrichUser 补了 bound、真后端没补）。商户端这里同理：
+     * 界面要显示"这台电脑已绑定"并给出解绑入口，判据必须真实存在。
+     */
+    const rows = result.rows.map(row => Object.assign({}, row, {
+      bound: row.boundDevice || row.bound_device ? 1 : 0
+    }))
+    res.json(page(rows, result.total, paging))
   }))
   router.post('/team/subs/save', asyncRoute(async (req, res) => {
     await core.saveSub(req.pixUser, input(req))

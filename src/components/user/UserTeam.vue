@@ -39,10 +39,23 @@
           <el-switch v-model="scope.row.autoAlloc" :active-value="1" :inactive-value="0" @change="val => setAlloc(scope.row, val)"></el-switch>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="280">
+      <el-table-column label="电脑" width="90">
+        <template slot-scope="scope">
+          <el-tag :type="scope.row.bound ? 'success' : 'info'" size="mini">{{ scope.row.bound ? '已绑定' : '未绑定' }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" width="320">
         <template slot-scope="scope">
           <el-button type="text" @click="openChars(scope.row)">分字符</el-button>
           <el-button type="text" @click="openEdit(scope.row)">编辑</el-button>
+          <!--
+            解绑电脑。
+            子账号首次登录会自动绑定当前电脑，换机器就登不上（DEVICE_BOUND）。
+            这件事商户自己能办 —— 否则每次换电脑都得来找客服，而客服那边
+            的按钮原先还叫「踢下线」，两边都找不到。
+            只在已绑定显示：没绑定时这个动作没有意义，留着只会让人以为"点了会出事"。
+          -->
+          <el-button v-if="scope.row.bound" type="text" @click="resetDevice(scope.row)">解绑电脑</el-button>
           <el-button type="text" @click="toggle(scope.row)">{{ scope.row.status === 1 ? '关闭' : '开启' }}</el-button>
           <el-button type="text" class="danger" @click="remove(scope.row)">删除</el-button>
         </template>
@@ -166,6 +179,35 @@ export default {
             return
           }
           this.$message.success(data.msg || '已删除')
+          this.load()
+        })
+      }).catch(() => {})
+    },
+    /**
+     * 解绑子账号绑定的电脑。
+     *
+     * 子账号首次登录会把当前电脑记进 bound_device，之后换机器登录会被
+     * 409 DEVICE_BOUND 挡住（"账号已绑定其他设备，请先解绑"）。
+     * 这个接口主账号可以对自己名下的子账号调用，服务端会校验归属
+     * （只认 parent_id 是自己的，越权直接 404）。
+     *
+     * 必须二次确认：它**同时会把该子账号当前所有在线会话踢掉**。
+     * 商户在自己电脑上点一下，员工的窗口就掉线了 —— 这后果得先说清楚。
+     */
+    resetDevice(row) {
+      this.$confirm(
+        `解绑后，「${row.username}」可以在任意电脑登录（首次登录会重新绑定那台）。`
+        + '该账号当前已登录的所有设备会立刻下线，需要用密码重新登录。',
+        '解绑子账号绑定电脑',
+        { type: 'warning', confirmButtonText: '确定解绑', cancelButtonText: '取消' }
+      ).then(() => {
+        this.postRequest('/team/device/reset', { id: row.id }).then(resp => {
+          const data = resp && resp.data ? resp.data : {}
+          if (data.success === 'error') {
+            this.$message.error(data.msg || '解绑失败')
+            return
+          }
+          this.$message.success('已解绑，该账号下次登录会绑定新的电脑')
           this.load()
         })
       }).catch(() => {})
