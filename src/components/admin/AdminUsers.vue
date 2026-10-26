@@ -59,7 +59,8 @@
                 本来就没有到期时间的号，这个动作没有意义。
               -->
               <el-dropdown-item v-if="scope.row.expireTime" :command="'unlimited'">设为无限期</el-dropdown-item>
-              <el-dropdown-item :command="'unbind'">踢下线</el-dropdown-item>
+              <!-- 原名「踢下线」：只说踢人，不说解绑。实际两件事都做。 -->
+              <el-dropdown-item :command="'unbind'">{{ scope.row.bound ? '解绑设备' : '强制下线' }}</el-dropdown-item>
               <el-dropdown-item :command="'toggle'">{{ scope.row.status === 1 ? '停用' : '启用' }}</el-dropdown-item>
               <el-dropdown-item :command="'reclaim'">回收字符</el-dropdown-item>
               <el-dropdown-item :command="'delete'" divided>删除</el-dropdown-item>
@@ -180,9 +181,19 @@
         <el-table-column label="状态" width="80">
           <template slot-scope="scope">{{ scope.row.status === 1 ? '启用' : '停用' }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="100">
+        <el-table-column label="操作" width="150">
           <template slot-scope="scope">
-            <el-button type="text" @click="unbindSub(scope.row)">踢下线</el-button>
+            <!--
+              原先叫「踢下线」—— 名字只说了「把人赶走」，而它实际做的是
+              **清掉设备绑定 + 撤销所有在线会话**。超管想找「解绑设备」时
+              按字面完全搜不到，只能以为后台没这个功能。
+              按当前状态给不同的名字，让人一眼知道会发生什么：
+                已绑定 → 「解绑设备」（清绑定 + 踢下线）
+                未绑定 → 「强制下线」（没有绑定可解，只剩踢会话）
+            -->
+            <el-button type="text" @click="unbindSub(scope.row)">
+              {{ scope.row.bound ? '解绑设备' : '强制下线' }}
+            </el-button>
           </template>
         </el-table-column>
       </el-table>
