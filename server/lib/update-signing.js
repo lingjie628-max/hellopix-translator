@@ -124,7 +124,10 @@ function buildManifest (row, options) {
       url,
       sha256: row.sha256,
       channel: opts.channel || 'stable',
-      minVersion: row.min_version || row.minVersion || row.version
+      // 两种命名都认：这行可能来自 SQL 原始行（min_version），
+      // 也可能来自 publicRelease 驼峰化后的对象（minVersion）。
+      // 顺序无所谓，缺一个就取另一个，都没有才退回本次版本号。
+      minVersion: row.minVersion || row.min_version || row.version
     }, opts.env)
   } catch (error) {
     // 私钥配错不能静默当成"没更新"—— 那会让更新通道无声瘫痪

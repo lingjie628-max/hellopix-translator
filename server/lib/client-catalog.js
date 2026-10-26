@@ -55,7 +55,20 @@ function publicRelease(row) {
     // 清单是 /client/update 现签现发的；这里多带一份存库的签名，只会在
     // 轮换密钥后产生"两个签名都合法但不一样"的困惑。
     sha256: row.sha256 || '',
-    minVersion: row.min_version || '',
+    /**
+     * ★ 两种命名都要认 ★
+     *
+     * `publicReleases()` 传进来的是**已经经过 mapRow 驼峰化**的行
+     * （production-repository.js 的 mapRow 把 min_version 转成 minVersion），
+     * 所以这里只读 `row.min_version` 永远是 undefined → 退成空串 →
+     * buildManifest 再退成 `row.version`。
+     *
+     * 后果：库里 min_version=1.2.0 的记录，签出来的清单 minVersion 却是 1.2.6。
+     * 客户端拿它做防降级自检，等于把"可以升到任意 ≥ 1.2.6"变成
+     * "只能 ≥ 1.2.6" —— 语义被悄悄改掉，而现有测试是直接构造
+     * `{ min_version }` 调 buildManifest 的，压根没经过这一层，所以全绿。
+     */
+    minVersion: row.minVersion || row.min_version || '',
     note: row.note || ''
   }
 }
