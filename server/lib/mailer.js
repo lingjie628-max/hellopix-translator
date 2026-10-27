@@ -17,6 +17,67 @@
 let nodemailer = null
 try { nodemailer = require('nodemailer') } catch (e) { nodemailer = null }
 
+/**
+ * 每日发信计数（按 UTC 自然日）。
+ *
+ * ## 为什么自己数
+ *
+ * Resend 免费版每天只有 100 封，超了 SMTP 直接回
+ * `550 You have reached your daily email sending quota`，注册验证码
+ * 全部发不出去 —— 这是**直接掉用户**，比运维告警严重得多。
+ *
+ * Resend 没有公开的「今日还剩多少封」查询接口（api.resend.com 返回的
+ * `ratelimit-*` 头是请求速率，不是发送额度，别被它误导）。所以只能自己记。
+ *
+ * 计数落在 `/var/lib/hello-pix-mail-counter.json`，按 UTC 日期分桶。
+ * 进程重启不影响（读文件），多进程并发也只是偶尔少记几封 ——
+ * 预警阈值留了足够余量，不需要精确到个位数。
+ */
+const COUNTER_FILE = '/var/lib/hello-pix-mail-counter.json'
+/** 免费额度：每天 100 封（UTC 自然日）。付费版无每日限制，按需调大。 */
+const DAILY_QUOTA = Number(process.env.MAIL_DAILY_QUOTA) || 100
+
+function utcDate() {
+  return new Date().toISOString().slice(0, 10)
+}
+
+function readCounter() {
+  try {
+    const raw = JSON.parse(require('fs').readFileSync(COUNTER_FILE, 'utf8'))
+    return raw && raw.date === utcDate() ? raw : { date: utcDate(), sent: 0 }
+  } catch (e) {
+    return { date: utcDate(), sent: 0 }
+  }
+}
+
+/**
+ * 记一次发送。**在 sendMail 之后调用**，失败的不算额度
+ * （供应商只对成功投递的计费）。
+ */
+function bumpCounter(n) {
+  const fs = require('fs')
+  const path = require('path')
+  const counter = readCounter()
+  counter.sent += (Number(n) || 1)
+  try {
+    fs.mkdirSync(path.dirname(COUNTER_FILE), { recursive: true })
+    fs.writeFileSync(COUNTER_FILE, JSON.stringify(counter))
+  } catch (e) { /* 写不进去也不能影响发信本身 */ }
+  return counter
+}
+
+/** 供巡检读取：今天发了多少、额度多少、还剩多少。 */
+function readDailyUsage() {
+  const counter = readCounter()
+  return {
+    date: counter.date,
+    sent: counter.sent,
+    quota: DAILY_QUOTA,
+    remaining: Math.max(0, DAILY_QUOTA - counter.sent),
+    percentUsed: Math.round(counter.sent * 100 / DAILY_QUOTA)
+  }
+}
+
 /** HTML 转义。邮件正文里所有插值都必须过一遍。 */
 function esc(value) {
   return String(value == null ? '' : value)
@@ -182,7 +243,11 @@ class Mailer {
       text: text || html.replace(/<[^>]+>/g, ''),
       html
     })
-    return { messageId: info && info.messageId, accepted: (info && info.accepted) || [] }
+    // 只记成功投递的：供应商只对真正发出去的计额度。
+    // 多个收件人各算一封（To/CC/BCC 都算），所以按 accepted 数量计。
+    const accepted = (info && info.accepted) || []
+    bumpCounter(accepted.length || 1)
+    return { messageId: info && info.messageId, accepted }
   }
 
   /** 后台"测试发信"用。任何失败都不抛异常，一律返回结构化结果。 */
@@ -236,6 +301,8 @@ class Mailer {
           detail: String((info && info.response) || '').slice(0, 300)
         }
       }
+      // 探活信同样消耗每日额度，必须计数 —— 否则巡检自己就是隐形大户。
+      bumpCounter(accepted.length || 1)
       return {
         ok: true, stage: 'done', code: 'OK',
         msg: `测试邮件已投递至 ${to}`,
@@ -298,5 +365,5 @@ class Mailer {
 module.exports = {
   Mailer, readConfig, readAlertTo, maskEmail, esc,
   describeSmtpError, validEmail, setting, objectSetting,
-  SMTP_ERROR_REASONS
+  SMTP_ERROR_REASONS, readDailyUsage, DAILY_QUOTA
 }

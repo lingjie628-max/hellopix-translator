@@ -29,7 +29,6 @@ const DRY = process.argv.includes('--dry')
 const BACKUP_DIR = '/var/backups/hello-pix'
 const BACKUP_MAX_AGE_HOURS = 26      // 每日备份，超过 26 小时说明昨天没跑成功
 const DISK_MAX_PERCENT = 85
-const SILENCE_HOURS = 1
 /**
  * 邮件实发探测的间隔。
  *
@@ -88,10 +87,33 @@ function saveState(state) {
   } catch (e) { /* 状态存不下来不该让巡检本身失败 */ }
 }
 
-/** 同一问题 1 小时内不重复告警 —— 每 10 分钟一封会被无视 */
-function shouldAlert(key, state) {
-  const last = Number(state[key] || 0)
-  return Date.now() - last > SILENCE_HOURS * 3600 * 1000
+/**
+ * 判断本轮要不要发告警。**只在状态变化时通知**。
+ *
+ * ## 为什么放弃「N 小时内不重复」
+ *
+ * 原实现是「同一问题 1 小时内只发一次」。看起来能防骚扰，实际有两个洞：
+ *
+ *   1. **持续存在的问题会一直重发**。充值异常积压了 5 天，就每天重发 24 次。
+ *      2026-10-27 那次正是如此 —— 同一批异常反复推送，把真正的信息淹了。
+ *   2. **恢复时没有任何通知**。问题自己好了，没人知道；
+ *      于是下次再坏，你以为"一直在坏"。
+ *
+ * 现在改成状态机：记录「上一轮有哪些问题」。
+ *   - 新出现的问题   → 告警（`[新增]`）
+ *   - 一直在的问题   → 静默
+ *   - 消失的问题     → 发一条恢复通知（`[恢复]`）
+ *
+ * 这样每件事你只会被打扰两次：出事时一次、好了一次。
+ *
+ * @returns {{toAlert: string[]}}
+ */
+function diffProblems(problems, state) {
+  const prev = Array.isArray(state && state.activeProblems) ? state.activeProblems : []
+  // 去重：同一轮里可能因为检查项重叠报出同名问题，重复报就是重复烧额度
+  const now = [...new Set(problems.map(([k]) => k))]
+  // 只返回「新出现的」——「恢复的」由主流程自己算（它需要区分全恢复 / 部分恢复）
+  return { toAlert: now.filter(k => !prev.includes(k)) }
 }
 
 // ---------------------------------------------------------------------------
@@ -199,6 +221,7 @@ async function checkMail(pool, options) {
   const deps = opts.deps || {}
   const Mailer = deps.Mailer || require('../server/lib/mailer').Mailer
   const readAlertTo = deps.readAlertTo || require('../server/lib/mailer').readAlertTo
+  const readDailyUsage = deps.readDailyUsage || require('../server/lib/mailer').readDailyUsage
   const ProductionRepository = deps.ProductionRepository
     || require('../server/repositories/production-repository').ProductionRepository
   const stateFile = opts.stateFile || '/var/lib/hello-pix-mail-probe.json'
@@ -215,6 +238,25 @@ async function checkMail(pool, options) {
       detail: `邮件服务未配置，缺少：${cfg.missing.join('、')}`
         + '。注册与找回密码会全部失败（user/emailCode 返回 503）'
     }
+  }
+
+  // 第一层半：**每日额度预警**。也不花钱、不联网。
+  //
+  // 为什么必须盯着这个：免费版每天 100 封，超了之后**注册验证码发不出去**。
+  // 那不是一个"运维告警"，而是直接掉用户 —— 新用户注册收不到码就走了，
+  // 你事后根本不知道发生过。等到巡检发现"发信失败"时，用户已经丢了。
+  //
+  // 80% 就报，留出处理时间；100% 时报"已经发不出去"。
+  const readUsage = deps.readDailyUsage || require('../server/lib/mailer').readDailyUsage
+  const usage = readUsage()
+  // 每轮都打一行用量，方便直接 journalctl 看趋势（不告警也不吵）
+  console.log(`邮件用量: ${usage.sent}/${usage.quota}（${usage.percentUsed}%）`)
+  if (usage.percentUsed >= 80) {
+    const detail = usage.percentUsed >= 100
+      ? `今日额度已用完（${usage.sent}/${usage.quota}），注册验证码现在发不出去`
+      : `今日已用 ${usage.sent}/${usage.quota} 封（${usage.percentUsed}%），`
+        + `剩 ${usage.remaining} 封。用完会导致注册验证码发不出去`
+    return { ok: false, detail }
   }
 
   // 第二层：真发信。按频率限制，避免把供应商惹毛。
@@ -428,21 +470,54 @@ async function main() {
 
   if (!problems.length) {
     console.log(`[${new Date().toISOString()}] 巡检正常`)
+    // ★ 全部恢复：如果之前有在报的问题，发一条恢复通知 ★
+    //
+    // 没有这条，"问题已经好了"这件事只有翻日志的人知道。用户会以为
+    // 一直在坏，或者反过来以为一直没坏过。
+    const state = loadState()
+    const prev = Array.isArray(state.activeProblems) ? state.activeProblems : []
+    if (prev.length) {
+      const lines = prev.map(k => `<b>${k}</b>：已恢复`)
+      console.log('恢复: ' + prev.join('、'))
+      state.activeProblems = []
+      saveState(state)
+      if (!DRY) {
+        try {
+          const result = await sendAlert('【Hello Pix 恢复】' + prev.join(' / '), lines)
+          console.log('恢复通知已送达（通道：' + ((result && result.channel) || 'mail') + '）')
+        } catch (e) {
+          console.error('恢复通知发送异常（不影响巡检结果）:', e.message)
+        }
+      }
+    }
     return
   }
 
   const state = loadState()
-  const fresh = problems.filter(([k]) => shouldAlert(k, state))
+  const { toAlert } = diffProblems(problems, state)
   for (const [k] of problems) console.log(`异常: ${k}`)
 
-  if (!fresh.length) {
-    console.log('（同一问题 1 小时内已告警过，本次静默）')
-    return
-  }
-  for (const [k] of fresh) state[k] = Date.now()
+  // 状态落盘：本轮实际存在的问题全部记下（不只是新出现的），
+  // 否则下一轮会把"一直在的问题"又当成新问题报一遍。
+  //
+  // 注意：partial recover 也要通知。例如原来「服务不可用 + 磁盘告急」，
+  // 现在只剩「磁盘告急」—— 说明服务恢复了，这件事值得一句话。
+  const prev = Array.isArray(state.activeProblems) ? state.activeProblems : []
+  const now = [...new Set(problems.map(([k]) => k))]
+  const recovered = prev.filter(k => !now.includes(k))
+  state.activeProblems = now
   saveState(state)
 
-  const lines = fresh.map(([k, d]) => `<b>${k}</b>：${d}`)
+  if (!toAlert.length && !recovered.length) {
+    console.log('（都是持续中的已知问题，无变化，不通知）')
+    return
+  }
+
+  const detailOf = new Map(problems)
+  const lines = []
+  for (const k of toAlert) lines.push(`<b>[新增] ${k}</b>：${detailOf.get(k) || ''}`)
+  for (const k of recovered) lines.push(`<b>[恢复] ${k}</b>：已恢复正常`)
+
   if (DRY) {
     console.log('（--dry 模式，不发邮件）\n' + lines.join('\n'))
     return
@@ -462,7 +537,7 @@ async function main() {
   // 查：journalctl -u hello-pix-alert --since -48h | grep MAIL-ALERT
   //     cat /var/lib/hello-pix-alerts.log
   const stamp = new Date().toISOString()
-  const plain = fresh.map(([k, d]) => `[MAIL-ALERT ${stamp}] ${k}: ${d}`)
+  const plain = lines.map(l => `[MAIL-ALERT ${stamp}] ${l.replace(/<[^>]+>/g, '')}`)
   for (const l of plain) console.error(l)
   try {
     fs.mkdirSync('/var/lib', { recursive: true })
@@ -472,12 +547,24 @@ async function main() {
   }
 
   try {
-    await sendAlert('【Hello Pix 告警】' + fresh.map(p => p[0]).join(' / '), lines)
-    console.log('告警邮件已发送')
+    const subject = toAlert.length
+      ? '【Hello Pix 告警】' + toAlert.join(' / ')
+      : '【Hello Pix 恢复】' + recovered.join(' / ')
+    const result = await sendAlert(subject, lines)
+    if (result && result.sent) {
+      console.log('告警已送达（通道：' + (result.channel || 'mail') + '）')
+    } else {
+      console.error('告警未能送达任何通道（' + ((result && result.reason) || 'unknown') + '）')
+    }
   } catch (e) {
-    // 邮件发不出去也要留下痕迹 —— 这是最后一道防线
-    console.error('告警邮件发送失败:', e.message)
-    process.exit(1)
+    // ★ 不 exit 1 ★
+    //
+    // 发送失败是"通知没能送达"，不是"巡检任务执行失败"。用非零退出码会让
+    // systemd 把本服务标记 failed，进而被 host-health 当成故障再报一次 ——
+    // 2026-10-27 那次每 10 分钟一次的告警骚扰就是这么来的。
+    //
+    // 真正的痕迹已经由上面的 MAIL-ALERT 落盘 + stderr 留下了，不会丢。
+    console.error('告警发送异常（不影响巡检结果）:', e.message)
   }
 }
 
@@ -490,6 +577,7 @@ if (require.main === module) {
 module.exports = {
   checkMail,
   checkRechargeExceptions,
+  diffProblems,
   RECHARGE_OPEN_MAX,
   RECHARGE_OPEN_MAX_HOURS,
   RECHARGE_ALERT_SAMPLE

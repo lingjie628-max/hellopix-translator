@@ -44,7 +44,7 @@ function tmpStateFile() {
  * 关键：**永远不碰真实 SMTP**。这组测试跑在开发机和 CI 上，
  * 真发信既慢又可能触发供应商风控。
  */
-function harness ({ configured = true, missing = [], sendResult, settings, sendCalls }) {
+function harness ({ configured = true, missing = [], sendResult, settings, sendCalls, usage }) {
   const calls = sendCalls || []
 
   class FakeMailer {
@@ -71,7 +71,13 @@ function harness ({ configured = true, missing = [], sendResult, settings, sendC
     pool: {},
     stateFile: tmpStateFile(),
     calls,
-    deps: { Mailer: FakeMailer, ProductionRepository: FakeRepo, readAlertTo: (s) => String(s['mail.alert_to'] || '') }
+    deps: {
+      Mailer: FakeMailer,
+      ProductionRepository: FakeRepo,
+      readAlertTo: (s) => String(s['mail.alert_to'] || ''),
+      // 默认额度充足。接真实实现会去读 /var/lib，CI 上没权限也没意义。
+      readDailyUsage: () => usage || { date: '2026-10-27', sent: 0, quota: 100, remaining: 100, percentUsed: 0 }
+    }
   }
 }
 
@@ -174,4 +180,71 @@ test('频率限制不能掩盖已发生的故障：配置层每轮都查，不�
   // 两条都必须报错 —— 如果第二轮回"跳过"，就等于故障只报一次就哑了
   assert.equal(first.ok, false)
   assert.equal(second.ok, false)
+})
+
+// ---------------------------------------------------------------------------
+// 每日额度预警
+// ---------------------------------------------------------------------------
+
+/**
+ * 2026-10-27 的真实事故：Resend 免费版每天 100 封，被巡检告警自己打满，
+ * SMTP 回 `550 You have reached your daily email sending quota`，
+ * 注册验证码全部发不出去。
+ *
+ * 关键点：**这不该等到"发信失败"才发现**。那时候用户已经注册不了了。
+ * 80% 就要报，留出处理时间。
+ */
+
+test('额度用掉 85% → 必须提前预警（还没失败，但要能来得及处理）', async () => {
+  const h = harness({
+    sendResult: { ok: true },
+    usage: { date: '2026-10-27', sent: 85, quota: 100, remaining: 15, percentUsed: 85 }
+  })
+  const r = await checkMail(h.pool, { deps: h.deps, stateFile: h.stateFile })
+
+  assert.equal(r.ok, false)
+  // 数字必须报出来，只说"额度紧张"等于没说
+  assert.match(r.detail, /85\/100/)
+  assert.match(r.detail, /剩 15 封/)
+  // 必须点明后果：这不是"慢一点"，是注册直接坏掉
+  assert.match(r.detail, /注册验证码/)
+  // 预警阶段不该再去真发一封探活信（那是在火上浇油）
+  assert.equal(h.calls.length, 0, '额度预警时不应再消耗额度发探活信')
+})
+
+test('额度已用尽 100% → 判定为故障，措辞要说清"现在已经发不出去"', async () => {
+  const h = harness({
+    sendResult: { ok: true },
+    usage: { date: '2026-10-27', sent: 100, quota: 100, remaining: 0, percentUsed: 100 }
+  })
+  const r = await checkMail(h.pool, { deps: h.deps, stateFile: h.stateFile })
+
+  assert.equal(r.ok, false)
+  assert.match(r.detail, /额度已用完/)
+  assert.match(r.detail, /100\/100/)
+  assert.match(r.detail, /现在发不出去/)
+})
+
+test('额度充足（79%）→ 正常放行，别没事找事', async () => {
+  const h = harness({
+    sendResult: { ok: true },
+    usage: { date: '2026-10-27', sent: 79, quota: 100, remaining: 21, percentUsed: 79 }
+  })
+  const r = await checkMail(h.pool, { deps: h.deps, stateFile: h.stateFile })
+
+  assert.equal(r.ok, true)
+  assert.equal(h.calls.length, 1, '额度够的时候探活信照发，否则测不出真的能不能发')
+})
+
+test('额度预警优先于探活：额度满了就别再发信，先报', async () => {
+  const h = harness({
+    sendResult: { ok: false, stage: 'deliver', code: 'EQUEUE', msg: 'quota exceeded' },
+    usage: { date: '2026-10-27', sent: 100, quota: 100, remaining: 0, percentUsed: 100 }
+  })
+  const r = await checkMail(h.pool, { deps: h.deps, stateFile: h.stateFile })
+
+  // 报的应该是"额度用完"，而不是绕一圈才在 SMTP 报错里看到
+  assert.equal(r.ok, false)
+  assert.match(r.detail, /额度已用完/)
+  assert.equal(h.calls.length, 0)
 })
