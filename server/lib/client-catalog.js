@@ -1,10 +1,17 @@
 'use strict'
 
 // 独立应用是 Hello Pix 自己的单应用翻译壳，不是 Signal/Telegram 官方安装包。
-// client_releases.app 必须对齐 desktop/platforms.js 的 id（如 signal、telegram-z）。
+// client_releases.app 必须对齐 desktop/platforms.js 的 id（如 telegram-z、whatsapp-green）。
 const platforms = require('../../desktop/shared/platforms')
 
 const RELEASE_GROUPS = Object.freeze([
+  // `desktop` 是发布脚本实际在写的分组（1.2.2 起 12 条记录）。它原来不在
+  // 这张表里，`groupId()` 于是把它归一成空串，后果是：
+  //   · findUpdate 的 score() 给"空分组"多打 1 分，旧版 windows/macos
+  //     记录反过来把**新版**压到后面 —— 线上返回 1.2.1 让客户端以为自己最新；
+  //   · 后台分组列显示空白，看不出这些包属于哪个平台。
+  // 放在最前，让它是 `groupLabel` 的兜底选择。
+  { id: 'desktop', label: '桌面版' },
   { id: 'windows', label: 'Windows' },
   { id: 'macos', label: 'macOS' },
   { id: 'android', label: 'Android' },
@@ -95,11 +102,36 @@ function packageAllowsStandalone(clients) {
   return clients.standalone === true || Number(clients.standalone) === 1
 }
 
+/**
+ * 语义化版本比较：`a` 比 `b` 新返回正数，旧返回负数，相同返回 0。
+ *
+ * 必须按**数字段**比，不能按字符串比 —— `'1.10.0' < '1.9.0'` 是字符串的真相，
+ * 但版本语义恰好相反。客户端 `renderer/pure.js` 里已有一份 cmpVer，这里
+ * 是服务端对应实现（两处不共用代码是因为一个跑在 Electron 渲染进程、
+ * 一个跑在 Node 服务端，没有可共享的构建产物）。
+ *
+ * `findUpdate` 选包**必须先过这个函数**再考虑其他偏好分：把一个更旧、
+ * 但恰好"app 字段为空 / 架构写法更讨喜"的包推给用户，等于把用户按在
+ * 已知问题上，而且界面会显示"已是最新"。
+ */
+function compareVersions(a, b) {
+  const parts = v => String(v == null ? '' : v).split(/[^\d]+/).filter(s => s !== '').map(n => parseInt(n, 10) || 0)
+  const pa = parts(a)
+  const pb = parts(b)
+  const len = Math.max(pa.length, pb.length)
+  for (let i = 0; i < len; i += 1) {
+    const diff = (pa[i] || 0) - (pb[i] || 0)
+    if (diff !== 0) return diff
+  }
+  return 0
+}
+
 module.exports = {
   RELEASE_GROUPS,
   STANDALONE_APPS,
   groupId,
   groupLabel,
+  compareVersions,
   isStandaloneApp,
   hasPublicUrl,
   publicRelease,

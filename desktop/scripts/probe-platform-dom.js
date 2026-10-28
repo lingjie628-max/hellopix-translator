@@ -25,7 +25,7 @@ const path = require('node:path')
 
 const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 const OUT_DIR = path.join(__dirname, 'probe-out')
-const SKIP = new Set(['custom-web', 'tickets', 'pm-office', 'signal'])
+const SKIP = new Set(['custom-web', 'tickets', 'pm-office'])
 const MAX_FRAMES = 12
 
 app.setPath('userData', path.join(app.getPath('appData'), 'Hello Pix Probe'))

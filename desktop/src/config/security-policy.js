@@ -3,6 +3,7 @@ const net = require('net')
 const PLATFORM_DOMAINS = {
   'whatsapp-green': ['whatsapp.com'],
   'whatsapp-pro': ['whatsapp.com'],
+  'whatsapp-biz': ['whatsapp.com'],
   'telegram-z': ['telegram.org'],
   line: ['line.me', 'line-scdn.net'],
   'line-biz': ['line.biz', 'line.me', 'line-scdn.net'],
@@ -32,7 +33,6 @@ const PLATFORM_DOMAINS = {
   deepseek: ['deepseek.com'],
   vk: ['vk.com'],
   band: ['band.us'],
-  signal: ['signal.org'],
   'pm-office': ['hellowoorld.com']
 }
 

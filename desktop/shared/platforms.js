@@ -1,6 +1,10 @@
 module.exports = [
   { id: 'whatsapp-green', name: 'WhatsApp绿色版', url: 'https://web.whatsapp.com/', icon: 'whatsapp' },
   { id: 'whatsapp-pro', name: 'WhatsApp多功能版', url: 'https://web.whatsapp.com/', icon: 'whatsapp' },
+  // 商业版与上面两个是**同一个站点**：WhatsApp Business 没有独立的网页聊天入口，
+  // 官网只说「用手机上的 Business App 扫码登录 web.whatsapp.com」。
+  // 三者靠各自的分区（partition）隔离登录态，扫不同的号就是不同的会话。
+  { id: 'whatsapp-biz', name: 'WhatsApp商业版', url: 'https://web.whatsapp.com/', icon: 'whatsapp' },
   { id: 'telegram-z', name: 'Telegram', url: 'https://web.telegram.org/a/', icon: 'telegram' },
   { id: 'line', name: 'Line', url: 'chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc/index.html', extension: 'line' },
   { id: 'line-biz', name: 'Line商业版', url: 'https://chat.line.biz/', icon: 'line' },
@@ -30,7 +34,13 @@ module.exports = [
   { id: 'deepseek', name: 'DeepSeek', url: 'https://chat.deepseek.com/' },
   { id: 'vk', name: 'VK Messenger', url: 'https://vk.com/im' },
   { id: 'band', name: 'Band', url: 'https://band.us/' },
-  { id: 'signal', name: 'Signal', url: 'https://signal.org/', badge: false, listed: false },
+  // Signal 曾经在这里挂过一条 `listed: false` 的隐藏条目，指向 signal.org 首页。
+  // 已删除：Signal **没有网页版**（web.signal.org 不存在），官方只提供手机 App
+  // 和桌面客户端（原生程序，需手机配对）。而本软件的所有实例都是
+  // WebContentsView 加载网页 URL、靠往 DOM 注入 JS 做翻译 ——
+  // 原生程序既没有 URL 也没有 DOM，接进来也翻译不了。
+  // 详见 2026-10-28 的排查记录：移动外部窗口可行，但控制不了其尺寸，
+  // 窗口跟随会抖动、会漂在桌面上、不随主程序退出。
   { id: 'custom-web', name: '自定义网页', url: 'https://www.google.com/', customUrl: true, badge: false },
   { id: 'tickets', name: '计数工单系统', url: 'http://127.0.0.1:8080/', icon: 'tickets', badge: false, listed: false },
   { id: 'pm-office', name: 'PM-Office', url: 'https://hellowoorld.com/', icon: 'pm-office', badge: false, listed: false }
