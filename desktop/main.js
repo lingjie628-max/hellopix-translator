@@ -775,13 +775,20 @@ function bindTabLoading(tab) {
   })
 }
 
+/**
+ * 默认开启防撤回的平台。必须与 src/window/open-platform.js 的同名集合保持一致：
+ * 这里是"重启后恢复"路径，那边是"新开"路径 —— 两边不一致会出现
+ * 「新开的窗口防撤回是开的，重启一次就悄悄关了」。
+ */
+const ANTI_REVOKE_DEFAULT = new Set(['whatsapp-pro', 'whatsapp-biz'])
+
 function restoreOneApp(row) {
   const item = fallbackPlatforms.find(p => p.id === row.platform)
   if (!item) return
   const index = Math.max(1, Number(row.index) || 1)
   const partition = row.partition || makePartition(item.id, index)
   const settings = normalizeTabSettings(unsealSettings(row.settings || {}))
-  if (item.id === 'whatsapp-pro' && settings.antiRevoke === undefined) settings.antiRevoke = true
+  if (ANTI_REVOKE_DEFAULT.has(item.id) && settings.antiRevoke === undefined) settings.antiRevoke = true
   const homeUrl = safePlatformHomeUrl(item, settings)
   if (!homeUrl) return
   const view = createWebView(partition, settings, item, homeUrl,
@@ -2902,15 +2909,45 @@ function runEditCommand(wc, action) {
 async function copyImageToClipboard (wc, url) {
   try {
     const buf = await downloadAsBuffer(wc, url)
-    if (!buf || !buf.length) return false
+    if (!buf || !buf.length) throw new Error('图片是空的')
     const image = electron.nativeImage.createFromBuffer(buf)
-    if (!image || image.isEmpty()) return false
+    if (!image || image.isEmpty()) throw new Error('图片格式无法识别')
     electron.clipboard.writeImage(image)
     return true
   } catch (e) {
     if (clientLog) clientLog.warn('context-menu', '复制图片失败：' + ((e && e.message) || e))
+    // ★ 失败必须让用户看见 ★
+    //
+    // 原来这里 return false 就完了。用户右键点「复制图片」，
+    // 菜单关掉、什么都没发生、也没有任何提示 —— 看起来就像菜单坏了。
+    // 2026-10-29 报的正是这个形态（真因是 blob: 拉不到，见 downloadAsBuffer）。
+    notifyImageCopyFailed(e)
     return false
   }
+}
+
+/**
+ * 图片复制失败时告诉用户"为什么"。
+ *
+ * 分成两类说，因为用户能做的事完全不同：
+ *   · 网络/超时   → 可以再试一次
+ *   · 格式不支持 → 再试也没用，得换「另存为」
+ */
+function notifyImageCopyFailed (e) {
+  const msg = String((e && e.message) || '')
+  let reason = '这张图片没能复制到剪贴板'
+  if (/格式|无法识别/i.test(msg)) {
+    reason = '这张图片的格式无法复制，可以用「图片另存为…」'
+  } else if (/HTTP|超时|网络|请求/i.test(msg)) {
+    reason = '图片下载失败，请检查网络后重试'
+  } else if (/页面.*(关闭|已)/i.test(msg)) {
+    reason = '页面已关闭，图片读取不到了'
+  }
+  try {
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('app:toast', { type: 'warn', text: reason })
+    }
+  } catch (err) { /* 提示失败不该再抛 */ }
 }
 
 /**
@@ -2935,6 +2972,7 @@ async function saveImageAs (win, url) {
     return true
   } catch (e) {
     if (clientLog) clientLog.warn('context-menu', '保存图片失败：' + ((e && e.message) || e))
+    notifyImageCopyFailed(e)
     return false
   }
 }
@@ -2946,10 +2984,36 @@ function openImageInNewWindow (url) {
       width: 1000, height: 760, title: '图片预览', autoHideMenuBar: true,
       webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true }
     })
+    // blob: 的生命周期绑在原页面，新窗口直接 loadURL 必然白屏。
+    // 只对 http(s)/data 走直接加载；blob 由调用方先读成 data URL 再传进来。
     w.loadURL(url)
     return true
   } catch (e) {
     if (clientLog) clientLog.warn('context-menu', '打开图片失败：' + ((e && e.message) || e))
+    return false
+  }
+}
+
+/**
+ * 打开图片预览。
+ *
+ * blob: 不能直接 `loadURL` —— 它绑在**原来那个页面**的上下文里，
+ * 换一个窗口去加载只会得到一张白板。所以 blob 先读成 data URL，
+ * data URL 是自包含的，任何窗口都能显示。
+ */
+async function openImagePreview (wc, url) {
+  const target = String(url || '')
+  if (!target) return false
+  if (!/^blob:/i.test(target)) return openImageInNewWindow(target)
+  try {
+    const buf = await readUrlInPage(wc, target)
+    if (!buf || !buf.length) throw new Error('图片是空的')
+    const mime = /^data:([^;]+);/i.exec(target)
+    const type = (mime && mime[1]) || 'image/png'
+    return openImageInNewWindow(`data:${type};base64,${buf.toString('base64')}`)
+  } catch (e) {
+    if (clientLog) clientLog.warn('context-menu', '预览 blob 图片失败：' + ((e && e.message) || e))
+    notifyImageCopyFailed(e)
     return false
   }
 }
@@ -2985,25 +3049,65 @@ function installEditableFocusRouter () {
 /**
  * 下载一个 URL 成 Buffer。
  *
- * 用 webContents 所属 session 发请求：WhatsApp 的图片是
- * `blob:` 或带签名的 https，凭据绑在那个 session 上。
+ * 用 webContents 所属 session 发请求：带签名的 https 图片凭据绑在那个 session 上。
+ *
+ * ## blob: / data: 为什么不能走 net.request（2026-10-29 实测）
+ *
+ * `electron.net.request` **只支持 http: 和 https:**：
+ *
+ *     blob:  ❌ ClientRequest only supports http: and https: protocols
+ *     data:  ❌ ClientRequest only supports http: and https: protocols
+ *
+ * 而 WhatsApp 网页版的聊天图片**全是 blob:** —— 这就是"右键有『复制图片』，
+ * 但点了一点反应都没有"的根因。https 那条路是好的（实测 200 / 3831 字节），
+ * 只有 blob 挂了。
+ *
+ * 所以 blob:/data: 改走**页面内读取**：让渲染进程 fetch 那个 URL、
+ * 读成 base64 回传。页面自己当然能读自己的 blob URL。
+ *
+ * ## 另一处必须修的：Promise 永久挂起
+ *
+ * `net.request()` 遇到不支持的协议是**同步 throw**。原来这行写在
+ * Promise executor 里，throw 之后 Promise 既没 resolve 也没 reject ——
+ * `await` 就永远停在那里。用户看不到报错，也看不到成功，就是"没反应"。
+ * 现在用 try/catch 包住，异常一律 reject。
  */
-function downloadAsBuffer (wcOrWin, url) {
+async function downloadAsBuffer (wcOrWin, url) {
+  const target = String(url || '')
+  if (!target) throw new Error('图片地址为空')
+
+  // blob: / data: 只有页面自己读得到
+  if (/^(blob|data):/i.test(target)) {
+    const wc = wcOrWin && wcOrWin.webContents ? wcOrWin.webContents : wcOrWin
+    return readUrlInPage(wc, target)
+  }
+
   return new Promise((resolve, reject) => {
     const ses = (wcOrWin && wcOrWin.session) || electron.session.defaultSession
-    const request = electron.net.request({ url, session: ses, useSessionCookies: true })
+    let request
+    try {
+      request = electron.net.request({ url: target, session: ses, useSessionCookies: true })
+    } catch (e) {
+      // 不支持的协议在这里就炸，必须显式 reject，否则 await 永久挂起
+      reject(new Error('无法请求该地址：' + ((e && e.message) || e)))
+      return
+    }
     const chunks = []
     let total = 0
     const MAX = 64 * 1024 * 1024   // 64MB 封顶：再大就不是聊天图片了
     request.on('response', response => {
       if (response.statusCode >= 400) {
         reject(new Error('HTTP ' + response.statusCode))
-        request.abort()
+        try { request.abort() } catch (e) {}
         return
       }
       response.on('data', chunk => {
         total += chunk.length
-        if (total > MAX) { request.abort(); reject(new Error('图片超过 64MB')); return }
+        if (total > MAX) {
+          try { request.abort() } catch (e) {}
+          reject(new Error('图片超过 64MB'))
+          return
+        }
         chunks.push(chunk)
       })
       response.on('end', () => resolve(Buffer.concat(chunks)))
@@ -3012,6 +3116,72 @@ function downloadAsBuffer (wcOrWin, url) {
     request.on('error', reject)
     request.end()
   })
+}
+
+/**
+ * 读取图片用的隔离世界 id。
+ *
+ * 与 `src/translate/probe-page.js` 的 PROBE_WORLD_ID 取同一个值：
+ * 两者都是"主进程要读远程页面里的东西"，共用一个 world 便于排查，
+ * 也避免多个 world 各自持有状态造成困惑。
+ */
+const ISOLATED_READ_WORLD_ID = 999
+
+/**
+ * 在**隔离世界**里把一个 URL（通常是 blob:）读成 Buffer。
+ *
+ * ## 为什么是隔离世界，不是 executeJavaScript
+ *
+ * 第一版用了 page world 的 `executeJavaScript`，直接被安全测试拦下：
+ *
+ *     【安全】main.js 里没有任何 page world 的 executeJavaScript
+ *     remote pages have no page-world IPC bridge or dynamic code injection
+ *
+ * 那条规则是对的：往**远程页面**自己的 world 里塞代码，等于把主进程的
+ * 执行环境暴露给页面脚本（能窥探、能篡改）。WhatsApp 的页面是别人写的，
+ * 不该信任。
+ *
+ * `executeJavaScriptInIsolatedWorld` 跑在独立 world，页面脚本读不到也改不了。
+ *
+ * ## 隔离世界能不能读 blob：实测过，能
+ *
+ * blob URL 是按 **origin** 隔离的，不是按 world。隔离世界和主世界共享
+ * 同一个 origin 和 document，所以读得到同一个 blob：
+ *
+ *     主世界造出 blob: blob:null/123b9f04-...（89 字节）
+ *     隔离世界读取: 89 字节 → nativeImage ✅ 6x6
+ *     data: URL 在隔离世界: ✅
+ */
+async function readUrlInPage (wc, url) {
+  if (!wc || (typeof wc.isDestroyed === 'function' && wc.isDestroyed())) {
+    throw new Error('页面已关闭，无法读取图片')
+  }
+  if (typeof wc.executeJavaScriptInIsolatedWorld !== 'function') {
+    throw new Error('当前环境不支持隔离世界读取，无法复制图片')
+  }
+  // URL 通过 JSON.stringify 注入，避免被拼进表达式造成注入
+  const literal = JSON.stringify(url)
+  const code = `
+    (async () => {
+      const res = await fetch(${literal})
+      if (!res.ok) throw new Error('页面读取失败 HTTP ' + res.status)
+      const blob = await res.blob()
+      const buf = await blob.arrayBuffer()
+      const bytes = new Uint8Array(buf)
+      let bin = ''
+      const CHUNK = 0x8000
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK))
+      }
+      return btoa(bin)
+    })()
+  `
+  // world id 与 probe-page.js 保持一致，便于排查时统一
+  const raw = await wc.executeJavaScriptInIsolatedWorld(ISOLATED_READ_WORLD_ID, [{ code }])
+  // 返回形态随 Electron 版本而变：老版本给数组，新版直接给结果
+  const b64 = Array.isArray(raw) ? raw[0] : raw
+  if (!b64 || typeof b64 !== 'string') throw new Error('页面没有返回图片数据')
+  return Buffer.from(b64, 'base64')
 }
 
 /** 从 data URL 的 mime 或 URL 后缀推断图片格式。 */
@@ -3144,7 +3314,7 @@ function installEditSupport(view) {
     const template = buildContextMenuTemplate(params, {
       copyImage: () => copyImageToClipboard(wc, String((params && params.srcURL) || '')),
       saveImage: () => saveImageAs(win, String((params && params.srcURL) || '')),
-      openImage: () => openImageInNewWindow(String((params && params.srcURL) || '')),
+      openImage: () => openImagePreview(wc, String((params && params.srcURL) || '')),
       saveFromPage: () => saveImageFromPage(wc, win),
       copyText: () => runEditCommand(wc, 'copy'),
       cut: () => runEditCommand(wc, 'cut'),
@@ -3585,6 +3755,11 @@ function showMainWindow() {
   win.focus()
 }
 
+// stability-boot.js 的单实例层要用它：第二个实例被挡下时，用户按下图标
+// 的预期是"它出现在我面前"。暴露到 global 而不是互相 require，是因为
+// boot 层在 require(main.js) **之前**就跑完了，拿不到这里的模块导出。
+global.__pixFocusMainWindow = showMainWindow
+
 /** 真正退出。必须先立 isQuitting，否则 close 拦截会把这次退出吃掉。 */
 function quitApp() {
   isQuitting = true
@@ -3841,6 +4016,19 @@ require('./src/ipc/app').registerAppIpc({
     writePresets: all => writeJson(userFile('app-presets.json'), all),
     trustedTabSender,
     accountSlug,
+    /**
+     * 把事件推给主界面（外壳 webContents）。
+     *
+     * 只发给**主窗口**，不广播到各账号的客页 —— 更新是应用级的事，
+     * 推给第三方网页等于把版本信息泄露给 WhatsApp/Telegram 的页面脚本。
+     * `win` 可能还没建好（更新检查早于窗口创建），所以这里必须判空。
+     */
+    sendToMain: (channel, payload) => {
+      try {
+        if (!win || win.isDestroyed()) return
+        win.webContents.send(channel, payload)
+      } catch (e) {}
+    },
     // 更新通道的验签结果要落盘：验签失败说明有人在动更新通道，
     // 不能只弹个 toast 就过去了，事后要能从日志里翻出来。
     log: (level, channel, msg) => {
@@ -3855,7 +4043,9 @@ require('./src/ipc/app').registerAppIpc({
     isAllowedExternalUrl,
     unsealSettings,
     sealSettings,
-    stripProxyFields
+    stripProxyFields,
+    // 自动更新要用 app.getPath('temp') 找临时下载目录
+    app
   }
 })
 
@@ -4069,6 +4259,9 @@ app.on('before-quit', (event) => {
   } catch (e) {}
   // 收掉 API 传输层的连接池（自带 undici 的 keep-alive socket），别留在进程里。
   try { closeApiAgents() } catch (e) {}
+  // 清理上一轮更新留下的安装包（约 100MB/次）。
+  // 不会删当前待安装的那个 —— cleanup 内部跳过 state.file。
+  try { if (global.__pixUpdateCleanup) global.__pixUpdateCleanup() } catch (e) {}
   // 归还槽位，让下一个窗口能拿回同一个分区（登录态得以保留）。
   // 崩溃时不会执行到这里，由 acquireSlot 的陈旧锁接管逻辑兜底。
   try { instanceSlot.releaseSlot(instanceSlotHandle) } catch (e) {}

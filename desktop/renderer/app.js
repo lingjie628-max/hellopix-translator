@@ -886,6 +886,14 @@ window.pix.onKicked((msg) => {
   skipAutoLogin = true
   backToLogin(msg || '账号已在其他电脑登录')
 })
+if (window.pix.onToast) {
+  // 主进程动作的一次性提示。目前来源：右键「复制图片」失败。
+  // 以前这里什么都不显示，用户点完菜单关掉、没有任何反馈 —— 看起来就是坏了。
+  window.pix.onToast(data => {
+    if (!data || !data.text) return
+    toast(String(data.text), data.type === 'warn' ? 'warn' : '')
+  })
+}
 if (window.pix.onContextCommand) {
   window.pix.onContextCommand(command => {
     if (command && typeof command === 'object') {

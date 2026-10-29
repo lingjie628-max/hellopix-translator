@@ -52,6 +52,16 @@ contextBridge.exposeInMainWorld('pix', {
   home: () => ipcRenderer.invoke('app:home'),
   version: () => ipcRenderer.invoke('app:version'),
   checkUpdate: () => ipcRenderer.invoke('app:checkUpdate'),
+  // ---- 应用内自动更新 ----
+  // start 不接受任何参数：主进程会自己重新取清单并验签。
+  // 传 URL 进来等于给网页开一条「让主进程下载并执行任意文件」的通路。
+  updateStart: () => ipcRenderer.invoke('app:updateStart'),
+  updateApply: () => ipcRenderer.invoke('app:updateApply'),
+  updateCancel: () => ipcRenderer.invoke('app:updateCancel'),
+  updateState: () => ipcRenderer.invoke('app:updateState'),
+  onUpdateProgress: (cb) => {
+    ipcRenderer.on('app:update-progress', (_event, data) => cb(data))
+  },
   translateEngines: () => ipcRenderer.invoke('translate:engines'),
   // 翻译桥健康：preload 装载失败时，界面必须显示常驻警告，不能让用户以为翻译开着
   bridgeStatus: () => ipcRenderer.invoke('translate:bridgeStatus'),
@@ -82,6 +92,11 @@ contextBridge.exposeInMainWorld('pix', {
   },
   onContextCommand: (cb) => {
     ipcRenderer.on('context:command', (_event, command) => cb(command))
+  },
+  // 主进程发起的一次性提示（如"复制图片失败：格式不支持"）。
+  // 这些是主进程侧的动作结果，渲染层无从得知，必须由主进程推过来。
+  onToast: (cb) => {
+    ipcRenderer.on('app:toast', (_event, data) => cb(data))
   },
   // 右键菜单点了「代理设置」：主进程只回传线路 id，渲染层据此打开弹窗
   onProxySettings: (cb) => {
