@@ -52,7 +52,8 @@ function isImageContext (params) {
  * @param {Function} actions.copyImage      (url) => void
  * @param {Function} actions.saveImage      (url) => void
  * @param {Function} actions.openImage      (url) => void
- * @param {Function} actions.saveFromPage   () => void   兜底：从页面里自己找图
+ * @param {Function} actions.saveFromPage   () => void   兜底：从页面里自己找图并保存
+ * @param {Function} actions.copyFromPage   () => void   兜底：从页面里自己找图并复制
  * @param {Function} actions.copyText       () => void
  * @param {Function} actions.cut            () => void
  * @param {Function} actions.paste          () => void
@@ -118,6 +119,9 @@ function buildContextMenuTemplate (params, actions) {
   // 所以兜底里必须有「保存图片…」：它走页面内嗅探，不依赖 srcURL。
   // 这也是一个信号 —— 至少用户知道右键是活的。
   if (!template.length) {
+    // 灯箱拿不到 srcURL 时，复制和保存都走页面内嗅探。
+    // 只给「保存」不够 —— "复制了直接粘进微信"才是最高频的动作。
+    template.push({ label: '复制图片', click: () => call('copyFromPage') })
     template.push({ label: '保存图片…', click: () => call('saveFromPage') })
     template.push({ type: 'separator' })
     template.push({ label: '重新加载', click: () => call('reload') })

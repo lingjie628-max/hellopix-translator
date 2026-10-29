@@ -108,8 +108,14 @@ test('readUrlInPage 必须在隔离世界里读 blob（安全约束，不能用 
     'readUrlInPage 必须用隔离世界读取')
 
   assert.match(body, /fetch\(/, 'blob: 只有页面自己能 fetch')
-  assert.match(body, /btoa/, '要把二进制转成 base64 才能安全穿过上下文边界')
   assert.match(body, /Buffer\.from\(b64,\s*'base64'\)/, '主进程侧要把 base64 还原成 Buffer')
+
+  // ★ 必须用 canvas 重编码成 PNG，不能原样回传字节 ★
+  //
+  // nativeImage 解不了 WebP（实测：614 字节合法 WebP → isEmpty=true），
+  // 而聊天贴纸/表情大量是 WebP。原样回传 = 这类图复制必失败。
+  assert.match(body, /createImageBitmap/, '必须解码成位图再重编码')
+  assert.match(body, /toDataURL\('image\/png'\)/, '必须重编码成 PNG —— nativeImage 不支持 WebP 解码')
 
   // 安全：URL 必须经 JSON.stringify 注入，不能裸拼进表达式
   assert.match(body, /JSON\.stringify\(url\)/,
@@ -154,4 +160,43 @@ test('https 图片的既有能力不能被改坏（回归保护）', () => {
   // https 仍然走 net.request，且带 session cookie
   assert.match(body, /useSessionCookies:\s*true/, 'https 图片仍需要带 session 凭据')
   assert.match(body, /statusCode\s*>=\s*400/, 'HTTP 错误码仍要 reject')
+})
+
+// ---------------------------------------------------------------------------
+// 图片形态覆盖：WebP 贴纸 / 灯箱背景图
+// ---------------------------------------------------------------------------
+
+test('WebP 贴纸必须能复制 —— nativeImage 解不了 WebP，得先转 PNG', () => {
+  // 实测：614 字节的合法 WebP 喂给 nativeImage.createFromBuffer 返回 isEmpty=true。
+  // WhatsApp 的贴纸、表情大量是 WebP，不做转换这条路就是断的。
+  const body = functionBody(mainSrc, 'readUrlInPage')
+  assert.match(body, /createImageBitmap/, '必须先把 WebP 解码成位图')
+  assert.match(body, /toDataURL\('image\/png'\)/, '必须重编码为 PNG —— nativeImage 只认 PNG/JPEG')
+})
+
+test('灯箱拿不到 srcURL 时，兜底菜单必须给「复制图片」而不只是保存', () => {
+  const tmpl = fs.readFileSync(path.join(ROOT, 'desktop/src/window/context-menu-template.js'), 'utf8')
+
+  // 兜底分支里要有 copyFromPage
+  assert.match(tmpl, /copyFromPage/, '兜底菜单缺少「复制图片」—— 灯箱里只能存不能复制，很别扭')
+  assert.match(tmpl, /saveFromPage/, '兜底菜单缺「保存图片」')
+
+  // 主进程必须真的接上这个回调
+  assert.match(mainSrc, /copyFromPage:\s*\(\)\s*=>\s*copyImageFromPage\(/,
+    'main.js 没接 copyFromPage 回调，菜单项点了会没反应')
+})
+
+test('页面嗅探逻辑被保存/复制共用，不能各写一份', () => {
+  // 两份嗅探代码迟早会分叉，改一处漏一处
+  assert.match(mainSrc, /async function sniffPageImageUrl/, '缺少共用的嗅探函数')
+  const copyBody = functionBody(mainSrc, 'copyImageFromPage')
+  const saveBody = functionBody(mainSrc, 'saveImageFromPage')
+  assert.match(copyBody, /sniffPageImageUrl/, '复制必须复用 sniffPageImageUrl')
+  assert.match(saveBody, /sniffPageImageUrl/, '保存必须复用 sniffPageImageUrl')
+})
+
+test('嗅探出的 URL 必须过协议白名单，不能拿来就用', () => {
+  const body = functionBody(mainSrc, 'sniffPageImageUrl')
+  // 页面是不可信的，它返回的字符串可能被构造成 javascript: 之类
+  assert.match(body, /\^\(https\?|https\?:/, '嗅探结果必须只认 http(s)/blob/data')
 })

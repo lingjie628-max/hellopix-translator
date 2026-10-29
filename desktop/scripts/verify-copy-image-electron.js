@@ -31,14 +31,16 @@ async function readUrlInPage (wc, url) {
       const res = await fetch(${literal})
       if (!res.ok) throw new Error('页面读取失败 HTTP ' + res.status)
       const blob = await res.blob()
-      const buf = await blob.arrayBuffer()
-      const bytes = new Uint8Array(buf)
-      let bin = ''
-      const CHUNK = 0x8000
-      for (let i = 0; i < bytes.length; i += CHUNK) {
-        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK))
-      }
-      return btoa(bin)
+      const bitmap = await createImageBitmap(blob)
+      const canvas = document.createElement('canvas')
+      canvas.width = bitmap.width
+      canvas.height = bitmap.height
+      canvas.getContext('2d').drawImage(bitmap, 0, 0)
+      if (typeof bitmap.close === 'function') bitmap.close()
+      const dataUrl = canvas.toDataURL('image/png')
+      const comma = dataUrl.indexOf(',')
+      if (comma < 0) throw new Error('图片重编码失败')
+      return dataUrl.slice(comma + 1)
     })()
   `
   const raw = await wc.executeJavaScriptInIsolatedWorld(ISOLATED_WORLD_ID, [{ code }])
@@ -141,6 +143,53 @@ app.whenReady().then(async () => {
     const p = path.join(os.tmpdir(), 'pix-clipboard-verify.png')
     fs.writeFileSync(p, back.toPNG())
     log(`已导出: ${p}（${fs.statSync(p).size} 字节）`)
+  }
+
+  // ---- WebP 贴纸：nativeImage 解不了 WebP，必须靠转 PNG 救 ----
+  log('\n=== WebP 贴纸（nativeImage 不支持 WebP 解码）===')
+  let webp
+  try {
+    const rawWebp = await win.webContents.executeJavaScriptInIsolatedWorld(ISOLATED_WORLD_ID, [{
+      code: `
+        (() => {
+          const c = document.createElement('canvas')
+          c.width = 16; c.height = 16
+          const ctx = c.getContext('2d')
+          ctx.fillStyle = '#ff00aa'
+          ctx.fillRect(0, 0, 16, 16)
+          return new Promise(r => c.toBlob(b => r(
+            b ? { blobUrl: URL.createObjectURL(b), size: b.size } : null
+          ), 'image/webp', 0.9))
+        })()
+      `
+    }])
+    webp = Array.isArray(rawWebp) ? rawWebp[0] : rawWebp
+  } catch (e) {
+    log('造 WebP 失败: ' + e.message)
+  }
+
+  if (!webp) {
+    log('⚠️  当前离线环境不支持 WebP 编码，跳过')
+  } else {
+    // 对照：原始 WebP 字节直接喂 nativeImage
+    const rawB64 = await win.webContents.executeJavaScriptInIsolatedWorld(ISOLATED_WORLD_ID, [{
+      code: `fetch(${JSON.stringify(webp.blobUrl)}).then(r => r.arrayBuffer())
+        .then(b => btoa(String.fromCharCode.apply(null, new Uint8Array(b))))`
+    }])
+    const rawStr = Array.isArray(rawB64) ? rawB64[0] : rawB64
+    const direct = nativeImage.createFromBuffer(Buffer.from(rawStr, 'base64'))
+    log(`  直接喂 WebP    : ${direct.isEmpty() ? '❌ 解析为空（这就是贴纸复制失败的根因）' : '✅ ' + JSON.stringify(direct.getSize())}`)
+
+    clipboard.clear()
+    try {
+      await copyImage(win.webContents, webp.blobUrl)
+      const wb = clipboard.readImage()
+      const ws = wb.isEmpty() ? null : wb.getSize()
+      log(`  走转 PNG 复制  : ${ws ? '✅ ' + ws.width + 'x' + ws.height : '❌ 剪贴板是空的'}`)
+      log(ws && ws.width === 16 ? '✅ WebP 贴纸能复制了' : '❌ WebP 贴纸仍然失败')
+    } catch (e) {
+      log(`  ❌ 复制失败: ${e.message}`)
+    }
   }
 
   log('\n=== 对照：修复前会怎样 ===')

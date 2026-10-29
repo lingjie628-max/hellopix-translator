@@ -3166,14 +3166,25 @@ async function readUrlInPage (wc, url) {
       const res = await fetch(${literal})
       if (!res.ok) throw new Error('页面读取失败 HTTP ' + res.status)
       const blob = await res.blob()
-      const buf = await blob.arrayBuffer()
-      const bytes = new Uint8Array(buf)
-      let bin = ''
-      const CHUNK = 0x8000
-      for (let i = 0; i < bytes.length; i += CHUNK) {
-        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK))
-      }
-      return btoa(bin)
+
+      // ★ 统一转成 PNG，而不是原样回传 ★
+      //
+      // nativeImage.createFromBuffer 解不了 WebP（实测：合法的 614 字节
+      // WebP 返回 isEmpty=true）。而 WhatsApp 的贴纸、表情大量是 WebP ——
+      // 原样回传的话，这类图片右键复制会失败。
+      //
+      // 转成 PNG 还有第二个好处：canvas 重编码必然拿到合法位图，
+      // 避免把 HTML 错误页、0 字节之类的东西当图片送进剪贴板。
+      const bitmap = await createImageBitmap(blob)
+      const canvas = document.createElement('canvas')
+      canvas.width = bitmap.width
+      canvas.height = bitmap.height
+      canvas.getContext('2d').drawImage(bitmap, 0, 0)
+      if (typeof bitmap.close === 'function') bitmap.close()
+      const dataUrl = canvas.toDataURL('image/png')
+      const comma = dataUrl.indexOf(',')
+      if (comma < 0) throw new Error('图片重编码失败')
+      return dataUrl.slice(comma + 1)
     })()
   `
   // world id 与 probe-page.js 保持一致，便于排查时统一
@@ -3316,6 +3327,7 @@ function installEditSupport(view) {
       saveImage: () => saveImageAs(win, String((params && params.srcURL) || '')),
       openImage: () => openImagePreview(wc, String((params && params.srcURL) || '')),
       saveFromPage: () => saveImageFromPage(wc, win),
+      copyFromPage: () => copyImageFromPage(wc),
       copyText: () => runEditCommand(wc, 'copy'),
       cut: () => runEditCommand(wc, 'cut'),
       paste: () => runEditCommand(wc, 'paste'),
@@ -3380,9 +3392,17 @@ function popupMenu (template) {
  */
 let imageUiSourceCache = null
 
-async function saveImageFromPage (wc, parentWin) {
-  if (!wc || typeof wc.executeJavaScriptInIsolatedWorld !== 'function') return false
-  if (typeof wc.isDestroyed === 'function' && wc.isDestroyed()) return false
+/**
+ * 在页面里嗅探「当前正在看的那张图」的 URL。
+ *
+ * 判据是**可见面积最大的图**，不依赖任何类名 —— 宿主改版也不会坏。
+ * 这是 `saveImageFromPage` 和 `copyImageFromPage` 的共同前半段。
+ *
+ * @returns {Promise<string>} 图片 URL；找不到返回 ''
+ */
+async function sniffPageImageUrl (wc) {
+  if (!wc || typeof wc.executeJavaScriptInIsolatedWorld !== 'function') return ''
+  if (typeof wc.isDestroyed === 'function' && wc.isDestroyed()) return ''
   // ★ 常量脚本，不接受拼接输入 ★
   const SNIFF = `
     (() => {
@@ -3419,12 +3439,36 @@ async function saveImageFromPage (wc, parentWin) {
     const value = Array.isArray(raw) ? raw[0] : raw
     const url = String(value === undefined || value === null ? '' : value).trim()
     // 只认 http(s)/blob/data —— 别的地方来的字符串一律不碰
-    if (!/^(https?:\/\/|blob:|data:)/i.test(url)) return false
-    return await saveImageAs(parentWin, url)
+    return /^(https?:\/\/|blob:|data:)/i.test(url) ? url : ''
   } catch (e) {
-    if (clientLog) clientLog.warn('context-menu', '保存页面图片失败：' + ((e && e.message) || e))
+    if (clientLog) clientLog.warn('context-menu', '嗅探页面图片失败：' + ((e && e.message) || e))
+    return ''
+  }
+}
+
+/**
+ * 兜底：`srcURL` 为空时（灯箱用 background-image / canvas 铺图），
+ * 从页面里嗅探出那张图再复制。
+ *
+ * 没有这条，用户在灯箱上右键只能「保存图片…」，无法复制 ——
+ * 而"复制了直接粘进微信"恰恰是最常用的动作。
+ */
+async function copyImageFromPage (wc) {
+  const url = await sniffPageImageUrl(wc)
+  if (!url) {
+    notifyImageCopyFailed(new Error('页面上没有找到可复制的图片'))
     return false
   }
+  return copyImageToClipboard(wc, url)
+}
+
+async function saveImageFromPage (wc, parentWin) {
+  const url = await sniffPageImageUrl(wc)
+  if (!url) {
+    notifyImageCopyFailed(new Error('页面上没有找到可保存的图片'))
+    return false
+  }
+  return saveImageAs(parentWin, url)
 }
 
 /**
