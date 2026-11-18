@@ -3,11 +3,10 @@
 /**
  * 后台 · 工单系统（客服 ←→ 商户）。
  *
- * ## 边界：这一版只做后台
+ * ## 边界
  *
- * 商户端（网页/客户端提单）还没做。现在客服可以**代客开单**，把 Telegram
- * 里的对话搬进系统里，先把「处理记录」沉淀下来；商户端接口按同一张表设计，
- * 后面接的时候不需要改 schema。
+ * 后台支持代客开单；商户端提单、查看和回复在 `routes/user-tickets.js`，
+ * 两端共用同一张会话表和状态机。
  *
  * ## 为什么权限分两档
  *
@@ -42,23 +41,24 @@ function registerAdminTickets (router, ctx) {
    * admin_unread/user_unread —— 少一列，写操作就会拿到 undefined 并
    * 「当成 false」或「当成 null」，静默把红点或首次解决时间抹掉。
    */
-  async function mustGet (id) {
+  async function mustGet (id, client, lock) {
     const result = await repo.query(
       `SELECT id,user_id,username,submitter_kind,submitter_name,subject,category,priority,status,assignee,
               version,package_code,admin_unread,user_unread,last_reply_at,
               resolved_at,closed_at,created_at,updated_at
-       FROM tickets WHERE id=$1`, [Number(id)])
+       FROM tickets WHERE id=$1${lock ? ' FOR UPDATE' : ''}`, [Number(id)], client)
     const row = result.rows[0]
     if (!row) throw new ApiError(404, '工单不存在', 'TICKET_NOT_FOUND')
     return row
   }
 
   /** 写一条消息（会话历史只追加，永不 UPDATE/DELETE）。 */
-  async function addMessage (ticketId, { authorType, authorName, body, internal }) {
+  async function addMessage (ticketId, { authorType, authorName, body, internal }, client) {
     const result = await repo.query(
       `INSERT INTO ticket_messages(ticket_id,author_type,author_name,body,internal)
        VALUES($1,$2,$3,$4,$5) RETURNING id,created_at`,
-      [ticketId, authorType, String(authorName || '').slice(0, 64), String(body).slice(0, MAX_BODY), Boolean(internal)])
+      [ticketId, authorType, String(authorName || '').slice(0, 64), String(body).slice(0, MAX_BODY), Boolean(internal)],
+      client)
     return result.rows[0]
   }
 
@@ -163,21 +163,24 @@ function registerAdminTickets (router, ctx) {
       username = found.rows[0].username || ''
     }
 
-    const created = await repo.query(
-      `INSERT INTO tickets(user_id,username,submitter_kind,submitter_name,subject,category,priority,status,
-                           assignee,admin_unread,user_unread)
-       VALUES($1,$2,'main',$3,$4,$5,$6,'in_progress',$7,false,true) RETURNING id`,
-      [userId, username, String(data.submitterName || username).slice(0, 64), subject, category, priority,
-        String(req.pixAdmin && req.pixAdmin.username || '')])
-    const id = created.rows[0].id
+    const id = await repo.transaction(async client => {
+      const created = await repo.query(
+        `INSERT INTO tickets(user_id,username,submitter_kind,submitter_name,subject,category,priority,status,
+                             assignee,admin_unread,user_unread)
+         VALUES($1,$2,'main',$3,$4,$5,$6,'in_progress',$7,false,true) RETURNING id`,
+        [userId, username, String(data.submitterName || username).slice(0, 64), subject, category, priority,
+          String(req.pixAdmin && req.pixAdmin.username || '')], client)
+      const ticketId = created.rows[0].id
 
-    await addMessage(id, {
-      authorType: 'admin',
-      authorName: String(req.pixAdmin && req.pixAdmin.nickname || req.pixAdmin && req.pixAdmin.username || '客服'),
-      body,
-      internal: Boolean(data.internal)
+      await addMessage(ticketId, {
+        authorType: 'admin',
+        authorName: String(req.pixAdmin && req.pixAdmin.nickname || req.pixAdmin && req.pixAdmin.username || '客服'),
+        body,
+        internal: Boolean(data.internal)
+      }, client)
+      await repo.query('UPDATE tickets SET last_reply_at=NOW(),updated_at=NOW() WHERE id=$1', [ticketId], client)
+      return ticketId
     })
-    await repo.query('UPDATE tickets SET last_reply_at=NOW(),updated_at=NOW() WHERE id=$1', [id])
 
     await repo.audit(null, req.pixAdmin, '代客开单', `${subject}`.slice(0, 60), req.ip, { type: 'ticket', id })
     ok(res, '工单已创建', { id })
@@ -191,35 +194,39 @@ function registerAdminTickets (router, ctx) {
     const data = input(req)
     const body = String(data.body || '').trim()
     if (!body) throw new ApiError(400, '回复内容不能为空', 'TICKET_BODY_REQUIRED')
-    const ticket = await mustGet(data.id)
-    if (ticket.status === 'closed') {
-      throw new ApiError(400, '工单已关闭，请让商户新建工单', 'TICKET_CLOSED')
-    }
     const internal = Boolean(data.internal)
+    await repo.transaction(async client => {
+      // Lock the ticket before checking status and writing the message. This
+      // prevents a close/reopen race and keeps the message and state atomic.
+      const ticket = await mustGet(data.id, client, true)
+      if (ticket.status === 'closed') {
+        throw new ApiError(400, '工单已关闭，请让商户新建工单', 'TICKET_CLOSED')
+      }
 
-    await addMessage(ticket.id, {
-      authorType: 'admin',
-      authorName: String(req.pixAdmin && req.pixAdmin.nickname || req.pixAdmin && req.pixAdmin.username || '客服'),
-      body,
-      internal
+      await addMessage(ticket.id, {
+        authorType: 'admin',
+        authorName: String(req.pixAdmin && req.pixAdmin.nickname || req.pixAdmin && req.pixAdmin.username || '客服'),
+        body,
+        internal
+      }, client)
+
+      // 内部备注不通知商户，也不改状态 —— 它只是给自己人看的。
+      // 正式回复：商户未读置 true；若球在商户那边，客服回复等于接手，推回 in_progress。
+      if (internal) {
+        await repo.query('UPDATE tickets SET last_reply_at=NOW(),updated_at=NOW() WHERE id=$1', [ticket.id], client)
+      } else {
+        const status = ['waiting_user', 'resolved'].includes(ticket.status)
+          ? tickets.nextState(ticket, 'in_progress').status
+          : ticket.status
+        // resolved_at 刻意不在 SET 里：从 resolved 回到 in_progress 时
+        // 「这单曾经解决过」是事实，擦掉会让平均解决时长和复发率失真。
+        await repo.query(
+          `UPDATE tickets SET last_reply_at=NOW(),updated_at=NOW(),user_unread=true,
+                  status=$2, assignee=CASE WHEN assignee='' THEN $3 ELSE assignee END
+           WHERE id=$1`,
+          [ticket.id, status, String(req.pixAdmin && req.pixAdmin.username || '')], client)
+      }
     })
-
-    // 内部备注不通知商户，也不改状态 —— 它只是给自己人看的。
-    // 正式回复：商户未读置 true；若球在商户那边，客服回复等于接手，推回 in_progress。
-    if (internal) {
-      await repo.query('UPDATE tickets SET last_reply_at=NOW(),updated_at=NOW() WHERE id=$1', [ticket.id])
-    } else {
-      const status = ['waiting_user', 'resolved'].includes(ticket.status)
-        ? tickets.nextState(ticket, 'in_progress').status
-        : ticket.status
-      // resolved_at 刻意不在 SET 里：从 resolved 回到 in_progress 时
-      // 「这单曾经解决过」是事实，擦掉会让平均解决时长和复发率失真。
-      await repo.query(
-        `UPDATE tickets SET last_reply_at=NOW(),updated_at=NOW(),user_unread=true,
-                status=$2, assignee=CASE WHEN assignee='' THEN $3 ELSE assignee END
-         WHERE id=$1`,
-        [ticket.id, status, String(req.pixAdmin && req.pixAdmin.username || '')])
-    }
     ok(res, internal ? '内部备注已保存' : '回复已发送')
   }))
 
@@ -229,40 +236,41 @@ function registerAdminTickets (router, ctx) {
   // 非法流转直接 400 —— 路由不做自己的判断，规则只有一份。
   router.post('/admin/tickets/update', asyncRoute(async (req, res) => {
     const data = input(req)
-    const ticket = await mustGet(data.id)
-    const sets = []
-    const values = [ticket.id]
+    const ticket = await repo.transaction(async client => {
+      const current = await mustGet(data.id, client, true)
+      const sets = []
+      const values = [current.id]
 
-    if (data.status !== undefined && data.status !== '') {
-      const next = tickets.nextState(ticket, String(data.status))
-      values.push(next.status); sets.push(`status=$${values.length}`)
-      values.push(next.resolvedAt); sets.push(`resolved_at=$${values.length}`)
-      values.push(next.closedAt); sets.push(`closed_at=$${values.length}`)
-      // 解决/关闭时：客服侧红点清掉（这个会话已处理完），商户侧标未读
-      // —— 商户下次登录要知道「你的单有结论了」。
-      if (next.status === 'closed' || next.status === 'resolved') {
-        sets.push('admin_unread=false')
-        sets.push('user_unread=true')
+      if (data.status !== undefined && data.status !== '') {
+        const next = tickets.nextState(current, String(data.status))
+        values.push(next.status); sets.push(`status=$${values.length}`)
+        values.push(next.resolvedAt); sets.push(`resolved_at=$${values.length}`)
+        values.push(next.closedAt); sets.push(`closed_at=$${values.length}`)
+        // 解决/关闭时：客服侧红点清掉（这个会话已处理完），商户侧标未读
+        // —— 商户下次登录要知道「你的单有结论了」。
+        if (next.status === 'closed' || next.status === 'resolved') {
+          sets.push('admin_unread=false')
+          sets.push('user_unread=true')
+        }
+        // 转入「待商户回复」：球交给商户，必须点亮商户未读。
+        if (next.status === 'waiting_user') {
+          sets.push('user_unread=true')
+        }
       }
-      // 转入「待商户回复」：球交给商户，必须点亮商户未读。
-      // 商户端还没上线，但这条不留就是死债 —— 等商户端接进来时，
-      // 客服发的追问会静默躺在库里，商户永远收不到通知。
-      if (next.status === 'waiting_user') {
-        sets.push('user_unread=true')
+      if (data.priority !== undefined && data.priority !== '') {
+        values.push(tickets.normalizePriority(data.priority)); sets.push(`priority=$${values.length}`)
       }
-    }
-    if (data.priority !== undefined && data.priority !== '') {
-      values.push(tickets.normalizePriority(data.priority)); sets.push(`priority=$${values.length}`)
-    }
-    if (data.category !== undefined && data.category !== '') {
-      values.push(tickets.normalizeCategory(data.category)); sets.push(`category=$${values.length}`)
-    }
-    if (data.assignee !== undefined) {
-      values.push(String(data.assignee || '').slice(0, 64)); sets.push(`assignee=$${values.length}`)
-    }
-    if (!sets.length) throw new ApiError(400, '没有要修改的字段', 'TICKET_NOTHING_TO_UPDATE')
+      if (data.category !== undefined && data.category !== '') {
+        values.push(tickets.normalizeCategory(data.category)); sets.push(`category=$${values.length}`)
+      }
+      if (data.assignee !== undefined) {
+        values.push(String(data.assignee || '').slice(0, 64)); sets.push(`assignee=$${values.length}`)
+      }
+      if (!sets.length) throw new ApiError(400, '没有要修改的字段', 'TICKET_NOTHING_TO_UPDATE')
 
-    await repo.query(`UPDATE tickets SET ${sets.join(',')},updated_at=NOW() WHERE id=$1`, values)
+      await repo.query(`UPDATE tickets SET ${sets.join(',')},updated_at=NOW() WHERE id=$1`, values, client)
+      return current
+    })
 
     if (data.status && String(data.status) !== ticket.status) {
       await repo.audit(null, req.pixAdmin, '工单状态',

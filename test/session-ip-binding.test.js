@@ -9,7 +9,7 @@
  * 当时会话对 IP **没有任何约束** —— 只要 cookie 被拿到（XSS、共享电脑没退出、
  * 代理日志），谁拿都能用，而且不会引起任何注意。
  *
- * 现在的规则：会话绑定 IP 的**上位网段**（IPv4 /24、IPv6 /48），网段变了
+ * 现在的规则：会话绑定 IP 的**上位网段**（IPv4 /16、IPv6 /32），网段变了
  * 直接作废会话、强制重新登录。
  *
  * 为什么是网段不是完整 IP：家宽和手机网络换 IP 太常见，绑完整 IP 会把
@@ -29,26 +29,26 @@ const memorySecurity = require('../server/security')
 
 // ── ipPrefixOf ────────────────────────────────────────────
 
-test('IPv4 取 /24 网段', () => {
+test('IPv4 取 /16 网段', () => {
   const f = memorySecurity.ipPrefixOf
-  assert.equal(f('203.0.113.9'), '203.0.113.0/24')
-  assert.equal(f('203.0.113.200'), '203.0.113.0/24')
-  assert.equal(f('10.0.0.1'), '10.0.0.0/24')
+  assert.equal(f('203.0.113.9'), '203.0.0.0/16')
+  assert.equal(f('203.0.113.200'), '203.0.0.0/16')
+  assert.equal(f('10.0.0.1'), '10.0.0.0/16')
 })
 
 test('Express 的 ::ffff: 映射形式要能认出来', () => {
   // trust proxy 打开后 Express 常给这种形式，不处理就会判定成"换了网段"
-  assert.equal(memorySecurity.ipPrefixOf('::ffff:203.0.113.9'), '203.0.113.0/24')
+  assert.equal(memorySecurity.ipPrefixOf('::ffff:203.0.113.9'), '203.0.0.0/16')
 })
 
-test('IPv6 取 /48 网段', () => {
-  assert.equal(memorySecurity.ipPrefixOf('2001:db8:1234:5678::1'), '2001:db8:1234::/48')
+test('IPv6 取 /32 网段', () => {
+  assert.equal(memorySecurity.ipPrefixOf('2001:db8:1234:5678::1'), '2001:db8::/32')
 })
 
 test('同网段不同主机 → 同一个前缀；跨网段 → 不同前缀', () => {
   const f = memorySecurity.ipPrefixOf
-  assert.equal(f('203.0.113.1'), f('203.0.113.254'))
-  assert.notEqual(f('203.0.113.1'), f('203.0.114.1'))
+  assert.equal(f('203.0.113.1'), f('203.0.114.254'))
+  assert.notEqual(f('203.0.113.1'), f('203.1.114.1'))
 })
 
 test('空值 / 垃圾值 → 空前缀（表示不绑定，不能误判成"换网段"）', () => {
@@ -100,11 +100,11 @@ test('内存版：IP 换网段 → 会话作废', async () => {
   const holder = []
   const res = resProxy(holder)
   const created = await security.createSession(makeRequest('203.0.113.9'), res, 'admin', 1, {})
-  assert.equal(created.ipPrefix, '203.0.113.0/24')
+  assert.equal(created.ipPrefix, '203.0.0.0/16')
 
   const token = String(holder[0]).split(';')[0]
   // 同网段：仍然有效
-  const same = await security.resolveSession({ ip: '203.0.113.44', headers: { cookie: token } }, 'admin')
+  const same = await security.resolveSession({ ip: '203.0.114.44', headers: { cookie: token } }, 'admin')
   assert.ok(same, '同网段应当继续有效（运营商换 IP 不该踢人）')
 
   // 换网段：作废
@@ -153,5 +153,5 @@ test('createSession 必须从 req.ip 取网段（不能留空，留空等于没�
   const security = memorySecurity.createSecurity({ production: false })
   const holder = []
   const created = await security.createSession(makeRequest('198.51.100.20'), resProxy(holder), 'user', 2, {})
-  assert.equal(created.ipPrefix, '198.51.100.0/24')
+  assert.equal(created.ipPrefix, '198.51.0.0/16')
 })

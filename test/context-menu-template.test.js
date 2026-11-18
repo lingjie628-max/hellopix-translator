@@ -63,8 +63,6 @@ test('普通 <img>：给出复制 / 另存 / 新窗口三件套', () => {
   const { actions } = spyActions()
   const t = buildContextMenuTemplate(
     { mediaType: 'image', srcURL: 'https://x.com/a.jpg' }, actions)
-  // 「诊断图片翻译」是 2026-10-30 加的：打包版没有 devtools 菜单，
-  // 线上出问题时用户只能靠这一项把链路状态吐出来。
   assert.deepEqual(labels(t), ['复制图片', '图片另存为…', '在新窗口打开图片', '诊断图片翻译', '重新加载'])
 })
 

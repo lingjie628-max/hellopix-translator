@@ -120,7 +120,7 @@ test('production refuses to boot the in-memory demo backend', () => {
   assert.match(result.stderr, /拒绝启动/)
 })
 
-test('desktop and standalone translation requests carry an idempotency key', () => {
+test('desktop translation requests carry an idempotency key', () => {
   // 正式后端 core.translate 强制幂等键（缺失返回 400 IDEMPOTENCY_KEY_REQUIRED），
   // 桌面端与独立电报端必须带。
   //
@@ -137,10 +137,15 @@ test('desktop and standalone translation requests carry an idempotency key', () 
   // 桌面端的请求构造现在在 src/translate/translation-cache.js（见 createRequestTranslate）
   const desktopNet = fs.readFileSync(
     path.join(root, 'desktop', 'src', 'translate', 'translation-cache.js'), 'utf8')
-  const telegramMain = fs.readFileSync(path.join(root, 'standalone', 'telegram', 'main.js'), 'utf8')
   assert.ok(/requestId:\s*cache\.requestId\(text, from, to, engine\)/.test(desktopNet),
     'desktop translate:run 请求缺少 requestId')
-  assert.ok(telegramMain.includes('function transRequestKey('), 'standalone telegram 缺少幂等键生成函数')
-  assert.ok(/idempotencyKey:\s*transRequestKey\(\)/.test(telegramMain),
-    'standalone telegram 翻译请求缺少幂等键')
+  // The Telegram standalone product has been removed from this branch. Keep
+  // the desktop guard active, and validate the bridge only if it is restored.
+  const telegramMainPath = path.join(root, 'standalone', 'telegram', 'main.js')
+  if (fs.existsSync(telegramMainPath)) {
+    const telegramMain = fs.readFileSync(telegramMainPath, 'utf8')
+    assert.ok(telegramMain.includes('function transRequestKey('), 'standalone telegram 缺少幂等键生成函数')
+    assert.ok(/idempotencyKey:\s*transRequestKey\(\)/.test(telegramMain),
+      'standalone telegram 翻译请求缺少幂等键')
+  }
 })

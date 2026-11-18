@@ -32,6 +32,12 @@
 function createWebViewFactory (deps) {
   const { electron, state, libs, env } = deps
 
+  function warn (channel, msg) {
+    try {
+      if (libs && typeof libs.logWarn === 'function') libs.logWarn(channel, msg)
+    } catch (e) {}
+  }
+
   /**
    * WebRTC 防泄漏。
    *
@@ -77,8 +83,12 @@ function createWebViewFactory (deps) {
     try {
       const proto = require('../translate/pix-protocol')
       const inject = require('../translate/page-world-inject')
-      proto.attachHandler(electron, ses, inject.pageWorldDir())
-    } catch (e) {}
+      if (!proto.attachHandler(electron, ses, inject.pageWorldDir())) {
+        warn('page-world', '实例分区 pix:// 协议挂载失败：' + partition)
+      }
+    } catch (e) {
+      warn('page-world', '实例分区 pix:// 协议挂载异常：' + ((e && e.message) || e))
+    }
     if (typeof view.setBorderRadius === 'function') view.setBorderRadius(0)
     if (typeof view.setBackgroundColor === 'function') view.setBackgroundColor('#081628')
     view.webContents.setUserAgent(env.CHROME_UA)

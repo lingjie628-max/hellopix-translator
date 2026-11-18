@@ -46,7 +46,7 @@
           <el-input
             v-model="form.password"
             type="password"
-            :placeholder="form.id ? '不填则不修改' : '请输入至少 6 位密码'"></el-input>
+            :placeholder="form.id ? '不填则不修改' : '请输入至少 10 位密码（字母+数字）'"></el-input>
         </el-form-item>
         <el-form-item label="角色">
           <!--

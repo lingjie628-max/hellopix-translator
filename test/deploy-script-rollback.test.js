@@ -147,6 +147,24 @@ test('有语法错误的新代码必须被回滚，线上目录保持旧版且�
   }
 })
 
+test('数据库迁移失败必须回滚，不能重启到半迁移状态', () => {
+  const sb = sandbox()
+  try {
+    seedOld(sb)
+    const tgz = pack(sb, {
+      'server/index.js': 'module.exports = "NEW"\n',
+      'scripts/migrate.js': 'process.exit(7)\n'
+    })
+    const r = run(sb, tgz)
+    assert.notStrictEqual(r.code, 0, '迁移失败还返回成功')
+    assert.match(r.out, /迁移失败|回滚/, '没有明确报告迁移失败并回滚')
+    assert.match(read(path.join(sb.app, 'server', 'index.js')), /OLD/,
+      '迁移失败后新代码仍留在线上')
+  } finally {
+    fs.rmSync(sb.dir, { recursive: true, force: true })
+  }
+})
+
 test('按目录滚动覆盖的 .tmp-* 备份方式已经移除（它会让回滚无从谈起并撑爆磁盘）', () => {
   const body = remoteBody()
   assert.ok(!/\.tmp-/.test(body), '远端脚本里还在用 .tmp-$d：备份被下一轮循环删掉，失败时无路可退')
@@ -243,4 +261,12 @@ test('scripts/*.sh 在部署后必须仍是可执行（chmod 644 一刀切会弄
   } finally {
     fs.rmSync(sb.dir, { recursive: true, force: true })
   }
+})
+
+test('部署后必须修复目录可遍历权限，否则服务用户读不到 scripts', () => {
+  const body = remoteBody()
+  assert.match(body, /find "\$APP\/server" "\$APP\/migrations" -type d -exec chmod 755/,
+    'server/migrations 目录权限没修，服务可能无法遍历')
+  assert.match(body, /find "\$APP\/scripts" -type d -exec chmod 755/,
+    'scripts 目录权限没修，ExecStartPre 会找不到 migrate.js')
 })

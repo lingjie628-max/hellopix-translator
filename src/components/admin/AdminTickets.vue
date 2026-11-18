@@ -48,7 +48,7 @@
               <span>{{ row.username || '未关联商户' }}</span>
               <span>·</span>
               <span>{{ statusLabel(row.status) }}</span>
-              <span class="time">{{ fmt(row.lastReplyAt || row.createTime) }}</span>
+              <span class="time">{{ fmt(row.lastReplyAt || row.createdAt) }}</span>
             </div>
           </div>
         </div>
@@ -73,7 +73,7 @@
             <div class="detail-meta">
               <span>{{ current.username || '未关联商户' }}</span>
               <span>·</span>
-              <span>{{ fmt(current.createTime) }}</span>
+              <span>{{ fmt(current.createdAt) }}</span>
               <span v-if="current.assignee">· 负责人 {{ current.assignee }}</span>
             </div>
           </div>
@@ -95,7 +95,7 @@
             <div class="msg-head">
               <span class="who">{{ m.authorName || m.authorType }}</span>
               <el-tag v-if="m.internal" type="warning" size="mini">内部备注</el-tag>
-              <span class="time">{{ fmt(m.createTime) }}</span>
+              <span class="time">{{ fmt(m.createdAt) }}</span>
             </div>
             <div class="msg-body">{{ m.body }}</div>
           </div>
@@ -198,7 +198,7 @@ export default {
       filters: { status: 'open', category: 'all', keyword: '' },
       rows: [],
       total: 0,
-      page: 0,
+      page: 1,
       size: 30,
       loading: false,
       detailLoading: false,
@@ -236,7 +236,7 @@ export default {
       return `${d.getMonth() + 1}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
     },
     reload() {
-      this.page = 0
+      this.page = 1
       this.rows = []
       this.total = 0
       this.fetch()
@@ -248,11 +248,11 @@ export default {
     fetch() {
       this.loading = true
       this.getRequest('/admin/tickets', Object.assign({}, this.filters, {
-        offset: this.page * this.size,
-        size: this.size
+        page: this.page,
+        rows: this.size
       })).then(resp => {
         if (!resp) return
-        this.rows = this.page === 0 ? resp.data.rows : this.rows.concat(resp.data.rows)
+        this.rows = this.page === 1 ? resp.data.rows : this.rows.concat(resp.data.rows)
         this.total = resp.data.total
       }).finally(() => { this.loading = false })
     },
@@ -320,7 +320,7 @@ export default {
       this.createVisible = true
       // 商户列表只在需要时拉，减少后台每次进页面的一次全表请求
       if (!this.users.length) {
-        this.getRequest('/admin/users', { size: 200 }).then(resp => {
+        this.getRequest('/admin/users', { page: 1, rows: 100 }).then(resp => {
           if (resp) this.users = resp.data.rows || resp.data || []
         })
       }

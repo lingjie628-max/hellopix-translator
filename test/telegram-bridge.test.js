@@ -4,9 +4,13 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
-const test = require('node:test')
+const nodeTest = require('node:test')
 const { spawnSync } = require('node:child_process')
-const { BRIDGE_NAME, buildBridge, writeBridge, writeBridges } = require('../standalone/telegram-win/lib/bridge')
+const { optionalTest } = require('./helpers/optional-standalone')
+const MODULE = path.join(__dirname, '..', 'standalone', 'telegram-win', 'lib', 'bridge.js')
+const test = optionalTest(nodeTest, MODULE, 'Telegram standalone bridge module has been removed')
+const bridge = fs.existsSync(MODULE) ? require(MODULE) : {}
+const { BRIDGE_NAME, buildBridge, writeBridge, writeBridges } = bridge
 
 // 随包发出的 Windows 诊断脚本必须满足两个容易在编辑中被破坏的条件。
 // 两个都是实测踩过的：$args 是 PowerShell 自动变量；无 BOM 的 UTF-8 会被

@@ -192,7 +192,16 @@ function normalizePlatformUid(platform, raw) {
   }
 
   if (p.startsWith('whatsapp')) {
-    // WhatsApp 的唯一标识就是手机号，交给手机号归一化处理
+    const lid = /^(?:lid:|whatsapp:)(\d{5,30})(?:@lid)?$/.exec(v) ||
+      /^(\d{5,30})@lid$/.exec(v)
+    if (lid) {
+      return {
+        ok: true,
+        value: 'wa-lid:' + lid[1],
+        note: 'whatsapp_lid'
+      }
+    }
+    // 纯数字 WhatsApp 值仍按手机号处理，避免把号码误标成平台 UID。
     return { ok: false, reason: 'use_phone' }
   }
 

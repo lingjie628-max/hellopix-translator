@@ -1,7 +1,7 @@
 'use strict'
 
 /**
- * 「重置商户密码」入口 + 密码策略放宽到 6 位。
+ * 「重置商户密码」入口 + 密码策略收紧到 10 位。
  *
  * ## 起因
  *
@@ -17,7 +17,7 @@
  *
  * ## 本文件守什么（源码级断言，不需要数据库）
  *
- *   1. 密码策略：最少 6 位、不限字符类型、上限 128（唯一真源 lib/password.js）
+ *   1. 密码策略：10-128 位且同时包含字母和数字（唯一真源 lib/password.js）
  *   2. 前端有独立「重置密码」按钮与弹窗，走**只做一件事**的独立接口
  *   3. 服务端 `/admin/users/resetPassword` 存在，且**不依赖套餐**、改完踢会话、写审计
  *   4. 全站文案不再残留「10-128 / 含字母和数字 / 至少 8 位」
@@ -37,21 +37,21 @@ const { validPassword } = require('../server/lib/password')
 
 // --- 1. 密码策略 ---------------------------------------------------------
 
-test('密码策略：最少 6 位，且不再限制字符类型', () => {
-  assert.equal(validPassword('123456'), true, '6 位纯数字必须通过（用户明确要求「6 位数」）')
-  assert.equal(validPassword('abc123'), true)
-  assert.equal(validPassword('abcdef'), true, '纯字母也必须通过 —— 已取消「含字母和数字」的复杂度要求')
-  assert.equal(validPassword('a'.repeat(128)), true, '128 位是上限，必须通过')
+test('密码策略：至少 10 位，且同时包含字母和数字', () => {
+  assert.equal(validPassword('123456'), false, '6 位纯数字必须被拒绝')
+  assert.equal(validPassword('Abcd123456'), true)
+  assert.equal(validPassword('abcdefghij'), false, '纯字母必须被拒绝')
+  assert.equal(validPassword('Abcd1' + 'a'.repeat(123)), true, '128 位是上限，必须通过')
   assert.equal(validPassword('a'.repeat(129)), false, '超过 128 位仍应拒绝')
   assert.equal(validPassword('12345'), false, '5 位必须拒绝')
   assert.equal(validPassword(''), false, '空密码必须拒绝')
 })
 
-test('密码策略：hash/verify 对 6 位纯数字可用（放宽后不能反而存不进去）', async () => {
+test('密码策略：hash/verify 对合规密码可用', async () => {
   const { hashPassword, verifyPassword } = require('../server/lib/password')
-  const hash = await hashPassword('123456')
+  const hash = await hashPassword('Abcd123456')
   assert.match(hash, /^scrypt\$[^$]+\$[^$]+$/, '必须仍是 scrypt 格式，满足 users.password_hash 的 CHECK 约束')
-  assert.equal(await verifyPassword(hash, '123456'), true)
+  assert.equal(await verifyPassword(hash, 'Abcd123456'), true)
   assert.equal(await verifyPassword(hash, '999999'), false, '错码不得通过')
 })
 
@@ -66,11 +66,13 @@ test('商户列表有独立的「重置密码」按钮，且指向 openReset', (
   assert.match(usersVue, /<el-dialog title="重置密码"/, '必须有独立的重置密码弹窗')
 })
 
-test('重置密码弹窗：两次输入必须一致，且不少于 6 位', () => {
+test('重置密码弹窗：两次输入必须一致，且不少于 10 位', () => {
   const at = usersVue.indexOf('submitReset() {')
   assert.ok(at > 0, '找不到 submitReset()')
   const block = usersVue.slice(at, usersVue.indexOf('\n    },', at))
-  assert.match(block, /length < 6/, '前端必须挡一下 <6 位（规则以服务端为准）')
+  assert.match(block, /length < 10/, '前端必须挡一下 <10 位（规则以服务端为准）')
+  assert.match(block, /\[A-Za-z\]/, '前端提示必须包含字母规则')
+  assert.match(block, /\[0-9\]/, '前端提示必须包含数字规则')
   assert.match(block, /!==\s*String\(this\.resetPwd2\)|String\(this\.resetPwd\) !== String\(this\.resetPwd2\)/,
     '必须校验两次输入一致')
   assert.match(block, /\/admin\/users\/resetPassword/,
@@ -91,7 +93,7 @@ test('服务端存在 /admin/users/resetPassword，且只做一件事', () => {
   const block = routes.slice(at, routes.indexOf('\n  }))', at))
 
   assert.match(block, /await auth\.hash\(data\.password\)/,
-    '必须经 auth.hash 落库 —— 它内部走 validPassword，是 6 位规则的唯一真源')
+    '必须经 auth.hash 落库 —— 它内部走 validPassword，是 10 位规则的唯一真源')
   assert.match(block, /UPDATE users SET password_hash/,
     '只更新 password_hash 一列，不得顺带改套餐/状态/到期等字段')
   assert.match(block, /await auth\.revokeUser\('main',\s*userId\)/,
@@ -105,7 +107,7 @@ test('服务端存在 /admin/users/resetPassword，且只做一件事', () => {
 
 // --- 4. 文案一致性 -------------------------------------------------------
 
-test('全站不再残留过时的密码文案（10-128 / 含字母和数字 / 至少 8 位）', () => {
+test('全站不再残留 6 位弱密码文案，并明确使用 10 位策略', () => {
   const files = [
     'server/services/auth-service.js',
     'server/services/account-service.js',
@@ -117,8 +119,7 @@ test('全站不再残留过时的密码文案（10-128 / 含字母和数字 / �
   ]
   for (const f of files) {
     const body = read(f)
-    assert.ok(!/10-128|包含字母和数字|至少 ?8 ?位|length >= 10|min: 8/.test(body),
-      `${f} 里还残留旧密码文案/规则：占位符写 8 位、后端要 10 位且含字母数字，`
-      + '正是让用户以为"没有重置密码功能"的根源')
+    assert.ok(!/6-128|最少 ?6 ?位|至少 ?6 ?位|length < 6|min: 6|length >= 6/.test(body),
+      `${f} 里还残留 6 位弱密码规则/文案`)
   }
 })

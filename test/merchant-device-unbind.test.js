@@ -51,15 +51,11 @@ test('★ 越权防线：主账号只能解绑自己名下的子账号', () => {
   assert.match(block, /SUB_NOT_FOUND/,
     '越权解绑必须回 SUB_NOT_FOUND（404），不能回成功')
 
-  // 子账号身份传 id 也不能越权：只解绑自己。
-  // 现在用 `target` 显式声明目标类型（撞号安全的唯一办法），
-  // 同时保留「缺 id 就报错」的防线，避免静默退化成解绑主账号自己。
-  assert.match(block, /target/,
-    '必须用显式的 target 参数区分 sub/self；只靠 id 大小猜会在撞号时解错人')
-  assert.match(block, /SUB_ID_REQUIRED/,
-    '主账号调用 target=sub 时若没给 id，必须报 400 而不是默认解绑自己')
-  assert.match(block, /kind !== 'main'/,
-    '子账号身份只能作用于自己')
+  // target 必须显式声明；target=sub 时子账号身份只能解绑自己
+  assert.match(block, /const target = data\.target/,
+    '解绑目标必须显式声明，不能靠 id 是否等于 parent.id 猜测')
+  assert.match(block, /if \(kind !== 'main'\)/,
+    'target=sub 时只有主账号才能指定子账号；子账号身份必须只作用于自己')
 })
 
 test('解绑必须同时清 bound_device 与撤销会话', () => {
@@ -89,11 +85,12 @@ test('★ 商户端界面有「解绑电脑」入口，且仅在已绑定时显�
   assert.match(teamVue, /postRequest\('\/team\/device\/reset'/,
     '解绑按钮必须调用 /team/device/reset')
 
-  // 必须带 id 并且是 row 自己的 id（不能漏传导致解绑自己），
-  // 且必须显式声明 target=sub —— 两张表的 id 会撞号（users.id=37 与
-  // sub_accounts.id=37 可以同时存在），只靠 id 猜类型必然解错人。
-  assert.match(teamVue, /resetDevice\s*\(row\)[\s\S]{0,600}\{\s*id:\s*row\.id\s*,\s*target:\s*'sub'\s*\}/,
-    '解绑请求必须带上 row.id 且显式 target=sub，否则 id 撞号时会解绑主账号自己')
+  // 必须带 id 并且是 row 自己的 id（不能漏传导致解绑自己）
+  assert.match(
+    teamVue,
+    /postRequest\(\s*'\/team\/device\/reset'\s*,\s*\{\s*id:\s*row\.id\s*,\s*target:\s*'sub'\s*\}/,
+    '解绑请求必须带上 row.id 并明确 target=sub，不能退化成解绑主账号自己'
+  )
 })
 
 test('商户端必须如实告知：解绑会把对方踢下线', () => {

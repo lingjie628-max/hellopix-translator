@@ -76,6 +76,8 @@ function buildContext(context) {
     windowMs,
     key: keyFn
   })
+  // 每分钟限额不能约束一整天的持续刷图成本；默认 500 次/主账号/天。
+  const imageDailyLimit = Math.max(1, Math.min(10000, Number(process.env.PIX_IMAGE_DAILY_LIMIT) || 500))
 
   const limits = {
     // 登录按入口分桶。
@@ -125,6 +127,11 @@ function buildContext(context) {
     translateImageIp: limit('translate-image-ip', 40, 60_000),
     translateImageAccount: limit('translate-image-account', 20, 60_000, req =>
       req.pixUser ? `${req.pixUser.kind}:${req.pixUser.account.id}` : 'missing'
+    ),
+    translateImageParentDaily: limit('translate-image-parent-daily', imageDailyLimit, 24 * 60 * 60_000, req =>
+      req.pixUser && req.pixUser.parent && req.pixUser.parent.id
+        ? String(req.pixUser.parent.id)
+        : 'missing'
     ),
     // 崩溃日志上报：每 IP 每小时 20 次。
     // 客户端正常一年也传不了几次（只在异常退出后的下次启动传一次），

@@ -70,13 +70,11 @@ function syncOverlay() {
  */
 function showOverlay(el, on) {
   if (on) {
-    show(profile, el === profile)
-    show(transPanel, el === transPanel)
+    // 面板互斥按 DOM 自动发现，新增 .modal 不需要回来补白名单。
+    // 历史上手抄白名单漏过一次，代价是确认框被原生视图整块盖住。
+    const panels = document.querySelectorAll('.modal')
+    for (const panel of panels) show(panel, panel === el)
     show(lockScreen, el === lockScreen)
-    show(addApp, el === addApp)
-    show(proxySettings, el === proxySettings)
-    show(updatePanel, el === updatePanel)
-    show(standalonePanel, el === standalonePanel)
   } else {
     show(el, false)
   }

@@ -10,6 +10,8 @@
  * 4. **消息分区是否覆盖当前月份** —— 这是最隐蔽的一个：
  *    分区缺失时插入直接报错，而客户端采集是"尽力而为"、
  *    失败不报错，所以表现为**数据静默变空**
+ * 5. **SSL 证书是否临近过期** —— certbot 续期失败是静默的，
+ *    只在日志里留一行退出码，没人会去看
  *
  * 告警静默：同一问题 1 小时内只发一次，避免每 10 分钟骚扰一次。
  *
@@ -145,6 +147,59 @@ function checkDisk() {
       : { ok: true }
   } catch (e) {
     return { ok: true }   // 取不到就不告警，避免误报刷屏
+  }
+}
+
+/**
+ * SSL 证书到期检查。
+ *
+ * ## 为什么要单独盯这个
+ *
+ * certbot 每天 02:05 自动续期，但它**失败的时候非常安静**：
+ * 只在 journalctl 里留一行 exit-code=1，没有任何人会被通知。
+ * 2026-11-13 就抓到过一次 —— 一个早就删掉配置的旧域名证书
+ * 每天续期失败，把 certbot 的退出码永远钉在 1，
+ * 真正的证书问题要翻日志才看得到。
+ *
+ * 证书过期的影响是"用户突然看到红色警告页"，而且**不可逆**：
+ * 过期后浏览器不给点穿，用户直接走人。
+ *
+ * 用 openssl 读 notAfter 而不是依赖 renew 成功与否 ——
+ * 前者是事实，后者只是"这一次试了"。剩 15 天就开始报，
+ * 留给人工介入足够的窗口。
+ */
+function checkCerts() {
+  const LIVE = '/etc/letsencrypt/live'
+  const DAYS_MIN = 15
+  try {
+    const dirs = fs.readdirSync(LIVE).filter(d => d !== 'README')
+    if (!dirs.length) return { ok: false, detail: '证书目录为空，一台机器上不该一个证书都没有' }
+
+    const { execFileSync } = require('child_process')
+    const expiring = []
+    let checked = 0
+    for (const d of dirs) {
+      const pem = path.join(LIVE, d, 'fullchain.pem')
+      if (!fs.existsSync(pem)) continue
+      const raw = execFileSync('openssl',
+        ['x509', '-in', pem, '-noout', '-enddate'],
+        { encoding: 'utf8', timeout: 5000 })
+      // 输出形如 notAfter=Dec  7 22:53:26 2026 GMT
+      const m = raw.match(/notAfter=(.+)/)
+      if (!m) continue
+      const end = new Date(m[1].trim())
+      if (Number.isNaN(end.getTime())) continue
+      checked++
+      const days = Math.floor((end.getTime() - Date.now()) / 86400000)
+      if (days < DAYS_MIN) expiring.push(`${d}(${days}天)`)
+    }
+    if (!checked) return { ok: true }   // 一个都读不出来，宁可不说也不误报
+    return expiring.length
+      ? { ok: false, detail: `即将过期：${expiring.join('、')}（阈值 ${DAYS_MIN} 天）` }
+      : { ok: true }
+  } catch (e) {
+    // 读不到就不告警。证书检查本身出错不该盖过真正的问题
+    return { ok: true }
   }
 }
 
@@ -435,6 +490,9 @@ async function main() {
 
   const backup = checkBackup()
   if (!backup.ok) problems.push(['备份异常', backup.detail])
+
+  const certs = checkCerts()
+  if (!certs.ok) problems.push(['证书即将过期', certs.detail])
 
   const pool = new Pool({
     connectionString: config.database.connectionString,

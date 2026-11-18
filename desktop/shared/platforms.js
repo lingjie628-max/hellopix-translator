@@ -42,6 +42,5 @@ module.exports = [
   // 详见 2026-10-28 的排查记录：移动外部窗口可行，但控制不了其尺寸，
   // 窗口跟随会抖动、会漂在桌面上、不随主程序退出。
   { id: 'custom-web', name: '自定义网页', url: 'https://www.google.com/', customUrl: true, badge: false },
-  { id: 'tickets', name: '计数工单系统', url: 'http://127.0.0.1:8080/', icon: 'tickets', badge: false, listed: false },
   { id: 'pm-office', name: 'PM-Office', url: 'https://hellowoorld.com/', icon: 'pm-office', badge: false, listed: false }
 ]

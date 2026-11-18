@@ -16,10 +16,12 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
-const test = require('node:test')
+const nodeTest = require('node:test')
 const vm = require('node:vm')
+const { optionalTest } = require('./helpers/optional-standalone')
 
 const APP_JS = path.join(__dirname, '..', 'standalone', 'telegram-win', 'renderer', 'app.js')
+const test = optionalTest(nodeTest, APP_JS, 'Telegram standalone renderer has been removed')
 
 function makeElement(id) {
   return {

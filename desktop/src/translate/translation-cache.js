@@ -99,7 +99,9 @@ function createTranslationCache (deps) {
 
   function cacheKey (from, to, engine, text) {
     return nodeCrypto.createHash('sha256')
-      .update([engine || '', from || 'auto', to || '', text].join('\u0001'))
+      // Include the current account: the module-level LRU survives logout and
+      // account switching, so a content-only key would cross tenant boundaries.
+      .update([currentUser(), engine || '', from || 'auto', to || '', text].join('\u0001'))
       .digest('hex')
   }
 

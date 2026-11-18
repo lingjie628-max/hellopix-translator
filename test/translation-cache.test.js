@@ -96,6 +96,20 @@ test('缓存：命中后返回原值，且被移到 LRU 队尾', () => {
   assert.equal(c.get('zh', 'en', 'deepl', '你好'), '')
 })
 
+test('★ 缓存必须按当前账号隔离，登出换号不能命中上一账号译文', () => {
+  let user = 'alice'
+  const c = createTranslationCache({
+    currentUser: () => user,
+    deviceId: () => 'dev-1'
+  })
+  c.put('zh', 'en', 'google', '同一句话', 'alice translation')
+  user = 'bob'
+  assert.equal(c.get('zh', 'en', 'google', '同一句话'), '',
+    '账号已切换却命中旧账号的本地缓存')
+  user = 'alice'
+  assert.equal(c.get('zh', 'en', 'google', '同一句话'), 'alice translation')
+})
+
 test('缓存：空译文不入缓存（否则这条文本会被锁死成空）', () => {
   const c = makeCache()
   c.put('zh', 'en', 'google', '你好', '')

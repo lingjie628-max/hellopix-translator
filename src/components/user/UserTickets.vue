@@ -169,12 +169,13 @@ export default {
       this.sending = true
       this.postRequest('/tickets/reply', { id: this.current.id, body }).then(resp => {
         this.sending = false
-        if (resp && resp.success === 'success') {
+        const data = (resp && resp.data) || {}
+        if (data.success === 'success') {
           this.reply = ''
           this.open(this.current.id)
           this.load()
-        } else if (resp && resp.msg) {
-          this.$message.error(resp.msg)
+        } else if (data.msg) {
+          this.$message.error(data.msg)
         }
       }).catch(() => { this.sending = false })
     },
@@ -188,14 +189,15 @@ export default {
       this.creating = true
       this.postRequest('/tickets/create', this.form).then(resp => {
         this.creating = false
-        if (resp && resp.success === 'success') {
-          this.$message.success(resp.msg || '工单已提交')
+        const data = (resp && resp.data) || {}
+        if (data.success === 'success') {
+          this.$message.success(data.msg || '工单已提交')
           this.showCreate = false
           this.status = 'open'
           this.reload()
-          if (resp.id) this.open(resp.id)
-        } else if (resp && resp.msg) {
-          this.$message.error(resp.msg)
+          if (data.id) this.open(data.id)
+        } else if (data.msg) {
+          this.$message.error(data.msg)
         }
       }).catch(() => { this.creating = false })
     }

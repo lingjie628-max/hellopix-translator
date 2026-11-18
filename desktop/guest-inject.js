@@ -138,6 +138,61 @@ function installEditableReporter () {
   }, true)
 }
 
+/**
+ * 「快速语音」的受限 Opus 编码桥。
+ *
+ * 页面世界不能直接使用 ipcRenderer，preload 又看不到页面世界的函数。
+ * 两边只通过 window.postMessage 交换固定频道的请求/响应。页面先解码成
+ * 单声道 Float32 PCM，再按块送来；主进程用 WASM Opus 编码，不启动外部
+ * 程序，也不读取任意本地路径。
+ */
+function installVoiceConversionBridge () {
+  if (String(location.hostname || '').toLowerCase() !== 'web.whatsapp.com') return
+  window.addEventListener('message', async event => {
+    if (event.source !== window) return
+    const data = event.data
+    const channels = {
+      'voice:opusStart': 'start',
+      'voice:opusChunk': 'chunk',
+      'voice:opusFinish': 'finish',
+      'voice:opusCancel': 'cancel'
+    }
+    if (!data || data.source !== 'hello-pix-page' || !channels[data.channel]) return
+    const requestId = String(data.requestId || '')
+    let result = { success: false, msg: '语音编码请求无效' }
+    try {
+      if (!requestId) throw new Error('语音编码缺少请求 ID')
+      let samples = null
+      if (channels[data.channel] === 'chunk') {
+        samples = data.samples
+        const bytes = samples && (samples.byteLength || samples.length * 4)
+        if (!bytes || bytes > 4 * 1024 * 1024) throw new Error('语音 PCM 分块无效')
+      }
+      result = await ipcRenderer.invoke('translate:voiceOpus', {
+        action: channels[data.channel],
+        requestId,
+        sampleRate: Number(data.sampleRate) || 0,
+        bitrate: Number(data.bitrate) || 0,
+        samples,
+        name: String(data.name || '').slice(0, 260)
+      })
+    } catch (e) {
+      result = { success: false, msg: (e && e.message) || String(e) }
+    }
+    window.postMessage({
+      source: 'hello-pix-preload',
+      channel: 'voice:opus:result',
+      requestId,
+      ok: !!(result && result.success),
+      base64: result && result.base64,
+      name: result && result.name,
+      type: result && result.type,
+      msg: result && result.msg,
+      samples: result && result.samples
+    }, location.origin)
+  })
+}
+
 ;(() => {
   if (window.__helloPixChat) return true
   window.__helloPixChat = true
@@ -145,6 +200,7 @@ function installEditableReporter () {
   // 焦点上报：主进程判断 Ctrl+Z 该不该拦，全靠它（见 installEditableReporter）。
   // 出错不能拖垮翻译主线，所以单独 try。
   try { installEditableReporter() } catch (e) {}
+  try { installVoiceConversionBridge() } catch (e) {}
 
   const cache = new Map()
   const pending = new Map()
@@ -706,7 +762,8 @@ function installEditableReporter () {
       const signature = chatKey + '|' + info.device + '|' + (info.seen || []).join(',')
       if (signature === peerDeviceReported) return
       peerDeviceReported = signature
-      if (typeof pix !== 'undefined' && pix && typeof pix.reportPeerDevice === 'function') {
+      const pix = api()
+      if (pix && typeof pix.reportPeerDevice === 'function') {
         pix.reportPeerDevice({ device: info.device, seen: info.seen })
       }
     } catch (e) {}
@@ -5517,9 +5574,13 @@ function installEditableReporter () {
     try {
       urls = ipcRenderer.sendSync('translate:pageScripts')
     } catch (e) {
+      console.warn('[pix-pageworld] sendSync 失败：' + ((e && e.message) || e))
       urls = null
     }
-    if (!urls || typeof urls !== 'object' || !urls.patch || !urls.main || !urls.guard) return
+    if (!urls || typeof urls !== 'object' || !urls.patch || !urls.main || !urls.guard) {
+      console.warn('[pix-pageworld] 没有拿到完整脚本 URL：' + JSON.stringify(urls))
+      return
+    }
 
     // 顺序要紧：patch 先把 JSON 和 CSP 处理好，main 才在干净环境里跑。
     // guard 放在最后，它自己会盯着前两个被删就重建。
@@ -5529,12 +5590,31 @@ function installEditableReporter () {
       ['guard', urls.guard]
     ]
     for (let i = 0; i < files.length; i++) {
+      const name = files[i][0]
+      const url = files[i][1]
       try {
         const el = document.createElement('script')
-        el.src = files[i][1]
-        el.setAttribute('data-pix', files[i][0])
+        el.addEventListener('load', () => {
+          console.info('[pix-pageworld] 已加载 ' + name)
+        })
+        el.addEventListener('error', () => {
+          console.warn('[pix-pageworld] 加载失败 ' + name + ' url=' + url)
+        })
+        try {
+          el.src = url
+        } catch (trustedTypeError) {
+          // 部分新版宿主启用 Trusted Types，会拦截 script.src 的字符串赋值。
+          // setAttribute 不一定绕过，但要把真实异常留在日志里，不能再静默。
+          console.warn('[pix-pageworld] script.src 被拦 ' + name + '：' +
+            ((trustedTypeError && trustedTypeError.message) || trustedTypeError))
+          el.setAttribute('src', url)
+        }
+        el.setAttribute('data-pix', name)
         document.documentElement.appendChild(el)
-      } catch (e) {}
+      } catch (e) {
+        console.error('[pix-pageworld] 插入脚本失败 ' + name + ' url=' + url + '：' +
+          ((e && e.stack) || e))
+      }
     }
   }
 

@@ -96,6 +96,11 @@
       <div class="utility">
         <button id="dndBtn" type="button" class="util-btn"><span class="util-ico">🔔</span>勿扰模式：<b id="dndText">关</b></button>
         <button id="lockBtn" type="button" class="util-btn"><span class="util-ico">🔒</span>锁屏 Hello Pix</button>
+        <button id="counterBtn" type="button" class="util-btn counter-entry" title="查看 WhatsApp 进粉、重粉和自动工单">
+          <span class="util-ico counter-entry-mark" aria-hidden="true"></span>
+          进粉中心
+          <span id="counterQueueBadge" class="counter-entry-badge hidden">0</span>
+        </button>
         <button id="themeBtn" type="button" class="util-btn" title="切换日间 / 夜间模式"><span class="util-ico" id="themeIco">🌙</span><span id="themeText">夜间</span></button>
         <button id="tabLayoutBtn" type="button" class="util-btn" data-layout="top" title="标签栏：顶部（点击切换为侧面）"><span class="util-ico" id="tabLayoutIco">▤</span><span id="tabLayoutText">顶部</span></button>
         <div class="spacer"></div>
@@ -258,7 +263,6 @@
           <div class="add-sec-body add-checks">
             <label><input id="addTransOn" type="checkbox" checked> 开启翻译</label>
             <label><input id="addQuickReply" type="checkbox"> 开启快捷回复</label>
-            <label><input id="addCounter" type="checkbox"> 开启计数器</label>
             <label id="addAntiRevokeCell" class="hidden"><input id="addAntiRevoke" type="checkbox" checked> 防撤回</label>
           </div>
         </section>
@@ -348,10 +352,6 @@
                 <label class="cell" id="addProxyPassCell">代理密码
                   <input id="addProxyPass" type="text" placeholder="代理密码" autocomplete="off" maxlength="200">
                 </label>
-                <label class="cell cell-wide" id="addProxyRefreshCell">刷新URL
-                  <input id="addProxyRefresh" type="text" placeholder="可选，用于更换出口 IP" autocomplete="off" spellcheck="false">
-                </label>
-                <label class="proxy-udp" id="addProxyUdpCell"><input id="addProxyUdp" type="checkbox"> UDP协议</label>
                 <p id="addProxyTip" class="add-proxy-tip"></p>
               </div>
               <aside class="proxy-detect" id="proxyDetect">

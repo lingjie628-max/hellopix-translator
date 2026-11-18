@@ -140,6 +140,24 @@ test('WhatsApp 没有稳定 ID，应当走手机号而不是伪造一个', () =>
   assert.equal(r.reason, 'use_phone')
 })
 
+test('WhatsApp LID 是可归一的平台身份别名', () => {
+  const r = identity.normalizePlatformUid('whatsapp-green', 'lid:123456789012345')
+  assert.equal(r.ok, true)
+  assert.equal(r.value, 'wa-lid:123456789012345')
+  assert.equal(r.note, 'whatsapp_lid')
+})
+
+test('WhatsApp 同一条线索同时保留号码和 LID', () => {
+  const rows = identity.collectIdentities({
+    phone: '+5511955057471',
+    platform: 'whatsapp-green',
+    platformUid: 'lid:123456789012345'
+  })
+  assert.deepEqual(rows.map(row => row.type), ['phone', 'platform_uid'])
+  assert.equal(rows[0].value, '5511955057471')
+  assert.equal(rows[1].value, 'wa-lid:123456789012345')
+})
+
 // ---------------------------------------------------------------------------
 // 指纹
 // ---------------------------------------------------------------------------

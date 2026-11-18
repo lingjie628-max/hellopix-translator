@@ -72,7 +72,7 @@
           <el-input v-model="form.email"></el-input>
         </el-form-item>
         <el-form-item label="密码">
-          <el-input v-model="form.password" :placeholder="form.id ? '不填则不修改' : '请输入至少 6 位密码'"></el-input>
+          <el-input v-model="form.password" :placeholder="form.id ? '不填则不修改' : '请输入至少 10 位密码（字母+数字）'"></el-input>
         </el-form-item>
         <el-form-item label="名称">
           <el-input v-model="form.nickname"></el-input>

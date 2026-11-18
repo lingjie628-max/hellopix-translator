@@ -43,7 +43,7 @@ function registerAdminUsers(router, ctx) {
     const data = input(req)
     const userId = number(data.id || data.userId)
     if (!userId) throw new ApiError(400, '缺少商户 id', 'USER_ID_REQUIRED')
-    // auth.hash 内部走 validPassword，不合规会抛 WEAK_PASSWORD，文案已放宽到 6 位
+    // auth.hash 内部走 validPassword，不合规会抛 WEAK_PASSWORD（10 位且含字母和数字）
     const passwordHash = await auth.hash(data.password)
     const result = await repo.query(
       'UPDATE users SET password_hash=$2,updated_at=NOW() WHERE id=$1 RETURNING username',

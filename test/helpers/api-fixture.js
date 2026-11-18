@@ -11,6 +11,11 @@ const express = require('express')
 const registerApi = require('../../mock')
 const { createSecurity } = require('../../server/security')
 
+// These tests exercise RBAC/CSRF/session behavior, not the TOTP gate.
+// The production default is strict; tests use the explicit compatibility switch
+// so the mock admin does not need a real TOTP secret.
+process.env.PIX_REQUIRE_ADMIN_TOTP = '0'
+
 async function startApi (options) {
   const opts = options || {}
   const app = express()

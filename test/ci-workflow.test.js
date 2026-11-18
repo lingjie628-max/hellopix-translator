@@ -16,12 +16,14 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
-const test = require('node:test')
+const nodeTest = require('node:test')
+const { optionalTest } = require('./helpers/optional-standalone')
 
 const SOURCE = path.join(__dirname, '..', 'standalone', 'telegram-win', 'tdesktop-fork', 'build-telegram.yml')
 const CI_MIRROR = path.join(__dirname, '..', '.ci-build', '.github', 'workflows', 'build-telegram.yml')
+const test = optionalTest(nodeTest, SOURCE, 'Telegram standalone workflow has been removed')
 
-const workflow = fs.readFileSync(SOURCE, 'utf8')
+const workflow = fs.existsSync(SOURCE) ? fs.readFileSync(SOURCE, 'utf8') : ''
 
 function has(pattern, label) {
   assert.match(workflow, pattern, label)

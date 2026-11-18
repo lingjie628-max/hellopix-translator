@@ -18,12 +18,12 @@ function appendCookie(res, value) {
 }
 
 /**
- * 取 IP 的上位网段：IPv4 取 /24，IPv6 取 /48。
+ * 取 IP 的上位网段：IPv4 取 /16，IPv6 取 /32。
  *
  * 用于会话 IP 绑定：网段变了说明"换了地方"，作废会话强制重新登录；
  * 同一网段内换 IP（运营商重拨、手机切基站）不踢人 —— 那是把安全做成骚扰。
  *
- * 取 /48 而不是 /64：同一运营商给一个用户分配的前缀常在 /48~/64 之间浮动。
+ * 2026-11-12 事故后从 /24、/48 放宽：绑定太细时，用户同城换基站或 4G/Wi-Fi 互切就会被判定换了网络、直接删会话，表现为反复掉线。
  *
  * 放在模块顶层（而不是 createSecurity 闭包里），这样 redis-security.js
  * 也能复用**同一份**实现 —— 两份实现迟早会漂移。
@@ -35,12 +35,12 @@ function ipPrefix(raw) {
   const v4 = ip.replace(/^::ffff:/, '')
   if (/^\d{1,3}(\.\d{1,3}){3}$/.test(v4)) {
     const parts = v4.split('.')
-    return parts.slice(0, 3).join('.') + '.0/24'
+    return parts.slice(0, 2).join('.') + '.0.0/16'
   }
   if (ip.includes(':')) {
-    const groups = ip.split(':').filter(Boolean).slice(0, 3)
+    const groups = ip.split(':').filter(Boolean).slice(0, 2)
     if (!groups.length) return ''
-    return groups.join(':') + '::/48'
+    return groups.join(':') + '::/32'
   }
   return ''
 }
@@ -115,7 +115,7 @@ function createSecurity(options) {
       subjectId: String(subjectId),
       csrf,
       deviceId: String(cfg.deviceId || ''),
-      // 会话绑定的 IP 前缀（/24 或 /48）。为空表示不绑定。
+      // 会话绑定的 IP 前缀（/16 或 /32）。为空表示不绑定。
       // 用前缀而不是完整 IP：家宽/运营商会换 IP，绑太死会把正常用户踢下线。
       ipPrefix: ipPrefixOf(req && req.ip),
       expiresAt: Date.now() + ttl
@@ -154,9 +154,9 @@ function createSecurity(options) {
   }
 
   /**
-   * 取 IP 的上位网段：IPv4 取 /24，IPv6 取 /48。
+   * 取 IP 的上位网段：IPv4 取 /16，IPv6 取 /32。
    *
-   * 取 /48 而不是 /64：同一运营商给一个用户分配的前缀常在 /48~/64 之间浮动。
+   * 2026-11-12 事故后从 /24、/48 放宽：绑定太细时，用户同城换基站或 4G/Wi-Fi 互切就会被判定换了网络、直接删会话，表现为反复掉线。
    */
   function ipPrefixOf(raw) {
     return ipPrefix(raw)

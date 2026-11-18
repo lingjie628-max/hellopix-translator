@@ -9,10 +9,11 @@
 
 | 目录 | 职责 | 典型文件 |
 | --- | --- | --- |
-| `src/ipc/` | 所有 IPC 通道 | `registrar.js`、`config.js`、`auth.js`、`translate.js`、`tabs.js`、`app.js` |
+| `src/ipc/` | 所有 IPC 通道 | `registrar.js`、`config.js`、`auth.js`、`translate.js`、`tabs.js`、`app.js`、`counter.js` |
+| `src/counter/` | 进粉本地待传队列与重试 | `outbox.js` |
 | `src/window/` | 窗口 / 视图 / 标签生命周期 | `main-window.js`、`web-view.js`、`open-platform.js`、`tab-context-menu.js`、`hidden-tabs.js`、`background-mode.js` |
 | `src/proxy/` | 代理、隧道、节点检测 | `detect.js`、`socks-relay.js`、`ssh-tunnel.js`、`ip-geo.js`、`proxy-settings.js` |
-| `src/translate/` | 翻译桥、引擎、解析 | `bridge.js`、`probe-page.js`、`engines.js` |
+| `src/translate/` | 翻译桥、页面注入、原生 composer、图片/语音翻译、WhatsApp 进粉观察 | `page-world-inject.js`、`native-composer.js`、`image-translate-ui.js`、`voice-note-import.js`、`whatsapp-direct-ptt.js`、`whatsapp-counter-observer.js`、`voice-opus-encode.js` |
 | `src/stability/` | 崩溃、看门狗、资源 | `health-guard.js`、`log-file.js`、`tab-budget.js`、`load-error-page.js` |
 | `src/net/` | 网络请求底座 | `api-net.js` |
 | `src/storage/` | 异步落盘 | `async-store.js` |
@@ -66,6 +67,7 @@ popupTabContextMenu: payload => popupTabContextMenu(payload)
 | `window/web-view.js` | 实例渲染进程崩溃不留痕（`oom` 与 `crashed` 是两个排查方向） |
 | `window/main-window.js` | 无托盘还拦截关窗 → 进程成了用户关不掉的僵尸 |
 | `window/tab-context-menu.js` | 隐藏放进"关闭"那一组 → 误点把收消息的窗口藏掉 |
+| `translate/whatsapp-direct-ptt.js` | WhatsApp 内部模块版本会变，硬编码模块号会在下一次升级静默失效 |
 
 ## 已知的哑炮（已修）
 

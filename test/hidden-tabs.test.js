@@ -54,7 +54,10 @@ test('backgroundThrottling 必须是 true —— 写 false 会让隐藏窗口后
     '不能有任何一个实例创建时写死 false')
   // 全仓库不能再有第二处创建 WebContentsView 的代码绕过这条
   const main = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
-  assert.ok(!/new WebContentsView\(/.test(main), '实例视图只能由 web-view.js 工厂创建')
+  const mainCode = main
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
+  assert.ok(!/new WebContentsView\(/.test(mainCode), '实例视图只能由 web-view.js 工厂创建')
 })
 
 test('恢复计划：用户自己静音过就别替他开声音', () => {

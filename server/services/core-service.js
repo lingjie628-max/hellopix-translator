@@ -838,16 +838,75 @@ class CoreService {
     // 绝不在图片场景偷偷换成 GPT —— 那是"静默切换供应商"。
     const resolved = await this.resolveTranslateEngine(session, data, {})
 
+    // 图片没有字符预留，服务端仍必须有内容级幂等和短时结果缓存。
+    // 客户端缓存只能在桌面端生效；直接调用 API、两个客户端或双击重放
+    // 仍会重复打昂贵的视觉模型。
+    const imageDigest = crypto.createHash('sha256')
+      .update([resolved.engine.id, to, String((data && data.mime) || 'image/jpeg'), raw].join('\u0000'))
+      .digest('hex')
+    const parentId = String(
+      (session && session.parent && session.parent.id) ||
+      (session && session.account && session.account.id) ||
+      ''
+    )
+    const cacheKey = `${redisPrefix}image:result:${parentId}:${imageDigest}`
+    let cached = null
+    if (this.redis && typeof this.redis.get === 'function') {
+      try {
+        cached = await this.redis.get(cacheKey)
+      } catch (error) {
+        console.error('Image result cache read failed:', error.message)
+      }
+    }
+    if (cached) {
+      try {
+        const payload = JSON.parse(cached)
+        if (payload && payload.ok) return Object.assign(payload, { cached: true })
+      } catch (error) {
+        try { await this.redis.del(cacheKey) } catch (_) {}
+      }
+    }
+
+    const lockKey = `${redisPrefix}image:lock:${parentId}:${imageDigest}`
+    const lockToken = crypto.randomBytes(16).toString('hex')
+    let lockHeld = false
+    if (this.redis && typeof this.redis.set === 'function') {
+      try {
+        const acquired = await this.redis.set(lockKey, lockToken, 'NX', 'PX', 120000)
+        if (!acquired) {
+          throw new ApiError(409, '同一张图片正在翻译，请稍等后重试', 'IMAGE_REQUEST_IN_PROGRESS')
+        }
+        lockHeld = true
+      } catch (error) {
+        if (error instanceof ApiError) throw error
+        // 缓存/锁是成本保护层，不应把本已可用的图片翻译整体打挂；
+        // Redis 本身不可用时，上层鉴权通常也会先失败。
+        console.error('Image result lock failed:', error.message)
+      }
+    }
+
     const credentials = await this.engineCredentials(resolved.engine.id)
     const started = Date.now()
-    const result = await this.translator.translateImage(resolved.engine, {
-      image: raw,
-      mime: String((data && data.mime) || 'image/jpeg'),
-      to: to
-    }, {
-      allowPublicNetwork: this.allowPublicNetwork,
-      credentials
-    })
+    let result
+    try {
+      result = await this.translator.translateImage(resolved.engine, {
+        image: raw,
+        mime: String((data && data.mime) || 'image/jpeg'),
+        to: to
+      }, {
+        allowPublicNetwork: this.allowPublicNetwork,
+        credentials
+      })
+    } catch (error) {
+      if (lockHeld) {
+        try {
+          await this.redis.eval(
+            'if redis.call("get",KEYS[1])==ARGV[1] then return redis.call("del",KEYS[1]) else return 0 end',
+            1, lockKey, lockToken)
+        } catch (_) {}
+      }
+      throw error
+    }
 
     const elapsed = Date.now() - started
     try {
@@ -863,6 +922,13 @@ class CoreService {
       // 客户端据此引导"换成 GPT"，而不是提示"稍后重试"。
       const code = (result && result.code) || 'IMAGE_TRANSLATE_FAILED'
       const status = code === 'NO_VISION' ? 400 : 502
+      if (lockHeld) {
+        try {
+          await this.redis.eval(
+            'if redis.call("get",KEYS[1])==ARGV[1] then return redis.call("del",KEYS[1]) else return 0 end',
+            1, lockKey, lockToken)
+        } catch (_) {}
+      }
       throw new ApiError(status, (result && result.msg) || '图片翻译暂不可用', code)
     }
 
@@ -898,7 +964,7 @@ class CoreService {
       } catch (inner) { /* 日志本身不能抛 */ }
     }
 
-    return {
+    const response = {
       ok: true,
       blocks: result.blocks || [],
       text: result.text || '',
@@ -906,6 +972,23 @@ class CoreService {
       usage: result.usage || null,
       ms: elapsed
     }
+    if (this.redis && typeof this.redis.set === 'function') {
+      try {
+        // Keep only a short window: enough for user double-click/replay, bounded
+        // enough that Redis does not become an unbounded image archive.
+        await this.redis.set(cacheKey, JSON.stringify(response), 'PX', 10 * 60_000)
+      } catch (error) {
+        console.error('Image result cache write failed:', error.message)
+      }
+    }
+    if (lockHeld) {
+      try {
+        await this.redis.eval(
+          'if redis.call("get",KEYS[1])==ARGV[1] then return redis.call("del",KEYS[1]) else return 0 end',
+          1, lockKey, lockToken)
+      } catch (_) {}
+    }
+    return response
   }
 
   /**

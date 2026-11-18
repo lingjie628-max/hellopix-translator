@@ -123,9 +123,11 @@ chown root:root "$APP" 2>/dev/null || true
 chmod 755 "$APP" 2>/dev/null || true
 
 find "$APP/server" "$APP/migrations" -type f -exec chmod 644 {} + 2>/dev/null || true
+find "$APP/server" "$APP/migrations" -type d -exec chmod 755 {} + 2>/dev/null || true
 # scripts/ 不能一刀切 644：里面有被 systemd 直接 exec 的 .sh（preflight.sh
 # 是 ExecStartPre）。统一 644 会让它失去执行位 → 203/EXEC → 服务起不来。
 find "$APP/scripts" -type f -exec chmod 644 {} + 2>/dev/null || true
+find "$APP/scripts" -type d -exec chmod 755 {} + 2>/dev/null || true
 find "$APP/scripts" -type f -name '*.sh' -exec chmod 755 {} + 2>/dev/null || true
 find "$APP/dist" -type f -exec chmod 644 {} + 2>/dev/null || true
 find "$APP/dist" -type d -exec chmod 755 {} + 2>/dev/null || true
@@ -146,8 +148,11 @@ chmod 755 "$APP"/scripts/*.js 2>/dev/null || true
 chmod 755 "$APP"/scripts/*.sh 2>/dev/null || true
 
 cd "$APP"
-# 迁移不要被 || true 吞掉：库结构对不上就别重启
-node scripts/migrate.js up 2>&1 | grep -E 'MIGRATION|Error' || true
+# 迁移失败必须回滚，不能带着旧/新结构不一致重启服务。
+if ! node scripts/migrate.js up; then
+  echo "  ✖ 数据库迁移失败，保留旧版本并回滚" >&2
+  rollback
+fi
 
 systemctl restart hello-pix
 # 等待启动的秒数可配：测试里设 0，生产默认 5。

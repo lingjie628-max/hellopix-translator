@@ -45,6 +45,8 @@ test('★ 架构2：图片限额必须独立，不能搭文本的便车', () => 
 
   assert.match(ctx, /translateImageIp\s*:/, '必须有独立的图片 IP 限额')
   assert.match(ctx, /translateImageAccount\s*:/, '必须有独立的图片账号限额')
+  assert.match(ctx, /translateImageParentDaily\s*:/, '必须有按主账号的日成本上限')
+  assert.match(routes, /translateImageParentDailyLimit/, '图片路由必须挂主账号日限额')
 
   // 路由必须用图片自己的限额
   const line = routes.split('\n').find(l => /router\.post\('\/translate\/image'/.test(l))
@@ -81,6 +83,16 @@ test('★ 架构4：图片结果必须有缓存（重复点击不能重复付费
   assert.match(src, /imageCachePut/, '缺写缓存')
   // 容量上限：常驻软件里无界 Map 就是内存泄漏
   assert.match(src, /IMAGE_CACHE_MAX/, '缺容量上限（常驻软件无界增长 = 内存泄漏）')
+  assert.match(src, /accountKey/, '客户端图片缓存键必须带账号')
+  assert.match(src, /engineKey/, '客户端图片缓存键必须带引擎')
+})
+
+test('★ 架构4b：服务端图片请求必须有内容锁和短期结果缓存', () => {
+  const src = read('server/services/core-service.js')
+  assert.match(src, /image:result:/, '缺服务端图片结果缓存键')
+  assert.match(src, /image:lock:/, '缺服务端图片并发锁')
+  assert.match(src, /IMAGE_REQUEST_IN_PROGRESS/, '并发重放必须明确拒绝')
+  assert.match(src, /'PX',\s*10 \* 60_000/, '图片结果缓存必须有短 TTL')
 })
 
 test('★ 架构5：注入脚本内部不许块注释（模板会被截断）', () => {
@@ -100,7 +112,7 @@ test('★ 架构6：body 放宽只对图片路由生效（全局仍是 256kb）'
   const findLine = re => lines.findIndex(l => re.test(l) && !/^\s*[*/]/.test(l))
 
   const imgIdx = findLine(/app\.use\('\/apis\/translate\/image',\s*express\.json\(\{\s*limit:\s*'16mb'/)
-  const globalIdx = findLine(/app\.use\(express\.json\(\{\s*limit:\s*'256kb'\s*\}\)\)/)
+  const globalIdx = findLine(/app\.use\(express\.json\(\{\s*limit:\s*'256kb'[^}]*\}\)\)/)
 
   assert.ok(imgIdx >= 0, '找不到图片路由的大 body 解析器')
   assert.ok(globalIdx >= 0, '找不到全局 256kb 解析器')

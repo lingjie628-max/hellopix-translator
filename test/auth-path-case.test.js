@@ -113,8 +113,8 @@ async function run (svc, { path, method = 'POST', headers = {}, router }) {
   return { status, next: passed, type: req.pixSessionType || (req.pixUser ? 'user' : '') }
 }
 
-const ADMIN = { id: 1, role: 'superadmin', status: 1, username: 'pix', passwordHash: 'hash:pix-pass' }
-const OPERATOR = { id: 2, role: 'operator', status: 1, username: 'staff', passwordHash: 'hash:staff-pass' }
+const ADMIN = { id: 1, role: 'superadmin', status: 1, username: 'pix', passwordHash: 'hash:pix-pass', totpEnabled: true }
+const OPERATOR = { id: 2, role: 'operator', status: 1, username: 'staff', passwordHash: 'hash:staff-pass', totpEnabled: true }
 const USER = {
   account: { id: 2, status: 1 },
   parent: { id: 2, status: 1, expiresAt: null }

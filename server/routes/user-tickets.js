@@ -163,32 +163,27 @@ function registerUserTickets (router, ctx) {
     // 充值类默认给中等，其余给低，客服按实际情况再调。
     const priority = category === 'recharge' ? 'medium' : 'low'
 
-    /**
-     * 防刷：同一商户未关闭的单超过 20 张就拒绝。
-     *
-     * 不是为了防恶意攻击（那是限流的事），是防「连点提交」和
-     * 「同一个问题开十张单」—— 后者会让客服的列表彻底没法用。
-     */
-    const open = await repo.query(
-      "SELECT count(*)::int AS n FROM tickets WHERE user_id=$1 AND status <> 'closed'", [me.userId]
-    )
-    if (open.rows[0].n >= 20) {
-      throw new ApiError(400, '你还有 20 张未关闭的工单，请先在已有工单里继续沟通，或等待处理完成', 'TICKET_TOO_MANY_OPEN')
-    }
-
-    const ins = await repo.query(
-      `INSERT INTO tickets(user_id,username,submitter_kind,submitter_name,subject,category,priority,status,
-                           admin_unread,user_unread,last_reply_at)
-       VALUES($1,$2,$3,$4,$5,$6,$7,'new',true,false,NOW()) RETURNING id`,
-      [me.userId, me.parentUsername, me.kind, me.submitter, subject, category, priority]
-    )
-    const ticketId = Number(ins.rows[0].id)
-    // 正文作为第一条消息存，而不是塞进 tickets 表 ——
-    // 这样「提单」和「追问」在消息流里是同一种东西，渲染逻辑只需一套。
-    await repo.query(
-      "INSERT INTO ticket_messages(ticket_id,author_type,author_name,body,internal) VALUES($1,'user',$2,$3,false)",
-      [ticketId, me.submitter || me.parentUsername, body]
-    )
+    const ticketId = await repo.transaction(async client => {
+      // Re-check the open-ticket cap inside the same transaction and lock the
+      // owner row, so two simultaneous submits cannot both create the 21st
+      // ticket while seeing 19 open tickets.
+      await repo.query('SELECT id FROM users WHERE id=$1 FOR UPDATE', [me.userId], client)
+      const open = await repo.query(
+        "SELECT count(*)::int AS n FROM tickets WHERE user_id=$1 AND status <> 'closed'", [me.userId], client)
+      if (open.rows[0].n >= 20) {
+        throw new ApiError(400, '你还有 20 张未关闭的工单，请先在已有工单里继续沟通，或等待处理完成', 'TICKET_TOO_MANY_OPEN')
+      }
+      const ins = await repo.query(
+        `INSERT INTO tickets(user_id,username,submitter_kind,submitter_name,subject,category,priority,status,
+                             admin_unread,user_unread,last_reply_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,'new',true,false,NOW()) RETURNING id`,
+        [me.userId, me.parentUsername, me.kind, me.submitter, subject, category, priority], client)
+      const id = Number(ins.rows[0].id)
+      await repo.query(
+        "INSERT INTO ticket_messages(ticket_id,author_type,author_name,body,internal) VALUES($1,'user',$2,$3,false)",
+        [id, me.submitter || me.parentUsername, body], client)
+      return id
+    })
     ok(res, '工单已提交，客服会尽快处理', { id: ticketId })
   }))
 
@@ -207,22 +202,23 @@ function registerUserTickets (router, ctx) {
     if (!body) throw new ApiError(400, '回复内容不能为空', 'TICKET_BODY_REQUIRED')
     if (body.length > 5000) throw new ApiError(400, '回复太长了，请控制在 5000 字以内', 'TICKET_BODY_TOO_LONG')
 
-    const t = await repo.query('SELECT id,status FROM tickets WHERE id=$1 AND user_id=$2', [id, me.userId])
-    if (!t.rows.length) throw new ApiError(404, '工单不存在', 'TICKET_NOT_FOUND')
-    const current = t.rows[0].status
-    if (current === 'closed') {
-      throw new ApiError(400, '这张工单已关闭，如需继续请新建工单并附上原单号', 'TICKET_CLOSED')
-    }
+    await repo.transaction(async client => {
+      const t = await repo.query(
+        'SELECT id,status FROM tickets WHERE id=$1 AND user_id=$2 FOR UPDATE', [id, me.userId], client)
+      if (!t.rows.length) throw new ApiError(404, '工单不存在', 'TICKET_NOT_FOUND')
+      const current = t.rows[0].status
+      if (current === 'closed') {
+        throw new ApiError(400, '这张工单已关闭，如需继续请新建工单并附上原单号', 'TICKET_CLOSED')
+      }
 
-    await repo.query(
-      "INSERT INTO ticket_messages(ticket_id,author_type,author_name,body,internal) VALUES($1,'user',$2,$3,false)",
-      [id, me.submitter || me.parentUsername, body]
-    )
-    const next = tickets.afterUserReply(current)
-    await repo.query(
-      `UPDATE tickets SET status=$2, admin_unread=true, last_reply_at=NOW(), updated_at=NOW() WHERE id=$1`,
-      [id, next]
-    )
+      await repo.query(
+        "INSERT INTO ticket_messages(ticket_id,author_type,author_name,body,internal) VALUES($1,'user',$2,$3,false)",
+        [id, me.submitter || me.parentUsername, body], client)
+      const next = tickets.afterUserReply(current)
+      await repo.query(
+        `UPDATE tickets SET status=$2, admin_unread=true, last_reply_at=NOW(), updated_at=NOW() WHERE id=$1`,
+        [id, next], client)
+    })
     ok(res, '已回复')
   }))
 
