@@ -99,6 +99,40 @@ function signManifest (release, env) {
 }
 
 /**
+ * 把离线签名写回发布记录后，生产服务不需要持有私钥。
+ *
+ * 签名仍然由客户端内置公钥校验：数据库被改 URL/哈希但没重新签名时，
+ * 清单会验签失败，不会因为“库里有个 signature 字段”就被无条件信任。
+ */
+function storedManifest (row, options) {
+  const signature = String(row && row.signature || '').trim()
+  if (!signature) return null
+
+  let decoded
+  try {
+    decoded = Buffer.from(signature, 'base64')
+  } catch (_error) {
+    decoded = null
+  }
+  if (!decoded || decoded.length !== SIGNATURE_BYTES) {
+    const error = new Error('发布记录中的 signature 不是 64 字节 base64')
+    if (options && options.onError) options.onError(error)
+    else console.error('[update-signing] 发布记录签名无效：', error.message)
+    return null
+  }
+
+  return {
+    appId: String(options.appId || 'com.hellopix.desktop'),
+    version: String(row.version || ''),
+    url: String(row.url || '').trim(),
+    sha256: String(row.sha256 || '').toLowerCase(),
+    channel: String(options.channel || 'stable'),
+    minVersion: String(row.minVersion || row.min_version || row.version || ''),
+    signature
+  }
+}
+
+/**
  * 由数据库行生成清单。三个必要条件缺一不可：
  *   · 有 sha256（发布时算过哈希）
  *   · 有签名私钥（服务端配置了）
@@ -116,6 +150,13 @@ function buildManifest (row, options) {
   const appId = String(opts.appId || 'com.hellopix.desktop')
   const url = String(row.url || '').trim()
   if (!/^https:\/\//i.test(url)) return null
+
+  const stored = storedManifest(Object.assign({}, row, { url }), {
+    appId,
+    channel: opts.channel || 'stable',
+    onError: opts.onError
+  })
+  if (stored) return stored
 
   try {
     return signManifest({
@@ -142,5 +183,6 @@ module.exports = {
   manifestPayload,
   parsePrivateKey,
   signManifest,
+  storedManifest,
   buildManifest
 }

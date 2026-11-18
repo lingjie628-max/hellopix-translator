@@ -102,6 +102,43 @@ test('没配私钥时不签名，buildManifest 返回 null（不发无签名清�
   assert.equal(buildManifest(ROW, { env: {} }), null)
 })
 
+test('生产无私钥时使用离线入库签名，客户端仍能验过', () => {
+  const signed = signManifest({
+    appId: 'com.hellopix.desktop',
+    version: ROW.version,
+    url: ROW.url,
+    sha256: ROW.sha256,
+    channel: 'stable',
+    minVersion: ROW.min_version
+  }, envWith(PRIVATE_PEM))
+  const manifest = buildManifest(Object.assign({}, ROW, { signature: signed.signature }), { env: {} })
+  const pubPem = publicKey.export({ type: 'spki', format: 'pem' })
+  assert.equal(
+    clientSignature.verifySignature(clientSignature.manifestPayload(manifest), manifest.signature, [pubPem]),
+    true
+  )
+})
+
+test('入库签名绑定 URL 与哈希，事后改字段会验签失败', () => {
+  const signed = signManifest({
+    appId: 'com.hellopix.desktop',
+    version: ROW.version,
+    url: ROW.url,
+    sha256: ROW.sha256,
+    channel: 'stable',
+    minVersion: ROW.min_version
+  }, envWith(PRIVATE_PEM))
+  const tampered = buildManifest(Object.assign({}, ROW, {
+    url: 'https://pixfanyi.com/downloads/evil.exe',
+    signature: signed.signature
+  }), { env: {} })
+  const pubPem = publicKey.export({ type: 'spki', format: 'pem' })
+  assert.throws(
+    () => clientSignature.verifySignature(clientSignature.manifestPayload(tampered), tampered.signature, [pubPem]),
+    /验证失败/
+  )
+})
+
 test('私钥不是 Ed25519 时抛错，不静默降级', () => {
   const rsa = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 })
   const rsaPem = rsa.privateKey.export({ type: 'pkcs8', format: 'pem' })

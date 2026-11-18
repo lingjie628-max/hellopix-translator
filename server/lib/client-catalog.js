@@ -58,10 +58,10 @@ function publicRelease(row) {
     app: row.app || '',
     version: row.version,
     url: String(row.url).trim(),
-    // 签名相关：只暴露「有没有哈希 / 下限版本」，**不暴露 signature 本身**。
-    // 清单是 /client/update 现签现发的；这里多带一份存库的签名，只会在
-    // 轮换密钥后产生"两个签名都合法但不一样"的困惑。
+    // 签名清单优先使用离线签好并入库的 signature；生产服务不必常驻私钥。
+    // 数据库若改了 URL/哈希却没重新签名，客户端仍会验签失败。
     sha256: row.sha256 || '',
+    signature: row.signature || '',
     /**
      * ★ 两种命名都要认 ★
      *
