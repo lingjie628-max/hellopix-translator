@@ -8,10 +8,13 @@
  */
 const { asyncRoute, input, ok, ApiError } = require('../lib/http')
 
-function ownerOf(req) {
+function ownerOf(req, countTickets) {
   const session = req.pixUser
   if (!session || !session.parent || !session.parent.id) {
     throw new ApiError(401, '请先登录', 'USER_AUTH_REQUIRED')
+  }
+  if (!countTickets.isEntitled(session.parent)) {
+    throw new ApiError(403, '当前套餐不包含计数工单，请升级专业版', 'COUNT_PLAN_REQUIRED')
   }
   return Number(session.parent.id)
 }
@@ -20,34 +23,38 @@ function registerCountTickets(router, ctx) {
   const { countTickets } = ctx
 
   router.get('/count-tickets', asyncRoute(async (req, res) => {
-    res.json(await countTickets.list(ownerOf(req), input(req)))
+    res.json(await countTickets.list(ownerOf(req, countTickets), input(req)))
   }))
 
   // 静态路径必须排在 /:id 之前，否则 "available-accounts" 会被当成工单号。
   router.get('/count-tickets/available-accounts', asyncRoute(async (req, res) => {
-    res.json({ rows: await countTickets.availableAccounts(ownerOf(req)) })
+    res.json({ rows: await countTickets.availableAccounts(ownerOf(req, countTickets)) })
   }))
 
   router.get('/count-tickets/:id', asyncRoute(async (req, res) => {
-    res.json(await countTickets.detail(req.params.id, ownerOf(req)))
+    res.json(await countTickets.detail(req.params.id, {
+      userId: ownerOf(req, countTickets)
+    }))
   }))
 
   router.get('/count-tickets/:id/fans', asyncRoute(async (req, res) => {
-    res.json(await countTickets.fans(req.params.id, ownerOf(req), input(req)))
+    res.json(await countTickets.fans(req.params.id, {
+      userId: ownerOf(req, countTickets)
+    }, input(req)))
   }))
 
   router.post('/count-tickets/save', asyncRoute(async (req, res) => {
-    const result = await countTickets.saveTicket(ownerOf(req), input(req))
+    const result = await countTickets.saveTicket(ownerOf(req, countTickets), input(req))
     ok(res, result.id ? '计数工单已保存' : '计数工单已创建', { id: result.id })
   }))
 
   router.post('/count-tickets/accounts/save', asyncRoute(async (req, res) => {
-    await countTickets.saveAccount(ownerOf(req), input(req))
+    await countTickets.saveAccount(ownerOf(req, countTickets), input(req))
     ok(res, '账号已绑定')
   }))
 
   router.post('/count-tickets/accounts/remove', asyncRoute(async (req, res) => {
-    await countTickets.removeAccount(ownerOf(req), input(req))
+    await countTickets.removeAccount(ownerOf(req, countTickets), input(req))
     ok(res, '账号已停用')
   }))
 }

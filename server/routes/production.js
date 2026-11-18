@@ -426,20 +426,24 @@ function productionRouter(context) {
     const result = await customers.ingest(session.parent.id, Object.assign({}, data, { operatorId }))
     // 计数是旁路账本，失败不能反过来阻断翻译/消息接入。
     // 同一 conversationId 重复上报是幂等的，下一次消息还能补记。
-    try {
-      result.counting = await countTickets.captureFan(session.parent.id, {
-        conversationId: result.conversationId,
-        customerId: result.customerId,
-        platform: data.platform,
-        accountKey: data.accountKey,
-        peerKey: data.peerKey,
-        displayName: data.displayName,
-        eventAt: data.sentAt || new Date().toISOString()
-      })
-    } catch (error) {
-      console.error('[count-ticket] capture failed:',
-        error && error.code ? error.code : (error && error.message) || error)
-      result.counting = { captured: false, reason: 'count_unavailable' }
+    if (countTickets.isEntitled(session.parent)) {
+      try {
+        result.counting = await countTickets.captureFan(session.parent.id, {
+          conversationId: result.conversationId,
+          customerId: result.customerId,
+          platform: data.platform,
+          accountKey: data.accountKey,
+          peerKey: data.peerKey,
+          displayName: data.displayName,
+          eventAt: data.sentAt || new Date().toISOString()
+        })
+      } catch (error) {
+        console.error('[count-ticket] capture failed:',
+          error && error.code ? error.code : (error && error.message) || error)
+        result.counting = { captured: false, reason: 'count_unavailable' }
+      }
+    } else {
+      result.counting = { captured: false, reason: 'plan_not_entitled' }
     }
     res.json(result)
   }))

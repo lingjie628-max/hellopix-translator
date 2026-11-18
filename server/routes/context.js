@@ -36,6 +36,7 @@ const { DashboardStatsService } = require('../services/dashboard-stats-service')
 const { CrashReportService } = require('../services/crash-report-service')
 const { AdminAccountService } = require('../services/admin-account-service')
 const { RechargeOrderService } = require('../services/recharge-order-service')
+const catalog = require('../lib/client-catalog')
 
 /**
  * 会话里可公开返回给前端的字段。
@@ -52,7 +53,8 @@ function publicUser(session) {
     basename: session.parent.packageTitle || '',
     versionId: session.parent.packageId,
     charBalance: number(session.account.charBalance),
-    enterprise: number(session.parent.enterprise)
+    enterprise: number(session.parent.enterprise),
+    counterSuite: catalog.packageAllowsCounter(session.parent.packageClients)
   }
 }
 

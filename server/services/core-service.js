@@ -172,7 +172,8 @@ class CoreService {
       expireTime: parent.expiresAt,
       port: number(parent.portLimit),
       userPorts: number(parent.portsInUse),
-      standaloneClient: catalog.packageAllowsStandalone(json(parent.packageClients, {})) ? 1 : 0
+      standaloneClient: catalog.packageAllowsStandalone(json(parent.packageClients, {})) ? 1 : 0,
+      counterSuite: catalog.packageAllowsCounter(parent.packageClients) ? 1 : 0
     }
   }
 

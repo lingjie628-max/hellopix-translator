@@ -103,6 +103,25 @@ function packageAllowsStandalone(clients) {
 }
 
 /**
+ * 套餐是否包含原生计数工单。
+ *
+ * 计数工单承接原“计数器版本”的商业权益，因此必须与套餐 `clients.counter`
+ * 使用同一个开关。后端 API 是最终闸门，前端字段只负责隐藏入口。
+ */
+function packageAllowsCounter(clients) {
+  let value = clients
+  if (typeof value === 'string') {
+    try {
+      value = JSON.parse(value)
+    } catch (_error) {
+      return false
+    }
+  }
+  if (!value || typeof value !== 'object') return false
+  return value.counter === true || Number(value.counter) === 1
+}
+
+/**
  * 语义化版本比较：`a` 比 `b` 新返回正数，旧返回负数，相同返回 0。
  *
  * 必须按**数字段**比，不能按字符串比 —— `'1.10.0' < '1.9.0'` 是字符串的真相，
@@ -136,5 +155,6 @@ module.exports = {
   hasPublicUrl,
   publicRelease,
   adminRelease,
-  packageAllowsStandalone
+  packageAllowsStandalone,
+  packageAllowsCounter
 }

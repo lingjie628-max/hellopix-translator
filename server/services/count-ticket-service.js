@@ -2,6 +2,7 @@
 
 const { ApiError } = require('../lib/http')
 const { mapRow } = require('../repositories/production-repository')
+const catalog = require('../lib/client-catalog')
 
 const TICKET_STATUSES = new Set(['active', 'closed'])
 const FAN_TYPES = new Set(['new', 'repeat'])
@@ -68,6 +69,10 @@ class CountTicketService {
     this.repo = repo
   }
 
+  isEntitled(parent) {
+    return !!parent && catalog.packageAllowsCounter(parent.packageClients)
+  }
+
   async saveTicket(userId, data) {
     const payload = normalizeTicket(data || {})
     const id = data && data.id ? Number(data.id) : null
@@ -78,6 +83,16 @@ class CountTicketService {
       if (id != null) {
         const current = await this.repo.lockTicket(id, userId, client)
         if (!current) throw new ApiError(404, '计数工单不存在', 'COUNT_TICKET_NOT_FOUND')
+        if (current.has_fans && (
+          String(current.timezone) !== payload.timezone ||
+          String(current.zero_time) !== payload.zeroTime
+        )) {
+          throw new ApiError(
+            409,
+            '该工单已有进粉记录，业务时区和每日置零时间不能再修改',
+            'COUNT_BUSINESS_TIME_LOCKED'
+          )
+        }
         return this.repo.updateTicket(id, userId, payload, client)
       }
       return this.repo.createTicket(userId, payload, client)
@@ -217,14 +232,15 @@ class CountTicketService {
     }
   }
 
-  async detail(ticketId, userId) {
+  async detail(ticketId, access) {
     const id = Number(ticketId)
     if (!Number.isSafeInteger(id)) {
       throw new ApiError(400, '计数工单号不合法', 'COUNT_TICKET_BAD_ID')
     }
-    const ticket = userId == null
+    const scope = normalizeAccess(access)
+    const ticket = scope.admin
       ? await this.repo.ticketForAdmin(id)
-      : await this.repo.ticketForOwner(id, userId)
+      : await this.repo.ticketForOwner(id, scope.userId)
     if (!ticket) throw new ApiError(404, '计数工单不存在', 'COUNT_TICKET_NOT_FOUND')
     const [metrics, accounts] = await Promise.all([
       this.repo.metrics(id),
@@ -233,14 +249,15 @@ class CountTicketService {
     return { ticket: mapRow(ticket), metrics, accounts }
   }
 
-  async fans(ticketId, userId, data) {
+  async fans(ticketId, access, data) {
     const id = Number(ticketId)
     if (!Number.isSafeInteger(id)) {
       throw new ApiError(400, '计数工单号不合法', 'COUNT_TICKET_BAD_ID')
     }
-    const ticket = userId == null
+    const scope = normalizeAccess(access)
+    const ticket = scope.admin
       ? await this.repo.ticketForAdmin(id)
-      : await this.repo.ticketForOwner(id, userId)
+      : await this.repo.ticketForOwner(id, scope.userId)
     if (!ticket) throw new ApiError(404, '计数工单不存在', 'COUNT_TICKET_NOT_FOUND')
     const type = cleanText(data.type || 'all', 16)
     if (type !== 'all' && !FAN_TYPES.has(type)) {
@@ -262,10 +279,20 @@ class CountTicketService {
   }
 }
 
+function normalizeAccess(access) {
+  if (access && access.admin === true) return { admin: true, userId: null }
+  const userId = access && Number(access.userId)
+  if (!Number.isSafeInteger(userId) || userId <= 0) {
+    throw new ApiError(500, '计数工单查询缺少访问作用域', 'COUNT_ACCESS_SCOPE_REQUIRED')
+  }
+  return { admin: false, userId }
+}
+
 module.exports = {
   CountTicketService,
   normalizeTicket,
   normalizeAccount,
   validTimezone,
-  validZeroTime
+  validZeroTime,
+  normalizeAccess
 }

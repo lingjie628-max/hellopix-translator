@@ -11,7 +11,7 @@
         <i class="el-icon-user"></i>
         <span slot="title">子账号管理</span>
       </el-menu-item>
-      <el-menu-item v-if="isMain" index="/count/tickets">
+      <el-menu-item v-if="counterSuite" index="/count/tickets">
         <i class="el-icon-data-analysis"></i>
         <span slot="title">计数工单</span>
       </el-menu-item>
@@ -81,6 +81,10 @@ export default {
     },
     isMain() {
       return this.$store.state.user.role !== 'sub'
+    },
+    counterSuite() {
+      return this.$store.state.user.counterSuite === true ||
+        Number(this.$store.state.user.counterSuite) === 1
     }
   },
   mounted() {

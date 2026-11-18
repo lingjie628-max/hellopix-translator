@@ -122,9 +122,13 @@ class CountTicketRepository {
 
   async lockTicket(ticketId, userId, client) {
     const result = await this.query(
-      `SELECT id, user_id, status
-       FROM count_tickets
-       WHERE id = $1 AND user_id = $2
+      `SELECT t.id, t.user_id, t.status, t.timezone, t.zero_time,
+              EXISTS(
+                SELECT 1 FROM count_ticket_fans f
+                WHERE f.ticket_id = t.id AND f.user_id = t.user_id
+              ) AS has_fans
+       FROM count_tickets t
+       WHERE t.id = $1 AND t.user_id = $2
        FOR UPDATE`,
       [ticketId, userId], client
     )

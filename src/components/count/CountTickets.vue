@@ -4,7 +4,7 @@
       <div>
         <div class="count-kicker">COUNT DESK</div>
         <h1>计数工单</h1>
-        <p>绑定实际聊天账号后，系统按会话去重计粉。同一客户换账号再次进入，自动记为重粉。</p>
+        <p>绑定客户端实际上报的接入账号后，系统按会话去重计粉。同一客户换账号再次进入，自动记为重粉。</p>
       </div>
       <el-button type="primary" icon="el-icon-plus" @click="openTicketForm()">新建计数工单</el-button>
     </section>
@@ -116,7 +116,7 @@
           <div class="count-section-head">
             <div>
               <h3>绑定账号</h3>
-              <p>一个聊天账号同时只能属于一个进行中的计数工单。</p>
+              <p>一个客户端接入账号同时只能属于一个进行中的计数工单。</p>
             </div>
           </div>
           <el-table :data="accounts" size="small" border>
@@ -242,14 +242,14 @@
       </span>
     </el-dialog>
 
-    <el-dialog title="绑定聊天账号" :visible.sync="accountDialog" width="480px" :close-on-click-modal="false">
+    <el-dialog title="绑定接入账号" :visible.sync="accountDialog" width="480px" :close-on-click-modal="false">
       <el-form label-width="82px">
         <el-form-item label="平台">
-          <el-select v-model="accountForm.platform" filterable style="width:100%">
+          <el-select v-model="accountForm.platform" filterable style="width:100%" @change="onAccountPlatformChange">
             <el-option v-for="p in platformOptions" :key="p.id" :label="p.name" :value="p.id"></el-option>
           </el-select>
         </el-form-item>
-        <el-form-item label="账号">
+        <el-form-item label="接入账号">
           <el-select
             v-model="accountForm.accountKey"
             filterable
@@ -267,7 +267,7 @@
           </el-select>
         </el-form-item>
       </el-form>
-      <p class="count-form-tip">账号必须与客户端 customer/ingest 上报的账号完全一致，否则不会进入本工单。</p>
+      <p class="count-form-tip">这里选择客户端主进程实际上报的接入账号；它可能不是 WhatsApp 手机号。</p>
       <span slot="footer">
         <el-button @click="accountDialog = false">取消</el-button>
         <el-button type="primary" :loading="savingAccount" @click="saveAccount">绑定</el-button>
@@ -325,10 +325,12 @@ export default {
     }
   },
   mounted() {
-    this.load()
     this.getRequest('/client/platforms').then(resp => {
       if (resp && resp.data && Array.isArray(resp.data.rows)) this.platforms = resp.data.rows
     }).catch(() => {})
+  },
+  activated() {
+    this.load()
   },
   methods: {
     load() {
@@ -420,9 +422,13 @@ export default {
         }
       }).catch(() => {})
     },
+    onAccountPlatformChange() {
+      const first = this.availableAccountOptions[0]
+      this.accountForm.accountKey = first ? first.accountKey : ''
+    },
     saveAccount() {
       if (!String(this.accountForm.accountKey || '').trim()) {
-        this.$message.warning('请填写聊天账号')
+        this.$message.warning('请选择或填写接入账号')
         return
       }
       this.savingAccount = true

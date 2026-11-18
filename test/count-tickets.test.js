@@ -11,6 +11,9 @@ const {
 } = require('../server/services/count-ticket-service')
 const { CountTicketRepository } = require('../server/repositories/count-ticket-repository')
 const { capabilityFor } = require('../server/lib/capabilities')
+const { packageAllowsCounter } = require('../server/lib/client-catalog')
+const { CustomerRepository } = require('../server/repositories/customer-repository')
+const { publicUser } = require('../server/routes/context')
 
 const databaseUrl = process.env.PIX_TEST_DATABASE_URL
 
@@ -40,11 +43,28 @@ test('计数工单超管读接口全部显式声明客户数据权限', () => {
   assert.equal(capabilityFor('GET', '/admin/count-tickets/:id/fans'), 'admin.data.customers')
 })
 
+test('计数工单权益只认套餐 clients.counter', () => {
+  assert.equal(packageAllowsCounter({ counter: true }), true)
+  assert.equal(packageAllowsCounter({ counter: 1 }), true)
+  assert.equal(packageAllowsCounter({ counter: false }), false)
+  assert.equal(packageAllowsCounter('{"counter":true}'), true)
+  assert.equal(packageAllowsCounter('bad-json'), false)
+
+  const baseSession = {
+    kind: 'main',
+    account: { username: 'demo', nickname: 'Demo', charBalance: 1 },
+    parent: { id: 1, packageClients: { counter: false }, enterprise: 0 }
+  }
+  assert.equal(publicUser(baseSession).counterSuite, false)
+  baseSession.parent.packageClients = { counter: true }
+  assert.equal(publicUser(baseSession).counterSuite, true)
+})
+
 test('原生计数：会话去重、跨账号重粉、跨商户识别与工单隔离', { skip: !databaseUrl }, async t => {
   process.env.DATABASE_URL = databaseUrl
   const { Pool } = require('pg')
   const pool = new Pool({ connectionString: databaseUrl, max: 5 })
-  const service = new CountTicketService(new CountTicketRepository({
+  const db = {
     query: (text, values, client) => (client || pool).query(text, values || []),
     transaction: async work => {
       const client = await pool.connect()
@@ -60,7 +80,9 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
         client.release()
       }
     }
-  }))
+  }
+  const service = new CountTicketService(new CountTicketRepository(db))
+  const customerRepository = new CustomerRepository(db)
 
   let seq = 0
   const createdUsers = []
@@ -181,13 +203,15 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
     '绑定弹窗只能看到当前商户真实上报过的接入账号'
   )
 
-  const detailA = await service.detail(ticketA.id, merchantA.id)
+  const detailA = await service.detail(ticketA.id, { userId: merchantA.id })
   assert.equal(detailA.metrics.totalFans, 3)
   assert.equal(detailA.metrics.newFans, 2)
   assert.equal(detailA.metrics.repeatFans, 1)
   assert.equal(detailA.accounts.length, 2)
+  const adminDetail = await service.detail(ticketA.id, { admin: true })
+  assert.equal(adminDetail.metrics.totalFans, 3, '显式 admin scope 才能走超管查询')
 
-  const cross = await service.detail(ticketA.id, merchantB.id)
+  const cross = await service.detail(ticketA.id, { userId: merchantB.id })
     .then(() => null, error => error)
   assert.ok(cross, '其他商户读取详情必须失败')
   assert.equal(cross.code, 'COUNT_TICKET_NOT_FOUND')
@@ -250,4 +274,65 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
     [ticketA2.id, merchantA.id]
   )
   assert.equal(closedBinding.rows[0].active, false, '关闭工单必须停止计数账号')
+
+  await assert.rejects(
+    () => service.saveTicket(merchantA.id, {
+      id: ticketA.id,
+      title: 'WhatsApp A 组',
+      timezone: 'UTC',
+      zeroTime: '00:00'
+    }),
+    error => error.code === 'COUNT_BUSINESS_TIME_LOCKED',
+    '已有粉丝后不能静默改变历史业务日口径'
+  )
+
+  await assert.rejects(
+    () => service.detail(ticketA.id),
+    error => error.code === 'COUNT_ACCESS_SCOPE_REQUIRED',
+    '缺少访问作用域不能默认走超管查询'
+  )
+
+  const mergeA = await makeCustomer('merge-a')
+  const mergeB = await makeCustomer('merge-b')
+  const mergeTicket = await service.saveTicket(merchantA.id, {
+    title: '身份合并回归',
+    timezone: 'Asia/Shanghai',
+    zeroTime: '00:00'
+  })
+  await service.saveAccount(merchantA.id, {
+    ticketId: mergeTicket.id, platform: 'whatsapp-green', accountKey: 'merge-a'
+  })
+  await service.saveAccount(merchantA.id, {
+    ticketId: mergeTicket.id, platform: 'whatsapp-green', accountKey: 'merge-b'
+  })
+  const mergeConvA = await makeConversation(merchantA.id, mergeA.id, 'merge-a', 'merge-peer-a')
+  const mergeConvB = await makeConversation(merchantA.id, mergeB.id, 'merge-b', 'merge-peer-b')
+  await service.captureFan(merchantA.id, {
+    conversationId: mergeConvA,
+    customerId: mergeA.id,
+    platform: 'whatsapp-green',
+    accountKey: 'merge-a',
+    peerKey: 'merge-peer-a',
+    eventAt: '2026-11-18T11:00:00+08:00'
+  })
+  await service.captureFan(merchantA.id, {
+    conversationId: mergeConvB,
+    customerId: mergeB.id,
+    platform: 'whatsapp-green',
+    accountKey: 'merge-b',
+    peerKey: 'merge-peer-b',
+    eventAt: '2026-11-18T12:00:00+08:00'
+  })
+  await customerRepository.mergeCustomers(mergeB.id, mergeA.id)
+  const mergedDetail = await service.detail(mergeTicket.id, { userId: merchantA.id })
+  assert.equal(mergedDetail.metrics.newFans, 1)
+  assert.equal(mergedDetail.metrics.repeatFans, 1)
+  const mergedRows = await pool.query(
+    `SELECT id,fan_type,repeat_of_id FROM count_ticket_fans
+     WHERE ticket_id=$1 ORDER BY event_at,id`,
+    [mergeTicket.id]
+  )
+  assert.equal(mergedRows.rows[0].fan_type, 'new')
+  assert.equal(mergedRows.rows[1].fan_type, 'repeat')
+  assert.equal(String(mergedRows.rows[1].repeat_of_id), String(mergedRows.rows[0].id))
 })

@@ -17,11 +17,11 @@ function registerAdminCountTickets(router, ctx) {
   }))
 
   router.get('/admin/count-tickets/:id', asyncRoute(async (req, res) => {
-    res.json(await countTickets.detail(req.params.id, null))
+    res.json(await countTickets.detail(req.params.id, { admin: true }))
   }))
 
   router.get('/admin/count-tickets/:id/fans', asyncRoute(async (req, res) => {
-    res.json(await countTickets.fans(req.params.id, null, input(req)))
+    res.json(await countTickets.fans(req.params.id, { admin: true }, input(req)))
   }))
 }
 

@@ -71,7 +71,7 @@ const routes = [
       { path: '/admin/users', name: '商户管理', component: AdminUsers },
       { path: '/admin/accounts', name: '在线账号', component: AdminAccounts },
       { path: '/admin/fans', name: '进粉统计', component: AdminFans },
-      { path: '/admin/count-tickets', name: '计数工单', component: AdminCountTickets },
+      { path: '/admin/count-tickets', name: '超管计数工单', component: AdminCountTickets },
       { path: '/admin/links', name: '分流链接', component: AdminLinks },
       { path: '/admin/scripts', name: '话术回复', component: AdminScripts },
       { path: '/admin/packages', name: '套餐管理', component: AdminPackages },
@@ -100,7 +100,7 @@ const routes = [
     redirect: '/home/index',
     children: [
       { path: '/home/index', name: '首页', component: HomeIndex, meta: { keepAlive: true } },
-      { path: '/count/tickets', name: '计数工单', component: CountTickets, meta: { keepAlive: true } },
+      { path: '/count/tickets', name: '商户计数工单', component: CountTickets, meta: { keepAlive: true } },
       { path: '/translate/channels', name: '翻译通道', component: TranslateChannels },
       { path: '/user/Recharge', name: '充值记录', component: UserRecharge },
       { path: '/user/rechargePage', name: '充值中心', component: UserRechargePage },
@@ -166,6 +166,12 @@ router.beforeEach((to, from, next) => {
   }
   if (store.state.user && store.state.user.username) {
     if (store.state.user.role === 'sub' && (to.path === '/user/team' || to.path === '/user/rechargePage')) {
+      next('/home/index')
+      return
+    }
+    if (to.path === '/count/tickets' && !(
+      store.state.user.counterSuite === true || Number(store.state.user.counterSuite) === 1
+    )) {
       next('/home/index')
       return
     }
