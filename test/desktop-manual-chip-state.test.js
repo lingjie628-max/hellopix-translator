@@ -70,6 +70,20 @@ test('失败 chip 必须带真实错误类别（禁止把"连不上服务器"说
     '退避窗口必须有独立文案，不能退回"翻译失败"')
 })
 
+test('★ 没有可翻译文字不能显示"翻译失败"', () => {
+  // 2026-10-30 用户报：消息没有字符时显示"翻译失败"。
+  // EMPTY_TEXT / EMPTY_RESULT 是翻译链路里**正常**的结果（纯图、纯表情、
+  // 上游回空），不是故障。落进 CHIP_FAIL_DEFAULT 会让用户以为软件坏了。
+  assert.match(guest, /EMPTY_TEXT:\s*'没有可翻译的文字'/,
+    'EMPTY_TEXT 必须有独立文案，不能退回"翻译失败"')
+  assert.match(guest, /EMPTY_RESULT:\s*'没有可翻译的文字'/,
+    'EMPTY_RESULT 必须有独立文案')
+
+  // 反向：这两个码确实是翻译链路的产出码（不是凭空写的常量）。
+  assert.match(guest, /code: 'EMPTY_TEXT'/, '链路里没有产出 EMPTY_TEXT 的地方')
+  assert.match(guest, /code: out \? '' : 'EMPTY_RESULT'/, '链路里没有产出 EMPTY_RESULT 的地方')
+})
+
 test('硬规则 4：渲染前必须有 isMessageHost 硬守卫 + TARGET_MISSING 兜底（禁止画到聊天根节点）', () => {
   assert.match(guest, /function isMessageHost\b/, '缺少 isMessageHost')
   assert.match(guest, /HOST_FORBIDDEN_IDS\s*=\s*\[[^\]]*'main'/, 'isMessageHost 没有禁止 #main')

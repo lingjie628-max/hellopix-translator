@@ -35,6 +35,8 @@ test('★ 不用 fetch 取图（blob: 在隔离世界里会撞 CORS）', () => {
 
 test('★ 优先直接画已渲染的图片元素（像素已在渲染器里，不受 CORS 限制）', () => {
   assert.match(EXTRACT_SCRIPT, /paint\(best\.el\)/, '应优先用页面上已渲染的元素')
+  assert.match(EXTRACT_SCRIPT, /best = \{ area: area, url: url, el: img \}/,
+    '扫描 <img> 时必须保存元素本身；只保存 url 会让 best.el 永远为空')
 })
 
 test('有 background-image 的兜底分支', () => {

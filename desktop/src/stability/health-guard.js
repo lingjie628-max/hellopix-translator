@@ -200,10 +200,21 @@ function createHealthGuard(opts) {
     stats.starts = recent.length
 
     // 上次没走 markCleanExit 也算一次异常退出 —— 与「启动次数」叠加判定。
-    const crashedLast = !!prev.crashed
+    //
+    // ★ 2026-11-08 修正：`crashed` 不能单独参与「2 次即循环」的放宽判据。
+    //   hardExit() 会先写 crashed=true 再 relaunch()，那是**我们自己安排的重启**，
+    //   用户什么都没做就会被连坐成循环。所以 selfRelaunch 时降级为普通判据
+    //   （仍要求 5 分钟内够 3 次），而不是整条豁免 —— 真循环照样能被抓住。
+    const selfRelaunch = !!prev.selfRelaunch
+    const crashedLast = !!prev.crashed && !selfRelaunch
+    // 主判据：短窗口内启动够多次 = 上次根本没跑起来。
+    // 放宽判据：上次异常退出时，2 次就够（崩溃→重开→崩溃，是典型循环）。
     const loop = recent.length >= cfg.crashLoopStarts || (crashedLast && recent.length >= 2)
     stats.safeMode = loop
-    writeState({ starts: recent, crashed: false })
+    // crashed / selfRelaunch 都必须在这里复位：它们是「上一次」的状态，本次已消费。
+    // 之前 crashed 只在 markCleanExit 里复位 —— 被系统强杀（活动监视器、断电）
+    // 根本走不到那里，true 会一直留着，把后续每次重启都判成崩溃。
+    writeState({ starts: recent, crashed: false, selfRelaunch: false })
 
     if (loop) {
       say('warn', '检测到崩溃循环（' + cfg.crashLoopWindowMs / 1000 + 's 内启动 ' +
@@ -247,7 +258,8 @@ function createHealthGuard(opts) {
     stats.fatalHandled++
     say('fatal', '主进程致命错误，准备自动重启（exitCode=' + code + '）')
     const prev = readState()
-    writeState({ starts: prev.starts || [], crashed: true })
+    // selfRelaunch：告诉下一次启动「这次退出是我自己安排的重启」，别算成崩溃循环。
+    writeState({ starts: prev.starts || [], crashed: true, selfRelaunch: true })
     try {
       // 不传 args：Electron 会按当前进程的启动方式重启（打包版与开发版都正确）。
       // 显式传 process.argv.slice(1) 在打包版里会把资源路径当成参数再传一遍，
@@ -464,6 +476,34 @@ function createHealthGuard(opts) {
     }
   }
 
+  /**
+   * 用户主动解除安全模式（2026-11-02）。
+   *
+   * ## 为什么需要一个人工出口
+   *
+   * 安全模式原本只能靠"等 crashLoopWindowMs（5 分钟）自然过期"退出 ——
+   * 用户不知道这回事，只会反复重启，而每次重启都在给计数加一，
+   * **越试越糟**。翻译又恰恰是被它摘掉的功能，用户完全无从下手。
+   *
+   * 这里清掉启动记录、把 safeMode 复位，并落盘 —— 否则进程内看起来好了，
+   * 下次启动 readState() 又把旧记录读回来，用户会以为"恢复了但没用"。
+   *
+   * 注意：这不等于修复了崩溃本身。崩溃根因仍需另外排查；
+   * 这里只是把"用户被锁在门外"这件事解开。
+   */
+  function clearSafeMode() {
+    try {
+      stats.safeMode = false
+      stats.starts = 0
+      writeState({ starts: [], crashed: false })
+      say('info', '用户手动解除安全模式：翻译桥将在实例重建后恢复')
+      return true
+    } catch (e) {
+      say('error', '解除安全模式失败：' + (e && e.message))
+      return false
+    }
+  }
+
   function dispose() {
     for (const t of timers) { try { clearT(t) } catch (e) {} }
     timers.clear()
@@ -481,6 +521,7 @@ function createHealthGuard(opts) {
     watchWindow,
     policy,
     report,
+    clearSafeMode,
     dispose,
     // 便于测试
     _defaults: DEFAULTS

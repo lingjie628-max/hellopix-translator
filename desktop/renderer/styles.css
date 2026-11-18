@@ -279,7 +279,17 @@
 html, body {
   margin: 0;
   height: 100%;
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
+  /* 字体栈要覆盖三个平台。
+   *
+   * 原来只有 -apple-system / BlinkMacSystemFont / SF Pro —— 这三个在 Windows
+   * 上一个都不存在，最终落到裸 `sans-serif`（通常是 Times 系的衬线兜底或
+   * 极窄的默认字形），中文则由系统临时替换。后果是：
+   *   · 底栏按钮被撑宽，6 个按钮挤不下；
+   *   · 字形宽度不稳定，和 macOS 上测出来的布局对不上。
+   * 补上 Windows 的 "Microsoft YaHei UI" / "Segoe UI" 与 Linux 的 Noto。 */
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI",
+    "PingFang SC", "Helvetica Neue", "Noto Sans SC", Roboto, Arial, sans-serif;
   background: var(--c-bg);
   color: var(--c-text-4);
   overflow: hidden;
@@ -1810,6 +1820,26 @@ button {
 .stage.is-home .pix-footer {
   background: var(--bg-footer-home);
   backdrop-filter: blur(12px);
+  /* ★ Windows 上「按钮文字叠印」的修复（2026-10-26）★
+   *
+   * 现象：首页底栏的「Windows电脑版」和「苹果电脑版」两段文字重叠打印在
+   * 同一位置，后面几个按钮直接消失；macOS 不复现。
+   *
+   * 原因不是布局 —— 实测 992px 窗口右组需要 499px、拿到 499px，完全放得下。
+   * 是 `backdrop-filter` 在 Windows/Chromium 上的合成层 bug：它把整个
+   * footer 提升为一个独立合成层，但**子元素的文字重绘没有跟着刷新**，
+   * 旧帧的字形留在原地，新字形又画上去 → 叠印 + 后续按钮被旧帧占位。
+   *
+   * 修法是让文字层和 backdrop 层处于同一个合成上下文里：
+   *   · `transform: translateZ(0)` 强制 footer 自带一个合成层，而不是由
+   *     backdrop-filter 隐式创建（隐式创建的层不参与子树重绘同步）；
+   *   · `will-change: backdrop-filter` 让合成器把这一层标记为"内容会变"，
+   *     避免它走那条缓存旧帧的快路径。
+   * `isolation` 补一层保险：断掉与父层背景的混合，防止残影透过半透明底透出来。
+   */
+  transform: translateZ(0);
+  will-change: backdrop-filter;
+  isolation: isolate;
 }
 .footer-group {
   min-width: 0;
@@ -1870,6 +1900,37 @@ button {
 @media (max-width: 1080px) {
   .footer-group button { padding: 0 4px; }
   .pix-footer { gap: 6px; }
+}
+/* 再窄一档：丢掉按钮前的装饰符号，只留文字。
+ *
+ * 底栏右组 6 个按钮在 12px 字号下约需 499px 宽，左组约 375px，中间版本块
+ * 约 90px —— 合计约 965px 是硬下限。Windows 上常见 125% / 150% 缩放，
+ * 1024 物理宽只剩 819 / 683 逻辑宽，会撞上这个下限。
+ *
+ * 实测：819 逻辑宽溢出 40px，683 逻辑宽溢出 176px。溢出时
+ * `.footer-group { overflow: hidden }` 会**直接裁掉**后面的按钮，
+ * 用户看到的就是"按钮凭空消失、前半截文字挤在一起"。
+ *
+ * 注意：`site-info.js` 的 syncFooterDownloads() 会给按钮写**内联**
+ * `style.display`（按是否真有发布记录显隐）。内联样式优先级高于本文件的
+ * 类选择器，所以这里的 `display: none` 只对**没有被 JS 内联设置过**的
+ * 按钮生效 —— 这是有意的：JS 说"没有安卓包"就隐藏，CSS 说"太窄藏不下"
+ * 也隐藏，两者不冲突。但本文件**不能**试图用 CSS 去"显示"被 JS 藏起来的
+ * 按钮，那叫对抗，说明数据层本该修。
+ */
+@media (max-width: 1000px) {
+  .footer-group button span { display: none; }
+  .footer-group button { padding: 0 5px; }
+  .footer-version { padding: 0 6px; }
+}
+@media (max-width: 860px) {
+  /* 极窄（150% 缩放的小屏）：藏掉次要的平台入口，保住主下载入口。
+     安卓 / 苹果手机版在官网都能下，底栏不该为它们牺牲主按钮。
+     `!important` 是必须的 —— syncFooterDownloads() 写的是内联样式。 */
+  .footer-right button[data-download-key="android"],
+  .footer-right button[data-download-key="ios"],
+  .footer-right button[data-download-key="standalone"] { display: none !important; }
+  .footer-left button[data-footer-action="support"]:last-child { display: none !important; }
 }
 .home-bg {
   position: absolute;
@@ -2840,6 +2901,38 @@ button {
   display: flex;
   gap: 10px;
 }
+/* ---- 应用内更新进度 ----
+ *
+ * 只在下载阶段出现。宽度用百分比而不是 transform: scaleX：
+ * 后者在 Windows 上会和 backdrop-filter 抢合成层（底栏那个 bug 同源），
+ * 百分比宽度走普通布局，重绘简单也更稳。
+ */
+.update-progress-wrap {
+  position: relative;
+  z-index: 2;
+  margin: 2px 0 4px;
+}
+.update-progress-track {
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(125, 211, 252, 0.14);
+  overflow: hidden;
+}
+.update-progress-bar {
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #38bdf8, #67e8f9);
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.55);
+  /* 进度跳动时不要有 200ms 以上的延迟感，但也要平滑 */
+  transition: width 0.18s linear;
+}
+.update-progress-text {
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--c-text-muted);
+  font-variant-numeric: tabular-nums;
+}
 .update-actions button {
   flex: 1;
   height: 38px;
@@ -3051,3 +3144,43 @@ button {
   cursor: pointer;
 }
 .pix-collision button:hover { background: rgb(var(--c-white-rgb, 255 255 255) / 0.08); }
+
+/* ---------- 翻译暂停横幅 ---------- */
+/* 复用 .pix-collision 的定位/配色体系，保证同屏两条横幅看起来是一家人。
+   区别：配色用 danger 而不是 warning —— 翻译整条链路失效比"撞单"严重得多。 */
+.pix-trans-banner {
+  position: fixed;
+  left: 50%;
+  top: 12px;
+  transform: translateX(-50%);
+  z-index: 901;  /* 略高于撞单横幅：功能失效优先被看见 */
+  max-width: min(720px, calc(100vw - 48px));
+  padding: 10px 14px;
+  border-radius: var(--w-radius-sm, 8px);
+  background: var(--c-surface, #1b2333);
+  border: 1px solid var(--c-danger, #dc2626);
+  box-shadow: 0 10px 30px rgb(var(--c-black-rgb, 0 0 0) / 0.35);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--w-text, #e6edf6);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pix-trans-banner.hidden { display: none; }
+.pix-trans-banner .ptb-ico { flex: none; }
+.pix-trans-banner .ptb-text { flex: 1; min-width: 0; }
+.pix-trans-banner .ptb-btn {
+  flex: none;
+  height: 26px;
+  padding: 0 12px;
+  border-radius: 6px;
+  border: 1px solid var(--c-danger, #dc2626);
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.pix-trans-banner .ptb-btn:hover { background: rgb(220 38 38 / 0.16); }
+.pix-trans-banner .ptb-btn:disabled { opacity: 0.55; cursor: default; }

@@ -1,5 +1,17 @@
 const { ipcRenderer } = require('electron')
 
+// ★ 必须显式取 contextBridge ★
+//
+// 页面世界拿不到 preload 作用域里的 window 属性（contextIsolation），
+// 只有 contextBridge.exposeInMainWorld 暴露的东西才跨得过去。
+// 这个 require 在 sandbox 下同样可用 —— sandbox 只限制"其它模块"。
+let contextBridge = null
+try {
+  contextBridge = require('electron').contextBridge || null
+} catch (e) {
+  contextBridge = null
+}
+
 const pixBridge = {
   getPrefs: () => ipcRenderer.invoke('translate:guestPrefs'),
   translate: payload => {
@@ -47,7 +59,25 @@ const pixBridge = {
   // ---------------------------------------------------------------------
   translateImage: payload => ipcRenderer.invoke('translate:image', {
     to: String((payload && payload.to) || 'zh')
-  })
+  }),
+  // ---------------------------------------------------------------------
+  // 联系人设备来源（2026-11-11）。
+  //
+  // 只上报**本地算出来的结果**：设备类型是 preload 自己从 DOM 的 data-id
+  // 解出来的，这里只把结论送给主进程记日志/埋点，不回传消息内容。
+  //
+  // 为什么不上报原始 data-id：那里面含对方 JID（手机号），属于通讯录级隐私。
+  // 主进程只需要知道"这个会话是什么设备"，不需要知道是谁。
+  // ---------------------------------------------------------------------
+  reportPeerDevice: payload => {
+    // 尽力而为：采集是附加功能，任何失败都不能影响聊天与翻译。
+    try {
+      return ipcRenderer.invoke('device:peer', {
+        device: String((payload && payload.device) || 'unknown'),
+        seen: Array.isArray(payload && payload.seen) ? payload.seen.slice(0, 6) : []
+      }).catch(() => null)
+    } catch (e) { return Promise.resolve(null) }
+  }
 }
 
 /**
@@ -360,6 +390,330 @@ function installEditableReporter () {
   }
   // ==== SITE ADAPTERS END ====
 
+  /* ==================================================================
+     联系人设备来源（2026-11-11）
+     ==================================================================
+
+     ## 这个功能是干什么的
+
+     在聊天头部显示「对方最近用什么设备发消息」：安卓 / iPhone / 网页版。
+
+     ## 数据是真是假的
+
+     **真的。** WhatsApp 每条消息的 ID 由服务端生成，**前缀编码了发送方设备**：
+
+       · 长度 > 21  → 安卓
+       · 以 3A 开头 → iPhone
+       · 以 3EB0 开头 → 网页版
+
+     规则来自 Baileys 与 wppconnect 两个独立的协议实现，两者一致。
+     消息节点本来就带 `data-id="false_<jid>_<msgId>"`，我们从 DOM 属性里取，
+     **不碰 WhatsApp 的内部模块系统** —— 那是明确的逆向客户端，封号高危路径。
+
+     ## 它做不到什么（必须诚实）
+
+     presence（在线状态）协议里**没有设备字段**，WhatsApp 服务端不广播。
+     所以任何"对方此刻用什么设备在线"都是编的。我们只显示
+     「最近用什么设备发的消息」。这是能力边界，不是实现偷懒。
+
+     ## 三条硬约束
+
+       1. **只读**：不点、不发、不改消息。只读 DOM 属性 + 往头部塞一个自己的标签。
+       2. **可降级**：规则是私有格式，WhatsApp 改版就会全部识别成 unknown。
+          那就显示「未知设备」，绝不编、绝不空白、绝不报错。
+       3. **不阻塞**：采集失败不影响翻译与聊天。所有入口都包 try/catch。
+     ================================================================== */
+
+  /** 设备类型（与 src/whatsapp/device-platform.js 的 DEVICES 保持一致）。 */
+  const PEER_DEVICE = {
+    ANDROID: 'android',
+    IPHONE: 'iphone',
+    DESKTOP: 'desktop',
+    WEB: 'web',
+    UNKNOWN: 'unknown'
+  }
+  const PEER_DEVICE_LABELS = {
+    android: '安卓',
+    iphone: 'iPhone',
+    desktop: '电脑版',
+    web: '网页版',
+    unknown: '未知设备'
+  }
+
+  /**
+   * 从裸消息 ID 判断设备。与 device-platform.js 的逻辑必须一致 ——
+   * 那边有单测锁着规则，这边是页面里的拷贝（sandbox 下 require 不到）。
+   * 改规则时**两边都要改**，否则页面与测试会不一致。
+   *
+   * 判据：前缀优先，长度兜底。
+   *   3A → iPhone / 3E → 网页版 / 3F → 电脑版 / 21 或 32 位 → 安卓
+   *
+   * 为什么不按 Baileys 的 /^3E.{20}$/：2026-04 WhatsApp 改了 ID 长度，
+   * 真机抓到 20 位的网页版 ID（3EB0872294EF67F1C4EB），严格正则会漏判。
+   */
+  function peerDeviceFromMessageId(msgId) {
+    const id = String(msgId == null ? '' : msgId).trim()
+    if (!id) return PEER_DEVICE.UNKNOWN
+    if (id.indexOf('3A') === 0) return PEER_DEVICE.IPHONE
+    if (id.indexOf('3E') === 0) return PEER_DEVICE.WEB
+    if (id.indexOf('3F') === 0) return PEER_DEVICE.DESKTOP
+    if (/^(.{21}|.{32})$/.test(id)) return PEER_DEVICE.ANDROID
+    if (id.length === 18) return PEER_DEVICE.DESKTOP
+    return PEER_DEVICE.UNKNOWN
+  }
+
+  /**
+   * 从 DOM 节点的 data-id 解析出设备。
+   *
+   * 必须同时支持两种格式（2026-11-11 真机实测）：
+   *   · 旧：`false_8613800138000@c.us_3EB0A1B2...`（复合串）
+   *   · 新：`2A327AC82CD56D95E087`（裸消息 ID，当前版本）
+   *
+   * @returns {{device:string, msgId:string, fromMe:boolean|null}|null}
+   */
+  function peerDeviceFromDataId(dataId) {
+    const raw = String(dataId == null ? '' : dataId).trim()
+    if (!raw) return null
+    const cut = raw.lastIndexOf('_')
+    if (cut >= 0) {
+      const msgId = raw.slice(cut + 1)
+      if (!msgId) return null
+      return {
+        device: peerDeviceFromMessageId(msgId),
+        msgId: msgId,
+        fromMe: raw.slice(0, cut).toLowerCase().indexOf('true') === 0
+      }
+    }
+    // 裸 ID：只接受字母数字，聊天列表行/懒加载哨兵的值不是消息 ID
+    if (!/^[0-9A-Za-z]+$/.test(raw)) return null
+    return { device: peerDeviceFromMessageId(raw), msgId: raw, fromMe: null }
+  }
+
+  /**
+   * 采集当前会话的设备分布。
+   *
+   * 只扫 `conversationScope()`（`#main`）内的行 —— 左侧会话列表的行也带
+   * data-id，退回 document 会把别的会话混进来（这是 chatKind 里踩过的坑，
+   * 见 conversationScope 的注释）。
+   *
+   * @returns {{device: string, label: string, seen: string[]}|null}
+   */
+  function collectPeerDevice() {
+    try {
+      const scope = conversationScope()
+      if (!scope || typeof scope.querySelectorAll !== 'function') return null
+
+      const rows = scope.querySelectorAll('[data-id]')
+      if (!rows || !rows.length) return null
+
+      // 从新到旧：WhatsApp 的消息顺序是「新在下」，倒序遍历即从新到旧。
+      // 取第一条能识别、且不是自己发的 —— 对方用什么设备才是我们要的。
+      const seen = []
+      let latest = PEER_DEVICE.UNKNOWN
+      let latestFromPeer = false
+
+      for (let i = rows.length - 1; i >= 0; i--) {
+        const row = rows[i]
+        const parsed = peerDeviceFromDataId(row.getAttribute('data-id'))
+        if (!parsed || parsed.device === PEER_DEVICE.UNKNOWN) continue
+
+        // ★ 判定这条是不是「自己发的」——两种格式要分别处理 ★
+        //
+        // 旧格式的 data-id 自带 fromMe 前缀，直接可信。
+        // 新格式（裸消息 ID）没有这个信息，改看气泡的方向 class：
+        // `.message-out` = 我们发的，`.message-in` = 对方发的。
+        // 两个都找不到时按「不知道」处理 —— 宁可不算进 seen，也不能张冠李戴。
+        let fromMe = parsed.fromMe
+        if (fromMe === null) {
+          const bubble = typeof row.closest === 'function'
+            ? row.closest('.message-out, .message-in')
+            : null
+          if (bubble) {
+            fromMe = bubble.classList.contains('message-out')
+          }
+        }
+        // fromMe 仍为 null：无法判断方向，这条不能用于「对方用什么设备」。
+        // 但它仍能证明「这个会话里出现过某种设备」，所以只记 seen、不记 latest。
+        if (fromMe === false) {
+          if (seen.indexOf(parsed.device) < 0) seen.push(parsed.device)
+          if (!latestFromPeer) {
+            latest = parsed.device
+            latestFromPeer = true
+          }
+        }
+      }
+
+      if (latest === PEER_DEVICE.UNKNOWN) {
+        // 全都没识别出来：可能全是自己发的，也可能 WhatsApp 改版了。
+        // 返回 unknown 而不是 null —— 调用方要能显示「未知设备」，
+        // 而不是把这个标签整个藏起来（藏起来用户会以为功能坏了）。
+        return { device: PEER_DEVICE.UNKNOWN, label: PEER_DEVICE_LABELS.unknown, seen: seen }
+      }
+
+      return {
+        device: latest,
+        label: PEER_DEVICE_LABELS[latest] || PEER_DEVICE_LABELS.unknown,
+        seen: seen
+      }
+    } catch (e) {
+      return null
+    }
+  }
+  // ==== PEER DEVICE COLLECT END ====
+
+  /* ==================================================================
+     联系人设备标签 —— 渲染与生命周期
+     ==================================================================
+
+     挂载点：优先插在聊天头部的 `[data-testid="chat-subtitle"]` **之后**；
+     没有副标题时退到 `header` 末尾（真机上确实没有副标题，见 peerDeviceAnchor）。
+
+     为什么优先副标题：
+       · 副标题就在联系人名字正下方，用户的视线天然落在那里；
+       · 它是 WhatsApp 自己渲染的节点（chatKind 也在用它判群聊），
+         比 class 名可靠 —— class 是混淆过的。
+       · 但**不能只依赖它**：2026-11 实测私聊头部没有这个节点，
+         死等副标题会导致标签永远不出现。
+
+     群聊**不显示**：群里有几十个人，每人设备不同，"对方的设备"没有意义。
+     判据直接用现有的 chatKind().group。
+     ================================================================== */
+
+  /** 当前这个标签渲染的是哪个会话 —— 换了会话就必须重建，不能复用旧结论。 */
+  let peerDeviceFor = ''
+  /** 最近一次上报的内容，用来去重（MutationObserver 触发极其频繁）。 */
+  let peerDeviceReported = ''
+
+  /**
+   * 找到挂载点。返回 `{node, mode}`：
+   *   · `{node: subtitle, mode: 'after'}` —— 副标题存在，插在它后面（首选）
+   *   · `{node: header, mode: 'append'}`  —— 没有副标题，挂到 header 末尾
+   *   · `null` —— 连 header 都没有
+   *
+   * ★ 为什么要有 header 兜底（2026-11-11 真机实测）
+   *
+   * 实测发现当前 WhatsApp Web 的私聊头部**没有** `[data-testid="chat-subtitle"]`：
+   *   scopeFound ✔  headerFound ✔  subtitleFound ✘
+   * 按老逻辑标签永远渲染不出来 —— 功能等于没做。header 是稳定存在的，
+   * 挂在那里至少能显示；等找到更精确的节点再换。
+   */
+  function peerDeviceAnchor() {
+    try {
+      const scope = conversationScope()
+      if (!scope) return null
+      const header = scope.querySelector('header')
+      if (!header) return null
+      const subtitle = header.querySelector('[data-testid="chat-subtitle"]')
+      if (subtitle && subtitle.parentNode) return { node: subtitle, mode: 'after' }
+      return { node: header, mode: 'append' }
+    } catch (e) {
+      return null
+    }
+  }
+
+  /** 移除页面上所有我们画的设备标签（换会话、群里、功能关掉时用）。 */
+  function removePeerDeviceTag() {
+    try {
+      const tags = document.querySelectorAll('.pix-peer-device')
+      for (let i = 0; i < tags.length; i++) {
+        if (tags[i].parentNode) tags[i].parentNode.removeChild(tags[i])
+      }
+    } catch (e) {}
+    peerDeviceFor = ''
+  }
+
+  /**
+   * 渲染（或更新）设备标签。
+   *
+   * @param {{device:string,label:string,seen:string[]}|null} info
+   * @param {string} chatKey 当前会话标识，用于判断是否需要重建
+   */
+  function renderPeerDeviceTag(info, chatKey) {
+    try {
+      // 群聊不显示 —— 见本节注释。
+      if (isGroupChat()) { removePeerDeviceTag(); return false }
+
+      if (!info || info.device === PEER_DEVICE.UNKNOWN) {
+        // 识别不出来时**仍然显示**「未知设备」：藏起来会让用户以为功能没生效。
+        // 但只有确实是私聊、且有消息行时才显示（连消息都没有就没什么可说的）。
+        if (!info) { removePeerDeviceTag(); return false }
+      }
+
+      const anchorInfo = peerDeviceAnchor()
+      const anchor = anchorInfo && anchorInfo.node
+      if (!anchor || !anchor.parentNode) { removePeerDeviceTag(); return false }
+
+      // 标签挂在 header 内部，所以从 header 范围内找，不再从 anchor.parentNode 找
+      // （anchor 可能是 header 本身，parentNode 会跑到 header 外面）。
+      const scope = conversationScope()
+      const holder = (scope && scope.querySelector('header')) || anchor.parentNode
+      let tag = holder.querySelector('.pix-peer-device')
+
+      if (!tag) {
+        tag = document.createElement('span')
+        tag.className = 'pix-peer-device'
+        tag.setAttribute('data-pix-ui', 'peer-device')
+        if (anchorInfo.mode === 'after') {
+          // 副标题存在：插在它**之后**，不打断 WhatsApp 自己的在线状态文本。
+          if (anchor.nextSibling) anchor.parentNode.insertBefore(tag, anchor.nextSibling)
+          else anchor.parentNode.appendChild(tag)
+        } else {
+          // 没有副标题：挂到 header 末尾（右对齐，见 CSS 的 margin-left:auto）。
+          anchor.appendChild(tag)
+        }
+      }
+
+      tag.setAttribute('data-device', info.device)
+      tag.textContent = info.label
+      // 悬停说明数据来源，避免用户误以为是 WhatsApp 官方功能。
+      const seenLabels = (info.seen || [])
+        .map(function (d) { return PEER_DEVICE_LABELS[d] || d })
+        .filter(function (l, i, arr) { return arr.indexOf(l) === i })
+      tag.title = seenLabels.length > 1
+        ? '对方最近使用过：' + seenLabels.join('、') + '（依据消息发送设备）'
+        : '对方最近用这个设备发过消息'
+
+      peerDeviceFor = chatKey
+      return true
+    } catch (e) {
+      return false
+    }
+  }
+
+  /**
+   * 采集 + 渲染 + 上报，一次跑完。
+   *
+   * 由 MutationObserver 防抖调用。**必须极其廉价**：这个函数会在用户
+   * 聊天的每一次 DOM 变化附近被触发，做重活会把主线程卡死。
+   * 已有的判据（chatKey 相同 + 结果没变）会直接 early-return。
+   */
+  function syncPeerDevice() {
+    try {
+      if (SITE && SITE.id !== 'whatsapp') return  // 先只做 WhatsApp，见需求
+      const scope = conversationScope()
+      if (!scope) { removePeerDeviceTag(); return }
+
+      const chatKey = chatIdentity()
+      // 换会话了：先把旧标签摘掉（新会话可能还没渲染消息）。
+      if (peerDeviceFor && peerDeviceFor !== chatKey) removePeerDeviceTag()
+
+      const info = collectPeerDevice()
+      if (!info) { removePeerDeviceTag(); return }
+
+      renderPeerDeviceTag(info, chatKey)
+
+      // 上报去重：同一个会话 + 同样的结论，只报一次。
+      const signature = chatKey + '|' + info.device + '|' + (info.seen || []).join(',')
+      if (signature === peerDeviceReported) return
+      peerDeviceReported = signature
+      if (typeof pix !== 'undefined' && pix && typeof pix.reportPeerDevice === 'function') {
+        pix.reportPeerDevice({ device: info.device, seen: info.seen })
+      }
+    } catch (e) {}
+  }
+  // ==== PEER DEVICE UI END ====
+
+
   /**
    * 当前会话的容器（WhatsApp 是 `#main`，Telegram 是 `#MiddleColumn`）。
    *
@@ -452,6 +806,14 @@ function installEditableReporter () {
       line-height: 1.45;
       opacity: 0.9;
       white-space: pre-wrap;
+      /* Long Chinese/Portuguese messages must wrap inside the current guest
+         viewport. Some WhatsApp message hosts keep a wider intrinsic bubble
+         width, which otherwise lets both the source and translation run past
+         the right edge and become unreadable/copy-incomplete. */
+      box-sizing: border-box;
+      max-width: min(100%, calc(100vw - 48px));
+      overflow-wrap: anywhere;
+      word-break: break-word;
       /* ------------------------------------------------------------------
          译文必须能被选中、复制。
          真机现象：译文看得见却选不中 / 复制不出来。
@@ -563,6 +925,10 @@ function installEditableReporter () {
       margin-top: 6px;
       white-space: pre-wrap;
       line-height: 1.45;
+      box-sizing: border-box;
+      max-width: min(100%, calc(100vw - 48px));
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
     .pix-revoked {
       display: block;
@@ -571,6 +937,35 @@ function installEditableReporter () {
       color: #d97706;
       opacity: 0.95;
     }
+
+    /* 联系人设备标签（聊天头部副标题旁）。
+       用 inline-flex + 小字号，不抢副标题（在线状态）的位置：
+       那个信息是 WhatsApp 自己给的，比我们的推断更重要。 */
+    .pix-peer-device {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      margin-left: 6px;
+      padding: 1px 6px;
+      border-radius: 8px;
+      font-size: 11px;
+      line-height: 16px;
+      font-weight: 500;
+      vertical-align: middle;
+      white-space: nowrap;
+      /* 中性灰：不要用品牌色，避免用户以为是 WhatsApp 官方标签 */
+      background: rgba(128, 128, 128, .18);
+      color: inherit;
+      opacity: .85;
+      cursor: default;
+      user-select: none;
+      pointer-events: auto;
+    }
+    .pix-peer-device[data-device="iphone"] { background: rgba(120, 120, 128, .20); }
+    .pix-peer-device[data-device="android"] { background: rgba(76, 175, 80, .18); }
+    .pix-peer-device[data-device="web"] { background: rgba(33, 150, 243, .18); }
+    /* 未知设备必须**可见但低调**：不能藏起来，用户会以为功能坏了 */
+    .pix-peer-device[data-device="unknown"] { opacity: .55; }
   `
   function mountStyle() {
     if (document.documentElement && !style.isConnected) document.documentElement.appendChild(style)
@@ -2174,6 +2569,169 @@ function installEditableReporter () {
   }
 
   /**
+   * 拉丁语系的**字符级**特征表：用来判断一段拉丁文本是不是某种特定语言。
+   *
+   * ## 为什么需要这张表
+   *
+   * `isDefinitelyLang` 对拉丁字母一律返回 false（分不清英/德/意/荷，见上面的长注释）。
+   * 这对"要不要翻"这个问题的回答是对的，但对"原文是不是已经等于目标语言"这个
+   * 问题**不够**：
+   *
+   *   用户 sendTo='pt-BR'，输入完全正确的葡萄牙语
+   *   → isDefinitelyLang 返回 false → 不跳过 → 送翻
+   *   → 模型把葡语"翻译"成葡语，可能改写措辞、动标点
+   *   → 扣了钱，用户还看不出为什么
+   *
+   * 线上数据里这类记录有几百条（`en -> pt-BR` 而 snippet 全是葡语），
+   * 全是白白送翻。
+   *
+   * ## 判据为什么用"必须有特有字符"而不是"常见词"
+   *
+   * 常见词表（the/and/of）在短句里根本凑不够，而 `ok`、`yes` 这种单词
+   * 没有任何词法特征。反过来，特有字符（ã/õ/ç/ñ/ü）一旦出现就是极强的证据 ——
+   * 葡萄牙语里 `ã`、`õ` 只可能来自葡语。宁可只覆盖"有明显特征"的样本，
+   * 也不要覆盖一半然后误判。
+   *
+   * ## 保守优先
+   *
+   * 这张表只用来**跳过**翻译。表里没命中的一律当"拿不准"照常送翻 ——
+   * 多翻一次只是浪费几个字符，跳过错了则是"该翻的没翻"，用户直接看得见。
+   */
+  const LATIN_LANG_SIGNS = {
+    // 葡萄牙语：ã õ 是葡语独有（西语没有），ç 常见但西/法/葡都有。
+    // 所以强证据只认 ã / õ，以及下面的葡语高频词。
+    'pt': /[\u00e3\u00f5]/i,
+    // 西班牙语：ñ 是西语标志（葡语没有）。¿ ¡ 也是西语独有的标点。
+    'es': /[\u00f1\u00bf\u00a1]/i,
+    // 德语：ä ö ü ß。只有 ß 是德语独有；ä ö ü 法语也用（分音符），
+    // 所以配合下面的词表双重确认。
+    'de': /[\u00df]/i,
+    // 法语：œ 是法语独有；ç é è ê à ù û î ô 与意/葡重叠，不单独作证据。
+    'fr': /[\u0153]/i,
+    // 意大利语：ì ò 相对独特（法语用 ò 极少），但覆盖窄。
+    'it': /[\u00ec]/i,
+    // 越南语：一整套变音字母，且带声调符号，特征极强。
+    'vi': /[\u0103\u0111\u01a1\u01b0\u00e2\u00ea\u00f4]|[\u1ea0-\u1ef9]/i,
+    // 波兰语：ą ć ę ł ń ó ś ź ż
+    'pl': /[\u0105\u0107\u0119\u0142\u0144\u015b\u017a\u017c]/i,
+    // 土耳其语：ğ ı ş （注意 ı 是无点字母，与 i 不同）
+    'tr': /[\u011f\u0131\u015f]/i,
+    // 捷克/斯洛伐克：č ě ř š ž ů ľ
+    'cs': /[\u010d\u011b\u0159\u0161\u017e\u016f]/i,
+    'sk': /[\u010d\u013e\u0161\u017e\u0165\u00fd]/i,
+    // 罗马尼亚语：ă â î ș ț
+    'ro': /[\u0103\u00e2\u00ee\u0219\u021b]/i,
+    // 瑞典/挪威/丹麦：å æ ø
+    'sv': /[\u00e5]/i,
+    'no': /[\u00e6\u00f8]/i,
+    'da': /[\u00e6\u00f8\u00e5]/i,
+    // 匈牙利：ő ű
+    'hu': /[\u0151\u0171]/i,
+    // 冰岛：þ ð
+    'is': /[\u00fe\u00f0]/i
+  }
+
+  /**
+   * 各语言的**高频功能词**。只在前面的字符证据不够时用来补强。
+   *
+   * ## 为什么需要第二道证据
+   *
+   * 葡语 `Bom dia, tudo bem com você?` 里只有 `ê`，而 `ê` 法语也用 ——
+   * 单看字符分不出来。但它有 `tudo` / `bem` / `você` 这些葡语专属词。
+   *
+   * ## 为什么只在"含变音符的文本"上启用
+   *
+   * 纯 ASCII 的文本用词表判定太危险：`Hola, nos vemos manana`（漏了 ñ）
+   * 和英语根本区分不开。所以词表只用来**补强已有的非 ASCII 证据**，
+   * 绝不单独构成"这是某某语"的结论。
+   */
+  const LATIN_LANG_WORDS = {
+    pt: /\b(não|sim|obrigad[oa]|voc[êe]|voce|tudo|bem|muito|bom|boa|dia|noite|tarde|para|com|isso|aqui|depois|agora|tamb[ée]m|podemos|preciso|falar|fazer|quando|porque)\b/i,
+    es: /\b(hola|gracias|buenos|buenas|d[ií]as|noche|tarde|c[óo]mo|est[áa]s|usted|nosotros|tambi[ée]n|porque|cuando|ahora|despu[ée]s|ma[ñn]ana)\b/i,
+    de: /\b(und|der|die|das|ist|nicht|ich|du|wir|sie|ein|eine|mit|f[üu]r|auf|auch|oder|danke|bitte|guten|tag|hallo|heute|morgen)\b/i,
+    fr: /\b(bonjour|merci|vous|nous|avec|pour|dans|les|des|une|c'?est|pas|aussi|mais|aujourd'?hui|demain|tr[èe]s|oui)\b/i,
+    it: /\b(ciao|grazie|buongiorno|buonasera|sono|come|stai|anche|perch[ée]|molto|bene|oggi|domani|adesso|per[òo])\b/i,
+    vi: /\b(ch[àa]o|b[ạa]n|c[ảa]m|ơn|xin|l[àa]|kh[ôo]ng|c[óo]|th[ểe]|được|h[ôo]m|nay|ng[àa]y)\b/i
+  }
+
+  /**
+   * 这段拉丁文本是不是**已经就是**目标语言（即：不需要再翻译）。
+   *
+   * 与 `isDefinitelyLang` 的分工：
+   *
+   *   isDefinitelyLang(text, lang)   "这段文本确定是 lang 的书写系统吗"
+   *   isAlreadyTarget(text, to)      "这段文本还需不需要翻成 to"
+   *
+   * 后者只在 `to` 是拉丁语系、而文本也全是拉丁字母时才有话可说；
+   * 其他情况一律返回 false（照常翻译），和原有行为一致。
+   *
+   * @param {string} text
+   * @param {string} to   目标语言（sendTo），如 'en'、'pt-BR'
+   * @returns {boolean}   true = 已经是目标语言，跳过翻译
+   */
+  function isAlreadyTarget(text, to) {
+    const s = String(text || '')
+    if (!s) return false
+    const target = String(to || '').toLowerCase()
+    const base = target.split('-')[0]
+    if (!base) return false
+
+    // 先把非实义字符去掉，只留字母。这一步和 isDefinitelyLang 保持一致。
+    const letters = s.replace(/[\s\d\p{P}\p{S}\p{Emoji_Presentation}]/gu, '')
+    if (!letters) return false
+
+    // 只要出现非拉丁字母（中文/日文/俄文…），说明这段文本不是目标语言 ——
+    // 那是"要翻译"的典型场景，交给下游。
+    //
+    // 范围必须覆盖到拉丁扩展附加（U+1E00–U+1EFF）：越南语的 ẽ ọ ạ 全在这里，
+    // 漏掉的话整个越南语都会被判成"非拉丁"，永远走不到下面的语言判定。
+    // 组合变音符 U+0300–U+036F 也要收：é 可能是 e + U+0301 的组合形式。
+    if (!/^[\u0041-\u024f\u1e00-\u1eff\u0300-\u036f]+$/u.test(letters)) return false
+
+    // 英语：**必须**同时满足"全 ASCII"和"两个以上词"。
+    //
+    // 为什么不能只看全 ASCII：`Guten Tag` / `Ciao` / `Hoi` 全是 ASCII，
+    // 它们不是英语。只看 ASCII 等于把那个已知 bug 换个壳引回来。
+    //
+    // 为什么要求多个词：`ok`、`yes`、`hello` 这种单词无法区分语言
+    // （德语也说 ok，葡语也说 ok）。多词时搭配下面的"无变音符 + 常见功能词"
+    // 才算证据。仍然只是启发式 —— 所以再加一条：**不能命中任何其他语言的
+    // 强特征字符**，否则就是别的语言。
+    if (base === 'en') {
+      // 带任何非 ASCII 拉丁字符（é/ñ/ã…）就基本不是英语 —— 除非是外来词，
+      // 但那种情况照常送翻不会错，这里保守地判 false。
+      if (/[^\u0000-\u007f]/.test(letters)) return false
+      const words = s.trim().split(/\s+/).filter(Boolean)
+      if (words.length < 2) return false
+      // 常见英语功能词：至少命中一个，且不能同时命中德/意/荷的高频词。
+      // 这一条只用来提高置信度，命中不了也不报错 —— 直接判 false（照常翻）。
+      const lower = ' ' + s.toLowerCase().replace(/[^\p{L}\s']/gu, ' ') + ' '
+      const EN_STOP = /\b(the|and|you|your|for|with|that|this|have|will|are|was|were|not|but|from|they|there|what|when|where|how|can|could|would|should|please|thanks|thank|okay|yes|no|is|it|to|of|in|on|at|my|me|we|our|be|been|do|does|did|just|get|got|need|want|let|make|take|know|think|see|go|going|come|good|great|nice|sorry|sure|right|well|now|later|today|tomorrow)\b/i
+      if (!EN_STOP.test(lower)) return false
+      // 反面证据：命中别的语言的强特征词就判 false（宁可翻）
+      const NOT_EN = /\b(und|der|die|das|ist|nicht|ich|du|wir|sie|ein|eine|mit|für|auf|auch|oder|cette|dans|pour|avec|vous|nous|les|des|une|hoi|vergadering|met|van|niet|een|celý|sam|alla|grazie|ciao|perche|anche|obrigad[oa]|você|para|não|isso|muito|bom)\b/i
+      if (NOT_EN.test(lower)) return false
+      return true
+    }
+
+    // 其他拉丁语系：强特征字符 或（有非 ASCII 证据 + 高频词命中）任一成立即算。
+    //
+    // 两层证据的意义：
+    //   · 字符层：ã/ñ/ß/œ 这种"只可能来自该语言"的字符，命中即定论
+    //   · 词表层：`Bom dia, tudo bem com você?` 只有 ê（法语也用），
+    //     但 tudo/bem/você 是葡语专属 —— 字符不足以定论时用它补强
+    //
+    // 词表**不能单独使用**：纯 ASCII 的西语（漏了 ñ）和英语无从区分，
+    // 单靠词表会把 `Hola, nos vemos manana` 判成西语，而它也可能是
+    // 某人的英语拼写错误。所以词表只在"文本确实含非 ASCII 拉丁字符"时才启用。
+    const sign = LATIN_LANG_SIGNS[base]
+    if (sign && sign.test(s)) return true
+    const words = LATIN_LANG_WORDS[base]
+    if (words && /[^\u0000-\u007f]/.test(s) && words.test(s)) return true
+    return false
+  }
+
+  /**
    * 这条消息是不是已经是我的母语 —— 是的话接收方向不翻。
    *
    * ## 原来的实现是 detectLang(text) === langMine，有两个方向的错
@@ -2946,7 +3504,12 @@ function installEditableReporter () {
     ENGINE_RETIRED: '通道已下架 · 点击重试',
     NO_BRIDGE: '翻译桥未就绪 · 点击重试',
     MANUAL_ROW_LOST: '消息已滚动 · 点击重试',
-    MANUAL_RENDER_MISSED: '译文未能显示 · 点击重试'
+    MANUAL_RENDER_MISSED: '译文未能显示 · 点击重试',
+    // 没有可翻译的文字 —— 不是"翻译失败"，是这条消息本来就是空的/纯图片。
+    // 原来这两码没进映射表，会掉到 CHIP_FAIL_DEFAULT，用户看到"翻译失败"，
+    // 以为软件坏了，其实根本没有文字可翻。
+    EMPTY_TEXT: '没有可翻译的文字',
+    EMPTY_RESULT: '没有可翻译的文字'
   }
   const CHIP_FAIL_DEFAULT = '翻译失败 · 点击重试'
 
@@ -3571,6 +4134,14 @@ function installEditableReporter () {
     // 拿不准就交给上游 —— 所有通道都支持 source='auto'，多翻一次顶多
     // 浪费本地一次判断，而漏翻是用户直接看得见的错误。
     if (isDefinitelyLang(masked.masked, prefs.sendTo || 'en')) return null
+    // 第二道闸门（拉丁语系专用）：isDefinitelyLang 对拉丁字母一律返回 false，
+    // 所以"输入英文 / 目标是英文"这种最该跳过的场景反而过不去 —— 白白送翻一次，
+    // 目标语言设错时还会把原文改写成别的语言。
+    // 见 isAlreadyTarget 的长注释：只在有强特征时跳过，拿不准照常翻。
+    if (isAlreadyTarget(masked.masked, prefs.sendTo || 'en')) {
+      trace('SEND_SKIP_ALREADY_TARGET', { to: prefs.sendTo || 'en', chars: raw.length })
+      return null
+    }
     // 到这里才真正决定"拦下并翻译"。状态机从这一刻开始，trace 走同一 actionId。
     sendActionId = newSendActionId()
     sendActionPhase = 'captured'
@@ -4827,6 +5398,11 @@ function installEditableReporter () {
     if (scanTimer) return
     scanTimer = window.setTimeout(() => {
       scanTimer = 0
+      // 设备标签与翻译扫描共用同一个防抖窗口：两者都依赖 DOM 变化，
+      // 分成两个定时器会让每次聊天变动都触发两次重排。
+      // 顺序无所谓，彼此不依赖；但 syncPeerDevice 极其廉价（见其注释），
+      // 放在前面能保证标签优先于翻译重绘出现，不会闪。
+      syncPeerDevice()
       scan()
     }, 220)
   }
@@ -4852,49 +5428,113 @@ function installEditableReporter () {
    *
    * 客页 webPreferences 是 `sandbox: true`（见 src/window/web-view.js）——
    * preload 在这个模式下**只能 require('electron')**，读不到本地的
-   * src/translate/image-translate-ui.js。所以源码由主进程读进来、
-   * 用 IPC 交给这里。
+   * src/translate/image-translate-ui.js。所以源码由主进程读进来、交给这里。
    *
-   * 用 sendSync 而不是 await：boot() 是 async 的，但这里不需要异步 ——
-   * 同步拿一次字符串（几十 KB）开销可以忽略，换来的是"安装时机确定"，
-   * 不用管 async 竞态。
+   * ## ★ 别在这里执行 UI 脚本 ★
    *
-   * ## 为什么用 new Function 而不是 eval
+   * 本函数跑在隔离世界。隔离世界里 `addEventListener` 挂的回调收不到
+   * 真实鼠标事件（2026-10-29 真机实测，见 installPageWorldScripts 注释）——
+   * 在这里执行 UI 脚本，按钮能画出来但点不动。
    *
-   * `new Function` 不继承当前作用域，避免和本文件里上百个同名局部变量
-   * （prefs / schedule / scan …）撞车。
+   * 所以这里**只做两件事**：挂桥、把页面世界脚本插进 <script>。
    *
-   * ## 桥怎么交给它
+   * ## 桥怎么交给页面世界（★ 2026-10-29 修正 ★）
    *
-   * 页面里的那一段拿不到 pixBridge（它在 preload 作用域里）。所以先把
-   * 回调挂到 window 上，注入的脚本再按名字取。
-   * 用带 __pix 前缀的名字，且**只挂这一个函数** —— 不挂 pixBridge 本身，
-   * 否则页面 JS 就能直接调所有 IPC。
+   * 原来是把 window 上的 __pixTranslateImage 直接赋值，以为页面世界能读到。
+   * **做不到** —— 真机实测：
+   *
+   *   preload 里 window.__pixProbe = 'x'
+   *   → 页面世界 typeof window.__pixProbe === 'undefined'
+   *   → 隔离世界 typeof window.__pixProbe === 'string'
+   *
+   * contextIsolation 下 preload 的 window 和页面的 window 是两个对象，
+   * 只有 `contextBridge.exposeInMainWorld` 暴露的东西才跨得过去。
+   * 所以桥必须走 contextBridge；同理，页面里回填的 `__pixImageLang`
+   * 也要用一个"可以写"的 world 对象来传。
    */
   function installImageTranslate(pix) {
     try {
       if (!pix || typeof pix.translateImage !== 'function') return
       if (window.__pixImageTranslateInstalled) return
 
-      window.__pixTranslateImage = payload => {
-        try {
-          return pix.translateImage({ to: (payload && payload.to) || (prefs && prefs.langMine) || 'zh' })
-        } catch (e) {
-          return Promise.resolve({ success: false, msg: String((e && e.message) || e) })
-        }
-      }
-      window.__pixImageLang = (prefs && prefs.langMine) || 'zh'
-
-      let code = ''
+      // ★ 只暴露这一个函数 ★ 不暴露 pixBridge 本身，
+      // 否则页面里任意 JS 都能直接调所有 IPC（见文件头）。
       try {
-        code = ipcRenderer.sendSync('translate:imageUiSource') || ''
-      } catch (e) {
-        code = ''
-      }
-      if (!code) return
-      new Function(code)()
+        if (contextBridge && contextBridge.exposeInMainWorld) {
+          contextBridge.exposeInMainWorld('__pixTranslateImage', payload => {
+            try {
+              return pix.translateImage({ to: (payload && payload.to) || (prefs && prefs.langMine) || 'zh' })
+            } catch (e) {
+              return Promise.resolve({ success: false, msg: String((e && e.message) || e) })
+            }
+          })
+        }
+      } catch (e) {}
+
+      // 目标语言。页面世界里要**读**它，但页面不该能写（写了就能改变
+      // 我们的计费语种）。所以给一个只读 getter 对象。
+      try {
+        if (contextBridge && contextBridge.exposeInMainWorld) {
+          contextBridge.exposeInMainWorld('__pixEnv', {
+            get lang() { return (prefs && prefs.langMine) || 'zh' },
+            get version() { return '1' }
+          })
+        }
+      } catch (e) {}
+
+      injectPageScripts()
     } catch (e) {
       // 静默失败：这是附加功能，不能因为它拖垮翻译主线。
+    }
+  }
+
+  /**
+   * 把「页面世界脚本 + 补丁 + 守护」插进 documentElement。
+   *
+   * ## 为什么必须走 file:// 的 <script src>，不能直接 new Function
+   *
+   * 客页 webPreferences 是 sandbox:true + contextIsolation:true：
+   *   · preload 读不到本地文件（没有 require 之外的模块能力）；
+   *   · 页面世界拿不到 preload 作用域里的变量。
+   * 唯一能把代码送进页面世界的通道是 <script> 标签，而它只认 URL。
+   * 所以：主进程把三段代码写进临时文件，用 pix:// 协议供出来，
+   * 这里按 patch → main → guard 的顺序插 <script>。
+   *
+   * ⚠️ pix:// 协议必须**在页面导航之前**挂好，否则页面里请求不到
+   * （实测见 src/translate/pix-protocol.js 的 prewarm 注释）。
+   * 那件事由 main.js（defaultSession）和 web-view.js（各分区）保证。
+   *
+   * 用同步 IPC 取 URL 是因为脚本标签要**立刻**插：异步回来时页面可能
+   * 已经跑过 did-finish-load，宿主的反注入逻辑也已经开始工作。
+   */
+  function injectPageScripts() {
+    if (window.__pixPageScriptsInjected) return
+    window.__pixPageScriptsInjected = true
+
+    // 先用 sendSync 探一次，拿不到 URL 说明主进程不支持（老版本 / 测试环境），
+    // 直接放弃，不影响翻译主线。
+    let urls = null
+    try {
+      urls = ipcRenderer.sendSync('translate:pageScripts')
+    } catch (e) {
+      urls = null
+    }
+    if (!urls || typeof urls !== 'object' || !urls.patch || !urls.main || !urls.guard) return
+
+    // 顺序要紧：patch 先把 JSON 和 CSP 处理好，main 才在干净环境里跑。
+    // guard 放在最后，它自己会盯着前两个被删就重建。
+    const files = [
+      ['patch', urls.patch],
+      ['host', urls.main],
+      ['guard', urls.guard]
+    ]
+    for (let i = 0; i < files.length; i++) {
+      try {
+        const el = document.createElement('script')
+        el.src = files[i][1]
+        el.setAttribute('data-pix', files[i][0])
+        document.documentElement.appendChild(el)
+      } catch (e) {}
     }
   }
 

@@ -46,7 +46,26 @@ test('remote pages have no page-world IPC bridge or dynamic code injection', () 
   const root = path.join(__dirname, '..')
   const guest = fs.readFileSync(path.join(root, 'desktop', 'guest-inject.js'), 'utf8')
   const main = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
-  assert.equal(guest.includes('exposeInMainWorld'), false)
+  // ★ 2026-10-29 收窄：原来禁止 exposeInMainWorld。
+  //
+  // 真机实测证明"preload 直接给 window 赋值"在 contextIsolation 下页面世界
+  // 读不到 —— 所以跨世界传东西**只能**用 contextBridge。全面禁止等于
+  // 把一个必需能力禁掉，那条断言只会被绕过（或者功能永久坏掉）。
+  //
+  // 正确的约束是"暴露的东西必须极小且不可执行任意 IPC"：
+  //   1. 只允许两个白名单名字（图片翻译桥 + 只读环境）；
+  //   2. 暴露的必须是函数或只读 getter，不能是 pixBridge 本身；
+  //   3. 不能把 ipcRenderer / invoke 直接塞进去。
+  const exposed = [...guest.matchAll(/exposeInMainWorld\(\s*['"]([^'"]+)['"]/g)].map(m => m[1])
+  for (const name of exposed) {
+    assert.ok(
+      ['__pixTranslateImage', '__pixEnv'].includes(name),
+      '只允许暴露白名单里的名字，实际出现：' + name
+    )
+  }
+  assert.equal(guest.includes('exposeInMainWorld(\'pixBridge\''), false)
+  assert.equal(guest.includes('exposeInMainWorld(\'ipcRenderer\''), false)
+  assert.equal(guest.includes('exposeInMainWorld(\'invoke\''), false)
   assert.equal(guest.includes('window.helloPix'), false)
   assert.equal(main.includes('executeJavaScript('), false)
   assert.equal(main.includes('else cb(true)'), false)

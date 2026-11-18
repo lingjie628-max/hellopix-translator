@@ -51,6 +51,9 @@ contextBridge.exposeInMainWorld('pix', {
   proxySettings: (id) => ipcRenderer.invoke('app:proxySettings', { id: id }),
   home: () => ipcRenderer.invoke('app:home'),
   version: () => ipcRenderer.invoke('app:version'),
+  // 翻译是否被崩溃循环保护停掉了（2026-11-02：「不翻译了」的静默根因）
+  translateStatus: () => ipcRenderer.invoke('app:translateStatus'),
+  translateRestore: () => ipcRenderer.invoke('app:translateRestore'),
   checkUpdate: () => ipcRenderer.invoke('app:checkUpdate'),
   // ---- 应用内自动更新 ----
   // start 不接受任何参数：主进程会自己重新取清单并验签。

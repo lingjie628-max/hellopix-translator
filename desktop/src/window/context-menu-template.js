@@ -87,6 +87,7 @@ function buildContextMenuTemplate (params, actions) {
       template.push({ label: '复制文字', accelerator: 'CmdOrCtrl+C', click: () => call('copyText') })
     }
     template.push({ type: 'separator' })
+    template.push({ label: '诊断图片翻译', click: () => call('diagnoseImage') })
     template.push({ label: '重新加载', click: () => call('reload') })
     return template
   }
@@ -125,6 +126,22 @@ function buildContextMenuTemplate (params, actions) {
     template.push({ label: '保存图片…', click: () => call('saveFromPage') })
     template.push({ type: 'separator' })
     template.push({ label: '重新加载', click: () => call('reload') })
+  }
+
+  // ★ 诊断入口（2026-10-30 补）★
+  //
+  // 用户报"点开图片没有翻译按钮"，而打包版**没有开发者工具菜单**
+  // （只在 NODE_ENV !== 'production' 时挂），线上根本没法自查。
+  // 这里给一个不依赖 devtools 的入口：点一下就把注入链路每一环
+  // 的结果弹成 toast + 写进日志，用户截图发过来即可定位。
+  //
+  // 只在图片场景 / 空白处挂：文字和输入框菜单里放它只会碍事。
+  const isImg = isImageContext(params)
+  if (isImg || (!hasSelection && !isEditable)) {
+    if (template.length && template[template.length - 1].type !== 'separator') {
+      template.push({ type: 'separator' })
+    }
+    template.push({ label: '诊断图片翻译', click: () => call('diagnoseImage') })
   }
 
   return template

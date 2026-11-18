@@ -1,7 +1,7 @@
 'use strict'
 
 // 独立应用是 Hello Pix 自己的单应用翻译壳，不是 Signal/Telegram 官方安装包。
-// client_releases.app 必须对齐 desktop/platforms.js 的 id（如 telegram-z、whatsapp-green）。
+// client_releases.app 必须对齐 desktop/platforms.js 的 id（如 signal、telegram-z）。
 const platforms = require('../../desktop/shared/platforms')
 
 const RELEASE_GROUPS = Object.freeze([

@@ -20,7 +20,7 @@ set -euo pipefail
 
 APP=/opt/hello-pix
 SSH_KEY="$HOME/.ssh/pikesi_deploy"
-SSH_HOST="${SSH_HOST:-207.57.167.121}"
+SSH_HOST="${SSH_HOST:-38.55.254.63}"
 SSH_PORT="${SSH_PORT:-30071}"
 
 # ── 部署前连通性预检 ────────────────────────────────────────────────

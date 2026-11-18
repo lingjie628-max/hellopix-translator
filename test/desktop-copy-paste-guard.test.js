@@ -94,8 +94,10 @@ test('第 2 层（主进程）：macOS 装了带编辑角色的应用菜单', ()
       '应用菜单缺少编辑角色：' + role)
   }
   // 必须在 createWindow 之前装好，窗口一出现快捷键就可用。
+  // 窗口范围给足：whenReady 里现在还夹着 pix:// 协议预挂（见 pix-protocol.js
+  // 里 prewarm 的注释），1200 字不够覆盖。
   const ready = main.indexOf("app.whenReady().then(() => {")
-  const readyBody = main.slice(ready, ready + 1200)
+  const readyBody = main.slice(ready, ready + 4000)
   assert.match(readyBody, /installApplicationMenu\(\)/, 'whenReady 里没有调用 installApplicationMenu')
 })
 

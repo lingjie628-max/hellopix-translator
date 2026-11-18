@@ -389,13 +389,50 @@ async function enterShell(data) {
   }
   renderTabs(await window.pix.tabs())
   if (refreshTimer) clearInterval(refreshTimer)
-  refreshTimer = setInterval(async () => {
+  refreshTimer = setInterval(pollSession, 8000)
+}
+
+/**
+ * 会话续期 + 撞单提醒（8 秒一轮）。
+ *
+ * ## 两道闸（2026-11-02 加的）
+ *
+ * ### ① 后台不刷
+ *
+ * 原先无条件每 8 秒打一次 `/client/session` + `/customer/reminders`。
+ * 用户把窗口最小化去干别的，这两个请求照样在打 —— 而在服务端日志里
+ * 它们表现为**不停地交替刷屏**（一轮两个请求，间隔 4 秒），
+ * 真出事的时候（比如今天的翻译故障）日志全被这玩意儿占满，根本看不见。
+ *
+ * 窗口藏起来时没人看得到撞单横幅，会话也不会因为少问几次就失效
+ * （服务端有 expires，真正失效时下一轮立刻就知道）。所以直接停。
+ *
+ * ### ② 上一轮没回来就别发下一轮
+ *
+ * 网络慢的时候 8 秒内回不来，原先会**继续发**，请求越堆越多 ——
+ * 断网时这是把队列塞爆的最短路径。加一个 inFlight 闸，
+ * 上一轮没结束就跳过本轮，相当于自动退避。
+ *
+ * 拉到前台时会**立刻补一次**（见文件末尾的 visibilitychange），
+ * 不让用户盯着"离开了一会儿"的旧数据干等 8 秒。
+ */
+let refreshInFlight = false
+async function pollSession() {
+  // 窗口在后台 / 页面不可见：跳过
+  if (typeof document !== 'undefined' && document.hidden) return
+  if (refreshInFlight) return
+  refreshInFlight = true
+  try {
     const resp = await window.pix.session()
     if (resp && resp.kicked) return
     if (resp && resp.obj) setProfile(resp.obj)
     // 撞单提醒搭这趟车，不另开定时器
     checkCollisions()
-  }, 8000)
+  } catch (e) {
+    // 网络抖动不该让定时器停摆：下一轮继续
+  } finally {
+    refreshInFlight = false
+  }
 }
 
 async function doLogin() {
@@ -1077,3 +1114,16 @@ if (!usernameEl.value) usernameEl.focus()
   setTimeout(push, 0)
   setTimeout(push, 300)
 })()
+
+// ---------------------------------------------------------------------------
+// 回到前台立刻续一次会话（2026-11-02）
+//
+// pollSession 在后台是跳过的（那两个请求曾经每 8 秒无限刷，把服务端日志
+// 淹了）。但"跳过"不能变成"回来还等 8 秒" —— 用户切回来时最可能正等着
+// 看撞单/续期结果。这里单纯提前触发一次，不走新的定时器。
+// ---------------------------------------------------------------------------
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return
+  if (!refreshTimer) return   // 还没登录 / 定时器未启动
+  pollSession()
+})

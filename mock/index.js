@@ -156,6 +156,9 @@ module.exports = function registerMock(app, options) {
     admins: [
       { id: 1, username: 'admin', password: 'admin123', nickname: '超级管理员', role: 'superadmin' }
     ],
+    // 工单：本地开发时是空列表，客服自己开会话。不预置假数据 ——
+    // 预置的工单会让人分不清"这是刚才点的"还是"本来就有"。
+    tickets: [],
     versions: [
       { id: 1, title: 'Hello Pix 基础版', subtitle: '基本功能，适合小型企业', port: 0, portUnlimited: 1, chars: 1500000, price: 35, engines: ['deepseek', 'gpt'], clients: { standalone: 0, mobile: 1, counter: 0 }, highlights: ['150万字符', 'DeepSeek、GPT'], features: { autoFill: 1, export: 1, moveMaster: 1, fanStats: 1, autoReply: 1, assistant: 1, repeatFan: 1, rotate: 1, keepChat: 0, counterRepeat: 1, ssl: 1, aws: 0, support: 0, feedback: 1 } },
       { id: 2, title: 'Hello Pix 高级版', subtitle: '高级功能，适合中大型企业', port: 0, portUnlimited: 1, chars: 3000000, price: 65, engines: ['deepseek', 'gpt'], clients: { standalone: 0, mobile: 1, counter: 0 }, highlights: ['300万字符', 'DeepSeek、GPT'], features: { autoFill: 1, export: 1, moveMaster: 1, fanStats: 1, autoReply: 1, assistant: 1, repeatFan: 1, rotate: 1, keepChat: 1, counterRepeat: 1, ssl: 1, aws: 0, support: 1, feedback: 1 } },
@@ -197,7 +200,9 @@ module.exports = function registerMock(app, options) {
       { id: 3, userId: 10002, username: 'demo', engine: 'deepseek', direction: 'en→zh', chars: 120, cost: 0.0058, sell: 0.016, snippet: 'Can you send the catalog?', createTime: later(-1) }
     ],
     audits: [
-      { id: 1, admin: 'admin', action: '登录超管后台', detail: '', createTime: now(), ip: '127.0.0.1' }
+      // detail 在真库里是 jsonb（形如 {"message":"..."}），mock 也照这个形状给，
+      // 否则本地看到的是纯文本、线上渲染成 [object Object]。
+      { id: 1, admin: 'admin', action: '登录超管后台', detail: { message: '' }, createTime: now(), ip: '127.0.0.1' }
     ],
     notices: [
       { id: 1, title: '企业用户说明', content: '购买即可成为企业用户，每买 1 组增加 1 个子账户名额。子账号里 Telegram / WhatsApp 等不限号。', enabled: 1, createTime: now() }
@@ -264,8 +269,8 @@ module.exports = function registerMock(app, options) {
       { id: 2, userId: 10001, username: 'pix', orderNum: 'CHAR20260902001', price: 0, originalPrice: 0, discountAmount: 0, paidAmount: 0, basename: '字符包 150万', month: 0, status: 1, type: '后台赠送', createTime: later(-3), kind: '字符', chars: 1500000, orderType: '赠送' }
     ],
     logins: [
-      { account: '8613800000001', loginType: '客户端', loginTime: now(), loginIp: '127.0.0.1', username: 'pix', nickname: '演示主号A' },
-      { account: 'pix', loginType: '商户后台', loginTime: later(-0.1), loginIp: '127.0.0.1', username: 'pix', nickname: '皮克斯商户' }
+      { account: '8613800000001', loginType: '客户端', loginTime: now(), createTime: now(), result: '成功', loginIp: '127.0.0.1', username: 'pix', nickname: '演示主号A' },
+      { account: 'pix', loginType: '商户后台', loginTime: later(-0.1), createTime: later(-0.1), result: '成功', loginIp: '127.0.0.1', username: 'pix', nickname: '皮克斯商户' }
     ],
     targets: [
       { orderNum: 'HP20260902001', wsid: '10001', insertTime: now(), account: '8613800000001', nickName: '演示主号A', completedDayTarget: 8, completedTotalTarget: 12, repeatQuantity: 1, dayTarget: 20, totalTarget: 100 }
@@ -353,7 +358,8 @@ module.exports = function registerMock(app, options) {
       id: nextAuditId++,
       admin: currentAdminName(req),
       action: action,
-      detail: detail || '',
+      // 与真库一致的 jsonb 形状（见 lib 里 audit 的写入方式）
+      detail: { message: detail || '' },
       createTime: now(),
       ip: (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString()
     })
@@ -2344,7 +2350,7 @@ module.exports = function registerMock(app, options) {
     const kind = query.kind || 'login'
     if (kind === 'audit') {
       let list = db.audits.slice()
-      if (query.keyword) list = list.filter(a => String(a.action).includes(query.keyword) || String(a.admin).includes(query.keyword) || String(a.detail).includes(query.keyword))
+      if (query.keyword) list = list.filter(a => String(a.action).includes(query.keyword) || String(a.admin).includes(query.keyword) || String(a.detail && a.detail.message || '').includes(query.keyword))
       res.json(page(list, query))
       return
     }
@@ -2479,6 +2485,227 @@ module.exports = function registerMock(app, options) {
     })
     audit(req, '新增 FAQ', query.question)
     okMsg(res, 'FAQ 已添加')
+  })
+
+  // ── 工单（客服 ←→ 商户）────────────────────────────────
+  //
+  // 状态流转复用服务端同一个状态机（server/services/ticket-service.js），
+  // 不在 mock 里重写一套 —— 否则本地对 mock 测着绿，上线换成真后端就变行为。
+  const ticketState = require('../server/services/ticket-service')
+  let nextTicketId = 1
+  let nextTicketMsgId = 1
+
+  function findTicket (id) {
+    return db.tickets.find(t => String(t.id) === String(id))
+  }
+
+  function pushTicketMessage (ticket, { authorType, authorName, body, internal }) {
+    const message = {
+      id: nextTicketMsgId++,
+      authorType,
+      authorName: authorName || '',
+      body: String(body || ''),
+      internal: Boolean(internal),
+      createTime: now()
+    }
+    ticket.messages.push(message)
+    ticket.lastReplyAt = message.createTime
+    ticket.updatedAt = message.createTime
+    return message
+  }
+
+  app.get('/apis/admin/tickets', (req, res) => {
+    if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
+    const query = q(req)
+    const size = Math.min(100, Math.max(1, Number(query.size) || 30))
+    const offset = Math.max(0, Number(query.offset) || 0)
+    let rows = db.tickets.slice()
+
+    if (query.status && query.status !== 'all') {
+      // 和服务端一样：非法状态回 400，不能静默返回空列表 ——
+      // 否则本地写错一个状态名看着"没数据"，上线才 400。
+      if (query.status !== 'open' && !ticketState.STATUSES.includes(query.status)) {
+        res.status(400).json({ success: 'error', msg: `状态取值不合法：${query.status}` })
+        return
+      }
+      rows = query.status === 'open'
+        ? rows.filter(t => t.status !== 'closed')
+        : rows.filter(t => t.status === query.status)
+    }
+    if (query.category && query.category !== 'all') rows = rows.filter(t => t.category === query.category)
+    if (query.assignee) rows = rows.filter(t => t.assignee === query.assignee)
+    if (query.keyword) {
+      const kw = String(query.keyword).toLowerCase()
+      rows = rows.filter(t => String(t.subject).toLowerCase().includes(kw) || String(t.username).toLowerCase().includes(kw))
+    }
+
+    // 排序必须和服务端 SQL 一致：未关闭优先 → 紧急度 → 最新动静
+    const rank = { urgent: 0, high: 1, medium: 2, low: 3 }
+    rows.sort((a, b) => {
+      const closed = Number(a.status === 'closed') - Number(b.status === 'closed')
+      if (closed) return closed
+      const p = (rank[a.priority] ?? 2) - (rank[b.priority] ?? 2)
+      if (p) return p
+      return String(b.lastReplyAt || b.createTime).localeCompare(String(a.lastReplyAt || a.createTime))
+    })
+
+    res.json({
+      success: 'success',
+      total: rows.length,
+      size,
+      offset,
+      rows: rows.slice(offset, offset + size).map(t => ({
+        id: t.id,
+        userId: t.userId,
+        username: t.username,
+        submitterName: t.submitterName,
+        subject: t.subject,
+        category: t.category,
+        priority: t.priority,
+        status: t.status,
+        assignee: t.assignee,
+        adminUnread: t.adminUnread,
+        lastReplyAt: t.lastReplyAt,
+        createTime: t.createTime,
+        updatedAt: t.updatedAt
+      }))
+    })
+  })
+
+  app.get('/apis/admin/tickets-unread', (req, res) => {
+    if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
+    const unread = db.tickets.filter(t => t.adminUnread && t.status !== 'closed').length
+    res.json({ unread })
+  })
+
+  app.get('/apis/admin/tickets/:id', (req, res) => {
+    if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
+    const ticket = findTicket(req.params.id)
+    if (!ticket) { res.status(404).json({ success: 'error', msg: '工单不存在' }); return }
+    ticket.adminUnread = false
+    res.json(Object.assign({}, ticket, { adminUnread: false, messages: ticket.messages.slice() }))
+  })
+
+  app.post('/apis/admin/tickets/create', (req, res) => {
+    if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
+    const query = q(req)
+    const subject = String(query.subject || '').trim()
+    const body = String(query.body || '').trim()
+    if (!subject) { res.status(400).json({ success: 'error', msg: '请填写工单主题' }); return }
+    if (!body) { res.status(400).json({ success: 'error', msg: '请填写工单内容' }); return }
+
+    const user = query.userId ? db.users.find(u => String(u.id) === String(query.userId)) : null
+    if (query.userId && !user) { res.status(404).json({ success: 'error', msg: '商户不存在' }); return }
+
+    const admin = (db.admins || [])[0] || { username: 'pix', nickname: '超管' }
+    // 非法分类/优先级回 400，与 server/routes/admin/tickets.js 一致
+    let category, priority
+    try {
+      category = ticketState.normalizeCategory(query.category)
+      priority = ticketState.normalizePriority(query.priority)
+    } catch (error) {
+      res.status(400).json({ success: 'error', msg: error.message })
+      return
+    }
+    const ticket = {
+      id: nextTicketId++,
+      userId: user ? user.id : null,
+      username: user ? user.username : '',
+      submitterKind: 'main',
+      submitterName: query.submitterName || (user ? user.username : ''),
+      subject,
+      category,
+      priority,
+      status: 'in_progress',
+      assignee: admin.username,
+      adminUnread: false,
+      userUnread: true,
+      lastReplyAt: null,
+      resolvedAt: null,
+      closedAt: null,
+      createTime: now(),
+      updatedAt: now(),
+      messages: []
+    }
+    db.tickets.unshift(ticket)
+    pushTicketMessage(ticket, {
+      authorType: 'admin',
+      authorName: query.authorName || admin.nickname || admin.username,
+      body,
+      internal: Boolean(Number(query.internal))
+    })
+    audit(req, '代客开单', subject)
+    okMsg(res, '工单已创建')
+  })
+
+  app.post('/apis/admin/tickets/reply', (req, res) => {
+    if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
+    const query = q(req)
+    const body = String(query.body || '').trim()
+    if (!body) { res.status(400).json({ success: 'error', msg: '回复内容不能为空' }); return }
+    const ticket = findTicket(query.id)
+    if (!ticket) { res.status(404).json({ success: 'error', msg: '工单不存在' }); return }
+    if (ticket.status === 'closed') { res.status(400).json({ success: 'error', msg: '工单已关闭，请让商户新建工单' }); return }
+
+    const admin = (db.admins || [])[0] || { username: 'pix', nickname: '超管' }
+    const internal = Boolean(Number(query.internal))
+    pushTicketMessage(ticket, {
+      authorType: 'admin',
+      authorName: query.authorName || admin.nickname || admin.username,
+      body,
+      internal
+    })
+    if (!internal) {
+      ticket.userUnread = true
+      if (ticket.status === 'waiting_user' || ticket.status === 'resolved') ticket.status = 'in_progress'
+      if (!ticket.assignee) ticket.assignee = admin.username
+    }
+    okMsg(res, internal ? '内部备注已保存' : '回复已发送')
+  })
+
+  app.post('/apis/admin/tickets/update', (req, res) => {
+    if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
+    const query = q(req)
+    const ticket = findTicket(query.id)
+    if (!ticket) { res.status(404).json({ success: 'error', msg: '工单不存在' }); return }
+
+    let touched = false
+    if (query.status !== undefined && query.status !== '') {
+      const current = { status: ticket.status, resolvedAt: ticket.resolvedAt, closedAt: ticket.closedAt }
+      let next
+      try {
+        next = ticketState.nextState(current, String(query.status))
+      } catch (error) {
+        res.status(400).json({ success: 'error', msg: error.message })
+        return
+      }
+      ticket.status = next.status
+      ticket.resolvedAt = next.resolvedAt
+      ticket.closedAt = next.closedAt
+      if (next.status === 'resolved' || next.status === 'closed') {
+        ticket.adminUnread = false
+        ticket.userUnread = true
+      }
+      // 转入「待商户回复」时点亮商户未读，否则商户收不到追问（见服务端同处注释）
+      if (next.status === 'waiting_user') ticket.userUnread = true
+      touched = true
+    }
+    if (query.priority !== undefined && query.priority !== '') {
+      try { ticket.priority = ticketState.normalizePriority(query.priority) } catch (e) {
+        res.status(400).json({ success: 'error', msg: e.message }); return
+      }
+      touched = true
+    }
+    if (query.category !== undefined && query.category !== '') {
+      try { ticket.category = ticketState.normalizeCategory(query.category) } catch (e) {
+        res.status(400).json({ success: 'error', msg: e.message }); return
+      }
+      touched = true
+    }
+    if (query.assignee !== undefined) { ticket.assignee = String(query.assignee || ''); touched = true }
+    if (!touched) { res.status(400).json({ success: 'error', msg: '没有要修改的字段' }); return }
+    ticket.updatedAt = now()
+    okMsg(res, '工单已更新')
   })
 
   app.get('/apis/admin/notices', (req, res) => {

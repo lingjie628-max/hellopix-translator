@@ -59,12 +59,17 @@ for (const p of PUBLIC_PATHS) {
 /**
  * 是否强制超管绑定两步验证。
  *
+ * 安全默认是开启。只有显式设置 `PIX_REQUIRE_ADMIN_TOTP=0`（或
+ * false/no/off）才关闭，避免部署时漏配一个环境变量就把最高权限账号
+ * 退回“只有密码”的模式。
+ *
  * 每次求值而不是模块加载时缓存 —— 测试要能在同一进程里切换这个开关，
  * 缓存成常量就只能重启进程才能测到另一条分支。
  */
 function requireAdminTotp () {
   const value = String(process.env.PIX_REQUIRE_ADMIN_TOTP || '').toLowerCase()
-  return value === '1' || value === 'true' || value === 'yes'
+  if (!value) return true
+  return !['0', 'false', 'no', 'off'].includes(value)
 }
 
 /**
@@ -78,6 +83,55 @@ function isExpired(expiresAt) {
   if (!expiresAt) return false
   const at = new Date(expiresAt).getTime()
   return Number.isFinite(at) && at <= Date.now()
+}
+
+/**
+ * 该商户的套餐是否**按时间**限制有效期。
+ *
+ * ## 为什么要有这个开关
+ *
+ * 2026-11-17：jiufa 的套餐在 04:23 到期，04:24 就登不上了 —— 而他账上
+ * 还有 254 万字符没用完。用户的理解是"我买的是字符量，凭什么按时间锁我"，
+ * 这个理解是对的：基础版/高级版/专业版卖的是**字符额度**，时间只是
+ * 当初顺手加的附属条件。
+ *
+ * 所以这三档改成**只看字符余额**：余额 > 0 就能用，用完自然报
+ * `INSUFFICIENT_CHARS`（这条拦截本来就有，在 core-service 的扣费事务里）。
+ *
+ * `solo_monthly`（单人包月）例外 —— 它按 `chars_unlimited` 卖，
+ * 卖的就是时间，没有字符上限可扣，必须继续看到期时间。
+ *
+ * ## 为什么按套餐 code 而不是写死 id
+ *
+ * 套餐是运营可以改的（后台能加档），id 会漂。code 是业务标识，稳定。
+ *
+ * ## 查不到时的默认值
+ *
+ * 拿不到套餐 code（session 没带）时**按时间算**，退回改造前的行为。
+ * 宁可多拦一个用户让他来找客服，也不要因为一次查询失败把全站变成无限期免费。
+ */
+const CHAR_BILLED_PACKAGES = Object.freeze(['basic', 'advanced', 'pro'])
+
+function usesTimeLimit(parent) {
+  const code = String((parent && parent.packageCode) || '').trim().toLowerCase()
+  if (!code) return true
+  return !CHAR_BILLED_PACKAGES.includes(code)
+}
+
+/**
+ * 这个商户现在还能不能用。
+ *
+ * 按字符计费的套餐 → 看余额；按时长计费的套餐 → 看到期时间。
+ * 这里只做"还有没有余额"的粗判，真正的扣费与超扣防护仍走
+ * core-service 的原子事务，不会因为这里读到的值过期就超扣。
+ */
+function isAccountUnavailable(parent) {
+  if (!parent) return true
+  if (usesTimeLimit(parent)) return isExpired(parent.expiresAt)
+  const balance = Number(parent.charBalance)
+  // 余额字段异常就退回按时间判断，避免把脏数据当成"可以用"
+  if (!Number.isFinite(balance)) return isExpired(parent.expiresAt)
+  return balance <= 0
 }
 
 class AuthService {
@@ -95,7 +149,7 @@ class AuthService {
 
   async hash(value) {
     if (!password.validPassword(value)) {
-      throw new ApiError(400, '密码需为 6-128 位', 'WEAK_PASSWORD')
+      throw new ApiError(400, '密码需为 10-128 位，且同时包含字母和数字', 'WEAK_PASSWORD')
     }
     return this.hashSecret(value)
   }
@@ -179,7 +233,7 @@ class AuthService {
       await this.recordLoginFailure(req, username, loginType, 'ACCOUNT_DISABLED')
       throw new ApiError(403, '账号已停用', 'ACCOUNT_DISABLED')
     }
-    if (isExpired(session.parent.expiresAt)) {
+    if (isAccountUnavailable(session.parent)) {
       await this.recordLoginFailure(req, username, loginType, 'ACCOUNT_EXPIRED')
       throw new ApiError(403, '账号已过期', 'ACCOUNT_EXPIRED')
     }
@@ -192,10 +246,27 @@ class AuthService {
       await this.repository.query(`UPDATE ${table} SET bound_device=$2 WHERE id=$1`, [session.account.id, deviceId])
     }
     await this.security.destroySession(req, res, 'user')
-    await this.security.createSession(req, res, 'user', this.subject(session.kind, session.account.id), {
+    const subjectId = this.subject(session.kind, session.account.id)
+    await this.security.createSession(req, res, 'user', subjectId, {
       remember: clientMode || Boolean(data.remember),
       deviceId
     })
+    /**
+     * 诊断：确认建会话时用的 subjectId 与预期一致。
+     *
+     * 线上 2026-11-11 排查「商户点解绑子账号，自己也被踢」时发现 Redis 里
+     * 只剩下 `sub:*` 的会话桶，一个 `main:*` 都没有 —— 但 login_logs 明明
+     * 记着 merchant 登录成功。没有这行日志就无法区分「登录时 subject 就错了」
+     * 和「建好了但后来被删了」。只打 subject 标识，不打 cookie / 密码。
+     */
+    if (process.env.PIX_AUTH_TRACE === '1') {
+      console.warn('[auth-trace] session created', {
+        subjectId,
+        kind: session.kind,
+        accountId: session.account.id,
+        clientMode: !!clientMode
+      })
+    }
     await this.repository.query(
       `INSERT INTO login_logs(user_id,sub_account_id,account,login_type,success,login_ip,user_agent,device_id)
        VALUES($1,$2,$3,$4,true,NULLIF($5,'')::inet,$6,$7)`,
@@ -275,24 +346,53 @@ class AuthService {
 
   async loginAdmin(req, res, data) {
     const admin = await this.verifyAdminCredentials(req, data)
+    // Never let this compatibility helper bypass the second factor. The HTTP
+    // route issues a one-time ticket when TOTP is enabled; this method is only
+    // safe for an unbound account during the initial setup flow.
+    if (admin.totpEnabled) {
+      throw new ApiError(403, '该超管已启用两步验证，请使用 TOTP 登录流程', 'TOTP_REQUIRED')
+    }
     return this.startAdminSession(req, res, admin)
   }
 
   async resolve(req, type) {
     const securitySession = await this.security.resolveSession(req, type)
-    if (!securitySession) return null
+    if (!securitySession) {
+      // 诊断用：区分"cookie 没了"与"会话被撤销/过期/IP 变了"。
+      // 线上 2026-11-11 排查「解绑子账号后自己也被踢」时，没有这行日志就分不清
+      // 是哪个环节把会话丢掉的。只打 subject 标识，不打 cookie 内容。
+      if (process.env.PIX_AUTH_TRACE === '1') {
+        console.warn('[auth-trace] no security session', {
+          path: String(req.path || '').slice(0, 64),
+          hasCookie: !!(req.headers && req.headers.cookie && /pix_user=/.test(req.headers.cookie))
+        })
+      }
+      return null
+    }
     if (type === 'admin') {
       const admin = await this.repository.adminById(securitySession.subjectId)
       return admin ? { securitySession, admin } : null
     }
     const session = await this.repository.sessionAccount(securitySession.subjectId)
-    if (!session || Number(session.account.status) !== 1 || Number(session.parent.status) !== 1) return null
+    if (!session || Number(session.account.status) !== 1 || Number(session.parent.status) !== 1) {
+      if (process.env.PIX_AUTH_TRACE === '1') {
+        console.warn('[auth-trace] session account unusable', {
+          subjectId: securitySession.subjectId,
+          reason: !session ? 'not-found' : (Number(session.account.status) !== 1 ? 'account-disabled' : 'parent-disabled'),
+          path: String(req.path || '').slice(0, 64)
+        })
+      }
+      return null
+    }
     // 到期判断必须放在**每次请求**上，而不是只在登录时做一次。
     //
     // 否则「到期」实际效果只是拦住下一次登录：已经登录的客户端把窗口挂着，
     // 就能一直翻译下去 —— 用户只要不主动退出，到期对他没有任何约束。
     // 子账号同理：主账号到期/停用，整个团队一起失效，不能只断主号那一条连接。
-    if (isExpired(session.parent.expiresAt)) return null
+    //
+    // 按字符计费的套餐（基础/高级/专业）在这里改看**余额**：字符用光才断，
+    // 而不是日历到点就断。时长套餐（单人包月）仍看到期时间。见 isAccountUnavailable。
+    if (isAccountUnavailable(session.parent)) return null
     return Object.assign({ securitySession }, session)
   }
 
@@ -333,7 +433,7 @@ class AuthService {
           //
           // 但直接强制会酿成事故：线上现有超管如果都没绑 TOTP，
           // 代码一上线所有人立刻进不去后台 —— 拿可用性换来的不是安全，是停机。
-          // 所以默认**关闭**，由运维先确认线上状态、逐个绑定后再打开：
+        // 当前默认是**开启**；显式配置 0 仅用于兼容旧部署的临时窗口。
           //
           //   PIX_REQUIRE_ADMIN_TOTP=1   → 未绑 TOTP 的超管只能访问绑定接口
           //
@@ -426,4 +526,4 @@ class AuthService {
   }
 }
 
-module.exports = { AuthService, isExpired, PUBLIC_PATHS }
+module.exports = { AuthService, isExpired, isAccountUnavailable, usesTimeLimit, PUBLIC_PATHS }

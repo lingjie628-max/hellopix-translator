@@ -79,6 +79,8 @@ const consoleLog = {
 }
 
 let guard = null
+// 启动记账结果。声明在顶层：单实例锁分支和多开逃生分支都要写它。
+const stats = { starts: 0, safeMode: false }
 
 if (!GUARD_OFF) {
   guard = createHealthGuard({
@@ -89,7 +91,13 @@ if (!GUARD_OFF) {
   })
 
   // ---- 1) 启动记账（必须在 ready 之前：安全模式要在这里决定关不关 GPU）----
-  const stats = guard.begin()
+  //
+  // ★ 2026-11-08 修正：`begin()` 原本在这里直接调用，但它在**单实例锁之前**。
+  //   用户重复点图标时，第二个进程会先执行 begin()（把启动计数 +1），
+  //   才发现拿不到锁、立刻 exit(0)。几次误触之后，5 分钟内的计数就 >=3，
+  //   主进程下次启动被误判为「崩溃循环」进入安全模式 ——
+  //   实例限到 2 个、翻译桥被摘掉，表现就是「打开就闪退 / 不翻译」。
+  //   现在改成：只有拿到锁的那个进程才记账（见文件末尾的 installGuard()）。
   global.__pixGuard = guard
 
   /**
@@ -211,18 +219,115 @@ if (!GUARD_OFF) {
   app.on('before-quit', () => {
     try { guard.markCleanExit() } catch (e) {}
   })
-
-  // 启动日志：把这次的判定写清楚，真机排障时第一行就能看到。
-  // 注意：安全模式在当前形态下**实际生效**的只有「关 GPU」与「缓存上限」
-  // （见上面两处）。`policy().maxTabs` / `policy().disableBridge` 只是**建议值**，
-  // 真正让它们生效需要 main.js 各一行（见 patches/main.js-integration.md 第 5 节），
-  // 不在本包的零改动范围内 —— 写在这里是为了让日志能反映"本应限到几个"。
-  console.log('[guard] 启动：' + JSON.stringify({
-    startsInWindow: stats.starts,
-    safeMode: stats.safeMode,
-    policy: guard.policy()
-  }))
 }
 
-// ---- 6) 交给原来的 main.js（顺序必须在上面全部完成之后）----
+// ---- 6) 单实例锁（必须在 require main.js 之前）----
+//
+// ## 为什么必须有这一层
+//
+// Electron 默认**不限制实例数**：双击快捷方式 N 次就是 N 个完整进程，
+// 每个进程各自持有 userData、各自跑定时器、各自连服务端。用户看到的是
+// "后台进程重复"—— 同一个账号被登了三次，凭据互相踢、会话反复失效。
+//
+// 这个锁只能放在 require('./main.js') **之前**：main.js 顶部就会创建
+// 窗口、注册 IPC、开始轮询。等到 ready 之后再判断，第二个进程已经做完了
+// 一半副作用（抢过槽位、写过状态文件），再退出就留下脏状态。
+//
+// ## 收到第二次启动时做什么
+//
+// 不新建任何东西 —— 把已有的主窗口显示出来、还原最小化、抢焦点。
+// 用户的预期是"我点了它，它出现在我面前"，而不是"它又开了一个"。
+//
+// ## 逃生开关
+//
+// `PIX_ALLOW_MULTI_INSTANCE=1` 时完全跳过本层。留着它是因为
+// `src/window/instance-slot.js` 那套多开槽位机制仍然在 main.js 里生效
+// —— 真要临时多开排障，设这个变量即可，不必改代码。
+//
+// 注意：**不需要**在这里抢 slot。单实例下永远是槽位 1，也就是历史命名，
+// 用户升级后不会丢 Telegram / WhatsApp 登录态。
+const ALLOW_MULTI = String(process.env.PIX_ALLOW_MULTI_INSTANCE || '') === '1'
+
+if (!ALLOW_MULTI) {
+  const gotLock = app.requestSingleInstanceLock()
+
+  if (!gotLock) {
+    // 锁已经在上一个实例手里。**立刻**退出，不碰任何磁盘状态。
+    // exit(0) 而不是 exit(1)：这不是错误，是"已有一个在跑"的正常结果，
+    // 用非零码会让外层的崩溃计数/启动记账误以为又崩了一次。
+    app.exit(0)
+  } else {
+    // ★ 只有拿到锁的进程才记账。
+    //   第二个进程走上面的 exit(0)，绝不能碰 health-state.json，
+    //   否则用户多点几次图标就会把主进程推进安全模式。
+    try {
+      const s = guard.begin()
+      stats.starts = s.starts
+      stats.safeMode = s.safeMode
+      // 安全模式下的 GPU 开关必须在 ready 之前生效（begin() 内部已 appendSwitch）。
+    } catch (e) {
+      console.error('[boot] 启动记账失败：' + (e && e.message))
+    }
+
+    /**
+     * 第二个实例被挡下时，Electron 会在**已有的那个进程**里触发这个事件。
+     * argv 里带着对方的命令行 —— 以后要做"用文件打开 / 带参数唤起"，
+     * 入口就是这里。
+     */
+    app.on('second-instance', (_event, argv, workingDirectory) => {
+      try {
+        const win = typeof global.__pixFocusMainWindow === 'function'
+          ? global.__pixFocusMainWindow()
+          : null
+        if (win) return
+      } catch (e) {}
+
+      // main.js 还没注册聚焦钩子（例如第二个实例在第一个刚启动时就被点开）。
+      // 退回到标准做法：从 BrowserWindow 列表里挑第一个可用的主窗口。
+      try {
+        const { BrowserWindow } = electron
+        const wins = BrowserWindow.getAllWindows().filter(w => w && !w.isDestroyed())
+        // 探测窗口（代理节点检测用的 380x260 隐藏窗）不该被掀出来。
+        const main = wins.find(w => {
+          try {
+            const b = w.getBounds()
+            return b.width >= 600 && b.height >= 400
+          } catch (e) { return false }
+        }) || wins[0]
+        if (!main) return
+        if (main.isMinimized()) main.restore()
+        if (!main.isVisible()) main.show()
+        main.focus()
+      } catch (e) {
+        console.error('[boot] 第二个实例请求聚焦失败：' + (e && e.message))
+      }
+      void argv
+      void workingDirectory
+    })
+
+    console.log('[boot] 已取得单实例锁（PIX_ALLOW_MULTI_INSTANCE=1 可绕过）')
+    // 启动日志：把这次的判定写清楚，真机排障时第一行就能看到。
+    console.log('[guard] 启动：' + JSON.stringify({
+      startsInWindow: stats.starts,
+      safeMode: stats.safeMode,
+      policy: guard.policy()
+    }))
+  }
+}
+
+// ---- 7) 交给原来的 main.js（顺序必须在上面全部完成之后）----
+//
+// 多开逃生模式（PIX_ALLOW_MULTI_INSTANCE=1）没有走单实例锁分支，
+// 记账要在那里补上，否则 guard 永远是初始状态：safeMode 恒 false
+// （这个分支本来就是排障用，不判安全模式是对的，但 starts 仍要记）。
+if (ALLOW_MULTI && guard) {
+  try {
+    const s = guard.begin()
+    stats.starts = s.starts
+    stats.safeMode = s.safeMode
+  } catch (e) {
+    console.error('[boot] 启动记账失败：' + (e && e.message))
+  }
+}
+
 require('./main.js')

@@ -96,6 +96,37 @@ async function createRuntime(options) {
   app.disable('x-powered-by')
   app.set('trust proxy', 'loopback')
   /**
+   * 机房失联时的应急公告页（PIX_MAINTENANCE=1 开启，默认关闭）。
+   *
+   * 场景：生产机整段网络不可达，临时用别处机器顶班。此时这个实例里没有真实
+   * 用户数据，直接放行登录只会让用户看到"账号不存在/密码错误"——比打不开更糟，
+   * 用户会以为账号被删了。所以整站先回公告页。
+   *
+   * ★ 必须注册在 api.register 之前 ★：express 按注册顺序匹配，装在后面对
+   * /apis/* 完全无效（实测漏了登录接口）。也不能依赖后面的 app.get('/')。
+   *
+   * 放行静态产物是有意的：浏览器会预取这些文件，全拦掉会让公告页自己白屏。
+   * /health 必须始终可达，否则外部监控会把"正在顶班"误判成"彻底挂了"。
+   *
+   * 开关而不是改代码，是为了机房恢复后不用重新发版：删掉环境变量重启即可。
+   */
+  if (envFlag(process.env.PIX_MAINTENANCE)) {
+    const maintenanceFile = path.join(__dirname, '..', 'dist', 'maintenance.html')
+    // 域名映射到本地但 Host 千奇百怪，这里不看 Host，一律拦。
+    // 判断方式与下方 express.static 的产物类型保持一致。
+    const STATIC_ASSET = /\.(?:js|css|png|jpe?g|svg|ico|woff2?|ttf|otf|map)$/i
+    app.use((req, res, next) => {
+      if (!['GET', 'HEAD'].includes(req.method)) return next()
+      if (req.path === '/health') return next()
+      if (STATIC_ASSET.test(req.path)) return next()
+      // 不缓存：恢复后用户刷新就该看到正常页面，不能被 503 卡在浏览器里
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate')
+      res.setHeader('Retry-After', '3600')
+      // 503 而非 200：搜索引擎会因此暂时摘除页面，而不是把公告页当成官网收录
+      res.status(503).sendFile(maintenanceFile)
+    })
+  }
+  /**
    * ★ 图片翻译的专属 body 解析（必须排在全局 256kb 之前）★
    *
    * 全局是 `express.json({ limit: '256kb' })` —— 那是**防止大 body 打爆内存**

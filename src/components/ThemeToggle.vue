@@ -40,3 +40,27 @@ export default {
   }
 }
 </script>
+
+<style scoped>
+/*
+ * `white-space: nowrap` 与 `flex-shrink: 0` 不是装饰，是防压缩。
+ * 去掉它们之后，这个按钮作为 flex 子项会被父容器挤扁：
+ * 文案折成两行、高度塌下去，白天/夜间两字上下叠在一起 —— 就是"UI 坏了"。
+ */
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--w-border);
+  background: var(--w-surface);
+  color: var(--w-text-muted);
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background .18s ease, color .18s ease, border-color .18s ease;
+}
+</style>

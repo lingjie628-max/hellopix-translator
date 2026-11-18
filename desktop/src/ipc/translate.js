@@ -211,7 +211,9 @@ function registerTranslateIpc (deps) {
           image: shot.image,
           mime: shot.mime || 'image/jpeg',
           to: to,
-          engine: data.engine || ''
+          // 图片翻译是明确标注的 GPT 视觉功能，不沿用可能不支持看图的文本通道。
+          // 固定值由主进程注入，页面世界不能借此选择任意通道。
+          engine: 'gpt'
         }
       })
       // 只缓存成功结果。失败不缓存 —— 下次用户重试应该真的重试。
@@ -255,19 +257,28 @@ function registerTranslateIpc (deps) {
   // ---- 客页调用（handleUnsafe + trustedTabSender 自校验）----
 
   /**
-   * 「翻译图片」UI 源码（同步）。
+   * 页面世界脚本的三个 file:// URL（同步）。
    *
-   * 客页是 sandbox:true，preload 读不到本地文件，只能向这里要。
-   * 用 sendSync 是因为它在 preload 启动阶段同步返回，不引入 async 竞态。
+   * ## 为什么要有这条通道（2026-10-29）
    *
-   * 守卫用 trustedTabSender 而不是 isMainSender —— 发起方是**客页的
-   * preload**（WebContentsView），本来就不是主界面。
+   * 客页是 sandbox:true，preload 读不到本地文件；而「翻译图片」的按钮必须
+   * 跑在**页面世界**（隔离世界的 click 回调收不到真实鼠标，实测见
+   * test/image-translate-page-world.test.js）。页面世界又只能通过
+   * `<script src>` 收代码，不认字符串。
    *
-   * 返回的是纯 UI 字符串（CSS + 状态机），不含任何凭据，所以给客页是安全的。
+   * 所以由主进程把代码写进临时文件，这里只把 URL 交出去。
+   * 同步是必须的：脚本标签要在 preload 阶段立刻插，异步回来就晚了。
+   *
+   * 守卫用 trustedTabSender 而不是 isMainSender —— 发起方是客页的 preload。
+   * 返回的是临时目录里的 file:// 路径，不含任何凭据。
    */
-  reg.handleSync('translate:imageUiSource', () => {
-    if (typeof actions.imageUiSource !== 'function') return ''
-    return actions.imageUiSource()
+  reg.handleSync('translate:pageScripts', (event) => {
+    if (typeof actions.pageScriptUrls !== 'function') return null
+    // 协议要挂到**发起方所在的 session** 上：客页跑在独立 partition，
+    // 挂错 session 页面里就取不到 pix:// 脚本。
+    let ses = null
+    try { ses = event.sender.session } catch (e) {}
+    return actions.pageScriptUrls(ses)
   }, sender => Boolean(actions.trustedTabSender(sender)))
 
   reg.handleUnsafe('translate:guestPrefs', event => {

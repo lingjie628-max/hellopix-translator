@@ -50,7 +50,9 @@ const EXTRACT_SCRIPT = `
     const url = img.currentSrc || img.src
     if (!url) continue
     const area = visibleArea(img)
-    if (area > 0 && (!best || area > best.area)) best = { area: area, url: url }
+    if (area > 0 && (!best || area > best.area)) {
+      best = { area: area, url: url, el: img }
+    }
   }
   if (!best) {
     for (const el of document.querySelectorAll('*')) {

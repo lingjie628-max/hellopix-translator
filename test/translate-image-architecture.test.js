@@ -121,11 +121,11 @@ test('★ 架构7：图片路由必须挂在 CSRF 之后（不是公开端点）
 
 test('★ 架构8：同步 IPC 通道必须带来源校验（否则任意页面可拉取）', () => {
   const src = read('desktop/src/ipc/translate.js')
-  const idx = src.indexOf("reg.handleSync('translate:imageUiSource'")
+  const idx = src.indexOf("reg.handleSync('translate:pageScripts'")
   assert.ok(idx > 0, '找不到同步通道注册')
-  const line = src.slice(idx, idx + 400)
+  const line = src.slice(idx, idx + 600)
   assert.match(line, /trustedTabSender/,
-    '同步通道必须校验来源 —— 它返回的是源码字符串，任意嵌入页面不该拿得到')
+    '同步通道必须校验来源 —— 它返回的是页面世界脚本的 URL，任意嵌入页面不该拿得到')
 })
 
 test('★ 架构9：同步通道拒绝时也必须 setReturnValue（否则渲染进程卡死）', () => {

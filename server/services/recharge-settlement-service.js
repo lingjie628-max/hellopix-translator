@@ -135,6 +135,23 @@ class RechargeSettlementService {  constructor(repo, options) {
       // 先找「疑似归属」再下结论：金额精确匹配失败不等于这笔钱与平台无关，
       // 最常见的原因是商户抄错数字。疑似结果**只提示不裁决**。
       const suspicion = await this.suspectCandidates(client, transfer)
+
+      // ★ 分水岭：有没有可能是我们的客户 ★
+      //
+      // 这个收款地址同时被多个项目共用（业主 2026-10-27 明确说明），
+      // 别的项目的进款、测试款、外部转账都会打进来。以前它们全部写进
+      // recharge_exceptions，异常池越堆越多，巡检天天报「异常积压」，
+      // 真正的订单问题被淹没 —— 2026-10-27 那次 59998 USDT 误报就是这么来的。
+      //
+      // 现在：
+      //   - 有疑似候选（金额相近 + 时间接近）→ 仍进异常池，请人工确认
+      //   - 完全没有 → 判定无关，链上标 ignored 留痕，不进异常池、不告警
+      if (!suspicion) {
+        const ignored = verdicts.unrelated(this, transfer, suspicion)
+        await this.finalizeTransaction(client, recorded.id, ignored.transactionPatch)
+        return ignored.result
+      }
+
       return this.rejectWithException(client, transfer, recorded.id,
         verdicts.noMatch(this, transfer, suspicion))
     }

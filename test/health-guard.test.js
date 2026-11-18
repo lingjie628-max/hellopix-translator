@@ -191,3 +191,52 @@ test('正常退出清掉 crashed 标记，避免下次被误判为崩溃循环',
   const state = JSON.parse(fs.readFileSync(path.join(dir, 'health-state.json'), 'utf8'))
   assert.equal(state.crashed, false)
 })
+
+// ---- 2026-11-08 线上事故回归 ----
+// 现象：某台 Mac 打开就闪退/不翻译，服务端收到 11 条「异常退出」。
+// 根因：stability-boot 在**单实例锁之前**调用 begin()，用户重复点图标时，
+// 第二个进程先把启动计数 +1 再 exit(0)，几次误触就把主进程推进安全模式。
+// 下面两条锁死「误触不计数」和「crashed 不留残留」。
+
+test('crashed 标记必须在 begin() 里消费掉，不能残留到下一次启动', () => {
+  const dir = tmpDir()
+  // 模拟被系统强杀（活动监视器 / 断电）：只留下 crashed=true，没有 clean exit
+  fs.writeFileSync(path.join(dir, 'health-state.json'), JSON.stringify({ starts: [], crashed: true }))
+
+  // 第一次重启：读到了 crashed，本次消费掉
+  createHealthGuard({ app: {}, dir }).begin()
+  let state = JSON.parse(fs.readFileSync(path.join(dir, 'health-state.json'), 'utf8'))
+  assert.equal(state.crashed, false, 'begin() 之后 crashed 必须复位')
+
+  // 隔很久再开一次（超过窗口）：绝不能再因为这个残留标记被判循环
+  const guard = createHealthGuard({ app: {}, dir })
+  const stats = guard.begin()
+  assert.equal(stats.safeMode, false, '残留的 crashed 不能把正常重启判成崩溃循环')
+})
+
+test('hardExit 自己安排的重启，单次不该判成崩溃循环', () => {
+  const dir = tmpDir()
+  const app = { relaunch: () => {}, exit: () => {}, disableHardwareAcceleration: () => {}, commandLine: { appendSwitch: () => {} } }
+
+  // 第一次：正常启动 → 主进程致命错误 → hardExit 写 crashed + selfRelaunch 并 relaunch
+  createHealthGuard({ app, dir }).begin()
+  createHealthGuard({ app, dir }).hardExit(1)
+
+  // 第二次启动（同一个硬重启）：只有 2 次启动、且是我们自己安排的，
+  // 不能因为「crashedLast && >=2」就把用户按进安全模式。
+  const stats = createHealthGuard({ app, dir }).begin()
+  assert.equal(stats.starts, 2)
+  assert.equal(stats.safeMode, false, '我们自己 relaunch 的那一次不算崩溃循环')
+})
+
+test('但我们自己重启连续发生 3 次，仍然要判循环（真死循环必须抓住）', () => {
+  const dir = tmpDir()
+  const app = { relaunch: () => {}, exit: () => {}, disableHardwareAcceleration: () => {}, commandLine: { appendSwitch: () => {} } }
+  let last = null
+  for (let i = 0; i < 3; i++) {
+    last = createHealthGuard({ app, dir }).begin()
+    createHealthGuard({ app, dir }).hardExit(1)
+  }
+  assert.equal(last.starts, 3)
+  assert.equal(last.safeMode, true, '3 次连续起不来必须进安全模式，不能因为是我们自己重启就放过')
+})

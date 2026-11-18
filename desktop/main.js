@@ -128,6 +128,118 @@ function safeModeDisablesBridge() {
   } catch (e) {}
   return false
 }
+
+/**
+ * 用户点「重新开启翻译」时的恢复动作（2026-11-02）。
+ *
+ * ## 为什么不能只 `reload()`
+ *
+ * 翻译桥是 **preload**（`guest-inject.js`），只在 `new WebContentsView()`
+ * 那一刻挂上去。`webContents.reload()` 复用同一个 WebContentsView，
+ * preload 不会被重新执行 —— 刷新一百次翻译照样是死的。
+ * 必须**重建视图**。
+ *
+ * ## 顺序很关键
+ *
+ * 1. 先清安全模式（否则新建的视图还是会读到 `disableBridge=true`）
+ * 2. 再重建视图（这时 preload 才真的带上）
+ * 3. 最后把位置按原顺序重排（重建会丢 active/布局）
+ *
+ * 失败时不清安全模式就重启 = 用户白点一次。所以第 1 步失败直接返回 false。
+ */
+function translateRestore() {
+  try {
+    const guard = global.__pixGuard
+    if (!guard || typeof guard.clearSafeMode !== 'function') {
+      // 没有守卫（极旧版本 / 守卫被关）时，翻译本来就是好的，直接当成功
+      return { ok: true, reason: 'no_guard' }
+    }
+    if (!guard.clearSafeMode()) return { ok: false, reason: 'clear_failed' }
+
+    // 重建每个实例的视图。记录原顺序，重建后按原位置放回去。
+    const snapshot = tabs.map(t => ({
+      tab: t,
+      index: Number(t.index) || 1,
+      view: t.view,
+      active: t.id === activeId
+    }))
+    let rebuilt = 0
+    for (const s of snapshot) {
+      try {
+        const item = s.tab.item
+        if (!item || typeof createWebView !== 'function') continue
+        const nextView = createWebView(s.tab.partition, s.tab.settings, item, s.tab.homeUrl, {
+          platform: s.tab.platform,
+          account: accountSlug(),
+          id: s.tab.id
+        })
+        // 旧视图必须摘掉：留在 contentView 里会叠在下面，继续吃内存和 CPU
+        try {
+          if (win && win.contentView && s.view) win.contentView.removeChildView(s.view)
+        } catch (e) {}
+        try { if (s.view && s.view.webContents && !s.view.webContents.isDestroyed()) s.view.webContents.close() } catch (e) {}
+        s.tab.view = nextView
+        s.tab.loading = true
+        if (s.tab.settings && s.tab.settings.muteAll) nextView.webContents.setAudioMuted(true)
+        bindTabLoading(s.tab)
+        startTabLoad(s.tab)
+        if (win && win.contentView) win.contentView.addChildView(nextView)
+        rebuilt++
+      } catch (e) {
+        console.error('translateRestore: 重建实例失败 ' + (s.tab && s.tab.id) + ' ' + (e && e.message))
+      }
+    }
+    // 恢复选中状态与布局
+    try { if (activeId) switchTab(activeId) } catch (e) {}
+    try { layoutViews() } catch (e) {}
+    console.log('[translate] 用户恢复翻译：已重建 ' + rebuilt + '/' + snapshot.length + ' 个实例')
+    return { ok: rebuilt > 0 || snapshot.length === 0, rebuilt, total: snapshot.length }
+  } catch (e) {
+    console.error('translateRestore 失败：' + (e && e.message))
+    return { ok: false, reason: 'error' }
+  }
+}
+
+/**
+ * 翻译不可用时的**用户可读**说明，给渲染层的横幅用。
+ *
+ * ## 为什么要这个（2026-11-02 线上事故）
+ *
+ * 用户报「1.3.5 不翻译了」。查下来：客户端在 5 分钟内崩了 5 次，
+ * 触发了崩溃循环保护 → `disableBridge` → **翻译桥被摘掉**。
+ * 这个设计本身没错（先保证能开起来），错在**摘掉之后一个字都不告诉用户**：
+ * 界面没有任何变化，点「译」没反应，用户只能以为软件坏了，
+ * 而实际上他只要等 5 分钟重启一次就好。
+ *
+ * 现在把它变成一个能看见、能自己救的提示。
+ *
+ * ## 为什么不用 safeModeDisablesBridge 直接判断
+ *
+ * 那个函数只答"桥关没关"。用户需要的是"为什么关、怎么办"——
+ * 比如崩溃循环 vs 用户自己开了安全模式，话术完全不同。
+ * 所以这里返回结构化原因，由渲染层决定怎么说。
+ *
+ * 返回 `{ limited: false }` 表示翻译正常，渲染层据此隐藏横幅。
+ */
+function translateAvailability() {
+  try {
+    const guard = global.__pixGuard
+    if (!guard) return { limited: false }
+    const p = typeof guard.policy === 'function' ? guard.policy() : {}
+    if (!p || !p.disableBridge) return { limited: false }
+    const rep = typeof guard.report === 'function' ? (guard.report() || {}) : {}
+    return {
+      limited: true,
+      reason: 'safe_mode',
+      // 启动次数一并给出去：文案里说「近 5 分钟启动 N 次」比干说「异常」可信得多
+      startsInWindow: Number(rep.startsInWindow) || 0,
+      safeMode: !!rep.safeMode
+    }
+  } catch (e) {
+    // 守卫本身出错不能反过来把翻译也判死 —— 宁可报"正常"
+    return { limited: false }
+  }
+}
 // 顶部标签栏高度。含 6px 横向滚动条 —— 标签本身 62px + 上下 padding 10px = 72px，
 // 多出的 6px 给滚动条，否则开多窗口滚动条会把标签压扁。与 styles.css 的 .tabs 同步。
 const TABS_HEIGHT = 80
@@ -2909,45 +3021,36 @@ function runEditCommand(wc, action) {
 async function copyImageToClipboard (wc, url) {
   try {
     const buf = await downloadAsBuffer(wc, url)
-    if (!buf || !buf.length) throw new Error('图片是空的')
+    if (!buf || !buf.length) { notifyImageCopyFailed(wc, '图片是空的'); return false }
     const image = electron.nativeImage.createFromBuffer(buf)
-    if (!image || image.isEmpty()) throw new Error('图片格式无法识别')
+    if (!image || image.isEmpty()) { notifyImageCopyFailed(wc, '这张图解码不了'); return false }
     electron.clipboard.writeImage(image)
     return true
   } catch (e) {
     if (clientLog) clientLog.warn('context-menu', '复制图片失败：' + ((e && e.message) || e))
-    // ★ 失败必须让用户看见 ★
-    //
-    // 原来这里 return false 就完了。用户右键点「复制图片」，
-    // 菜单关掉、什么都没发生、也没有任何提示 —— 看起来就像菜单坏了。
-    // 2026-10-29 报的正是这个形态（真因是 blob: 拉不到，见 downloadAsBuffer）。
-    notifyImageCopyFailed(e)
+    notifyImageCopyFailed(wc, (e && e.message) || '')
     return false
   }
 }
 
 /**
- * 图片复制失败时告诉用户"为什么"。
+ * 复制失败必须让用户看见。
  *
- * 分成两类说，因为用户能做的事完全不同：
- *   · 网络/超时   → 可以再试一次
- *   · 格式不支持 → 再试也没用，得换「另存为」
+ * 剪贴板操作是**静默**的：写进去了没有反馈，没写进去也没有。原来失败就
+ * `return false`，用户点了「复制图片」去微信里粘贴发现什么都没有，只会以为
+ * 软件坏了。发一条 toast 到渲染层，讲清楚失败在哪一步。
  */
-function notifyImageCopyFailed (e) {
-  const msg = String((e && e.message) || '')
-  let reason = '这张图片没能复制到剪贴板'
-  if (/格式|无法识别/i.test(msg)) {
-    reason = '这张图片的格式无法复制，可以用「图片另存为…」'
-  } else if (/HTTP|超时|网络|请求/i.test(msg)) {
-    reason = '图片下载失败，请检查网络后重试'
-  } else if (/页面.*(关闭|已)/i.test(msg)) {
-    reason = '页面已关闭，图片读取不到了'
-  }
+function notifyImageCopyFailed (wc, reason) {
+  const wcOf = el => (el && el.webContents) || ((el && el.send) ? el : null)
+  const target = wcOf(wc) || (win && win.webContents)
   try {
-    if (win && !win.isDestroyed()) {
-      win.webContents.send('app:toast', { type: 'warn', text: reason })
+    if (target && typeof target.send === 'function' && !target.isDestroyed()) {
+      // 固定走 'app:toast' 通道，渲染层已在 app.js 订阅
+      target.webContents.send('app:toast', { text: '复制图片失败' + (reason ? '：' + reason : ''), type: 'warn' })
     }
-  } catch (err) { /* 提示失败不该再抛 */ }
+  } catch (e) {
+    if (clientLog) clientLog.warn('context-menu', '复制失败提示发送失败：' + ((e && e.message) || e))
+  }
 }
 
 /**
@@ -2972,48 +3075,44 @@ async function saveImageAs (win, url) {
     return true
   } catch (e) {
     if (clientLog) clientLog.warn('context-menu', '保存图片失败：' + ((e && e.message) || e))
-    notifyImageCopyFailed(e)
-    return false
-  }
-}
-
-/** 在新窗口里打开原图（双击看细节、或想拖到别的软件里）。 */
-function openImageInNewWindow (url) {
-  try {
-    const w = new electron.BrowserWindow({
-      width: 1000, height: 760, title: '图片预览', autoHideMenuBar: true,
-      webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true }
-    })
-    // blob: 的生命周期绑在原页面，新窗口直接 loadURL 必然白屏。
-    // 只对 http(s)/data 走直接加载；blob 由调用方先读成 data URL 再传进来。
-    w.loadURL(url)
-    return true
-  } catch (e) {
-    if (clientLog) clientLog.warn('context-menu', '打开图片失败：' + ((e && e.message) || e))
     return false
   }
 }
 
 /**
- * 打开图片预览。
+ * 预览原图。
  *
- * blob: 不能直接 `loadURL` —— 它绑在**原来那个页面**的上下文里，
- * 换一个窗口去加载只会得到一张白板。所以 blob 先读成 data URL，
- * data URL 是自包含的，任何窗口都能显示。
+ * `blob:` 地址只属于它所在的页面进程，新窗口 loadURL 必然白板（甚至
+ * ERR_FAILED）。所以 blob/data 先在页面里读成 PNG data URL，再交给预览窗口。
  */
 async function openImagePreview (wc, url) {
   const target = String(url || '')
   if (!target) return false
-  if (!/^blob:/i.test(target)) return openImageInNewWindow(target)
+  const isBlob = /^blob:/i.test(target)
+  const isData = /^data:/i.test(target)
+  if (!isBlob && !isData) return openImageInNewWindow(target)
   try {
     const buf = await readUrlInPage(wc, target)
-    if (!buf || !buf.length) throw new Error('图片是空的')
-    const mime = /^data:([^;]+);/i.exec(target)
-    const type = (mime && mime[1]) || 'image/png'
-    return openImageInNewWindow(`data:${type};base64,${buf.toString('base64')}`)
+    if (!buf || !buf.length) { notifyImageCopyFailed(wc, '图片是空的'); return false }
+    const dataUrl = `data:${'image/png'};base64,${buf.toString('base64')}`
+    return openImageInNewWindow(dataUrl)
   } catch (e) {
-    if (clientLog) clientLog.warn('context-menu', '预览 blob 图片失败：' + ((e && e.message) || e))
-    notifyImageCopyFailed(e)
+    if (clientLog) clientLog.warn('context-menu', '预览图片失败：' + ((e && e.message) || e))
+    notifyImageCopyFailed(wc, (e && e.message) || '')
+    return false
+  }
+}
+
+/** 在新窗口里打开原图（双击看细节、或想拖到别的软件里）。 */
+function openImageInNewWindow (url) {  try {
+    const w = new electron.BrowserWindow({
+      width: 1000, height: 760, title: '图片预览', autoHideMenuBar: true,
+      webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true }
+    })
+    w.loadURL(url)
+    return true
+  } catch (e) {
+    if (clientLog) clientLog.warn('context-menu', '打开图片失败：' + ((e && e.message) || e))
     return false
   }
 }
@@ -3049,47 +3148,37 @@ function installEditableFocusRouter () {
 /**
  * 下载一个 URL 成 Buffer。
  *
- * 用 webContents 所属 session 发请求：带签名的 https 图片凭据绑在那个 session 上。
- *
- * ## blob: / data: 为什么不能走 net.request（2026-10-29 实测）
- *
- * `electron.net.request` **只支持 http: 和 https:**：
- *
- *     blob:  ❌ ClientRequest only supports http: and https: protocols
- *     data:  ❌ ClientRequest only supports http: and https: protocols
- *
- * 而 WhatsApp 网页版的聊天图片**全是 blob:** —— 这就是"右键有『复制图片』，
- * 但点了一点反应都没有"的根因。https 那条路是好的（实测 200 / 3831 字节），
- * 只有 blob 挂了。
- *
- * 所以 blob:/data: 改走**页面内读取**：让渲染进程 fetch 那个 URL、
- * 读成 base64 回传。页面自己当然能读自己的 blob URL。
- *
- * ## 另一处必须修的：Promise 永久挂起
- *
- * `net.request()` 遇到不支持的协议是**同步 throw**。原来这行写在
- * Promise executor 里，throw 之后 Promise 既没 resolve 也没 reject ——
- * `await` 就永远停在那里。用户看不到报错，也看不到成功，就是"没反应"。
- * 现在用 try/catch 包住，异常一律 reject。
+ * 用 webContents 所属 session 发请求：WhatsApp 的图片是
+ * `blob:` 或带签名的 https，凭据绑在那个 session 上。
  */
-async function downloadAsBuffer (wcOrWin, url) {
+function downloadAsBuffer (wcOrWin, url) {
   const target = String(url || '')
-  if (!target) throw new Error('图片地址为空')
+  if (!target) return Promise.reject(new Error('图片地址为空'))
 
-  // blob: / data: 只有页面自己读得到
+  // ★ blob: / data: 必须走页面内读取 ★
+  //
+  // WhatsApp 的图片是 `blob:https://web.whatsapp.com/...`，这个地址只在
+  // 那个页面进程里有效。net.request 打它必然是 404，而且新版本 Electron
+  // 里会**同步抛异常** —— 包在 new Promise 里就是 await 永久挂起。
+  //
+  // 页面里那个 <img> 已经渲染过，像素就在渲染器中：隔离世界 fetch → 
+  // createImageBitmap → canvas 重编码。既不受 CORS 影响，也不用二次下载。
   if (/^(blob|data):/i.test(target)) {
-    const wc = wcOrWin && wcOrWin.webContents ? wcOrWin.webContents : wcOrWin
+    const wcOf = el => (el && el.webContents) || ((el && el.executeJavaScriptInIsolatedWorld) ? el : null)
+    const wc = wcOf(wcOrWin)
+    if (!wc) return Promise.reject(new Error('缺少 webContents，读不到 blob 图片'))
     return readUrlInPage(wc, target)
   }
 
   return new Promise((resolve, reject) => {
     const ses = (wcOrWin && wcOrWin.session) || electron.session.defaultSession
+    // net.request 遇到不支持的协议是**同步 throw**。在 Promise executor 里
+    // throw 会让 Promise 永久 pending，外面的 await 永远等不到结果。
     let request
     try {
       request = electron.net.request({ url: target, session: ses, useSessionCookies: true })
     } catch (e) {
-      // 不支持的协议在这里就炸，必须显式 reject，否则 await 永久挂起
-      reject(new Error('无法请求该地址：' + ((e && e.message) || e)))
+      reject(e)
       return
     }
     const chunks = []
@@ -3098,16 +3187,12 @@ async function downloadAsBuffer (wcOrWin, url) {
     request.on('response', response => {
       if (response.statusCode >= 400) {
         reject(new Error('HTTP ' + response.statusCode))
-        try { request.abort() } catch (e) {}
+        request.abort()
         return
       }
       response.on('data', chunk => {
         total += chunk.length
-        if (total > MAX) {
-          try { request.abort() } catch (e) {}
-          reject(new Error('图片超过 64MB'))
-          return
-        }
+        if (total > MAX) { request.abort(); reject(new Error('图片超过 64MB')); return }
         chunks.push(chunk)
       })
       response.on('end', () => resolve(Buffer.concat(chunks)))
@@ -3119,79 +3204,51 @@ async function downloadAsBuffer (wcOrWin, url) {
 }
 
 /**
- * 读取图片用的隔离世界 id。
+ * 在页面里读一个 blob:/data: 图片，重编码成 PNG 回传。
  *
- * 与 `src/translate/probe-page.js` 的 PROBE_WORLD_ID 取同一个值：
- * 两者都是"主进程要读远程页面里的东西"，共用一个 world 便于排查，
- * 也避免多个 world 各自持有状态造成困惑。
- */
-const ISOLATED_READ_WORLD_ID = 999
-
-/**
- * 在**隔离世界**里把一个 URL（通常是 blob:）读成 Buffer。
+ * ## 为什么只能在页面里读
  *
- * ## 为什么是隔离世界，不是 executeJavaScript
+ * `blob:https://web.whatsapp.com/...` 这个地址是渲染进程内存里的句柄，
+ * 离开那个页面就没有意义：主进程 net.request 打它是 404 甚至同步抛异常。
+ * 页面里那个 <img> 已经渲染过，像素就在渲染器里 —— 隔离世界 fetch 就能拿到。
  *
- * 第一版用了 page world 的 `executeJavaScript`，直接被安全测试拦下：
+ * ## 为什么必须重编码成 PNG
  *
- *     【安全】main.js 里没有任何 page world 的 executeJavaScript
- *     remote pages have no page-world IPC bridge or dynamic code injection
+ * nativeImage 解不了 WebP（实测 614 字节合法 WebP → isEmpty=true），而聊天
+ * 贴纸/表情大量是 WebP。createImageBitmap 解码 → canvas → PNG，通吃所有格式。
  *
- * 那条规则是对的：往**远程页面**自己的 world 里塞代码，等于把主进程的
- * 执行环境暴露给页面脚本（能窥探、能篡改）。WhatsApp 的页面是别人写的，
- * 不该信任。
+ * ## 安全
  *
- * `executeJavaScriptInIsolatedWorld` 跑在独立 world，页面脚本读不到也改不了。
- *
- * ## 隔离世界能不能读 blob：实测过，能
- *
- * blob URL 是按 **origin** 隔离的，不是按 world。隔离世界和主世界共享
- * 同一个 origin 和 document，所以读得到同一个 blob：
- *
- *     主世界造出 blob: blob:null/123b9f04-...（89 字节）
- *     隔离世界读取: 89 字节 → nativeImage ✅ 6x6
- *     data: URL 在隔离世界: ✅
+ * 用 executeJavaScriptInIsolatedWorld(999)，绝不用 page world 的
+ * executeJavaScript：页面脚本既读不到也改不了这段代码。URL 用
+ * JSON.stringify 注入，页面内容无从注入表达式。
  */
 async function readUrlInPage (wc, url) {
-  if (!wc || (typeof wc.isDestroyed === 'function' && wc.isDestroyed())) {
-    throw new Error('页面已关闭，无法读取图片')
+  if (!wc || typeof wc.executeJavaScriptInIsolatedWorld !== 'function') {
+    throw new Error('缺少 webContents，读不到 blob 图片')
   }
-  if (typeof wc.executeJavaScriptInIsolatedWorld !== 'function') {
-    throw new Error('当前环境不支持隔离世界读取，无法复制图片')
+  if (typeof wc.isDestroyed === 'function' && wc.isDestroyed()) {
+    throw new Error('页面已关闭')
   }
-  // URL 通过 JSON.stringify 注入，避免被拼进表达式造成注入
+  // URL 必须经 JSON.stringify 转义 —— 直接拼字符串等于让页面内容能执行任意代码
   const literal = JSON.stringify(url)
   const code = `
     (async () => {
-      const res = await fetch(${literal})
-      if (!res.ok) throw new Error('页面读取失败 HTTP ' + res.status)
+      const target = ${literal}
+      const res = await fetch(target)
       const blob = await res.blob()
-
-      // ★ 统一转成 PNG，而不是原样回传 ★
-      //
-      // nativeImage.createFromBuffer 解不了 WebP（实测：合法的 614 字节
-      // WebP 返回 isEmpty=true）。而 WhatsApp 的贴纸、表情大量是 WebP ——
-      // 原样回传的话，这类图片右键复制会失败。
-      //
-      // 转成 PNG 还有第二个好处：canvas 重编码必然拿到合法位图，
-      // 避免把 HTML 错误页、0 字节之类的东西当图片送进剪贴板。
       const bitmap = await createImageBitmap(blob)
-      const canvas = document.createElement('canvas')
-      canvas.width = bitmap.width
-      canvas.height = bitmap.height
-      canvas.getContext('2d').drawImage(bitmap, 0, 0)
-      if (typeof bitmap.close === 'function') bitmap.close()
-      const dataUrl = canvas.toDataURL('image/png')
-      const comma = dataUrl.indexOf(',')
-      if (comma < 0) throw new Error('图片重编码失败')
-      return dataUrl.slice(comma + 1)
+      const cv = document.createElement('canvas')
+      cv.width = bitmap.width
+      cv.height = bitmap.height
+      cv.getContext('2d').drawImage(bitmap, 0, 0)
+      return cv.toDataURL('image/png')
     })()
   `
-  // world id 与 probe-page.js 保持一致，便于排查时统一
-  const raw = await wc.executeJavaScriptInIsolatedWorld(ISOLATED_READ_WORLD_ID, [{ code }])
-  // 返回形态随 Electron 版本而变：老版本给数组，新版直接给结果
-  const b64 = Array.isArray(raw) ? raw[0] : raw
-  if (!b64 || typeof b64 !== 'string') throw new Error('页面没有返回图片数据')
+  const raw = await wc.executeJavaScriptInIsolatedWorld(999, [{ code }])
+  const value = Array.isArray(raw) ? raw[0] : raw
+  const b64 = String(value || '').replace(/^data:image\/png;base64,/, '')
+  if (!b64) throw new Error('页面读不到图片数据')
   return Buffer.from(b64, 'base64')
 }
 
@@ -3326,8 +3383,9 @@ function installEditSupport(view) {
       copyImage: () => copyImageToClipboard(wc, String((params && params.srcURL) || '')),
       saveImage: () => saveImageAs(win, String((params && params.srcURL) || '')),
       openImage: () => openImagePreview(wc, String((params && params.srcURL) || '')),
+      copyFromPage: () => copyImageFromPage(wc, win),
       saveFromPage: () => saveImageFromPage(wc, win),
-      copyFromPage: () => copyImageFromPage(wc),
+      diagnoseImage: () => runImageTranslateDiagnosis(wc),
       copyText: () => runEditCommand(wc, 'copy'),
       cut: () => runEditCommand(wc, 'cut'),
       paste: () => runEditCommand(wc, 'paste'),
@@ -3365,6 +3423,99 @@ function popupMenu (template) {
 }
 
 /**
+ * 一键诊断「翻译图片」为什么不出现。
+ *
+ * ## 为什么必须内建
+ *
+ * 打包版**没有开发者工具菜单**（只有 `NODE_ENV !== 'production'` 时才挂），
+ * 线上用户根本没法自查。而这个功能横跨几层：
+ *
+ *   preload 跑没跑 → <script> 插没插 → pix:// 通不通 → 页面世界脚本跑没跑
+ *   → 按钮建没建 → 找没找到图
+ *
+ * 任何一环断了，用户看到的都是同一句话："没有翻译按钮"。
+ * 这里把每一环的实测值一次性弹给用户，截图就能定位。
+ */
+async function runImageTranslateDiagnosis (wc) {
+  const lines = []
+  const STEP = (name, value) => lines.push(name + '=' + value)
+
+  try {
+    // ① 主进程侧：脚本是否已落盘
+    try {
+      const urls = require('./src/translate/page-world-inject').pageWorldScriptUrls({ log: () => {} })
+      STEP('脚本', urls && urls.main ? 'OK' : 'MISSING')
+    } catch (e) {
+      STEP('脚本', 'ERR ' + ((e && e.message) || e))
+    }
+
+    // ② 隔离世界：preload 的痕迹
+    const PROBE = `(() => {
+      const out = {}
+      out.bridge = typeof window.__pixTranslateImage === 'function'
+      out.env = !!(window.__pixEnv && window.__pixEnv.lang)
+      out.flag = !!window.__pixPageScriptsInjected
+      out.patch = !!document.querySelector('script[data-pix="patch"]')
+      out.host = !!document.querySelector('script[data-pix="host"]') || !!document.querySelector('script[data-pix="main"]')
+      out.guard = !!document.querySelector('script[data-pix="guard"]')
+      const el = document.querySelector('script[data-pix]')
+      out.src = el ? String(el.src).slice(0, 40) : ''
+      let big = null
+      for (const img of document.images) {
+        const r = img.getBoundingClientRect()
+        const w = Math.max(0, Math.min(r.right, innerWidth) - Math.max(r.left, 0))
+        const h = Math.max(0, Math.min(r.bottom, innerHeight) - Math.max(r.top, 0))
+        const area = w * h
+        if (!big || area > big.area) big = { area, w: Math.round(w), h: Math.round(h), nw: img.naturalWidth, nh: img.naturalHeight }
+      }
+      out.imgs = document.images.length
+      out.big = big
+      return out
+    })()`
+    const rawA = await wc.executeJavaScriptInIsolatedWorld(999, [{ code: PROBE }], false)
+    const a = Array.isArray(rawA) ? rawA[0] : rawA
+    STEP('bridge', a.bridge ? 'OK' : 'MISSING')
+    STEP('env', a.env ? 'OK' : 'MISSING')
+    STEP('injectFlag', a.flag ? 'OK' : 'MISSING')
+    STEP('scripts', 'patch:' + a.patch + ' host:' + a.host + ' guard:' + a.guard)
+    if (a.src) STEP('src', a.src)
+    STEP('imgs', a.imgs)
+    if (a.big) STEP('big', a.big.w + 'x' + a.big.h + ' nw' + a.big.nw + ' nh' + a.big.nh)
+
+    // ③ 页面世界：脚本有没有真的跑起来
+    const PAGE = `(() => {
+      const out = {}
+      out.installed = !!window.__pixImageTranslateInstalled
+      out.bridge = typeof window.__pixTranslateImage === 'function'
+      out.style = !!document.getElementById('pix-imgtrans-style')
+      const btn = document.getElementById('pix-imgtrans-btn')
+      out.btn = !!btn
+      out.show = btn ? String(btn.dataset.show) : '-'
+      out.disp = btn ? getComputedStyle(btn).display : '-'
+      return out
+    })()`
+    const rawB = await wc.executeJavaScriptInIsolatedWorld(999, [{ code: PAGE }], false)
+    const b = Array.isArray(rawB) ? rawB[0] : rawB
+    STEP('有装UI', b.installed ? 'OK' : 'NOT_RUN')
+    STEP('pwBridge', b.bridge ? 'OK' : 'MISSING')
+    STEP('style', b.style ? 'OK' : 'MISSING')
+    STEP('btn', b.btn ? ('show=' + b.show + ' disp=' + b.disp) : 'NONE')
+  } catch (e) {
+    STEP('ERR', (e && e.message) || e)
+  }
+
+  const text = lines.join(' | ')
+  if (clientLog) clientLog.warn('img-diag', text)
+  try {
+    const target = (wc && wc.webContents) || wc || (win && win.webContents)
+    if (target && typeof target.send === 'function') {
+      target.webContents.send('app:toast', { text: '图片翻译诊断：' + text, type: 'warn' })
+    }
+  } catch (e) {}
+  return lines
+}
+
+/**
  * 从当前页面"猜"一张正在显示的图片并存下来。
  *
  * ## 为什么必须有这条路
@@ -3385,20 +3536,19 @@ function popupMenu (template) {
  *   · 只返回一串图片 URL（字符串），不构成 IPC 桥。
  * 返回值只是一张图的位置，拿它去下载——不涉及任何回传执行能力。
  */
-/**
- * 「翻译图片」注入脚本的缓存。
- *
- * null = 还没读过（懒加载）；'' = 读失败过（不再反复重试，避免每次开 tab 都抛一次）。
- */
-let imageUiSourceCache = null
+async function saveImageFromPage (wc, parentWin) {
+  const url = await sniffPageImageUrl(wc)
+  if (!url) return false
+  return saveImageAs(parentWin, url)
+}
 
 /**
- * 在页面里嗅探「当前正在看的那张图」的 URL。
+ * 页面嗅探：保存/复制共用同一份逻辑。
  *
- * 判据是**可见面积最大的图**，不依赖任何类名 —— 宿主改版也不会坏。
- * 这是 `saveImageFromPage` 和 `copyImageFromPage` 的共同前半段。
+ * 两份代码迟早会分叉，改一处漏一处 —— 所以只留这一份，两边都调它。
+ * 返回值只有一串图片 URL，不构成 IPC 桥；协议白名单在函数内强校验。
  *
- * @returns {Promise<string>} 图片 URL；找不到返回 ''
+ * @returns {Promise<string>} 命中返回 URL，否则空串
  */
 async function sniffPageImageUrl (wc) {
   if (!wc || typeof wc.executeJavaScriptInIsolatedWorld !== 'function') return ''
@@ -3439,7 +3589,8 @@ async function sniffPageImageUrl (wc) {
     const value = Array.isArray(raw) ? raw[0] : raw
     const url = String(value === undefined || value === null ? '' : value).trim()
     // 只认 http(s)/blob/data —— 别的地方来的字符串一律不碰
-    return /^(https?:\/\/|blob:|data:)/i.test(url) ? url : ''
+    if (!/^(https?:\/\/|blob:|data:)/i.test(url)) return ''
+    return url
   } catch (e) {
     if (clientLog) clientLog.warn('context-menu', '嗅探页面图片失败：' + ((e && e.message) || e))
     return ''
@@ -3447,28 +3598,12 @@ async function sniffPageImageUrl (wc) {
 }
 
 /**
- * 兜底：`srcURL` 为空时（灯箱用 background-image / canvas 铺图），
- * 从页面里嗅探出那张图再复制。
- *
- * 没有这条，用户在灯箱上右键只能「保存图片…」，无法复制 ——
- * 而"复制了直接粘进微信"恰恰是最常用的动作。
+ * 灯箱/背景图场景的「复制图片」：srcURL 拿不到时，从页面里嗅一张。
  */
-async function copyImageFromPage (wc) {
+async function copyImageFromPage (wc, parentWin) {
   const url = await sniffPageImageUrl(wc)
-  if (!url) {
-    notifyImageCopyFailed(new Error('页面上没有找到可复制的图片'))
-    return false
-  }
+  if (!url) { notifyImageCopyFailed(wc, '页面上没找到可见图片'); return false }
   return copyImageToClipboard(wc, url)
-}
-
-async function saveImageFromPage (wc, parentWin) {
-  const url = await sniffPageImageUrl(wc)
-  if (!url) {
-    notifyImageCopyFailed(new Error('页面上没有找到可保存的图片'))
-    return false
-  }
-  return saveImageAs(parentWin, url)
 }
 
 /**
@@ -3978,25 +4113,28 @@ require('./src/ipc/translate').registerTranslateIpc({
       })
     },
     /**
-     * 「翻译图片」UI 的源码（给 preload 用）。
+     * 页面世界脚本的 pix:// URL（给 preload 用）。
      *
-     * 客页是 sandbox:true，preload 读不到本地文件，只能由这里读好交给它。
-     * 懒加载 + 缓存：源码几十 KB，只读一次。
+     * 客页是 sandbox:true + contextIsolation:true：preload 读不到本地文件，
+     * 页面世界也拿不到 preload 的变量。而「翻译图片」按钮必须在页面世界
+     * （隔离世界的事件收不到真实鼠标）。唯一通道是 <script src>，
+     * 所以由主进程落盘、用 pix:// 供出来。详见
+     * src/translate/page-world-inject.js 的文件头。
      *
-     * 这就是一个纯字符串，不含任何密钥，所以可以直接给；
-     * 但仍要求**只有我们自己的客页**能取（见 translate.js 里的 sender 校验），
-     * 否则任意第三方页面嵌进来也能拿到我们的 UI 源码。
+     * 返回的是 URL，不含任何凭据；但仍要求只有我们自己的客页能取
+     * （见 translate.js 里的 sender 校验）。
      */
-    imageUiSource: () => {
-      if (imageUiSourceCache !== null) return imageUiSourceCache
+    pageScriptUrls: (ses) => {
       try {
-        const { buildImageTranslateScript } = require('./src/translate/image-translate-ui')
-        imageUiSourceCache = buildImageTranslateScript({ buttonText: '翻译图片' })
+        return require('./src/translate/page-world-inject').pageWorldScriptUrls({
+          ses: ses,
+          electron: electron,
+          log: msg => { if (clientLog) clientLog.warn('page-world', msg) }
+        })
       } catch (e) {
-        if (clientLog) clientLog.warn('image-trans', 'UI 源码加载失败：' + ((e && e.message) || e))
-        imageUiSourceCache = ''
+        if (clientLog) clientLog.warn('page-world', '页面世界脚本落盘失败：' + ((e && e.message) || e))
+        return null
       }
-      return imageUiSourceCache
     }
   },
   env: { tabPrefs, stripEmoji, stripBusyMarks, pickLang }
@@ -4060,6 +4198,9 @@ require('./src/ipc/app').registerAppIpc({
     writePresets: all => writeJson(userFile('app-presets.json'), all),
     trustedTabSender,
     accountSlug,
+    // 翻译桥是否被崩溃循环保护摘掉了（2026-11-02：「不翻译了」的静默根因）
+    translateAvailability,
+    translateRestore,
     /**
      * 把事件推给主界面（外壳 webContents）。
      *
@@ -4262,6 +4403,27 @@ app.whenReady().then(() => {
     handle.file ? '' : '（槽位已满，本次使用一次性分区）')
   try { fs.rmSync(userFile('translate-cache.json'), { force: true }) } catch (e) {}
   loadConfig()
+  // ★ 页面世界脚本协议必须在**任何 webview 导航之前**挂好 ★
+  //
+  // 2026-10-29 实测：protocol.handle() 晚于页面导航挂上就完全失效 ——
+  // 页面里取脚本直接 ERR_FAILED，处理函数一次都不会被调用，也没有任何报错。
+  // 原来的设计是"第一个客页 sendSync 时才挂"，而那一定发生在导航之后，
+  // 于是「翻译图片」按钮在所有平台上都永远不会出现。
+  //
+  // 这里一次性：注册特权 scheme + 落盘三段脚本 + 把 pix:// 挂到 defaultSession。
+  // 之后新建的 partition 在 web-view.js 里按需补挂（那时还没导航）。
+  try {
+    const proto = require('./src/translate/pix-protocol')
+    const inject = require('./src/translate/page-world-inject')
+    proto.registerPrivilegedScheme(electron)
+    inject.writePageWorldScripts({ log: msg => { if (log) log.warn('page-world', msg) } })
+    const ok = proto.prewarm(electron)
+    // 用 warn 级别：这个模块的 info 会被日志过滤器按"噪声"规则压掉，
+    // 真机排查时就看不到"到底挂没挂上"。
+    if (log) log.warn('page-world', 'pix:// 预挂 ' + (ok ? '成功' : '失败') + '，脚本目录 ' + inject.pageWorldDir())
+  } catch (e) {
+    if (log) log.error('page-world', 'pix:// 预挂异常：' + ((e && e.message) || e))
+  }
   // 应用菜单：macOS 上 Cmd+C/V/A 依赖菜单的编辑角色才能转发到 webContents。
   // 必须在建窗口之前装好，窗口一出现快捷键就可用。
   installApplicationMenu()
@@ -4349,7 +4511,7 @@ app.on('activate', () => showMainWindow())
 if (!app.isPackaged) {
   global.__pixMainTestExports = {
     // 函数真身
-    effectiveMaxTabs, safeModeDisablesBridge, timingEqual, sealSettings, unsealSettings,
+    effectiveMaxTabs, safeModeDisablesBridge, translateAvailability, timingEqual, sealSettings, unsealSettings,
     readJson, writeJson, asyncJson, flushSyncStores,
     accountSlug, makePartition, platformHomeUrl, safeApiUrl, safePlatformHomeUrl,
     unreadFromTitle, isLegacyLine, normalizeLine, mergeLines,

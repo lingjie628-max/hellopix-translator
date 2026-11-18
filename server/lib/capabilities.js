@@ -45,7 +45,11 @@ const OPERATOR_CAPS = new Set([
   'admin.read.translate',     // 翻译记录
   'admin.read.package',       // 套餐列表（只读）
   'admin.read.faq',           // FAQ、官网链接等内容配置的只读
-  'admin.read.engine'         // 翻译通道状态（不含密钥，接口本身只回 hasKey）
+  'admin.read.engine',        // 翻译通道状态（不含密钥，接口本身只回 hasKey）
+  // 工单是客服的日常工具：正文是单个商户主动提供的信息，不是全站客户名单。
+  // 不开放给 operator 的是 admin.data.customers（跨商户资产）。
+  'admin.read.ticket',
+  'admin.write.ticket'
 ])
 
 /**
@@ -148,7 +152,21 @@ const ROUTE_CAPS = {
   'POST /admin/clients/save': 'admin.write.content',
 
   // ── 仪表盘 ───────────────────────────────────────────────
-  'GET /admin/stats': 'admin.read.overview'
+  'GET /admin/stats': 'admin.read.overview',
+
+  // ── 工单（客服 ←→ 商户）────────────────────────────────
+  // 正文是单个商户主动提供的信息（充值单号、账号、报错描述），客服必须能看
+  // 才干活，所以读档给 operator；不是全站客户名单那一档。
+  // 写档也不标高危：客服一天回几十条，每条都输密码等于让功能不可用，
+  // 而且这里没有动钱/动账号的能力，滥用有审计兜底。
+  // 不提供任何删除路由 —— 工单是审计证据，写错了只能关闭。
+  'GET /admin/tickets': 'admin.read.ticket',
+  // 侧栏红点：只回数字，不带工单内容，但仍是「读工单」这一档
+  'GET /admin/tickets-unread': 'admin.read.ticket',
+  'GET /admin/tickets/:id': 'admin.read.ticket',
+  'POST /admin/tickets/create': 'admin.write.ticket',
+  'POST /admin/tickets/reply': 'admin.write.ticket',
+  'POST /admin/tickets/update': 'admin.write.ticket'
 }
 
 /**

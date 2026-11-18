@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>服务维护中 · Hello Pix</title>
+<style>
+  :root{
+    --bg:#0b0d12; --card:#141821; --line:rgba(255,255,255,.08);
+    --text:#e8ecf3; --muted:#8b95a7; --accent:#4f8cff; --warn:#f0b429;
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#f5f7fb; --card:#fff; --line:rgba(0,0,0,.08);
+      --text:#151a22; --muted:#66707f; --accent:#2563eb; --warn:#b45309;
+    }
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+    padding:24px; background:var(--bg); color:var(--text);
+    font:15px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{width:100%; max-width:600px}
+  .card{
+    background:var(--card); border:1px solid var(--line); border-radius:16px;
+    padding:40px 36px; box-shadow:0 20px 60px rgba(0,0,0,.18);
+  }
+  .badge{
+    display:inline-flex; align-items:center; gap:8px;
+    font-size:13px; font-weight:600; letter-spacing:.02em;
+    padding:6px 12px; border-radius:999px;
+    background:rgba(240,180,41,.14); color:var(--warn);
+    border:1px solid rgba(240,180,41,.28);
+  }
+  .dot{
+    width:7px; height:7px; border-radius:50%; background:currentColor;
+    animation:pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+  @media (prefers-reduced-motion:reduce){ .dot{animation:none} }
+  h1{font-size:25px; line-height:1.35; margin:20px 0 12px; letter-spacing:-.01em}
+  p{margin:0 0 14px; color:var(--muted)}
+  .lead{color:var(--text); font-size:16px}
+  ul{margin:0; padding-left:20px; color:var(--muted)}
+  li{margin-bottom:9px}
+  li strong{color:var(--text); font-weight:600}
+  .hr{height:1px; background:var(--line); margin:26px 0}
+  .foot{font-size:13px; color:var(--muted); display:flex; flex-wrap:wrap; gap:6px 16px}
+  .foot span{display:inline-flex; align-items:center; gap:6px}
+  a{color:var(--accent); text-decoration:none}
+  a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <span class="badge"><span class="dot"></span>系统维护中</span>
+
+    <h1>服务正在紧急抢修，请稍后再试</h1>
+
+    <p class="lead">我们的服务器所在机房出现网络故障，目前正在联系运营商紧急处理。这<strong>不是</strong>你的账号或软件问题。</p>
+
+    <div class="hr"></div>
+
+    <ul>
+      <li><strong>网页端</strong>：暂时无法登录，账号数据完整无损。</li>
+      <li><strong>桌面客户端</strong>：翻译功能依赖云端，恢复前会提示连接失败，请勿反复重试。</li>
+      <li><strong>你的数据</strong>：账号、余额、订单全部安全，无需做任何操作。</li>
+    </ul>
+
+    <div class="hr"></div>
+
+    <p style="margin-bottom:0">恢复后会立刻恢复正常访问，无需重新注册或重新下载。感谢耐心等待。</p>
+  </div>
+
+  <div class="foot" style="margin-top:18px;padding-left:6px">
+    <span>Hello Pix 团队</span>
+    <span id="ts"></span>
+  </div>
+</div>
+<script>
+  (function(){
+    var el = document.getElementById('ts')
+    if (!el) return
+    var d = new Date()
+    var p = function(n){ return n < 10 ? '0' + n : '' + n }
+    el.textContent = d.getFullYear() + '-' + p(d.getMonth()+1) + '-' + p(d.getDate()) +
+                     ' ' + p(d.getHours()) + ':' + p(d.getMinutes())
+  })()
+</script>
+</body>
+</html>

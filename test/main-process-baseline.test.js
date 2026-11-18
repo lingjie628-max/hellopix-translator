@@ -84,22 +84,30 @@ const BASELINE_CHANNELS = [
   'app:checkUpdate', 'app:clearActiveCache', 'app:close', 'app:contextAction',
   'app:hide', 'app:home', 'app:open', 'app:overlay', 'app:platforms', 'app:preset',
   'app:proxyPresets', 'app:proxySettings', 'app:reloadActive', 'app:rename',
-  'app:reorder', 'app:restart', 'app:savePreset', 'app:showContextMenu',
-  'app:showHidden', 'app:switch', 'app:tabs', 'app:updatePlatform',
-  'app:updateSettings', 'app:version',
+  'app:reorder', 'app:restart', 'app:savePreset', 'app:showContextMenu', 'app:showHidden', 'app:switch',
+  'app:tabs',
+  // 2026-11-02：翻译被崩溃循环保护摘掉时的可见提示与一键恢复
+  // 数组按字母序 deepEqual 比对，插错位置会误报成"频道缺失"
+  'app:translateRestore', 'app:translateStatus',
+  'app:updateApply', 'app:updateCancel', 'app:updatePlatform',
+  'app:updateSettings', 'app:updateStart', 'app:updateState',
+  'app:version',
   'auth:autoLogin', 'auth:get', 'auth:login', 'auth:logout', 'auth:save',
   'auth:session', 'auth:verifyLock',
   'chrome:barHeight', 'chrome:height',
   'config:get', 'config:setApiBase', 'config:setBackgroundRunning', 'config:setTabLayout', 'config:setTheme',
   'customer:ingest', 'customer:reminders',
+  // 联系人设备来源（2026-11-11）：客页从 DOM 的 data-id 解出对方设备后回报。
+  'device:peer',
   'lines:list', 'lines:ping', 'lines:pingAll', 'lines:select',
   'proxy:detect', 'shell:open', 'site:info',
   'translate:bridgeStatus', 'translate:composerInsertText',
   'translate:composerSelectAllDelete', 'translate:engines', 'translate:guestPrefs',
-  // 图片翻译：translate:image 走 ipcMain.handle（主界面发起），
-  // translate:imageUiSource 是 sendSync（客页 preload 启动时取 UI 源码，
-  // 因为 sandbox:true 读不到本地文件）。
-  'translate:image', 'translate:imageUiSource',
+  // 图片翻译：translate:image 走 ipcMain.handle（客页发起）。
+  // translate:pageScripts 是 sendSync（客页 preload 启动时取页面世界脚本的
+  // pix:// URL —— sandbox:true 读不到本地文件，contextIsolation 又传不进
+  // 页面世界，只能绕这一跳）。2026-10-29 由 translate:imageUiSource 改名而来。
+  'translate:image', 'translate:pageScripts',
   'translate:run', 'translate:savePrefs'
 ]
 

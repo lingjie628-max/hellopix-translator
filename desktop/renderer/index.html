@@ -71,6 +71,15 @@
   </div>
 
   <div id="pixCollision" class="pix-collision" role="status" aria-live="polite"></div>
+  <!-- 翻译被崩溃循环保护摘掉时的提示。
+       2026-11-02 事故：桥上被安全模式摘掉后界面毫无变化，用户点「译」没反应，
+       以为软件坏了 —— 实际等 5 分钟重启就好。这条横幅就是为了不再让用户猜。
+       aria-live="assertive"：这不是"顺带看一眼"的信息，是需要立刻知道的功能失效。 -->
+  <div id="pixTransBanner" class="pix-trans-banner hidden" role="alert" aria-live="assertive">
+    <span class="ptb-ico" aria-hidden="true">⚠️</span>
+    <span class="ptb-text" id="pixTransBannerText">翻译已暂停</span>
+    <button type="button" id="pixTransBannerBtn" class="ptb-btn">重新开启翻译</button>
+  </div>
   <div id="shell" class="screen hidden">
     <div id="stage" class="stage">
       <!-- 背景静态图同上；原 home-bg.mp4 已抽帧转 WebP 后移除 -->
@@ -456,6 +465,13 @@
       <h3>发现新版本</h3>
       <p id="updateVersionText" class="update-version"></p>
       <p id="updateDesc" class="update-desc">新版本已经准备好，建议更新以获得更稳定的使用体验。</p>
+      <!-- 应用内下载进度。默认隐藏，只有 status=downloading 时才显示 -->
+      <div id="updateProgressWrap" class="update-progress-wrap hidden">
+        <div class="update-progress-track">
+          <div id="updateProgressBar" class="update-progress-bar" style="width:0%"></div>
+        </div>
+        <div id="updateProgressText" class="update-progress-text">准备下载…</div>
+      </div>
       <div class="update-actions">
         <button id="updateLaterBtn" type="button" class="update-later">稍后提醒</button>
         <button id="updateDownloadBtn" type="button" class="update-download">立即更新</button>
@@ -508,6 +524,9 @@
   <script src="tab-layout.js"></script>
   <!-- 撞单提醒 + 软件更新检测（app.js 启动时会调 checkCollisions） -->
   <script src="collision-update.js"></script>
+
+  <!-- 翻译健康横幅：崩溃循环保护摘掉翻译桥时，别让用户对着没反应的「译」发呆 -->
+  <script src="trans-health.js"></script>
 
   <!-- 站点信息（客服 / 页脚下载 / 独立应用）：与账号、标签栏无关的一整块 -->
   <script src="site-info.js"></script>

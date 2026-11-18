@@ -113,10 +113,44 @@ function ineligible(service, transfer, eligibility, context) {
 }
 
 /**
- * 金额无归属。
+ * 与本平台无关的进款：金额不落在任何一张本平台预约上。
  *
- * 但**先找疑似归属再下结论**：金额精确匹配失败不等于这笔钱与平台无关，
- * 最常见的原因是商户抄错数字。疑似结果只进 detail 供人工确认，**绝不自动入账**。
+ * ## 与 noMatch 的区别（很关键）
+ *
+ * `noMatch` 以前承担了两种完全不同的情况：
+ *   1. 客户想付款但金额抄错了 → 需要人工介入
+ *   2. 别的项目的钱打进同一个地址 → 与我们毫无关系
+ *
+ * 共用一条路径的结果是第 2 类把异常池灌满，巡检天天报「异常积压」。
+ *
+ * 现在把第 2 类拆出来：**直接忽略**。
+ *   - 不写 recharge_exceptions（不给人工添活）
+ *   - 链上记录标 `ignored` 留痕（对账时仍查得到）
+ *   - 不进告警统计
+ *
+ * 保留 `suspicion` 只写进 detail：万一将来要复盘"这笔到底像不像订单"，
+ * 证据还在。
+ */
+function unrelated(service, transfer, suspicion) {
+  return {
+    transactionPatch: {
+      status: 'ignored', matchKind: MATCH_KIND.NO_MATCH, rechargeId: null,
+      shadowAction: {
+        wouldSettle: false, action: 'ignored', kind: 'UNRELATED', suspicion
+      }
+    },
+    result: {
+      outcome: OUTCOME.IGNORED_UNRELATED, matchKind: MATCH_KIND.NO_MATCH,
+      rechargeId: null, exceptionKind: null,
+      detail: { suspicion, reason: '金额不匹配任何本平台订单，判定为无关进款' }
+    }
+  }
+}
+
+/**
+ * 金额无归属，但**疑似**是抄错数字的客户付款。
+ *
+ * 只有存在疑似候选（金额相近、时间接近）时才走这条 —— 否则见 unrelated()。
  */
 function noMatch(service, transfer, suspicion) {
   return {
@@ -235,6 +269,7 @@ module.exports = {
   duplicateEvent,
   ineligible,
   noMatch,
+  unrelated,
   latePayment,
   duplicateTxid,
   shadowMatched,

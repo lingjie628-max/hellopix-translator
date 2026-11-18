@@ -184,7 +184,7 @@ test('before-quit 真的调用了落盘，且带重入保护 + 超时兜底', ()
 test('启动早期补刷一次（上次被强杀的兜底）', () => {
   const readyAt = mainSrc.indexOf('app.whenReady()')
   assert.ok(readyAt >= 0)
-  const readyBlock = mainSrc.slice(readyAt, readyAt + 2000)
+  const readyBlock = mainSrc.slice(readyAt, readyAt + 4000)
   assert.ok(/flushAllCookies\(/.test(readyBlock), 'whenReady 里必须有兜底刷新')
 })
 

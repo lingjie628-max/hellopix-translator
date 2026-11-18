@@ -342,3 +342,16 @@ test('图片翻译：取图失败按原因给不同提示，不统一说"翻译�
   assert.equal(r.code, 'TAINTED_CANVAS')
   assert.match(r.msg, /跨域/)
 })
+
+test('图片翻译固定使用 GPT 视觉通道，不沿用 DeepSeek 等纯文本通道', async () => {
+  clearImageCache()
+  const h = harness({
+    image: 'GPT_ONLY_IMAGE',
+    apiResult: async () => ({ success: true, ok: true, blocks: [] })
+  })
+  await h.handlers['translate:image']({}, { to: 'zh', engine: 'deepseek' })
+  const call = h.calls.find(c => c[0] === 'api' && c[1] === '/translate/image')
+  assert.ok(call, '图片翻译应发到 /translate/image')
+  assert.equal(call[2].json.engine, 'gpt',
+    '图片是独立视觉功能，必须在主进程固定 GPT；不能让 deepseek 文本通道连坐')
+})

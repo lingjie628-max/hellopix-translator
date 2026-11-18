@@ -195,13 +195,20 @@ export default {
      * 商户在自己电脑上点一下，员工的窗口就掉线了 —— 这后果得先说清楚。
      */
     resetDevice(row) {
+      // row.bound 为真才会渲染这个按钮，所以到这里一定有 id。
+      // 仍然做一次硬校验：缺 id 时后端会回 400 —— 而在修复之前，
+      // 缺 id 会静默解绑商户自己并把他踢下线，是这次线上故障的根因。
+      if (!row || !row.id) {
+        this.$message.error('缺少子账号信息，请刷新页面后重试')
+        return
+      }
       this.$confirm(
         `解绑后，「${row.username}」可以在任意电脑登录（首次登录会重新绑定那台）。`
         + '该账号当前已登录的所有设备会立刻下线，需要用密码重新登录。',
         '解绑子账号绑定电脑',
         { type: 'warning', confirmButtonText: '确定解绑', cancelButtonText: '取消' }
       ).then(() => {
-        this.postRequest('/team/device/reset', { id: row.id }).then(resp => {
+        this.postRequest('/team/device/reset', { id: row.id, target: 'sub' }).then(resp => {
           const data = resp && resp.data ? resp.data : {}
           if (data.success === 'error') {
             this.$message.error(data.msg || '解绑失败')
@@ -209,6 +216,9 @@ export default {
           }
           this.$message.success('已解绑，该账号下次登录会绑定新的电脑')
           this.load()
+        }).catch(err => {
+          const msg = err && err.response && err.response.data && err.response.data.msg
+          this.$message.error(msg || '解绑失败，请稍后重试')
         })
       }).catch(() => {})
     },

@@ -50,7 +50,7 @@ function topConsts (src) {
 
 test('★ 脚本顺序：依赖必须全部在 app.js 之前', () => {
   const order = scriptOrder(html)
-  assert.deepEqual(order, ['theme.js', 'dom.js', 'ui-kit.js', 'pure.js', 'proxy-panel.js', 'tab-layout.js', 'collision-update.js', 'site-info.js', 'ops-menu.js', 'tabs.js', 'theme-switch.js', 'lines.js', 'add-app.js', 'trans-settings.js', 'trans-bar.js', 'app.js'],
+  assert.deepEqual(order, ['theme.js', 'dom.js', 'ui-kit.js', 'pure.js', 'proxy-panel.js', 'tab-layout.js', 'collision-update.js', 'trans-health.js', 'site-info.js', 'ops-menu.js', 'tabs.js', 'theme-switch.js', 'lines.js', 'add-app.js', 'trans-settings.js', 'trans-bar.js', 'app.js'],
     '顺序错了就是白屏：各模块的顶层声明必须在 app.js 执行前就位')
   // ui-kit 只依赖 dom.js 的元素句柄；排到业务模块之后就等于谁都调不到它
   assert.equal(order.indexOf('ui-kit.js'), order.indexOf('dom.js') + 1,

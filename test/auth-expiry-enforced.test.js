@@ -96,3 +96,70 @@ test('主号与子号都正常 → 子账号放行', async () => {
   const { auth } = harness(subAccount({ parent: { expiresAt: future() } }))
   assert.ok(await auth.resolve(req(), 'user'))
 })
+
+// ---------------------------------------------------------------------------
+// 按字符计费（2026-11-17 起）
+//
+// 背景：jiufa 的套餐 04:23 到期、04:24 就被锁在门外，而账上还有 254 万字符
+// 没用完。基础/高级/专业版卖的是**字符额度**，不是租期，所以这三档改成
+// 只看余额。单人包月（solo_monthly）卖的是时间，必须继续看到期。
+// ---------------------------------------------------------------------------
+
+const { isAccountUnavailable } = require('../server/services/auth-service')
+
+test('★ 高级版到期但还有余额 → 仍可用（用户买的是字符不是租期）', () => {
+  const parent = { packageCode: 'advanced', expiresAt: past(), charBalance: 2_540_000 }
+  assert.strictEqual(isAccountUnavailable(parent), false,
+    '字符没用完却被到期时间锁住 —— 用户会认为钱白花了')
+})
+
+test('★ 高级版字符用完 → 不可用（交给 INSUFFICIENT_CHARS 之外的兜底）', () => {
+  const parent = { packageCode: 'advanced', expiresAt: past(), charBalance: 0 }
+  assert.strictEqual(isAccountUnavailable(parent), true)
+})
+
+test('基础版 / 专业版 同样按字符计', () => {
+  for (const code of ['basic', 'pro']) {
+    assert.strictEqual(
+      isAccountUnavailable({ packageCode: code, expiresAt: past(), charBalance: 1 }),
+      false, `${code} 有余额却不可用`)
+    assert.strictEqual(
+      isAccountUnavailable({ packageCode: code, expiresAt: past(), charBalance: 0 }),
+      true, `${code} 没余额却可用`)
+  }
+})
+
+test('★ 单人包月是按时长卖的 → 到期必须失效（不能被字符规则放行）', () => {
+  const parent = { packageCode: 'solo_monthly', expiresAt: past(), charBalance: 99_999_999 }
+  assert.strictEqual(isAccountUnavailable(parent), true,
+    '包月套餐被当成字符套餐 —— 等于白送无限期使用')
+})
+
+test('单人包月未到期 → 可用', () => {
+  const parent = { packageCode: 'solo_monthly', expiresAt: future(), charBalance: 0 }
+  assert.strictEqual(isAccountUnavailable(parent), false)
+})
+
+test('★ 拿不到套餐 code → 退回按时间判断（不能把全站变无限期）', () => {
+  assert.strictEqual(isAccountUnavailable({ expiresAt: past(), charBalance: 999 }), true)
+  assert.strictEqual(isAccountUnavailable({ expiresAt: future(), charBalance: 0 }), false)
+})
+
+test('余额字段异常 → 退回按时间判断，不误判为可用', () => {
+  const parent = { packageCode: 'advanced', expiresAt: past(), charBalance: 'not-a-number' }
+  assert.strictEqual(isAccountUnavailable(parent), true)
+})
+
+test('子账号受主账号余额约束（主号没字符了，整个团队一起停）', async () => {
+  const { auth } = harness(subAccount({
+    parent: { packageCode: 'advanced', expiresAt: past(), charBalance: 0 }
+  }))
+  assert.strictEqual(await auth.resolve(req(), 'user'), null)
+})
+
+test('子账号在主账号有字符时照常可用（即使已过原到期日）', async () => {
+  const { auth } = harness(subAccount({
+    parent: { packageCode: 'advanced', expiresAt: past(), charBalance: 500_000 }
+  }))
+  assert.ok(await auth.resolve(req(), 'user'), '主账号有余额，子账号却被拦了')
+})

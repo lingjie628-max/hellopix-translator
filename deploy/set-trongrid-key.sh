@@ -23,7 +23,7 @@ set -euo pipefail
 ENV_FILE="${ENV_FILE:-/etc/hello-pix/hello-pix.env}"
 REMOTE_JS=/tmp/hello-pix-set-trongrid-key.js
 
-SSH_HOST="${SSH_HOST:-207.57.167.121}"
+SSH_HOST="${SSH_HOST:-38.55.254.63}"
 SSH_PORT="${SSH_PORT:-30071}"
 SSH_KEY="$HOME/.ssh/pikesi_deploy"
 SSH_OPTS=(-p "$SSH_PORT" -i "$SSH_KEY" -o BatchMode=yes
