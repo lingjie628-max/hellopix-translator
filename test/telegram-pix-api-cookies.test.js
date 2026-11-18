@@ -22,10 +22,14 @@
  */
 
 const assert = require('node:assert/strict')
+const fs = require('node:fs')
 const path = require('node:path')
-const test = require('node:test')
+const nodeTest = require('node:test')
+const { optionalTest } = require('./helpers/optional-standalone')
 
-const { createPixApi } = require(path.join(__dirname, '..', 'standalone', 'telegram', 'lib', 'pix-api.js'))
+const MODULE = path.join(__dirname, '..', 'standalone', 'telegram', 'lib', 'pix-api.js')
+const test = optionalTest(nodeTest, MODULE, 'Telegram standalone client has been removed')
+const { createPixApi } = fs.existsSync(MODULE) ? require(MODULE) : {}
 
 /** 造一个最小的 fetch Response 替身，只要 headers.getSetCookie。 */
 function fakeResponse (setCookies, body) {

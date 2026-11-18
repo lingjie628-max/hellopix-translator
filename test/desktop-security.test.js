@@ -46,7 +46,26 @@ test('remote pages have no page-world IPC bridge or dynamic code injection', () 
   const root = path.join(__dirname, '..')
   const guest = fs.readFileSync(path.join(root, 'desktop', 'guest-inject.js'), 'utf8')
   const main = fs.readFileSync(path.join(root, 'desktop', 'main.js'), 'utf8')
-  assert.equal(guest.includes('exposeInMainWorld'), false)
+  // ★ 2026-10-29 收窄：原来禁止 exposeInMainWorld。
+  //
+  // 真机实测证明"preload 直接给 window 赋值"在 contextIsolation 下页面世界
+  // 读不到 —— 所以跨世界传东西**只能**用 contextBridge。全面禁止等于
+  // 把一个必需能力禁掉，那条断言只会被绕过（或者功能永久坏掉）。
+  //
+  // 正确的约束是"暴露的东西必须极小且不可执行任意 IPC"：
+  //   1. 只允许两个白名单名字（图片翻译桥 + 只读环境）；
+  //   2. 暴露的必须是函数或只读 getter，不能是 pixBridge 本身；
+  //   3. 不能把 ipcRenderer / invoke 直接塞进去。
+  const exposed = [...guest.matchAll(/exposeInMainWorld\(\s*['"]([^'"]+)['"]/g)].map(m => m[1])
+  for (const name of exposed) {
+    assert.ok(
+      ['__pixTranslateImage', '__pixEnv'].includes(name),
+      '只允许暴露白名单里的名字，实际出现：' + name
+    )
+  }
+  assert.equal(guest.includes('exposeInMainWorld(\'pixBridge\''), false)
+  assert.equal(guest.includes('exposeInMainWorld(\'ipcRenderer\''), false)
+  assert.equal(guest.includes('exposeInMainWorld(\'invoke\''), false)
   assert.equal(guest.includes('window.helloPix'), false)
   assert.equal(main.includes('executeJavaScript('), false)
   assert.equal(main.includes('else cb(true)'), false)
@@ -101,7 +120,7 @@ test('production refuses to boot the in-memory demo backend', () => {
   assert.match(result.stderr, /拒绝启动/)
 })
 
-test('desktop and standalone translation requests carry an idempotency key', () => {
+test('desktop translation requests carry an idempotency key', () => {
   // 正式后端 core.translate 强制幂等键（缺失返回 400 IDEMPOTENCY_KEY_REQUIRED），
   // 桌面端与独立电报端必须带。
   //
@@ -118,10 +137,15 @@ test('desktop and standalone translation requests carry an idempotency key', () 
   // 桌面端的请求构造现在在 src/translate/translation-cache.js（见 createRequestTranslate）
   const desktopNet = fs.readFileSync(
     path.join(root, 'desktop', 'src', 'translate', 'translation-cache.js'), 'utf8')
-  const telegramMain = fs.readFileSync(path.join(root, 'standalone', 'telegram', 'main.js'), 'utf8')
   assert.ok(/requestId:\s*cache\.requestId\(text, from, to, engine\)/.test(desktopNet),
     'desktop translate:run 请求缺少 requestId')
-  assert.ok(telegramMain.includes('function transRequestKey('), 'standalone telegram 缺少幂等键生成函数')
-  assert.ok(/idempotencyKey:\s*transRequestKey\(\)/.test(telegramMain),
-    'standalone telegram 翻译请求缺少幂等键')
+  // The Telegram standalone product has been removed from this branch. Keep
+  // the desktop guard active, and validate the bridge only if it is restored.
+  const telegramMainPath = path.join(root, 'standalone', 'telegram', 'main.js')
+  if (fs.existsSync(telegramMainPath)) {
+    const telegramMain = fs.readFileSync(telegramMainPath, 'utf8')
+    assert.ok(telegramMain.includes('function transRequestKey('), 'standalone telegram 缺少幂等键生成函数')
+    assert.ok(/idempotencyKey:\s*transRequestKey\(\)/.test(telegramMain),
+      'standalone telegram 翻译请求缺少幂等键')
+  }
 })

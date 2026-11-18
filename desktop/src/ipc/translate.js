@@ -22,9 +22,12 @@ const crypto = require('crypto')
  */
 
 const MAX_TRANSLATE_CHARS = 5000
+const activeVoiceEncoders = new Map()
+const VOICE_ENCODER_IDLE_MS = 2 * 60 * 1000
 
 // 与服务端同一份实现（desktop/shared），避免两边规则分叉。
 const { trimTrailingDot } = require('../../shared/trailing-dot')
+const { VoiceOpusSession } = require('../translate/voice-opus-encode')
 
 /**
  * 把上游/网络异常归一成渲染层能识别的错误码。
@@ -190,7 +193,10 @@ function registerTranslateIpc (deps) {
     // 语言也要先归一化：上游不传 `to` 时按 'zh' 处理（见 core.translateImage），
     // 否则 '' 和 'zh' 会占两份缓存、白打一次上游。
     const to = String(data.to || 'zh')
-    const hash = imageHash(to + '\u0000' + shot.image)
+    const profile = state.profile || {}
+    const accountKey = String(profile.username || '')
+    const engineKey = String(data.engine || profile.activeEngine || '')
+    const hash = imageHash([accountKey, engineKey, to, shot.image].join('\u0000'))
     const cached = imageCacheGet(hash)
     if (cached) {
       return Object.assign({}, cached, { success: true, cached: true, size: shot.from || '' })
@@ -255,20 +261,33 @@ function registerTranslateIpc (deps) {
   // ---- 客页调用（handleUnsafe + trustedTabSender 自校验）----
 
   /**
-   * 「翻译图片」UI 源码（同步）。
+   * 页面世界脚本的三个 file:// URL（同步）。
    *
-   * 客页是 sandbox:true，preload 读不到本地文件，只能向这里要。
-   * 用 sendSync 是因为它在 preload 启动阶段同步返回，不引入 async 竞态。
+   * ## 为什么要有这条通道（2026-10-29）
    *
-   * 守卫用 trustedTabSender 而不是 isMainSender —— 发起方是**客页的
-   * preload**（WebContentsView），本来就不是主界面。
+   * 客页是 sandbox:true，preload 读不到本地文件；而「翻译图片」的按钮必须
+   * 跑在**页面世界**（隔离世界的 click 回调收不到真实鼠标，实测见
+   * test/image-translate-page-world.test.js）。页面世界又只能通过
+   * `<script src>` 收代码，不认字符串。
    *
-   * 返回的是纯 UI 字符串（CSS + 状态机），不含任何凭据，所以给客页是安全的。
+   * 所以由主进程把代码写进临时文件，这里只把 URL 交出去。
+   * 同步是必须的：脚本标签要在 preload 阶段立刻插，异步回来就晚了。
+   *
+   * 守卫用 trustedTabSender 而不是 isMainSender —— 发起方是客页的 preload。
+   * 返回的是临时目录里的 file:// 路径，不含任何凭据。
    */
-  reg.handleSync('translate:imageUiSource', () => {
-    if (typeof actions.imageUiSource !== 'function') return ''
-    return actions.imageUiSource()
-  }, sender => Boolean(actions.trustedTabSender(sender)))
+  reg.handleSync('translate:pageScripts', (event) => {
+    if (typeof actions.pageScriptUrls !== 'function') return null
+    // 协议要挂到**发起方所在的 session** 上：客页跑在独立 partition，
+    // 挂错 session 页面里就取不到 pix:// 脚本。
+    let ses = null
+    try { ses = event.sender.session } catch (e) {}
+    return actions.pageScriptUrls(ses)
+  }, event => Boolean(
+    typeof actions.trustedTabBinding === 'function'
+      ? actions.trustedTabBinding(event && event.sender)
+      : actions.trustedTabSender(event && event.sender)
+  ))
 
   reg.handleUnsafe('translate:guestPrefs', event => {
     const tab = actions.trustedTabSender(event.sender)
@@ -277,6 +296,91 @@ function registerTranslateIpc (deps) {
     // 比心跳超时可靠：心跳可能是桥挂了但定时器还在跑。
     actions.bridgeReport(tab.id, true, '')
     return env.tabPrefs(tab)
+  })
+
+  /**
+   * 「快速语音」的 WASM OGG/Opus 编码。
+   *
+   * 页面世界先用 AudioContext 解码并降成单声道 PCM，再按块送到这里。
+   * 一个实例同一时间只允许一个会话；两分钟无后续块自动释放，防止页面异常
+   * 留下大型 Float32 缓冲区。
+   */
+  reg.handleUnsafe('translate:voiceOpus', (event, payload) => {
+    const tab = actions.trustedTabSender(event.sender)
+    if (!tab) return actions.rejectUntrustedSender()
+    const p = payload || {}
+    const action = String(p.action || '')
+    const requestId = String(p.requestId || '').slice(0, 120)
+    if (!requestId) return { success: false, msg: '语音编码请求缺少 ID' }
+    const key = tab.id + ':' + requestId
+
+    if (action === 'start') {
+      for (const existing of activeVoiceEncoders.keys()) {
+        if (existing.indexOf(tab.id + ':') === 0) {
+          return { success: false, msg: '当前窗口已有一段音频正在编码' }
+        }
+      }
+      try {
+        const session = new VoiceOpusSession({
+          sampleRate: p.sampleRate,
+          bitrate: p.bitrate
+        })
+        const timer = setTimeout(() => {
+          const row = activeVoiceEncoders.get(key)
+          if (!row) return
+          try { row.session.abort() } catch (e) {}
+          activeVoiceEncoders.delete(key)
+        }, VOICE_ENCODER_IDLE_MS)
+        if (typeof timer.unref === 'function') timer.unref()
+        activeVoiceEncoders.set(key, { session, timer })
+        return { success: true }
+      } catch (e) {
+        return { success: false, msg: (e && e.message) || String(e) }
+      }
+    }
+
+    const row = activeVoiceEncoders.get(key)
+    if (!row) return { success: false, msg: '语音编码会话不存在或已超时' }
+    row.timer.refresh()
+
+    if (action === 'chunk') {
+      try {
+        return { success: true, samples: row.session.push(p.samples) }
+      } catch (e) {
+        try { row.session.abort() } catch (ignore) {}
+        clearTimeout(row.timer)
+        activeVoiceEncoders.delete(key)
+        return { success: false, msg: (e && e.message) || String(e) }
+      }
+    }
+
+    if (action === 'finish') {
+      clearTimeout(row.timer)
+      activeVoiceEncoders.delete(key)
+      try {
+        const output = row.session.finish()
+        actions.log('voice-fast', '实例 ' + tab.id + ' OPUS_ENCODE ok=true bytes=' + output.length)
+        return {
+          success: true,
+          base64: output.toString('base64'),
+          name: String(p.name || 'voice').replace(/\.[^.]+$/, '') + '.ogg',
+          type: 'audio/ogg; codecs=opus',
+          bytes: output.length
+        }
+      } catch (e) {
+        actions.log('voice-fast', '实例 ' + tab.id + ' OPUS_ENCODE ok=false reason=' + ((e && e.message) || e))
+        return { success: false, msg: (e && e.message) || String(e) }
+      }
+    }
+
+    if (action === 'cancel') {
+      clearTimeout(row.timer)
+      activeVoiceEncoders.delete(key)
+      try { row.session.abort() } catch (e) {}
+      return { success: true }
+    }
+
+    return { success: false, msg: '未知的语音编码动作' }
   })
 
   const composerTargetOf = event => {

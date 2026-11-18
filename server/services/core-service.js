@@ -838,16 +838,75 @@ class CoreService {
     // 绝不在图片场景偷偷换成 GPT —— 那是"静默切换供应商"。
     const resolved = await this.resolveTranslateEngine(session, data, {})
 
+    // 图片没有字符预留，服务端仍必须有内容级幂等和短时结果缓存。
+    // 客户端缓存只能在桌面端生效；直接调用 API、两个客户端或双击重放
+    // 仍会重复打昂贵的视觉模型。
+    const imageDigest = crypto.createHash('sha256')
+      .update([resolved.engine.id, to, String((data && data.mime) || 'image/jpeg'), raw].join('\u0000'))
+      .digest('hex')
+    const parentId = String(
+      (session && session.parent && session.parent.id) ||
+      (session && session.account && session.account.id) ||
+      ''
+    )
+    const cacheKey = `${redisPrefix}image:result:${parentId}:${imageDigest}`
+    let cached = null
+    if (this.redis && typeof this.redis.get === 'function') {
+      try {
+        cached = await this.redis.get(cacheKey)
+      } catch (error) {
+        console.error('Image result cache read failed:', error.message)
+      }
+    }
+    if (cached) {
+      try {
+        const payload = JSON.parse(cached)
+        if (payload && payload.ok) return Object.assign(payload, { cached: true })
+      } catch (error) {
+        try { await this.redis.del(cacheKey) } catch (_) {}
+      }
+    }
+
+    const lockKey = `${redisPrefix}image:lock:${parentId}:${imageDigest}`
+    const lockToken = crypto.randomBytes(16).toString('hex')
+    let lockHeld = false
+    if (this.redis && typeof this.redis.set === 'function') {
+      try {
+        const acquired = await this.redis.set(lockKey, lockToken, 'NX', 'PX', 120000)
+        if (!acquired) {
+          throw new ApiError(409, '同一张图片正在翻译，请稍等后重试', 'IMAGE_REQUEST_IN_PROGRESS')
+        }
+        lockHeld = true
+      } catch (error) {
+        if (error instanceof ApiError) throw error
+        // 缓存/锁是成本保护层，不应把本已可用的图片翻译整体打挂；
+        // Redis 本身不可用时，上层鉴权通常也会先失败。
+        console.error('Image result lock failed:', error.message)
+      }
+    }
+
     const credentials = await this.engineCredentials(resolved.engine.id)
     const started = Date.now()
-    const result = await this.translator.translateImage(resolved.engine, {
-      image: raw,
-      mime: String((data && data.mime) || 'image/jpeg'),
-      to: to
-    }, {
-      allowPublicNetwork: this.allowPublicNetwork,
-      credentials
-    })
+    let result
+    try {
+      result = await this.translator.translateImage(resolved.engine, {
+        image: raw,
+        mime: String((data && data.mime) || 'image/jpeg'),
+        to: to
+      }, {
+        allowPublicNetwork: this.allowPublicNetwork,
+        credentials
+      })
+    } catch (error) {
+      if (lockHeld) {
+        try {
+          await this.redis.eval(
+            'if redis.call("get",KEYS[1])==ARGV[1] then return redis.call("del",KEYS[1]) else return 0 end',
+            1, lockKey, lockToken)
+        } catch (_) {}
+      }
+      throw error
+    }
 
     const elapsed = Date.now() - started
     try {
@@ -863,6 +922,13 @@ class CoreService {
       // 客户端据此引导"换成 GPT"，而不是提示"稍后重试"。
       const code = (result && result.code) || 'IMAGE_TRANSLATE_FAILED'
       const status = code === 'NO_VISION' ? 400 : 502
+      if (lockHeld) {
+        try {
+          await this.redis.eval(
+            'if redis.call("get",KEYS[1])==ARGV[1] then return redis.call("del",KEYS[1]) else return 0 end',
+            1, lockKey, lockToken)
+        } catch (_) {}
+      }
       throw new ApiError(status, (result && result.msg) || '图片翻译暂不可用', code)
     }
 
@@ -898,7 +964,7 @@ class CoreService {
       } catch (inner) { /* 日志本身不能抛 */ }
     }
 
-    return {
+    const response = {
       ok: true,
       blocks: result.blocks || [],
       text: result.text || '',
@@ -906,6 +972,23 @@ class CoreService {
       usage: result.usage || null,
       ms: elapsed
     }
+    if (this.redis && typeof this.redis.set === 'function') {
+      try {
+        // Keep only a short window: enough for user double-click/replay, bounded
+        // enough that Redis does not become an unbounded image archive.
+        await this.redis.set(cacheKey, JSON.stringify(response), 'PX', 10 * 60_000)
+      } catch (error) {
+        console.error('Image result cache write failed:', error.message)
+      }
+    }
+    if (lockHeld) {
+      try {
+        await this.redis.eval(
+          'if redis.call("get",KEYS[1])==ARGV[1] then return redis.call("del",KEYS[1]) else return 0 end',
+          1, lockKey, lockToken)
+      } catch (_) {}
+    }
+    return response
   }
 
   /**
@@ -1624,11 +1707,57 @@ class CoreService {
       // 一条都不匹配时退回第一条，保持旧行为 —— 宁可给一个能跑的包，
       // 也不要返回空串把下载按钮藏掉（那会让用户以为根本没有 mac 版）。
       const { archCompatible } = require('../lib/release-arch')
+      /**
+       * 按平台挑**版本最高**的那个包。
+       *
+       * ## 为什么不能只按 releaseGroup 精确匹配
+       *
+       * 发布脚本从 1.2.2 起统一写 `release_group='desktop'`，而早先的
+       * 1.2.3 及以前写的是 `windows` / `macos`。原来的实现是
+       * `listed.filter(item => item.releaseGroup === group)` ——
+       * desktop 那些记录永远匹配不上 `'windows'`，于是官网下载按钮
+       * **一直停在 1.2.3**，用户从官网下到的始终是旧包，跟 /client/update
+       * 推的版本完全是两回事。
+       *
+       * 现在改成按 `os` 文本判断平台（与 findUpdate 同一套口径），
+       * 再按版本号取最新。`desktop` 这种"平台未知"的分组留给下面的兜底。
+       */
+      const osOf = row => {
+        const text = [row.releaseGroup, row.os].join(' ')
+        if (/mac/i.test(text)) return 'macos'
+        if (/windows/i.test(text)) return 'windows'
+        if (/android/i.test(text)) return 'android'
+        if (/ios/i.test(text)) return 'ios'
+        if (/desktop/i.test(text)) return 'desktop'
+        return ''
+      }
       const download = group => {
-        const rows = listed.filter(item => item.releaseGroup === group)
-        if (!rows.length) return ''
-        const row = (wantArch && rows.find(item => archCompatible(wantArch, item.arch))) || rows[0]
-        return row.url
+        const rows = listed.filter(item => osOf(item) === group)
+        return pickHighest(rows, wantArch)?.url || ''
+      }
+      /**
+       * 版本号最高的那条；版本相同则优先架构匹配。
+       *
+       * 顺序不能反：先按架构过滤会让"最新版只有 x64"的场景返回到旧版，
+       * 而用户点官网按钮的预期是"拿到最新版"，架构只是同版本内的偏好。
+       */
+      function pickHighest(rows, arch) {
+        if (!rows.length) return null
+        const sorted = rows.slice().sort((a, b) => {
+          const byVer = catalog.compareVersions(b.version, a.version)
+          if (byVer !== 0) return byVer
+          if (!arch) return 0
+          const aOk = archCompatible(arch, a.arch) ? 0 : 1
+          const bOk = archCompatible(arch, b.arch) ? 0 : 1
+          return aOk - bOk
+        })
+        // 指定了架构时，同版本里挑匹配的；整批都不匹配就退回第一条（最新）
+        if (arch) {
+          const sameVer = sorted.filter(item => catalog.compareVersions(item.version, sorted[0].version) === 0)
+          const hit = sameVer.find(item => archCompatible(arch, item.arch))
+          if (hit) return hit
+        }
+        return sorted[0]
       }
     const standaloneApps = listed.filter(item => item.releaseGroup === 'standalone')
     const discounts = setting(settings, 'billing.discounts', {})
@@ -1744,10 +1873,23 @@ class CoreService {
       let points = 0
       // 写明了架构且能匹配上的优先于"不限架构"的
       if (String(row.arch || '').trim() && archCompatible(arch, row.arch)) points += 4
-      if (!row.app) points += 1
+      // ★ 这一分只在**同一版本号**之间做 tiebreaker 用，绝不能压过版本号 ★
+      //
+      // 原来它是排序主键，于是老记录（app 字段空）比新记录（app 已填）
+      // 多拿 1 分，直接把旧版顶到第一位：
+      //   usable = 1.2.6:s4, 1.2.4:s4, 1.2.3:s4, 1.2.2:s4, 1.2.1:s5  ← 1.2.1 胜出
+      // 线上后果：findUpdate 返回 1.2.1，客户端拿 local=1.2.1 一比相等，
+      // 界面显示"当前已是最新版本"，用户永远收不到更新。
+      // 判据换成 releaseGroup/app 都空的记录才算通用包，且只在同版本时参与比较。
+      if (!row.app && !row.releaseGroup && !row.release_group) points += 1
       return points
     }
-    const row = usable.slice().sort((left, right) => score(right) - score(left))[0] || {}
+    const row = usable.slice().sort((left, right) => {
+      // 版本号优先：回退到旧包等于把用户按在已知问题上。
+      const byVersion = catalog.compareVersions(right.version, left.version)
+      if (byVersion !== 0) return byVersion
+      return score(right) - score(left)
+    })[0] || {}
     const settings = await this.repo.settings()
 
     // 有该系统的发布记录、却没有一条架构匹配 —— 明确告知，不推错包

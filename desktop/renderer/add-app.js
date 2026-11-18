@@ -109,9 +109,10 @@ function fillAddForm(item, preset) {
   addTransOn.checked = settings.enableTranslate !== false
   addQuickReply.checked = !!settings.enableQuickReply
   addCounter.checked = !!settings.enableCounter
-  const isWaPro = item.id === 'whatsapp-pro'
-  addAntiRevokeCell.classList.toggle('hidden', !isWaPro)
-  addAntiRevoke.checked = isWaPro && settings.antiRevoke !== false
+  // 与主进程的 ANTI_REVOKE_DEFAULT 同口径：这两个版本才提供防撤回开关。
+  const isAntiRevokePlatform = item.id === 'whatsapp-pro' || item.id === 'whatsapp-biz'
+  addAntiRevokeCell.classList.toggle('hidden', !isAntiRevokePlatform)
+  addAntiRevoke.checked = isAntiRevokePlatform && settings.antiRevoke !== false
   addSendFrom.innerHTML = langOptionHtml()
   addSendTo.innerHTML = langOptionHtml()
   addRecvFrom.innerHTML = langOptionHtml()
@@ -166,8 +167,6 @@ function fillAddForm(item, preset) {
   addProxyPass.value = direct.proxyPass
   addProxyChannel.value = direct.proxyChannel
   addProxyIpVer.value = direct.proxyIpVer
-  addProxyRefresh.value = direct.proxyRefresh
-  addProxyUdp.checked = !!direct.proxyUdp
   geoManual = false
   fillGeoForm(null)
   syncProxyFields(true)
@@ -210,8 +209,8 @@ function readAddSettings() {
     proxyPass: addProxyPass.value,
     proxyChannel: addProxyChannel.value || 'dbip',
     proxyIpVer: addProxyIpVer.value || 'ipv4',
-    proxyRefresh: addProxyRefresh.value.trim(),
-    proxyUdp: addProxyUdp.checked,
+    proxyRefresh: '',
+    proxyUdp: false,
     proxyGeo: readGeoForm()
   }
 }

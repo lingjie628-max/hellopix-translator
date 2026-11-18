@@ -46,6 +46,7 @@ function productionRouter(context) {
   // 图片翻译的独立限额（成本是文本的几十到几百倍，不能共用额度）
   const translateImageIpLimit = limits.translateImageIp
   const translateImageAccountLimit = limits.translateImageAccount
+  const translateImageParentDailyLimit = limits.translateImageParentDaily
   const crashReportLimit = limits.crashReport
   router.use(auth.middleware())
   // 下单业务逻辑在 services/recharge-order-service.js，路由只负责拼响应
@@ -301,16 +302,65 @@ function productionRouter(context) {
     const data = input(req)
     let kind = req.pixUser.kind
     let id = req.pixUser.account.id
-    if (req.pixUser.kind === 'main' && data.id && String(data.id) !== String(req.pixUser.parent.id)) {
-      const owned = await repo.query('SELECT id FROM sub_accounts WHERE id=$1 AND parent_id=$2 AND deleted_at IS NULL', [data.id, req.pixUser.parent.id])
-      if (!owned.rows[0]) throw new ApiError(404, '子账号不存在', 'SUB_NOT_FOUND')
-      kind = 'sub'; id = data.id
+    /**
+     * ★ 目标类型必须由调用方显式声明，不能靠 id 大小猜 ★
+     *
+     * 2026-11-11 线上事故（反复复现）：
+     *
+     *   users.id = 37          → jiufa（商户主账号）
+     *   sub_accounts.id = 37   → shijiu（jiufa 名下的子账号）
+     *
+     * 两张表各有独立的 identity 序列，**id 撞号是常态**，不是异常数据。
+     * 原判定是：
+     *
+     *   if (data.id && String(data.id) !== String(parent.id))  → 当作子账号
+     *
+     * 商户给 shijiu 点解绑，前端传 {id:37}，而 parent.id 也是 37 —— 两者相等，
+     * 于是判定为假，**静默落进 else 分支把商户自己解绑并踢下线**。
+     * 用户看到"已解绑"绿字 + 自己被踢回登录页，而子账号还绑着。
+     *
+     * 现在约定：
+     *   · `target=sub`（默认，前端解绑子账号时传）→ 必须给 id，只作用于
+     *     sub_accounts 且带 parent_id 归属校验。**永远不会碰 users 表。**
+     *   · `target=self` → 解绑自己（主账号或子账号本人），忽略 id。
+     *
+     * `self=1` 保留为 `target=self` 的旧写法兼容。
+     */
+    const target = data.target
+      ? String(data.target)
+      : (String(data.self || '') === '1' ? 'self' : 'sub')
+    if (target !== 'sub' && target !== 'self') {
+      throw new ApiError(400, 'target 只能是 sub 或 self', 'BAD_TARGET')
     }
+
+    if (target === 'self') {
+      kind = req.pixUser.kind === 'sub' ? 'sub' : 'main'
+      id = req.pixUser.account.id
+    } else {
+      // target=sub：只有主账号能指定子账号；子账号身份只能解绑自己
+      if (kind !== 'main') {
+        kind = 'sub'; id = req.pixUser.account.id
+      } else {
+        if (!data.id) throw new ApiError(400, '缺少子账号 ID', 'SUB_ID_REQUIRED')
+        const owned = await repo.query(
+          'SELECT id FROM sub_accounts WHERE id=$1 AND parent_id=$2 AND deleted_at IS NULL',
+          [data.id, req.pixUser.parent.id])
+        if (!owned.rows[0]) throw new ApiError(404, '子账号不存在', 'SUB_NOT_FOUND')
+        kind = 'sub'; id = data.id
+      }
+    }
+    /**
+     * 会话撤销：只撤**目标账号**，绝不连带父账号。
+     *
+     * `auth.revokeUser('sub', id)` 会清掉 `user:sub:<id>` 这一桶会话，
+     * 和主账号的 `user:main:<id>` 是两个独立的 key（见 auth-service.subject）。
+     * 商户自己那条 `main:` 会话因此必须原封不动。
+     */
     await repo.query(kind === 'sub'
       ? "UPDATE sub_accounts SET bound_device='' WHERE id=$1 AND deleted_at IS NULL"
       : "UPDATE users SET bound_device='' WHERE id=$1", [id])
     await auth.revokeUser(kind, id)
-    ok(res, '客户端绑定已重置')
+    ok(res, kind === 'sub' ? '已解绑该子账号的电脑' : '已解绑本机')
   }))
 
   // 旧的商户端「工单」接口（/order/*、/orderDetails/*）已于 2026-09-25 移除：
@@ -348,13 +398,14 @@ function productionRouter(context) {
    * 用**独立**的限额（不是文本那两道）—— 一次图片的成本是纯文本的几十到
    * 几百倍，挂同一份额度等于限额失效。理由与数字依据见 routes/context.js。
    *
-   * 不要求 Idempotency-Key：图片翻译没有"字符预留"可退，重放一次只是
-   * 多花一次 token；客户端本来也不会自动重试（见 desktop 侧的调用）。
+   * 图片翻译没有字符预留可退，但服务端仍按图片内容 + 语言 + 引擎做
+   * 短时结果缓存和并发锁；重放会命中缓存或被明确拒绝，不会无限打上游。
    */
   const translateImage = asyncRoute(async (req, res) => {
     res.json(await core.translateImage(req.pixUser, input(req)))
   })
-  router.post('/translate/image', translateImageIpLimit, translateImageAccountLimit, translateImage)
+  router.post('/translate/image', translateImageIpLimit, translateImageAccountLimit,
+    translateImageParentDailyLimit, translateImage)
   router.post('/translate/run', translateIpLimit, translateAccountLimit, translate)
   router.post('/translate', translateIpLimit, translateAccountLimit, translate)
 
@@ -442,6 +493,14 @@ function productionRouter(context) {
   require('./admin/clients').registerAdminClients(router, ctx)
   // FAQ、短链、话术库、账号在线、粉丝
   require('./admin/ops').registerAdminOps(router, ctx)
+  // 工单（客服 ←→ 商户）
+  require('./admin/tickets').registerAdminTickets(router, ctx)
+  // 商户端工单：提单 / 查看 / 回复。
+  // 放在这里而不是文件顶部 —— 上面的 router.use(auth.middleware()) 已生效，
+  // 每条路由都能拿到 req.pixUser，归属校验才有依据。
+  require('./user-tickets').registerUserTickets(router, ctx)
+  // 进粉计数 + 进粉工单。与上面的“客服工单”完全分开。
+  require('./user-counter').registerUserCounter(router, ctx)
   // 套餐、系统设置、验证码通道
   require('./admin/settings').registerAdminSettings(router, ctx)
 

@@ -20,10 +20,11 @@
  *    管理端会话就会被拼进 `/apis/client/*` 的 Cookie 头、甚至写进 bridge 文件。
  */
 
-const test = require('node:test')
+const nodeTest = require('node:test')
 const assert = require('node:assert')
 const fs = require('fs')
 const path = require('path')
+const { optionalTest } = require('./helpers/optional-standalone')
 
 const ROOT = path.resolve(__dirname, '..')
 const APIS = {
@@ -35,7 +36,8 @@ const MAINS = {
   win: path.join(ROOT, 'standalone/telegram-win/main.js')
 }
 
-const { createPixApi } = require(APIS.mac)
+const test = optionalTest(nodeTest, Object.values(APIS), 'Telegram standalone clients have been removed')
+const { createPixApi } = fs.existsSync(APIS.mac) ? require(APIS.mac) : {}
 
 /** 抓一次请求，返回 { url, init } */
 function capture(api, call) {

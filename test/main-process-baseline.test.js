@@ -85,22 +85,32 @@ const BASELINE_CHANNELS = [
   'app:hide', 'app:home', 'app:open', 'app:overlay', 'app:platforms', 'app:preset',
   'app:proxyPresets', 'app:proxySettings', 'app:reloadActive', 'app:rename',
   'app:reorder', 'app:restart', 'app:savePreset', 'app:showContextMenu',
-  'app:showHidden', 'app:switch', 'app:tabs', 'app:updatePlatform',
-  'app:updateSettings', 'app:version',
+  'app:showHidden', 'app:switch', 'app:tabs', 'app:translateRestore', 'app:translateStatus',
+  'app:updateApply', 'app:updateCancel', 'app:updatePlatform',
+  'app:updateSettings', 'app:updateStart', 'app:updateState',
+  'app:version',
   'auth:autoLogin', 'auth:get', 'auth:login', 'auth:logout', 'auth:save',
   'auth:session', 'auth:verifyLock',
   'chrome:barHeight', 'chrome:height',
   'config:get', 'config:setApiBase', 'config:setBackgroundRunning', 'config:setTabLayout', 'config:setTheme',
-  'customer:ingest', 'customer:reminders',
+  'counter:accounts', 'counter:archiveAccount', 'counter:candidate', 'counter:events',
+  'counter:flush', 'counter:queueStatus', 'counter:repeats', 'counter:retryFailed',
+  'counter:summary', 'counter:tabs', 'counter:ticket', 'counter:ticketReply',
+  'counter:ticketTransition', 'counter:tickets', 'counter:toggleTab',
+  'customer:ingest', 'customer:reminders', 'device:peer',
   'lines:list', 'lines:ping', 'lines:pingAll', 'lines:select',
   'proxy:detect', 'shell:open', 'site:info',
   'translate:bridgeStatus', 'translate:composerInsertText',
   'translate:composerSelectAllDelete', 'translate:engines', 'translate:guestPrefs',
-  // 图片翻译：translate:image 走 ipcMain.handle（主界面发起），
-  // translate:imageUiSource 是 sendSync（客页 preload 启动时取 UI 源码，
-  // 因为 sandbox:true 读不到本地文件）。
-  'translate:image', 'translate:imageUiSource',
-  'translate:run', 'translate:savePrefs'
+  // 图片翻译：translate:image 走 ipcMain.handle（客页发起）。
+  // translate:pageScripts 是 sendSync（客页 preload 启动时取页面世界脚本的
+  // pix:// URL —— sandbox:true 读不到本地文件，contextIsolation 又传不进
+  // 页面世界，只能绕这一跳）。2026-10-29 由 translate:imageUiSource 改名而来。
+  'translate:image', 'translate:pageScripts',
+  'translate:run', 'translate:savePrefs',
+  // 快速语音：客页页面世界通过受限 postMessage 让 preload 转码，最终仍由
+  // trustedTabSender 校验后才允许主进程调用 FFmpeg。
+  'translate:voiceOpus'
 ]
 
 test('纯函数行为不变（真身直接调用，不复制源码）', async () => {

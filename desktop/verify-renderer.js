@@ -65,7 +65,11 @@ if (!process.versions.electron) {
 // ------------------------------------------------------------ 内层：Electron
 const { app, BrowserWindow } = require('electron')
 
-const EXPECTED_SCRIPTS = ['theme.js', 'dom.js', 'pure.js', 'proxy-panel.js', 'tabs.js', 'add-app.js', 'trans-bar.js', 'app.js']
+const EXPECTED_SCRIPTS = [
+  'theme.js', 'dom.js', 'ui-kit.js', 'pure.js', 'proxy-panel.js', 'counter-center.js', 'tab-layout.js',
+  'collision-update.js', 'trans-health.js', 'site-info.js', 'ops-menu.js', 'tabs.js',
+  'theme-switch.js', 'lines.js', 'add-app.js', 'trans-settings.js', 'trans-bar.js', 'app.js'
+]
 
 app.disableHardwareAcceleration()
 app.whenReady().then(async () => {
@@ -101,6 +105,8 @@ app.whenReady().then(async () => {
       attachTabsWheel: typeof attachTabsWheel,
       paintTransBar: typeof paintTransBar,
       fillAddForm: typeof fillAddForm,
+      hasCounterCenter: !!document.getElementById('counterCenter'),
+      counterViewButtons: document.querySelectorAll('[data-counter-view]').length,
       bodyLen: document.body.innerText.length,
       text: document.body.innerText.replace(/\\s+/g, ' ').slice(0, 80)
     })`))
@@ -127,6 +133,7 @@ app.whenReady().then(async () => {
   }
   if (report.fillAddForm !== 'function') problems.push('add-app.js 的 fillAddForm 不可用')
   if (report.paintTransBar !== 'function') problems.push('trans-bar.js 的 paintTransBar 不可用')
+  if (!report.hasCounterCenter || report.counterViewButtons !== 5) problems.push('进粉中心没有完整挂载')
   if (report.bodyLen < 50) problems.push('页面是白的（bodyLen=' + report.bodyLen + '）')
 
   // 顶层语法错误一律算失败 —— 白屏就是从这来的

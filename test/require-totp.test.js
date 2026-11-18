@@ -14,8 +14,8 @@
  * 那不是安全，是停机。所以默认关闭，由运维确认线上状态后再打开。
  *
  * 这个文件同时验证**两种状态**，确保：
- *   1. 关的时候行为一点没变（不能因为加了这个功能而误伤正常登录）
- *   2. 开的时候确实挡住了，并且**留着自助绑定的路**（不能把人锁死在门外）
+ *   1. 默认开启时挡住未绑定账号，并且**留着自助绑定的路**；
+ *   2. 运维显式设置 0 时才会关闭，兼容历史部署。
  */
 
 const test = require('node:test')
@@ -85,24 +85,37 @@ function withEnv (key, value) {
   }
 }
 
-// ── 关闭状态（默认）：行为必须和以前一模一样 ──────────────
+// ── 默认开启；只有显式 0/false 才关闭 ─────────────────────
 
-test('开关关闭时：没绑 TOTP 的超管照常能用后台', async () => {
+test('默认：没绑 TOTP 的超管不能访问业务接口', async () => {
   const restore = withEnv('PIX_REQUIRE_ADMIN_TOTP', undefined)
   try {
     const svc = harness(ADMIN_NO_TOTP)
     const r = await run(svc, { path: '/admin/stats' })
-    assert.equal(r.next, true, '默认必须放行，否则一上线所有人进不去')
+    assert.equal(r.next, false, '默认必须强制 TOTP')
+    assert.equal(r.status, 403)
   } finally { restore() }
 })
 
-test('开关关闭时：显式的其它值（如 0）也视为关闭', async () => {
+test('显式 0 时：兼容窗口内允许未绑定超管访问', async () => {
   const restore = withEnv('PIX_REQUIRE_ADMIN_TOTP', '0')
   try {
     const svc = harness(ADMIN_NO_TOTP)
     const r = await run(svc, { path: '/admin/stats' })
     assert.equal(r.next, true)
   } finally { restore() }
+})
+
+test('兼容方法 loginAdmin 不能绕过已绑定账号的 TOTP', async () => {
+  const svc = Object.create(AuthService.prototype)
+  svc.verifyAdminCredentials = async () => ADMIN_TOTP
+  let started = 0
+  svc.startAdminSession = async () => { started += 1 }
+  await assert.rejects(
+    () => svc.loginAdmin({}, {}, {}),
+    error => error.status === 403 && error.code === 'TOTP_REQUIRED'
+  )
+  assert.equal(started, 0)
 })
 
 // ── 开启状态：挡住，但留出自助绑定的路 ────────────────────

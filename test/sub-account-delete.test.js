@@ -120,7 +120,7 @@ test('子账号删除：退余额 / 让名额 / 可重建同名 / 账本保留',
   }
 
   // ── 建一个子账号，并从主账号划 3 万字符过去 ──
-  await core.saveSub(session, { username: `kid_${parent.id}`, password: 'secret123', nickname: '小明' })
+  await core.saveSub(session, { username: `kid_${parent.id}`, password: 'secret1234', nickname: '小明' })
   const kid = (await pool.query(
     'SELECT * FROM sub_accounts WHERE parent_id=$1 AND deleted_at IS NULL', [parent.id])).rows[0]
   assert.ok(kid, '子账号应已创建')
@@ -175,7 +175,7 @@ test('子账号删除：退余额 / 让名额 / 可重建同名 / 账本保留',
   assert.equal(info.subCount, 0, '已删除的子账号不该占用名额')
 
   // 7) 同名可以重建 —— 这条最容易漏：merchant_identities 的唯一索引
-  await core.saveSub(session, { username: `kid_${parent.id}`, password: 'secret123', nickname: '小明2' })
+  await core.saveSub(session, { username: `kid_${parent.id}`, password: 'secret1234', nickname: '小明2' })
   const recreated = (await pool.query(
     'SELECT id, deleted_at FROM sub_accounts WHERE parent_id=$1 AND deleted_at IS NULL', [parent.id])).rows[0]
   assert.ok(recreated, '删掉之后应能用同名重建')

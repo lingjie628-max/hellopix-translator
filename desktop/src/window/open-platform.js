@@ -22,6 +22,15 @@
  * —— 原生对话框是唯一稳的通道。
  */
 
+/**
+ * 默认开启防撤回的平台。
+ *
+ * 用户选「多功能版」/「商业版」而不是绿色版，图的就是能留下对方撤回的内容：
+ * 做客服、做外贸的，客户撤回了报价或承诺，没有记录就说不清。
+ * 只在用户没显式设置过时给默认值，绝不覆盖用户的显式选择。
+ */
+const ANTI_REVOKE_DEFAULT = new Set(['whatsapp-pro', 'whatsapp-biz'])
+
 function createOpenPlatform (deps) {
   const { state, libs, env } = deps
 
@@ -53,9 +62,9 @@ function createOpenPlatform (deps) {
     state.nextTab = state.nextTab + 1
     const partition = libs.makePartition(item.id, index)
     const settings = libs.normalizeTabSettings(payload.settings || {})
-    // WhatsApp Pro 默认开启防撤回 —— 这是用户选这个版本的理由，
+    // WhatsApp Pro / 商业版 默认开启防撤回 —— 这是用户选这个版本的理由，
     // 但只在"没显式设置过"时才给默认值，别覆盖用户的选择。
-    if (item.id === 'whatsapp-pro' && settings.antiRevoke === undefined) settings.antiRevoke = true
+    if (ANTI_REVOKE_DEFAULT.has(item.id) && settings.antiRevoke === undefined) settings.antiRevoke = true
     const homeUrl = libs.safePlatformHomeUrl(item, settings)
     if (!homeUrl) return { success: false, msg: '应用地址不符合安全策略' }
     const displayName = String(payload.name || item.name).trim() || item.name

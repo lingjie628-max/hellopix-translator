@@ -17,10 +17,15 @@
  * 而不是断言"源码里出现过 clearSession 这几个字"。
  */
 
-const test = require('node:test')
+const fs = require('node:fs')
+const path = require('node:path')
+const nodeTest = require('node:test')
 const assert = require('node:assert')
+const { optionalTest } = require('./helpers/optional-standalone')
 
-const { createPixApi } = require('../standalone/telegram/lib/pix-api')
+const MODULE = path.join(__dirname, '..', 'standalone', 'telegram', 'lib', 'pix-api.js')
+const test = optionalTest(nodeTest, MODULE, 'Telegram standalone client has been removed')
+const { createPixApi } = fs.existsSync(MODULE) ? require(MODULE) : {}
 
 function fakeFetch(response) {
   return async function () {

@@ -173,9 +173,27 @@ test('applySessionProxy：有代理时带 proxyBypassRules=<local>，本机流�
   })
 })
 
-test('applySessionProxy：session 缺失或没有 setProxy 时安静返回，不抛异常', async () => {
-  await assert.doesNotReject(() => applySessionProxy(null, { proxyType: 'socks5', proxyHost: 'h', proxyPort: '1' }))
-  await assert.doesNotReject(() => applySessionProxy({}, { proxyType: 'none' }))
+test('applySessionProxy：session 缺失或没有 setProxy 时必须拒绝（不能假装直连成功）', async () => {
+  await assert.rejects(
+    () => applySessionProxy(null, { proxyType: 'socks5', proxyHost: 'h', proxyPort: '1' }),
+    /没有可用的 session/
+  )
+  await assert.rejects(
+    () => applySessionProxy({}, { proxyType: 'none' }),
+    /没有可用的 session/
+  )
+})
+
+test('★ setProxy 拒绝时必须冒泡，不能被误判为代理已生效', async () => {
+  const ses = {
+    setProxy() {
+      return Promise.reject(new Error('ERR_NO_SUPPORTED_PROXIES'))
+    }
+  }
+  await assert.rejects(
+    () => applySessionProxy(ses, { proxyType: 'socks5', proxyHost: 'h', proxyPort: '1080' }),
+    /ERR_NO_SUPPORTED_PROXIES/
+  )
 })
 
 // ───────────────────────────────────────── 第 1 项：新建线路带代理

@@ -83,8 +83,9 @@ function fakeRepo (opts) {
 
 const fakeAuth = {
   async hash (password) {
-    if (!password || String(password).length < 6) {
-      const err = new Error('密码至少 6 位')
+    const value = String(password || '')
+    if (value.length < 10 || !/[A-Za-z]/.test(value) || !/[0-9]/.test(value)) {
+      const err = new Error('密码至少 10 位，且同时包含字母和数字')
       err.code = 'WEAK_PASSWORD'
       throw err
     }
@@ -122,7 +123,7 @@ test('超管：角色只能是 superadmin / operator', () => {
 test('超管：建号时不传角色直接拒绝，不静默降成 operator', async () => {
   const repo = fakeRepo()
   await assert.rejects(
-    () => saveStaff(deps(repo), { username: 'newbie', password: 'Abcd1234' }, actor, '1.2.3.4'),
+    () => saveStaff(deps(repo), { username: 'newbie', password: 'Abcd123456' }, actor, '1.2.3.4'),
     e => e.status === 400 && e.code === 'ROLE_REQUIRED'
   )
   assert.equal(repo.admins.length, 0, '被拒绝的请求不能留下半个账号')
@@ -132,7 +133,7 @@ test('超管：用 admin / auditor 当角色建号会被拒，且不落库', asy
   const repo = fakeRepo()
   for (const role of ['admin', 'auditor', 'root', 'SuperAdmin']) {
     await assert.rejects(
-      () => saveStaff(deps(repo), { username: 'x_' + role, password: 'Abcd1234', role }, actor, '1.2.3.4'),
+      () => saveStaff(deps(repo), { username: 'x_' + role, password: 'Abcd123456', role }, actor, '1.2.3.4'),
       e => e.code === 'BAD_ROLE',
       `角色 ${role} 必须被拒`
     )
@@ -143,7 +144,7 @@ test('超管：用 admin / auditor 当角色建号会被拒，且不落库', asy
 test('超管：正常建号会落库并写审计（含角色与来源 IP）', async () => {
   const repo = fakeRepo()
   const result = await saveStaff(deps(repo),
-    { username: 'ops1', password: 'Abcd1234', role: 'operator', nickname: '运营一号' }, actor, '9.9.9.9')
+    { username: 'ops1', password: 'Abcd123456', role: 'operator', nickname: '运营一号' }, actor, '9.9.9.9')
 
   assert.equal(result.created, true)
   assert.equal(result.role, 'operator')
@@ -158,7 +159,7 @@ test('超管：正常建号会落库并写审计（含角色与来源 IP）', as
 test('超管：账号名重复（大小写不同也算）返回 409 而不是 500', async () => {
   const repo = fakeRepo({ admins: [{ id: 1, username: 'pix', role: 'superadmin', status: 1 }] })
   await assert.rejects(
-    () => saveStaff(deps(repo), { username: 'PIX', password: 'Abcd1234', role: 'operator' }, actor, '1.1.1.1'),
+    () => saveStaff(deps(repo), { username: 'PIX', password: 'Abcd123456', role: 'operator' }, actor, '1.1.1.1'),
     e => e.status === 409 && e.code === 'ADMIN_EXISTS'
   )
 })
@@ -241,7 +242,7 @@ test('超管：改密码会撤销该账号的会话，且不落明文', async ()
     ]
   })
   const d = deps(repo)
-  await saveStaff(d, { id: 2, password: 'NewPass123' }, actor, '1.1.1.1')
+  await saveStaff(d, { id: 2, password: 'NewPass12345' }, actor, '1.1.1.1')
   assert.deepEqual(d.security.revoked, [['admin', 2]])
   assert.ok(repo.audits.some(a => /password/.test(a.detail)) || repo.audits.length > 0)
 })

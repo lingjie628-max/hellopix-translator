@@ -29,6 +29,7 @@ const appSrc = read('app.js')
 const themeSrc = read('theme.js')
 const pureSrc = read('pure.js')
 const proxyPanelSrc = read('proxy-panel.js')
+const counterCenterSrc = read('counter-center.js')
 const tabsSrc = read('tabs.js')
 const transBarSrc = read('trans-bar.js')
 const addAppSrc = read('add-app.js')
@@ -50,7 +51,7 @@ function topConsts (src) {
 
 test('★ 脚本顺序：依赖必须全部在 app.js 之前', () => {
   const order = scriptOrder(html)
-  assert.deepEqual(order, ['theme.js', 'dom.js', 'ui-kit.js', 'pure.js', 'proxy-panel.js', 'tab-layout.js', 'collision-update.js', 'site-info.js', 'ops-menu.js', 'tabs.js', 'theme-switch.js', 'lines.js', 'add-app.js', 'trans-settings.js', 'trans-bar.js', 'app.js'],
+  assert.deepEqual(order, ['theme.js', 'dom.js', 'ui-kit.js', 'pure.js', 'proxy-panel.js', 'counter-center.js', 'tab-layout.js', 'collision-update.js', 'trans-health.js', 'site-info.js', 'ops-menu.js', 'tabs.js', 'theme-switch.js', 'lines.js', 'add-app.js', 'trans-settings.js', 'trans-bar.js', 'app.js'],
     '顺序错了就是白屏：各模块的顶层声明必须在 app.js 执行前就位')
   // ui-kit 只依赖 dom.js 的元素句柄；排到业务模块之后就等于谁都调不到它
   assert.equal(order.indexOf('ui-kit.js'), order.indexOf('dom.js') + 1,
@@ -60,7 +61,7 @@ test('★ 脚本顺序：依赖必须全部在 app.js 之前', () => {
 })
 
 test('★ 文件之间不能有重复的顶层 const（重复声明 = SyntaxError = 白屏）', () => {
-  const files = { 'dom.js': domSrc, 'ui-kit.js': uiKitSrc, 'ops-menu.js': opsMenuSrc, 'site-info.js': siteInfoSrc, 'lines.js': linesSrc, 'theme-switch.js': themeSwitchSrc, 'trans-settings.js': transSettingsSrc, 'pure.js': pureSrc, 'proxy-panel.js': proxyPanelSrc, 'tabs.js': tabsSrc, 'trans-bar.js': transBarSrc, 'add-app.js': addAppSrc, 'app.js': appSrc, 'theme.js': themeSrc }
+  const files = { 'dom.js': domSrc, 'ui-kit.js': uiKitSrc, 'ops-menu.js': opsMenuSrc, 'site-info.js': siteInfoSrc, 'lines.js': linesSrc, 'theme-switch.js': themeSwitchSrc, 'trans-settings.js': transSettingsSrc, 'pure.js': pureSrc, 'proxy-panel.js': proxyPanelSrc, 'counter-center.js': counterCenterSrc, 'tabs.js': tabsSrc, 'trans-bar.js': transBarSrc, 'add-app.js': addAppSrc, 'app.js': appSrc, 'theme.js': themeSrc }
   const seen = new Map()
   const dup = []
   for (const [name, src] of Object.entries(files)) {

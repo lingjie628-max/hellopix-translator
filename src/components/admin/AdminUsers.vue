@@ -78,7 +78,7 @@
           <el-input v-model="form.username" :disabled="!!form.id"></el-input>
         </el-form-item>
         <el-form-item label="密码">
-          <el-input v-model="form.password" :placeholder="form.id ? '不填则不修改' : '请输入至少 6 位密码'"></el-input>
+          <el-input v-model="form.password" :placeholder="form.id ? '不填则不修改' : '请输入至少 10 位密码（字母+数字）'"></el-input>
         </el-form-item>
         <el-form-item label="商户名">
           <el-input v-model="form.nickname"></el-input>
@@ -153,11 +153,11 @@
     </el-dialog>
 
     <el-dialog title="重置密码" :visible.sync="resetVisible" width="440px" @closed="clearReset">
-      <p>为 <b>{{ resetRow.username }}</b> 设置新密码（<b>6 位以上</b>，不限字符类型）。</p>
+      <p>为 <b>{{ resetRow.username }}</b> 设置新密码（<b>至少 10 位</b>，需同时包含字母和数字）。</p>
       <p class="dialog-tip">重置后该商户所有已登录的会话会被踢下线，需用新密码重新登录。</p>
       <el-form label-width="70px" style="margin-top:10px">
         <el-form-item label="新密码">
-          <el-input v-model="resetPwd" placeholder="请输入至少 6 位密码"></el-input>
+          <el-input v-model="resetPwd" placeholder="请输入至少 10 位密码（字母+数字）"></el-input>
         </el-form-item>
         <el-form-item label="确认">
           <el-input v-model="resetPwd2" placeholder="请再次输入新密码"></el-input>
@@ -488,9 +488,10 @@ export default {
       this.resetLoading = false
     },
     submitReset() {
-      // 前端先挡一道省一次往返；真正的规则以服务端为准（6-128 位，见 lib/password.js）
-      if (!this.resetPwd || String(this.resetPwd).length < 6) {
-        this.$message.error('密码至少需要 6 位')
+      // 前端先挡一道省一次往返；真正的规则以服务端为准（10-128 位，见 lib/password.js）
+      if (!this.resetPwd || String(this.resetPwd).length < 10 ||
+          !/[A-Za-z]/.test(this.resetPwd) || !/[0-9]/.test(this.resetPwd)) {
+        this.$message.error('密码至少需要 10 位，且同时包含字母和数字')
         return
       }
       if (String(this.resetPwd) !== String(this.resetPwd2)) {

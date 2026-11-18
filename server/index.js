@@ -107,9 +107,11 @@ async function createRuntime(options) {
    *
    * `type: 'application/json'` 显式指定，避免把别的内容类型也吃掉。
    */
-  app.use('/apis/translate/image', express.json({ limit: '16mb', type: 'application/json' }))
-  app.use(express.urlencoded({ extended: false, limit: '256kb' }))
-  app.use(express.json({ limit: '256kb' }))
+  // 业务请求不需要压缩体；显式关闭 inflation，既减少攻击面，也避免
+  // body-parser 的压缩流处理成为未授权请求的入口。
+  app.use('/apis/translate/image', express.json({ limit: '16mb', type: 'application/json', inflate: false }))
+  app.use(express.urlencoded({ extended: false, limit: '256kb', inflate: false }))
+  app.use(express.json({ limit: '256kb', inflate: false }))
 
   // 诊断用请求日志：/apis 下每个请求的方法、路径、状态码、耗时
   app.use('/apis', (req, res, next) => {
@@ -135,6 +137,39 @@ async function createRuntime(options) {
   const dist = path.join(__dirname, '..', 'dist')
   app.get('/health', (_req, res) => {
     res.json({ ok: true, service: 'hello-pix', backend: persistent ? 'persistent' : 'mock', time: new Date().toISOString() })
+  })
+  /**
+   * Readiness must include the dependencies that request handling actually
+   * needs. `/health` stays a cheap liveness probe; monitoring must use this
+   * endpoint so a running Node process cannot mask a dead database/Redis.
+   */
+  app.get('/ready', async (req, res) => {
+    if (!persistent) {
+      return res.json({ ok: true, service: 'hello-pix', backend: 'mock' })
+    }
+    try {
+      const dependencies = await db.checkDependencies()
+      await checkMigrationVersion(db.query)
+      if (!dependencies.postgres || !dependencies.redis) {
+        return res.status(503).json({
+          ok: false,
+          service: 'hello-pix',
+          backend: 'persistent',
+          postgres: !!dependencies.postgres,
+          redis: !!dependencies.redis,
+          msg: '依赖服务未就绪'
+        })
+      }
+      return res.json({ ok: true, service: 'hello-pix', backend: 'persistent', postgres: true, redis: true })
+    } catch (error) {
+      console.error('[ready] dependency check failed:', error && error.message ? error.message : error)
+      return res.status(503).json({
+        ok: false,
+        service: 'hello-pix',
+        backend: 'persistent',
+        msg: '依赖服务未就绪'
+      })
+    }
   })
   // 静态资源缓存策略：
   //   - 带内容哈希的产物（app.47bedb2c.js）内容一变文件名就变，可以永久缓存；
@@ -194,6 +229,12 @@ async function createRuntime(options) {
       // 不打印 stack —— 这是客户端问题不是服务故障，打出来只会淹没真错误
       if (!res.headersSent) {
         res.status(413).json({ success: false, code: 'PAYLOAD_TOO_LARGE', msg: '内容太大，请换小一点的图片' })
+      }
+      return
+    }
+    if (err && (err.type === 'encoding.unsupported' || err.status === 415 || err.statusCode === 415)) {
+      if (!res.headersSent) {
+        res.status(415).json({ success: false, code: 'UNSUPPORTED_CONTENT_ENCODING', msg: '不支持压缩请求体' })
       }
       return
     }

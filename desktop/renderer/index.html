@@ -71,6 +71,15 @@
   </div>
 
   <div id="pixCollision" class="pix-collision" role="status" aria-live="polite"></div>
+  <!-- 翻译被崩溃循环保护摘掉时的提示。
+       2026-11-02 事故：桥上被安全模式摘掉后界面毫无变化，用户点「译」没反应，
+       以为软件坏了 —— 实际等 5 分钟重启就好。这条横幅就是为了不再让用户猜。
+       aria-live="assertive"：这不是"顺带看一眼"的信息，是需要立刻知道的功能失效。 -->
+  <div id="pixTransBanner" class="pix-trans-banner hidden" role="alert" aria-live="assertive">
+    <span class="ptb-ico" aria-hidden="true">⚠️</span>
+    <span class="ptb-text" id="pixTransBannerText">翻译已暂停</span>
+    <button type="button" id="pixTransBannerBtn" class="ptb-btn">重新开启翻译</button>
+  </div>
   <div id="shell" class="screen hidden">
     <div id="stage" class="stage">
       <!-- 背景静态图同上；原 home-bg.mp4 已抽帧转 WebP 后移除 -->
@@ -87,6 +96,11 @@
       <div class="utility">
         <button id="dndBtn" type="button" class="util-btn"><span class="util-ico">🔔</span>勿扰模式：<b id="dndText">关</b></button>
         <button id="lockBtn" type="button" class="util-btn"><span class="util-ico">🔒</span>锁屏 Hello Pix</button>
+        <button id="counterBtn" type="button" class="util-btn counter-entry" title="查看 WhatsApp 进粉、重粉和自动工单">
+          <span class="util-ico counter-entry-mark" aria-hidden="true"></span>
+          进粉中心
+          <span id="counterQueueBadge" class="counter-entry-badge hidden">0</span>
+        </button>
         <button id="themeBtn" type="button" class="util-btn" title="切换日间 / 夜间模式"><span class="util-ico" id="themeIco">🌙</span><span id="themeText">夜间</span></button>
         <button id="tabLayoutBtn" type="button" class="util-btn" data-layout="top" title="标签栏：顶部（点击切换为侧面）"><span class="util-ico" id="tabLayoutIco">▤</span><span id="tabLayoutText">顶部</span></button>
         <div class="spacer"></div>
@@ -339,10 +353,6 @@
                 <label class="cell" id="addProxyPassCell">代理密码
                   <input id="addProxyPass" type="text" placeholder="代理密码" autocomplete="off" maxlength="200">
                 </label>
-                <label class="cell cell-wide" id="addProxyRefreshCell">刷新URL
-                  <input id="addProxyRefresh" type="text" placeholder="可选，用于更换出口 IP" autocomplete="off" spellcheck="false">
-                </label>
-                <label class="proxy-udp" id="addProxyUdpCell"><input id="addProxyUdp" type="checkbox"> UDP协议</label>
                 <p id="addProxyTip" class="add-proxy-tip"></p>
               </div>
               <aside class="proxy-detect" id="proxyDetect">
@@ -456,6 +466,13 @@
       <h3>发现新版本</h3>
       <p id="updateVersionText" class="update-version"></p>
       <p id="updateDesc" class="update-desc">新版本已经准备好，建议更新以获得更稳定的使用体验。</p>
+      <!-- 应用内下载进度。默认隐藏，只有 status=downloading 时才显示 -->
+      <div id="updateProgressWrap" class="update-progress-wrap hidden">
+        <div class="update-progress-track">
+          <div id="updateProgressBar" class="update-progress-bar" style="width:0%"></div>
+        </div>
+        <div id="updateProgressText" class="update-progress-text">准备下载…</div>
+      </div>
       <div class="update-actions">
         <button id="updateLaterBtn" type="button" class="update-later">稍后提醒</button>
         <button id="updateDownloadBtn" type="button" class="update-download">立即更新</button>
@@ -469,6 +486,51 @@
       <p id="standaloneMsg" class="standalone-msg"></p>
       <div id="standaloneList" class="standalone-list"></div>
       <button id="standaloneClose" type="button" class="ghost">关闭</button>
+    </div>
+  </div>
+
+  <div id="counterCenter" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="counterCenterTitle">
+    <div class="counter-center-card">
+      <header class="counter-center-head">
+        <div class="counter-center-title">
+          <span class="counter-live-dot" aria-hidden="true"></span>
+          <div>
+            <p>WHATSAPP INBOUND</p>
+            <h3 id="counterCenterTitle">进粉中心</h3>
+          </div>
+        </div>
+        <div class="counter-center-tools">
+          <label class="counter-range-label" for="counterRange">时间范围</label>
+          <select id="counterRange" aria-label="选择统计时间范围">
+            <option value="today">今天</option>
+            <option value="7d">近 7 天</option>
+            <option value="30d">近 30 天</option>
+            <option value="all">全部</option>
+          </select>
+          <button id="counterRefreshBtn" type="button" class="counter-icon-btn" aria-label="刷新进粉数据">刷新</button>
+          <button id="counterCenterClose" type="button" class="counter-icon-btn counter-close" aria-label="关闭进粉中心">×</button>
+        </div>
+      </header>
+
+      <nav class="counter-center-tabs" role="tablist" aria-label="进粉中心功能">
+        <button type="button" role="tab" data-counter-view="overview" aria-controls="counterCenterBody" aria-selected="true">实时总览</button>
+        <button type="button" role="tab" data-counter-view="events" aria-controls="counterCenterBody" aria-selected="false" tabindex="-1">进粉流水</button>
+        <button type="button" role="tab" data-counter-view="repeats" aria-controls="counterCenterBody" aria-selected="false" tabindex="-1">重粉库</button>
+        <button type="button" role="tab" data-counter-view="tickets" aria-controls="counterCenterBody" aria-selected="false" tabindex="-1">自动工单</button>
+        <button type="button" role="tab" data-counter-view="accounts" aria-controls="counterCenterBody" aria-selected="false" tabindex="-1">计数账号</button>
+      </nav>
+
+      <div id="counterCenterAlert" class="counter-center-alert hidden" role="alert"></div>
+      <main id="counterCenterBody" class="counter-center-body" role="tabpanel" aria-busy="false"></main>
+
+      <footer class="counter-center-foot">
+        <span id="counterCenterStatus" role="status" aria-live="polite">等待连接</span>
+        <label id="counterArchiveWrap" class="counter-check hidden">
+          <input id="counterIncludeArchived" type="checkbox">
+          包含已归档账号的历史流水
+        </label>
+        <button id="counterCenterDone" type="button">完成</button>
+      </footer>
     </div>
   </div>
 
@@ -504,10 +566,15 @@
   <script src="pure.js"></script>
   <!-- 代理设置面板 -->
   <script src="proxy-panel.js"></script>
+  <!-- 原生进粉中心：实时 KPI、流水、重粉库、自动工单、计数账号 -->
+  <script src="counter-center.js"></script>
   <!-- 标签栏布局（顶部/侧面）必须在 tabs.js 之前：后者按布局选滚动轴 -->
   <script src="tab-layout.js"></script>
   <!-- 撞单提醒 + 软件更新检测（app.js 启动时会调 checkCollisions） -->
   <script src="collision-update.js"></script>
+
+  <!-- 翻译健康横幅：崩溃循环保护摘掉翻译桥时，别让用户对着没反应的「译」发呆 -->
+  <script src="trans-health.js"></script>
 
   <!-- 站点信息（客服 / 页脚下载 / 独立应用）：与账号、标签栏无关的一整块 -->
   <script src="site-info.js"></script>

@@ -639,23 +639,38 @@ test('发送翻译关闭时：不拦截，原文照常发送', async () => {
   } finally { h.close() }
 })
 
-test('英文发英文：本地不再猜语种，交给上游 auto（译文=原文，缓存兜住重复）', async () => {
-  // 原来的断言是"不拦截、不调接口"，靠的是 detectLang 把纯 ASCII 认成英语。
-  // 但 detectLang 认不出的语言**一律返回 'en'** —— 德语/俄语/阿拉伯语/
-  // 印地语全被当成英语放行，"其他语言翻译没反应"就是从这来的。
+test('英文发英文：本地已能确认是目标语言 → 跳过翻译，原样发送', async () => {
+  // ## 这条断言变过两次，两次都是被真机问题逼出来的
   //
-  // 现在的取舍：本地不再猜，拉丁字母区一律送翻。
-  // 英语文本的译文等于原文，成本极小；重复发送由 translation-cache 兜住。
-  // 详见 test/translation-lang-detection.test.js。
+  // 第一版：靠 detectLang 把纯 ASCII 认成英语 → "不拦截"。
+  //   坏了：detectLang 认不出的一律返回 'en'，德语/俄语/阿拉伯语全被当成
+  //   英语放行，"其他语言翻译没反应"就是从这来的。
+  //
+  // 第二版（上一轮）：本地不再猜，拉丁字母区一律送翻。
+  //   又坏了：`hello there` 这种**本来就是英语**的也被送翻。英翻英通常原文返回，
+  //   用户看不出来，但**每次都扣钱**；而一旦 sendTo 设成别的语言（葡语/中文），
+  //   英文就会被真的翻译成那个语言发出去 —— 用户反馈的"输入英文被翻成中文"。
+  //
+  // 现在（isAlreadyTarget）：只在**有硬证据**说明原文已经是目标语言时才跳过。
+  //   纯 ASCII 的德语 `Guten Tag` / 意语 `Ciao` 命中不了英语功能词，仍然照翻 ——
+  //   所以第一版那个 bug 不会回来。
   const h = await mount()
   try {
     h.composer.textContent = 'hello there'
-    assert.equal(h.pressEnter(), true, '会被拦下并送翻（不再本地猜"已经是英语"）')
+    assert.equal(h.pressEnter(), false, '已经是目标语言，不该拦')
     await settle()
-    assert.equal(h.translateCalls.length, 1, '应恰好调用一次翻译接口')
-    assert.equal(h.translateCalls[0].incoming, false, '这是发送方向')
-    // 目标语言由主进程 translate:run 解析（sendTo → pickLang → to），
-    // 客页发出的 payload 里本来就不带 to，这里只验证确实发了请求。
+    assert.equal(h.translateCalls.length, 0, '不该调用翻译接口（省一次扣费）')
+    assert.deepEqual(h.sent, ['hello there'], '原样发送')
+  } finally { h.close() }
+})
+
+test('★ 纯 ASCII 的德语不能被当成英语跳过（第一版 bug 不能回来）', async () => {
+  const h = await mount()
+  try {
+    h.composer.textContent = 'Guten Tag, Besprechung um 15 Uhr'
+    assert.equal(h.pressEnter(), true, '认不出是英语 → 必须拦下翻译')
+    await settle()
+    assert.equal(h.translateCalls.length, 1)
   } finally { h.close() }
 })
 

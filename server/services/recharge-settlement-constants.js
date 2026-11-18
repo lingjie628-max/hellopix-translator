@@ -24,7 +24,26 @@ const OUTCOME = Object.freeze({
   SHADOW_MATCHED: 'SHADOW_MATCHED',
   DUPLICATE: 'DUPLICATE',
   EXCEPTION: 'EXCEPTION',
-  SKIPPED_UNRESOLVED: 'SKIPPED_UNRESOLVED'
+  SKIPPED_UNRESOLVED: 'SKIPPED_UNRESOLVED',
+  /**
+   * 与本平台无关的进款 —— 直接忽略，不进异常池、不告警。
+   *
+   * ## 为什么需要这个
+   *
+   * 这个收款地址**同时被多个项目共用**（业主 2026-10-27 明确说明）。
+   * 别的项目的客户转账、测试款、外部资金都会打到同一个地址上。
+   * 原实现只要金额对不上本平台订单就写 `recharge_exceptions`，
+   * 结果是：无关进款持续堆积 → 巡检一直判定「异常积压」→ 无限告警，
+   * 真正的订单异常被淹没在里面（2026-10-27 那次 59998 USDT 的误报就是这么来的）。
+   *
+   * 现在的语义：
+   *   - 有对应金额的预约（含已过期）→ 照常走 MATCHED / LATE_PAYMENT
+   *   - 完全没有 → IGNORED_UNRELATED，链上记录标 ignored 留痕，不进异常池
+   *
+   * 留痕是必要的：日对账时仍能查到「这个地址收到过这些钱」，
+   * 只是不再当成平台的应收来处理。
+   */
+  IGNORED_UNRELATED: 'IGNORED_UNRELATED'
 })
 
 /** 匹配结论，与 chain_transactions.match_kind 的 CHECK 一致 */

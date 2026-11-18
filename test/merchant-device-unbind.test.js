@@ -51,9 +51,11 @@ test('★ 越权防线：主账号只能解绑自己名下的子账号', () => {
   assert.match(block, /SUB_NOT_FOUND/,
     '越权解绑必须回 SUB_NOT_FOUND（404），不能回成功')
 
-  // 子账号身份传 id 也不能越权：只解绑自己
-  assert.match(block, /req\.pixUser\.kind === 'main'/,
-    '只有主账号才能按 id 指定子账号；子账号身份必须只作用于自己')
+  // target 必须显式声明；target=sub 时子账号身份只能解绑自己
+  assert.match(block, /const target = data\.target/,
+    '解绑目标必须显式声明，不能靠 id 是否等于 parent.id 猜测')
+  assert.match(block, /if \(kind !== 'main'\)/,
+    'target=sub 时只有主账号才能指定子账号；子账号身份必须只作用于自己')
 })
 
 test('解绑必须同时清 bound_device 与撤销会话', () => {
@@ -84,8 +86,11 @@ test('★ 商户端界面有「解绑电脑」入口，且仅在已绑定时显�
     '解绑按钮必须调用 /team/device/reset')
 
   // 必须带 id 并且是 row 自己的 id（不能漏传导致解绑自己）
-  assert.match(teamVue, /resetDevice\s*\(row\)[\s\S]{0,400}\{\s*id:\s*row\.id\s*\}/,
-    '解绑请求必须带上 row.id，漏传会退化成"解绑主账号自己"')
+  assert.match(
+    teamVue,
+    /postRequest\(\s*'\/team\/device\/reset'\s*,\s*\{\s*id:\s*row\.id\s*,\s*target:\s*'sub'\s*\}/,
+    '解绑请求必须带上 row.id 并明确 target=sub，不能退化成解绑主账号自己'
+  )
 })
 
 test('商户端必须如实告知：解绑会把对方踢下线', () => {

@@ -1,0 +1,7 @@
+const fs = require('node:fs')
+const a = fs.readFileSync('scripts/tmp/probe-proto6.js', 'utf8')
+const b = fs.readFileSync('scripts/tmp/probe-proto7.js', 'utf8')
+console.log('=== 6 ===')
+console.log(a)
+console.log('=== 7 ===')
+console.log(b)

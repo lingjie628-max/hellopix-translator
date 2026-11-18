@@ -325,8 +325,10 @@ module.exports = function registerMock(app, options) {
   }
 
   function validPassword(password) {
-    // 与 server/lib/password.js 的 validPassword 保持一致：最少 6 位、不限字符类型
-    return String(password || '').length >= 6
+    // 与 server/lib/password.js 保持一致：10-128 位，且同时含字母和数字
+    const value = String(password || '')
+    return value.length >= 10 && value.length <= 128 &&
+      /[A-Za-z]/.test(value) && /[0-9]/.test(value)
   }
 
   let nextOrderId = 3
@@ -889,7 +891,7 @@ module.exports = function registerMock(app, options) {
     const password2 = String(query.passWord1 || query.password2 || '')
     const email = String(query.email || '').trim().toLowerCase()
     if (!username) { res.json({ success: false, msg: '请输入账号' }); return }
-    if (!validPassword(password)) { res.json({ success: false, msg: '密码至少需要 6 位' }); return }
+    if (!validPassword(password)) { res.json({ success: false, msg: '密码至少需要 10 位，且同时包含字母和数字' }); return }
     if (password !== password2) { res.json({ success: false, msg: '两次密码不一致' }); return }
     if (!validEmail(email)) { res.json({ success: false, msg: '请输入邮箱地址' }); return }
     const captchaErr = verifyCode.checkCaptcha(verifyStore, query.imageId, query.imageCode, true)
@@ -962,7 +964,7 @@ module.exports = function registerMock(app, options) {
     const password = String(query.passWord || query.password || '')
     const password2 = String(query.passWord1 || query.password2 || '')
     if (!validEmail(email)) { res.json({ success: false, msg: '请输入邮箱地址' }); return }
-    if (!validPassword(password)) { res.json({ success: false, msg: '密码至少需要 6 位' }); return }
+    if (!validPassword(password)) { res.json({ success: false, msg: '密码至少需要 10 位，且同时包含字母和数字' }); return }
     if (password !== password2) { res.json({ success: false, msg: '两次密码不一致' }); return }
     const captchaErr = verifyCode.checkCaptcha(verifyStore, query.imageId, query.imageCode, true)
     if (captchaErr) { res.json({ success: false, msg: captchaErr }); return }
@@ -1590,7 +1592,7 @@ module.exports = function registerMock(app, options) {
       if (query.nickname !== undefined) sub.nickname = query.nickname
       if (query.email !== undefined) sub.email = query.email
       if (query.password) {
-        if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 6 位' }); return }
+        if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 10 位，且同时包含字母和数字' }); return }
         sub.password = security.hashPassword(query.password)
         security.revokeSubject('user', sub.id)
       }
@@ -1613,7 +1615,7 @@ module.exports = function registerMock(app, options) {
       res.json({ success: 'error', msg: '用户名已被占用' })
       return
     }
-    if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 6 位' }); return }
+    if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 10 位，且同时包含字母和数字' }); return }
     db.subAccounts.push({
       id: nextSubId++,
       parentId: session.parent.id,
@@ -1668,7 +1670,7 @@ module.exports = function registerMock(app, options) {
       return
     }
     if (!validPassword(query.newPassword)) {
-      res.json({ success: 'error', msg: '新密码至少需要 6 位' })
+      res.json({ success: 'error', msg: '新密码至少需要 10 位，且同时包含字母和数字' })
       return
     }
     session.account.password = security.hashPassword(query.newPassword)
@@ -1908,7 +1910,7 @@ module.exports = function registerMock(app, options) {
         user.expireTime = query.expireTime
       }
       if (query.password) {
-        if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 6 位' }); return }
+        if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 10 位，且同时包含字母和数字' }); return }
         user.password = security.hashPassword(query.password)
         security.revokeSubject('user', user.id)
       }
@@ -1930,7 +1932,7 @@ module.exports = function registerMock(app, options) {
     const gift = query.charBalance !== undefined && query.charBalance !== ''
       ? Number(query.charBalance)
       : trial
-    if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 6 位' }); return }
+    if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 10 位，且同时包含字母和数字' }); return }
     const created = {
       id: nextUserId++,
       username: query.username,
@@ -1988,13 +1990,13 @@ module.exports = function registerMock(app, options) {
     okMsg(res, Number(query.status) === 1 ? '已启用' : '已停用')
   })
   // 与 server/routes/production.js 的 /admin/users/resetPassword 对齐：
-  // 只改密码、不碰其它字段。规则 6-128 位（见 server/lib/password.js）
+  // 只改密码、不碰其它字段。规则 10-128 位且含字母和数字（见 server/lib/password.js）
   app.post('/apis/admin/users/resetPassword', (req, res) => {
     if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
     const query = q(req)
     const user = db.users.find(u => String(u.id) === String(query.id || query.userId))
     if (!user) { res.json({ success: 'error', msg: '商户不存在' }); return }
-    if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 6 位' }); return }
+    if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 10 位，且同时包含字母和数字' }); return }
     user.password = security.hashPassword(query.password)
     security.revokeSubject('user', user.id)
     audit(req, '重置商户密码', user.username)
@@ -2353,6 +2355,32 @@ module.exports = function registerMock(app, options) {
     res.json(page(list, query))
   })
 
+  // 工单在本地 mock 中只维护最小可执行契约：列表、红点、详情和写操作。
+  // 真正的状态机与归属校验在 PostgreSQL 路由和 ticket-service 中。
+  app.get('/apis/admin/tickets', (req, res) => {
+    res.json({ rows: [], total: 0 })
+  })
+
+  app.get('/apis/admin/tickets-unread', (req, res) => {
+    res.json({ unread: 0 })
+  })
+
+  app.get('/apis/admin/tickets/:id', (req, res) => {
+    res.status(404).json({ success: false, code: 'TICKET_NOT_FOUND', msg: '工单不存在' })
+  })
+
+  app.post('/apis/admin/tickets/create', (req, res) => {
+    res.json({ success: 'success', msg: '工单已创建（mock）', obj: { id: 1 } })
+  })
+
+  app.post('/apis/admin/tickets/reply', (req, res) => {
+    okMsg(res, '回复已发送（mock）')
+  })
+
+  app.post('/apis/admin/tickets/update', (req, res) => {
+    okMsg(res, '工单已更新（mock）')
+  })
+
   app.get('/apis/admin/settings', (req, res) => {
     if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
     res.json(Object.assign({}, db.settings, { notices: db.notices }))
@@ -2538,7 +2566,7 @@ module.exports = function registerMock(app, options) {
       if (!admin) { res.json({ success: 'error', msg: '账号不存在' }); return }
       admin.nickname = query.nickname || admin.nickname
       if (query.password) {
-        if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 6 位' }); return }
+        if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 10 位，且同时包含字母和数字' }); return }
         admin.password = security.hashPassword(query.password)
         security.revokeSubject('admin', admin.id)
       }
@@ -2550,7 +2578,7 @@ module.exports = function registerMock(app, options) {
       res.json({ success: 'error', msg: '账号已存在' })
       return
     }
-    if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 6 位' }); return }
+    if (!validPassword(query.password)) { res.json({ success: 'error', msg: '密码至少需要 10 位，且同时包含字母和数字' }); return }
     db.admins.push({
       id: nextAdminId++,
       username: query.username,

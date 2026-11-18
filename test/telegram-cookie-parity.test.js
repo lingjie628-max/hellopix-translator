@@ -21,9 +21,11 @@
  *   4. 管理端 cookie（pix_admin / __Host-pix_admin）不许进客户端 jar
  */
 
-const test = require('node:test')
+const fs = require('node:fs')
+const nodeTest = require('node:test')
 const assert = require('node:assert')
 const path = require('path')
+const { optionalTest } = require('./helpers/optional-standalone')
 
 const ROOT = path.join(__dirname, '..')
 
@@ -31,6 +33,9 @@ const IMPLEMENTATIONS = [
   { name: 'macOS', file: 'standalone/telegram/lib/pix-api.js' },
   { name: 'Windows', file: 'standalone/telegram-win/lib/pix-api.js' }
 ]
+const test = optionalTest(nodeTest, IMPLEMENTATIONS.map(item => path.join(ROOT, item.file)),
+  'Telegram standalone clients have been removed')
+const hasImplementations = IMPLEMENTATIONS.every(item => fs.existsSync(path.join(ROOT, item.file)))
 
 function fakeResponse(setCookies) {
   return {
@@ -55,7 +60,7 @@ function harness(setCookies) {
   return { seen, saved, fetchImpl }
 }
 
-for (const impl of IMPLEMENTATIONS) {
+if (hasImplementations) for (const impl of IMPLEMENTATIONS) {
   const { createPixApi } = require(path.join(ROOT, impl.file))
 
   test('[' + impl.name + '] 退出登录：内存 cookie 必须清空', async () => {

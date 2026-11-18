@@ -51,6 +51,9 @@ contextBridge.exposeInMainWorld('pix', {
   proxySettings: (id) => ipcRenderer.invoke('app:proxySettings', { id: id }),
   home: () => ipcRenderer.invoke('app:home'),
   version: () => ipcRenderer.invoke('app:version'),
+  // 翻译是否被崩溃循环保护停掉了（2026-11-02：「不翻译了」的静默根因）
+  translateStatus: () => ipcRenderer.invoke('app:translateStatus'),
+  translateRestore: () => ipcRenderer.invoke('app:translateRestore'),
   checkUpdate: () => ipcRenderer.invoke('app:checkUpdate'),
   // ---- 应用内自动更新 ----
   // start 不接受任何参数：主进程会自己重新取清单并验签。
@@ -69,6 +72,23 @@ contextBridge.exposeInMainWorld('pix', {
     ipcRenderer.on('translate:bridgeDown', (_event, data) => cb(data))
   },
   customerReminders: () => ipcRenderer.invoke('customer:reminders'),
+  counter: {
+    summary: query => ipcRenderer.invoke('counter:summary', query),
+    events: query => ipcRenderer.invoke('counter:events', query),
+    repeats: query => ipcRenderer.invoke('counter:repeats', query),
+    accounts: query => ipcRenderer.invoke('counter:accounts', query),
+    archiveAccount: id => ipcRenderer.invoke('counter:archiveAccount', id),
+    tickets: query => ipcRenderer.invoke('counter:tickets', query),
+    ticket: id => ipcRenderer.invoke('counter:ticket', id),
+    transitionTicket: data => ipcRenderer.invoke('counter:ticketTransition', data),
+    replyTicket: data => ipcRenderer.invoke('counter:ticketReply', data),
+    tabs: () => ipcRenderer.invoke('counter:tabs'),
+    toggleTab: data => ipcRenderer.invoke('counter:toggleTab', data),
+    queueStatus: () => ipcRenderer.invoke('counter:queueStatus'),
+    retryFailed: () => ipcRenderer.invoke('counter:retryFailed'),
+    flush: () => ipcRenderer.invoke('counter:flush'),
+    onUpdated: cb => ipcRenderer.on('counter:updated', (_event, data) => cb(data))
+  },
   saveTranslatePrefs: (payload) => ipcRenderer.invoke('translate:savePrefs', payload),
   setOverlay: (on) => ipcRenderer.invoke('app:overlay', on),
   onTranslateOpen: (cb) => {

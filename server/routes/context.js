@@ -36,6 +36,7 @@ const { DashboardStatsService } = require('../services/dashboard-stats-service')
 const { CrashReportService } = require('../services/crash-report-service')
 const { AdminAccountService } = require('../services/admin-account-service')
 const { RechargeOrderService } = require('../services/recharge-order-service')
+const { CounterService } = require('../services/counter-service')
 
 /**
  * 会话里可公开返回给前端的字段。
@@ -76,6 +77,8 @@ function buildContext(context) {
     windowMs,
     key: keyFn
   })
+  // 每分钟限额不能约束一整天的持续刷图成本；默认 500 次/主账号/天。
+  const imageDailyLimit = Math.max(1, Math.min(10000, Number(process.env.PIX_IMAGE_DAILY_LIMIT) || 500))
 
   const limits = {
     // 登录按入口分桶。
@@ -126,10 +129,19 @@ function buildContext(context) {
     translateImageAccount: limit('translate-image-account', 20, 60_000, req =>
       req.pixUser ? `${req.pixUser.kind}:${req.pixUser.account.id}` : 'missing'
     ),
+    translateImageParentDaily: limit('translate-image-parent-daily', imageDailyLimit, 24 * 60 * 60_000, req =>
+      req.pixUser && req.pixUser.parent && req.pixUser.parent.id
+        ? String(req.pixUser.parent.id)
+        : 'missing'
+    ),
     // 崩溃日志上报：每 IP 每小时 20 次。
     // 客户端正常一年也传不了几次（只在异常退出后的下次启动传一次），
     // 这个额度只用于挡住刷接口，不会误伤真实用户。
     crashReport: limit('crash-report-ip', 20, 60 * 60_000),
+    counterEventIp: limit('counter-event-ip', 600, 60_000),
+    counterEventAccount: limit('counter-event-account', 300, 60_000, req =>
+      req.pixUser ? `${req.pixUser.kind}:${req.pixUser.account.id}` : 'missing'
+    ),
     // 第二步的限流按来源 IP：票据本身还有尝试次数上限，两层叠加
     adminTotp: limit('admin-totp-ip', 20, 15 * 60_000),
     // 动态码/密钥相关操作只可能在已登录会话里发生，给个宽松上限防脚本刷
@@ -175,7 +187,8 @@ function buildContext(context) {
     adminAccounts: new AdminAccountService(repo, auth),
     // 商户下单（资金主路径）。尾数分配、金额格式化、订单快照全在这里，
     // 路由只剩前端字段拼装。真跑测试见 test/recharge-order-service.test.js。
-    rechargeOrder: new RechargeOrderService({ repo, core, rechargeAmount, settings })
+    rechargeOrder: new RechargeOrderService({ repo, core, rechargeAmount, settings }),
+    counter: new CounterService(repo)
   }
 
   return {

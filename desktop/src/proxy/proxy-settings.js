@@ -240,16 +240,19 @@ function sessionOf(tab) {
  *
  * `options.relayEndpoint`：带认证 SOCKS5 的本地中继地址（见 proxyRulesOf）。
  *
- * 失败一律吞掉：代理填错不该让整个客户端崩，用户会表现为"上不了网"，
- * 再回去改设置即可。这也是原先就有的行为，保持不动。
+ * 失败必须向上传播：代理填错不该让整个客户端崩，但**更不能静默换出口**。
+ * 调用方（applyTabProxy / updateTabSettings / startTabLoad）会据此阻止页面
+ * 加载并回滚设置；这里吞掉异常会让上层误以为代理已生效。
  */
 function applySessionProxy(ses, settings, options) {
-  if (!ses || typeof ses.setProxy !== 'function') return Promise.resolve()
+  if (!ses || typeof ses.setProxy !== 'function') {
+    return Promise.reject(new Error('当前线路没有可用的 session，无法应用代理'))
+  }
   const rules = proxyRulesOf(settings, options)
   const next = rules
     ? ses.setProxy({ proxyRules: rules, proxyBypassRules: '<local>' })
     : ses.setProxy({ mode: 'direct' })
-  return Promise.resolve(next).catch(() => {})
+  return Promise.resolve(next)
 }
 
 /**

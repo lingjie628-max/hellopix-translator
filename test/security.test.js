@@ -4,6 +4,8 @@ const express = require('express')
 const registerApi = require('../mock')
 const { createSecurity } = require('../server/security')
 
+process.env.PIX_REQUIRE_ADMIN_TOTP = '0'
+
 async function startApi(options) {
   const opts = options || {}
   const app = express()
@@ -303,7 +305,7 @@ test('operator accounts are read-only for admin mutations', async t => {
     },
     body: new URLSearchParams({
       username: 'operator-test',
-      password: 'operator-pass',
+      password: 'operator-pass-2026',
       nickname: '只读运营',
       role: 'operator'
     })
@@ -313,7 +315,7 @@ test('operator accounts are read-only for admin mutations', async t => {
   const operatorResponse = await request(api.base, '/apis/admin/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ username: 'operator-test', password: 'operator-pass' })
+    body: new URLSearchParams({ username: 'operator-test', password: 'operator-pass-2026' })
   })
   const operatorJar = cookieJar(operatorResponse)
   // 用一个仍然存在的管理端写接口来验证角色守卫。
@@ -327,7 +329,7 @@ test('operator accounts are read-only for admin mutations', async t => {
       'X-CSRF-Token': decodeURIComponent(operatorJar.pix_csrf),
       // 带上 operator 自己的密码：如果拿不到 403 而拿到 428，
       // 说明"角色检查"被"二次认证"抢先了 —— 那 operator 只要补个密码就能过。
-      'x-pix-reauth': 'operator-pass',
+      'x-pix-reauth': 'operator-pass-2026',
       'Content-Type': 'application/x-www-form-urlencoded'
     },
     body: new URLSearchParams({ id: '1', status: '0' })

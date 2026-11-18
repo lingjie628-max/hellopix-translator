@@ -32,6 +32,12 @@
 function createWebViewFactory (deps) {
   const { electron, state, libs, env } = deps
 
+  function warn (channel, msg) {
+    try {
+      if (libs && typeof libs.logWarn === 'function') libs.logWarn(channel, msg)
+    } catch (e) {}
+  }
+
   /**
    * WebRTC 防泄漏。
    *
@@ -71,6 +77,18 @@ function createWebViewFactory (deps) {
         backgroundThrottling: true
       }
     })
+    // pix:// 要挂到**这个客页的 session** 上，否则页面里取不到页面世界脚本。
+    // 时序：这里仍在 setPartition/loadURL 之前，是安全的（晚于导航挂会失效，
+    // 实测见 src/translate/pix-protocol.js 里 prewarm 的注释）。
+    try {
+      const proto = require('../translate/pix-protocol')
+      const inject = require('../translate/page-world-inject')
+      if (!proto.attachHandler(electron, ses, inject.pageWorldDir())) {
+        warn('page-world', '实例分区 pix:// 协议挂载失败：' + partition)
+      }
+    } catch (e) {
+      warn('page-world', '实例分区 pix:// 协议挂载异常：' + ((e && e.message) || e))
+    }
     if (typeof view.setBorderRadius === 'function') view.setBorderRadius(0)
     if (typeof view.setBackgroundColor === 'function') view.setBackgroundColor('#081628')
     view.webContents.setUserAgent(env.CHROME_UA)

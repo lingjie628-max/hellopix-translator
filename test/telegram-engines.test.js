@@ -13,8 +13,14 @@
  */
 
 const assert = require('node:assert/strict')
-const test = require('node:test')
-const { usableEngines, resolveEngine, engineState } = require('../standalone/telegram-win/lib/engines')
+const fs = require('node:fs')
+const path = require('node:path')
+const nodeTest = require('node:test')
+const { optionalTest } = require('./helpers/optional-standalone')
+const MODULE = path.join(__dirname, '..', 'standalone', 'telegram-win', 'lib', 'engines.js')
+const test = optionalTest(nodeTest, MODULE, 'Telegram standalone engine module has been removed')
+const engines = fs.existsSync(MODULE) ? require(MODULE) : {}
+const { usableEngines, resolveEngine, engineState } = engines
 
 // 真实库的样子：12 个通道只有 deepseek 接通，账号 activeEngine 却指向没接通的 deepseek。
 function realWorldEngines() {

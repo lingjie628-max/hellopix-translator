@@ -1,14 +1,15 @@
 {
   "name": "hello-pix-desktop",
   "productName": "Hello Pix",
-  "version": "1.3.1",
+  "version": "1.3.9",
   "private": true,
   "description": "Hello Pix 桌面客户端",
   "author": "Hello Pix",
   "main": "stability-boot.js",
   "dependencies": {
     "electron-updater": "^6.8.11",
-    "undici": "^6.29.0"
+    "opus-recorder": "^8.0.5",
+    "undici": "^6.29.1"
   },
   "scripts": {
     "start": "electron .",
@@ -24,10 +25,15 @@
     "verify:api-net": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-api-net-electron.js",
     "verify:copy": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-copy-paste-electron.js",
     "verify:copy-image": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-copy-image-electron.js",
+    "verify:voice-import": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-voice-note-import-electron.js",
+    "verify:direct-ptt": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-whatsapp-direct-ptt-electron.js",
+    "verify:counter-center": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-counter-center-electron.js",
     "verify:hidden-tabs": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-hidden-tabs-electron.js",
     "verify:send-intercept": "env -u ELECTRON_RUN_AS_NODE electron scripts/verify-send-intercept-electron.js",
     "verify:stability": "node --test test/health-guard.test.js test/async-store.test.js test/stability-wiring.test.js",
     "probe:dom": "env -u ELECTRON_RUN_AS_NODE electron scripts/probe-platform-dom.js",
+    "probe:voice-import": "env -u ELECTRON_RUN_AS_NODE electron scripts/probe-voice-note-import-electron.js",
+    "probe:direct-ptt": "env -u ELECTRON_RUN_AS_NODE electron scripts/probe-whatsapp-direct-ptt.js",
     "bench:send": "env -u ELECTRON_RUN_AS_NODE electron scripts/bench-send-timing.js",
     "bench:translate:live": "env -u ELECTRON_RUN_AS_NODE electron scripts/bench-translate-live.js",
     "fetch:line-ext": "node scripts/fetch-line-ext.js",

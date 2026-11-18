@@ -319,8 +319,6 @@ function syncProxyFields(keepValues) {
   showProxyCell(addProxyPassCell, on && kind !== 'ssh')
   showProxyCell(addProxyChannelCell, on)
   showProxyCell(addProxyIpVerCell, on)
-  showProxyCell(addProxyRefreshCell, on)
-  showProxyCell(addProxyUdpCell, on)
   if (proxySplit) proxySplit.classList.toggle('with-detect', on)
   if (proxyDetect) proxyDetect.style.display = on ? '' : 'none'
   if (addCard) addCard.classList.toggle('wide', on)

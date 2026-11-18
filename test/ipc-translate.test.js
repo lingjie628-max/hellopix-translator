@@ -43,6 +43,7 @@ function harness (opts) {
     },
     state,
     actions: {
+      trustedTabBinding: o.trustedTabBinding || (sender => (sender && sender.bound ? tabs[0] : null)),
       // 默认：只有 sender 标了 trusted 才算我们管理的 tab
       trustedTabSender: sender => (sender && sender.trusted ? tabs[0] : null),
       rejectUntrustedSender: () => ({ success: false, msg: '来源不可信' }),
@@ -85,6 +86,17 @@ function harness (opts) {
   })
   return { handlers, unsafe, sync, logged, calls, cache, tabs, state }
 }
+
+test('★ 页面脚本同步通道：守卫必须从 IPC event 取 sender', () => {
+  const { sync } = harness()
+  const guard = sync.get('translate:pageScripts')
+  assert.equal(typeof guard, 'function', '同步通道缺少来源守卫')
+
+  const sender = { bound: true }
+  assert.equal(guard({ sender }), true, '受管客页应能取得页面世界脚本')
+  assert.equal(guard(sender), false, '不能把 event 本身误当成 WebContents')
+  assert.equal(guard({ sender: { bound: false } }), false, '未绑定的页面必须拒绝')
+})
 
 test('客页通道必须显式走 handleUnsafe（否则注册器会拿 isMainSender 卡死它们）', () => {
   const { unsafe } = harness()

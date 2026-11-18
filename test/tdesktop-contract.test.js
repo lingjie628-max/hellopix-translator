@@ -12,10 +12,13 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
-const test = require('node:test')
-const { BRIDGE_NAME, buildBridge } = require('../standalone/telegram-win/lib/bridge')
+const nodeTest = require('node:test')
+const { optionalTest } = require('./helpers/optional-standalone')
 
 const ROOT = path.join(__dirname, '..')
+const BRIDGE_MODULE = path.join(ROOT, 'standalone', 'telegram-win', 'lib', 'bridge.js')
+const test = optionalTest(nodeTest, BRIDGE_MODULE, 'Telegram standalone client has been removed')
+const { BRIDGE_NAME, buildBridge } = fs.existsSync(BRIDGE_MODULE) ? require(BRIDGE_MODULE) : {}
 const CPP = path.join(
   ROOT, 'standalone/telegram-win/tdesktop-fork/hello_pix_translate_provider.cpp'
 )

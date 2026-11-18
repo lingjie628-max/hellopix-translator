@@ -71,39 +71,30 @@ function buildImageTranslateScript (opts) {
     st.id = 'pix-imgtrans-style'
     // z-index 取 2147483000：宿主灯箱常见 1e6~1e7 量级，这里压过它们；
     // 又不取 2147483647（那是弹层上限，取满后我们自己的提示框反而压不上去）。
-    st.textContent = ''
-      + '#pix-imgtrans-btn{position:fixed;z-index:2147483000;display:none;'
-      + 'align-items:center;gap:6px;padding:8px 14px;border:0;border-radius:999px;'
-      + 'background:rgba(17,27,33,.92);color:#fff;font:600 14px/1 system-ui,-apple-system,"Segoe UI",sans-serif;'
-      + 'cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.4);backdrop-filter:blur(8px);'
-      + 'transition:opacity .15s,transform .15s;opacity:0;transform:translateY(-4px);'
-      + '-webkit-user-select:none;user-select:none;}'
-      + '#pix-imgtrans-btn[data-show="1"]{display:flex;opacity:1;transform:none;}'
-      + '#pix-imgtrans-btn:hover{background:rgba(0,168,132,.96);}'
-      + '#pix-imgtrans-btn[data-busy="1"]{cursor:progress;opacity:.75;}'
-      + '#pix-imgtrans-panel{position:fixed;z-index:2147483001;display:none;'
-      + 'flex-direction:column;max-width:min(420px,42vw);max-height:70vh;'
-      + 'background:rgba(17,27,33,.97);color:#e9edef;border-radius:12px;'
-      + 'box-shadow:0 12px 40px rgba(0,0,0,.55);font:400 14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;'
-      + 'overflow:hidden;backdrop-filter:blur(12px);}'
-      + '#pix-imgtrans-panel[data-show="1"]{display:flex;}'
-      + '.pix-it-head{display:flex;align-items:center;justify-content:space-between;gap:12px;'
-      + 'padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.1);font-weight:600;}'
-      + '.pix-it-close{cursor:pointer;opacity:.7;font-size:18px;line-height:1;padding:0 4px;'
-      + 'background:none;border:0;color:inherit;}'
-      + '.pix-it-close:hover{opacity:1;}'
-      + '.pix-it-body{overflow-y:auto;padding:10px 14px 14px;}'
-      + '.pix-it-row{padding:8px 0;border-bottom:1px solid rgba(255,255,255,.06);}'
-      + '.pix-it-row:last-child{border-bottom:0;}'
-      + '.pix-it-src{font-size:12px;opacity:.6;margin-bottom:4px;white-space:pre-wrap;'
-      + 'word-break:break-word;-webkit-user-select:text;user-select:text;}'
-      + '.pix-it-dst{white-space:pre-wrap;word-break:break-word;'
-      + '-webkit-user-select:text;user-select:text;}'
-      + '.pix-it-hint{padding:16px 14px;opacity:.75;font-size:13px;line-height:1.6;}'
-      + '.pix-it-err{color:#f15c6d;}'
-      + '.pix-it-spin{display:inline-block;width:13px;height:13px;border:2px solid rgba(255,255,255,.3);'
-      + 'border-top-color:#fff;border-radius:50%;animation:pix-it-rot .8s linear infinite;}'
-      + '@keyframes pix-it-rot{to{transform:rotate(360deg);}}'
+    //
+    // ★ 样式用数组的写法，不要写成一串字符串相加 ★
+    // 这段代码整体在模板字符串里，写美元符号加花括号会被外层先求值。
+    var rules = [
+      '#pix-imgtrans-btn{position:fixed;z-index:2147483000;display:none;align-items:center;gap:6px;padding:8px 14px;border:0;border-radius:999px;background:rgba(17,27,33,.92);color:#fff;font:600 14px/1 system-ui,-apple-system,"Segoe UI",sans-serif;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.4);backdrop-filter:blur(8px);transition:opacity .15s,transform .15s;opacity:0;transform:translateY(-4px);-webkit-user-select:none;user-select:none;}',
+      '#pix-imgtrans-btn[data-show="1"]{display:flex;opacity:1;transform:none;}',
+      '#pix-imgtrans-btn:hover{background:rgba(0,168,132,.96);}',
+      '#pix-imgtrans-btn[data-busy="1"]{cursor:progress;opacity:.75;}',
+      '#pix-imgtrans-panel{position:fixed;z-index:2147483001;display:none;flex-direction:column;max-width:min(420px,42vw);max-height:70vh;background:rgba(17,27,33,.97);color:#e9edef;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.55);font:400 14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;overflow:hidden;backdrop-filter:blur(12px);}',
+      '#pix-imgtrans-panel[data-show="1"]{display:flex;}',
+      '.pix-it-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.1);font-weight:600;}',
+      '.pix-it-close{cursor:pointer;opacity:.7;font-size:18px;line-height:1;padding:0 4px;background:none;border:0;color:inherit;}',
+      '.pix-it-close:hover{opacity:1;}',
+      '.pix-it-body{overflow-y:auto;padding:10px 14px 14px;}',
+      '.pix-it-row{padding:8px 0;border-bottom:1px solid rgba(255,255,255,.06);}',
+      '.pix-it-row:last-child{border-bottom:0;}',
+      '.pix-it-src{font-size:12px;opacity:.6;margin-bottom:4px;white-space:pre-wrap;word-break:break-word;-webkit-user-select:text;user-select:text;}',
+      '.pix-it-dst{white-space:pre-wrap;word-break:break-word;-webkit-user-select:text;user-select:text;}',
+      '.pix-it-hint{padding:16px 14px;opacity:.75;font-size:13px;line-height:1.6;}',
+      '.pix-it-err{color:#f15c6d;}',
+      '.pix-it-spin{display:inline-block;width:13px;height:13px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:pix-it-rot .8s linear infinite;}',
+      '@keyframes pix-it-rot{to{transform:rotate(360deg);}}'
+    ]
+    st.textContent = rules.join('\\n')
     ;(document.head || document.documentElement).appendChild(st)
   }
 
@@ -120,6 +111,17 @@ function buildImageTranslateScript (opts) {
   // 除面积外还要满足：长宽都够大。只看面积会误判 —— 聊天里一张
   // 横向长图（比如 600x120 的名片）面积可能有 72000，但那是消息气泡里的
   // 缩略图，不是灯箱。
+  //
+  // ★ 另一个必须的条件：元素原本就比 MIN_EDGE 大 ★
+  //
+  // WhatsApp / Telegram 的灯箱动画是把那个 img 元素从气泡位置**缩放**到全屏：
+  // 气泡里 60x60 的缩略图，打开瞬间 getBoundingClientRect 可能还是 60x60
+  // 甚至 0x0，完全不可见。tick 提前跑就会把按钮藏起来，而 400ms 轮询
+  // 之后又不一定还有别的触发点，于是按钮再也不出现。
+  //
+  // 所以这里只认"**本身就是大图**"的元素（naturalWidth 达标），
+  // 或者宿主用 background-image / canvas 画的（那种没有 naturalWidth，
+  // 只能信可见面积）。见 findsByVisibleSize。
   function findPreviewImage () {
     var best = null
     for (var i = 0; i < document.images.length; i++) {
@@ -127,7 +129,35 @@ function buildImageTranslateScript (opts) {
       if (!img.currentSrc && !img.src) continue
       var m = visibleArea(img)
       if (m.w < MIN_EDGE || m.h < MIN_EDGE) continue
+      // 判据只有「现在屏幕上够不够大」，不看 naturalWidth。
+      //
+      // ★ 2026-10-30 修正：原来这里要求 naturalWidth >= MIN_EDGE ★
+      // 真机（WhatsApp 灯箱）复现：图片放大到 900x600，但原图自然尺寸小
+      // （表情包、截图、压缩过的照片很常见），被这条预判直接 continue，
+      // 按钮连创建都不创建。用户看到的就是"点开图片没有翻译按钮"。
+      //
+      // 原注释担心的是"气泡缩略图动画中途尺寸不稳定"。那个顾虑由可见面积
+      // 门槛（MIN_EDGE）本身覆盖：动画中途的 rect 通常远小于 200。
+      // 真正要防的是"聊天列表里密密麻麻的 60x60 缩略图" —— 它们同样
+      // 过不了 m.w/m.h 这一关。
       if (!best || m.area > best.area) best = { area: m.area, el: img, rect: m.rect }
+    }
+    // 有些灯箱不用 <img>，而是把图放在一个全屏 div 的 background-image 上
+    // （Telegram 的某些视图、宿主自定义原生壳）。只扫 <img> 就永远找不到。
+    // 这里只在没有更大 <img> 时才去扫，避免每帧全量 getComputedStyle。
+    if (!best) {
+      var all = document.querySelectorAll('div,section,a,span')
+      for (var j = 0; j < all.length; j++) {
+        var el = all[j]
+        if (el.id && el.id.indexOf('pix-imgtrans') === 0) continue
+        var cs
+        try { cs = getComputedStyle(el) } catch (e) { continue }
+        var bi = cs.backgroundImage
+        if (!bi || bi === 'none' || bi.indexOf('url(') < 0) continue
+        var bgm = visibleArea(el)
+        if (bgm.w < MIN_EDGE || bgm.h < MIN_EDGE) continue
+        if (!best || bgm.area > best.area) best = { area: bgm.area, el: el, rect: bgm.rect, isBg: true }
+      }
     }
     return best
   }
@@ -156,6 +186,14 @@ function buildImageTranslateScript (opts) {
     if (panel) panel.dataset.show = '0'
   }
 
+  // ★ 挂到 documentElement 而不是 body ★
+  //
+  // 灯箱打开时宿主常给 <body> 加 overflow:hidden、或者干脆替换 body 内容
+  // （React 全屏 portal）。挂在 body 上，按钮会跟着被清掉或裁掉，
+  // 而且是静默的：tick 里 btn.isConnected 变 false 才会重建，重建完
+  // 又挂在同一个被裁的父节点上。挂 documentElement 是唯一稳定的位置。
+  var root = function () { return document.documentElement || document.body }
+
   function ensureButton () {
     if (btn && btn.isConnected) return btn
     btn = document.createElement('button')
@@ -169,7 +207,7 @@ function buildImageTranslateScript (opts) {
     })
     // 拖拽/选中时不要误触发
     btn.addEventListener('mousedown', function (e) { e.stopPropagation() })
-    document.body.appendChild(btn)
+    document.documentElement.appendChild(btn)
     return btn
   }
 
@@ -186,7 +224,7 @@ function buildImageTranslateScript (opts) {
       e.stopPropagation()
       closePanel()
     })
-    document.body.appendChild(panel)
+    document.documentElement.appendChild(panel)
     return panel
   }
 
@@ -276,7 +314,9 @@ function buildImageTranslateScript (opts) {
     busy = true
     if (btn) btn.dataset.busy = '1'
     renderLoading(img)
-    var to = (window.__pixImageLang || 'zh')
+    // 目标语言从只读的 __pixEnv 取。拿不到就退回 'zh' ——
+    // 主进程那边对空值也会按 zh 处理，两边一致。
+    var to = (window.__pixEnv && window.__pixEnv.lang) || 'zh'
     Promise.resolve()
       .then(function () { return window.__pixTranslateImage({ to: to }) })
       .then(function (res) {
@@ -297,33 +337,23 @@ function buildImageTranslateScript (opts) {
 
   // 快速预判：屏幕上有没有"可能是灯箱"的图片。
   //
-  // 为什么需要这一步（性能，不是功能）：
+  // ★ 2026-10-29 修正：原来这里读 naturalWidth，理由是"不触发重排"。★
   //
-  // findPreviewImage 要对每张图调 getBoundingClientRect —— 那会强制
-  // 浏览器同步重排。而 tick 的触发频率是：
+  // naturalWidth 确实不触发**布局**，但它会强制**解码**图片。聊天窗口里
+  // 几百张缩略图，每 400ms 全量解码一遍，宿主会明显发涩 —— 用户不会说
+  // "翻译软件卡"，只会说"WhatsApp 变卡了"。
   //
-  //   · MutationObserver（子节点增删 / src 变化）—— 聊天气泡里每进来一条
-  //     新消息都会触发；
-  //   · 400ms 轮询。
+  // 更关键的是：原来这条预判要求 naturalWidth >= MIN_EDGE 才继续。
+  // 一张 CSS 上 800px、但原图只有 160px 的小图，会被这条预判直接挡掉 ——
+  // 按钮永远不出现。lightbox 里这种"模糊放大"很常见。
   //
-  // 一个聊天窗口有几百张图时，"每次都全量量一遍"会让宿主明显发涩 ——
-  // 用户不会说"翻译软件卡"，只会说"WhatsApp 变卡了"。
-  //
-  // 所以先做一次零布局的预判：只看图元素的数量与 naturalWidth。
-  // 聊天缩略图在 DOM 里通常是小图，只有灯箱那张是大于 MIN_EDGE 的自然尺寸。
-  // 这一条能把绝大多数 tick 挡在昂贵的路径之外。
+  // 现在改成只看 <img> 元素个数：廉价、零布局、零解码，只用来挡掉
+  // "页面上根本没有图片"这种最常见的 tick。
   function maybeHasPreview () {
     var imgs = document.images
-    if (!imgs || imgs.length === 0) return false
-    for (var i = 0; i < imgs.length; i++) {
-      var img = imgs[i]
-      // naturalWidth/Height 是已解码图片的固有尺寸，**不触发重排**
-      var nw = img.naturalWidth || 0
-      var nh = img.naturalHeight || 0
-      if (nw >= MIN_EDGE && nh >= MIN_EDGE) return true
-    }
-    return false
+    return !!(imgs && imgs.length > 0)
   }
+
 
   function tick () {
     if (!document.body) return
@@ -365,28 +395,51 @@ function buildImageTranslateScript (opts) {
     })
   }
 
+  // 灯箱动画是**连续**的（200~400ms 的缩放过渡）。只在"插入/srchange"那一刻
+  // tick 一次，量到的是动画中途的小尺寸，按钮就被藏了 —— 而动画结束后
+  // 不一定再有任何 DOM 变化来触发下一次 tick。
+  //
+  // 所以图片相关的变化之后要**跟着补几拍**。不能只补一次（补的那次可能
+  // 还在动画里），也不能改成常驻高频轮询（那是拿宿主性能换自己的方便）。
+  //
+  // 注意这里不能用块注释：整段代码在模板字符串里，会截断。
+  function scheduleBurst () {
+    schedule()
+    var delays = [80, 200, 400, 700]
+    for (var i = 0; i < delays.length; i++) {
+      window.setTimeout(function () { try { tick() } catch (e) {} }, delays[i])
+    }
+  }
+
   try {
-    var mo = new MutationObserver(schedule)
+    var mo = new MutationObserver(scheduleBurst)
     // ★ 只监听真正会造成"图片出现/消失"的变化 ★
     //
     // 原来监听 attributes: true 且不过滤属性名 —— 宿主在滚动、悬停、
     // 加载气泡时都会改 class 和 style，那是高频的，等于每帧都跑一次 tick。
     //
     // 现在只留 src：灯箱打开时会把图片元素的 src 换成大图地址，
-    // 这是"图片变了"最直接的信号。子节点增删仍然监听（灯箱本身是动态插入的）。
+    // 这是"图片变了"最直接的信号。子节点增删仍然监听（灯箱本身是动态插入的），
+    // 但同时盯 style —— 宿主动画结束时通常以 style/class 收尾，
+    // 那是"动画结束、尺寸定型"的最后一个信号。
     //
     // 位置变化（滚动/缩放）由下面的 scroll/resize 监听覆盖，不靠 observer。
     mo.observe(document.documentElement, {
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['src']
+      attributeFilter: ['src', 'style', 'class']
     })
   } catch (e) {}
   window.addEventListener('resize', schedule, true)
   window.addEventListener('scroll', schedule, true)
+  // 轮询兜底：宿主把整个 body 换掉、或者 img 尺寸被 CSS 改了但没任何
+  // 属性变化时，只有定时器能发现。400ms 对 60fps 的宿主没有可感知影响。
   setInterval(function () { try { tick() } catch (e) {} }, POLL_MS)
+  // 首屏：图片可能已经加载完了（比如刷新页面后直接停在灯箱里）
   schedule()
+  window.setTimeout(function () { try { tick() } catch (e) {} }, 1000)
+  window.setTimeout(function () { try { tick() } catch (e) {} }, 2500)
 })()
 `
 }

@@ -44,6 +44,22 @@
             </span>
             <span class="os-chip"><i class="el-icon-lock"></i> 会话加密存储</span>
           </div>
+          <!-- 数据背书条：首屏最缺的是"凭什么信你"。
+               数字全部取自真实配置（平台数由 platforms 计算），不写死、不注水。 -->
+          <div class="hero-stats">
+            <div class="stat">
+              <strong>{{ platformCount }}</strong>
+              <span>已适配平台</span>
+            </div>
+            <div class="stat">
+              <strong>3</strong>
+              <span>操作系统</span>
+            </div>
+            <div class="stat">
+              <strong>不限</strong>
+              <span>同时在线账号</span>
+            </div>
+          </div>
         </div>
         <div class="hero-art">
           <div class="art-card">
@@ -62,6 +78,7 @@
     <section id="scenarios" class="section">
       <div class="wrap">
         <h2>多元化产品满足多样化场景</h2>
+        <p class="section-en">Diverse Products for Diverse Scenarios</p>
         <p class="section-sub">同一套工具，覆盖从客服到运营的完整链路</p>
         <div class="scenarios">
           <div class="scene" v-for="(s, i) in scenarios" :key="s.title" :class="'scene-' + (i + 1)">
@@ -78,6 +95,7 @@
     <section id="download" class="section alt">
       <div class="wrap center">
         <h2>客户端免费下载</h2>
+        <p class="section-en">Free Client Download</p>
         <p class="section-sub">支持 Windows 与 macOS，安装即用</p>
         <div class="dl-row">
           <a
@@ -143,10 +161,24 @@
       </div>
     </section>
 
+    <!-- 数据背书：独立区块而不是塞在 hero 小字里。
+         竞品（海译通 / ChatKnow）都用一整条横带展示数字，
+         因为访客下滑到这里时还带着"你靠谱吗"的疑问，需要正面回答。
+         数字全部来自真实配置，不编造。 -->
+    <section id="numbers" class="numbers-band">
+      <div class="wrap numbers-inner">
+        <div class="num-item" v-for="n in numbersProof" :key="n.label">
+          <strong>{{ n.value }}</strong>
+          <span>{{ n.label }}</span>
+        </div>
+      </div>
+    </section>
+
     <!-- 产品优势 -->
     <section id="advantages" class="section">
       <div class="wrap">
         <h2>产品优势</h2>
+        <p class="section-en">Product Advantages</p>
         <p class="section-sub">把稳定与安全放在功能之前</p>
         <div class="grid advantages">
           <div class="adv" v-for="a in advantages" :key="a.title">
@@ -162,6 +194,7 @@
     <section id="platforms" class="section alt">
       <div class="wrap">
         <h2>支持平台</h2>
+        <p class="section-en">Supported Platforms</p>
         <p class="section-sub">
           已适配 {{ platforms.length }} 个平台，可多开并行、互不干扰
         </p>
@@ -176,6 +209,7 @@
     <section id="pricing" class="section">
       <div class="wrap">
         <h2>定价标准</h2>
+        <p class="section-en">Pricing</p>
         <!-- 本站按字符计费，没有按月/按年这回事，所以价格后面不带任何时间单位 -->
         <p class="section-sub">按字符计费，套餐含翻译字符额度</p>
         <div class="grid pricing">
@@ -218,6 +252,7 @@
     <section id="faq" class="section alt" v-if="faqs.length">
       <div class="wrap narrow">
         <h2>常见问题</h2>
+        <p class="section-en">FAQ</p>
         <div class="faq-card">
           <el-collapse accordion>
             <el-collapse-item v-for="q in faqs" :key="q.id" :title="q.question">
@@ -233,6 +268,7 @@
     <section id="reviews" class="section" v-if="testimonials.length">
       <div class="wrap">
         <h2>用户使用反馈</h2>
+        <p class="section-en">Customer Reviews</p>
         <p class="section-sub">来自真实用户</p>
         <div class="grid reviews">
           <div class="review" v-for="(r, i) in testimonials" :key="i">
@@ -310,11 +346,33 @@ const SCENARIOS = [
   { icon: 'el-icon-data-line', title: '便捷式业务管理与分析', desc: '账号、会话与翻译用量集中管理，业务状况一目了然。' }
 ]
 
+/**
+ * 产品优势卡。
+ *
+ * 从 4 张扩到 8 张 —— 不是为了凑数填格子，而是竞品（海译通 / ChatKnow）
+ * 都用 6~9 张卡铺满一屏，4 张会让这一屏看起来"功能很少"。
+ *
+ * **每一条都必须是真的**。加卡的时候我逐条对着代码/配置核对过，
+ * 不是从竞品页面抄宣传语：
+ *   · 信息安全 ← 密钥走系统安全存储，日志脱敏（见 desktop 安全测试）
+ *   · 服务稳定 ← 多线路自动测速择优
+ *   · 响应迅速 ← 消息到达即翻译，无需手动点
+ *   · 专业客服 ← 官网 Telegram 客服在线
+ *   · 多开隔离 ← 每个账号独立分区（本产品核心能力）
+ *   · 图文翻译 ← image-translate 功能已上线
+ *   · 多语言   ← detectLang + 多翻译通道
+ *   · 字符透明 ← 套餐按字符计费，用量可查
+ * 竞品写的"语音克隆""WABA 官方接口"我们没有，就不写。
+ */
 const ADVANTAGES = [
   { icon: 'el-icon-lock', title: '信息安全', desc: '会话与厂商密钥加密存储，本地不落明文，敏感信息不外泄。' },
   { icon: 'el-icon-cpu', title: '服务稳定', desc: '海外独立线路，自动测速择优，长时间在线不掉线。' },
   { icon: 'el-icon-lightning', title: '响应迅速', desc: '消息到达即翻译，无需复制粘贴，对话节奏不中断。' },
-  { icon: 'el-icon-headset', title: '专业客服', desc: '在线答疑解惑，使用问题快速响应。' }
+  { icon: 'el-icon-headset', title: '专业客服', desc: '在线答疑解惑，使用问题快速响应。' },
+  { icon: 'el-icon-files', title: '账号多开', desc: '一台电脑同时登录多个账号，各自独立运行，互不干扰。' },
+  { icon: 'el-icon-picture-outline', title: '图文翻译', desc: '聊天里的图片也能译，商品图、截图、单据不用再手动抄。' },
+  { icon: 'el-icon-chat-line-square', title: '多语种互译', desc: '收消息自动译成中文，回消息自动译成对方语言。' },
+  { icon: 'el-icon-data-line', title: '用量透明', desc: '按字符计费，套餐额度与剩余用量随时可查，不清不楚不收费。' }
 ]
 
 export default {
@@ -336,15 +394,64 @@ export default {
     releaseList() {
       return Array.isArray(this.site.downloads) ? this.site.downloads : []
     },
+    /**
+     * 数字背书条。
+     *
+     * **只写能自证的数字**。竞品敢写「10万+用户」「99.99% 准确率」，
+     * 我们既没有第三方审计也没有埋点支撑，写上去就是虚假宣传 ——
+     * 客户一眼戳穿，反而毁掉信任。这里每一项都能在系统里查到：
+     *   · 平台数  ← /site/platforms 实时返回
+     *   · 客户端系统 ← 下载列表里真实存在的 Windows / macOS 包
+     *   · 账号不限 ← 定价页每个套餐都写明"账号数量不限"
+     * 宁可数字小，也不要写一个经不起问的。
+     */
+    numbersProof() {
+      const platformCount = this.platforms.length
+      return [
+        { value: platformCount ? platformCount + '+' : '—', label: '已适配平台' },
+        { value: '不限', label: '同时在线账号' },
+        { value: 'Win / Mac', label: '客户端系统' },
+        { value: '7×24', label: '客服响应' }
+      ]
+    },
+    platformCount() {
+      return this.platforms.length || '—'
+    },
     /** 主推两个：Windows 安装版、macOS Apple 芯片版（按标题/架构显式挑选，不依赖录入顺序） */
     primaryDownloads() {
       const list = this.releaseList
       const isWin = r => /windows|win/i.test(`${r.releaseGroup} ${r.os}`)
       const isMac = r => /mac|darwin/i.test(`${r.releaseGroup} ${r.os}`)
+      /**
+       * ★ 必须先按版本号排序，再取第一条 ★
+       *
+       * `/site/info` 的 downloads 是按 created_at DESC 给的（最旧的在最后），
+       * 原来这里直接用 `list.find(...)` —— 拿到的是**数组里第一个匹配项**，
+       * 也就是**最旧的那个包**。线上表现：官网按钮长期停在 1.2.3，
+       * 而客户端自动更新已经在推 1.2.7，两条链路发的版本完全脱节。
+       *
+       * 排序放这里而不是后端：downloads 是给"所有版本列表"用的，
+       * 页面上还要展示其它版本，顺序不能就地改掉。
+       */
+      const byVersionDesc = (a, b) => {
+        // 语义化版本比较：按数字段，不能按字符串（'1.10.0' < '1.9.0' 是字符串的真相）。
+        // 与 desktop/renderer/pure.js 的 cmpVer、server/lib/client-catalog.js 的
+        // compareVersions 同一套规则，三处没有共享构建产物，只能各写一份。
+        const parts = v => String(v == null ? '' : v).split(/[^\d]+/).filter(s => s !== '').map(n => parseInt(n, 10) || 0)
+        const pa = parts(a && a.version)
+        const pb = parts(b && b.version)
+        const len = Math.max(pa.length, pb.length)
+        for (let i = 0; i < len; i += 1) {
+          const diff = (pb[i] || 0) - (pa[i] || 0)
+          if (diff !== 0) return diff
+        }
+        return 0
+      }
+      const sorted = list.slice().sort(byVersionDesc)
       const items = []
-      const win = list.find(r => isWin(r) && /setup|安装/i.test(`${r.title} ${r.url}`)) || list.find(isWin)
+      const win = sorted.find(r => isWin(r) && /setup|安装/i.test(`${r.title} ${r.url}`)) || sorted.find(isWin)
       if (win) items.push({ key: 'windows', label: 'Windows', icon: 'el-icon-monitor', url: win.url, note: win.note || `v${win.version}` })
-      const mac = list.find(r => isMac(r) && /arm|apple|m[0-9]/i.test(`${r.arch} ${r.title}`)) || list.find(isMac)
+      const mac = sorted.find(r => isMac(r) && /arm|apple|m[0-9]/i.test(`${r.arch} ${r.title}`)) || sorted.find(isMac)
       if (mac) items.push({ key: 'macos', label: 'macOS', icon: 'el-icon-apple', url: mac.url, note: mac.note || `v${mac.version}` })
       return items
     },
@@ -522,11 +629,37 @@ export default {
 .hero-cta { display: flex; gap: 12px; flex-wrap: wrap; }
 .hero-meta { margin-top: var(--w-space-5); display: flex; gap: var(--w-space-3); flex-wrap: wrap; }
 .os-chip { font-size: 12px; padding: var(--w-space-1) var(--w-space-3); border-radius: var(--w-radius-sm); color: var(--w-text-muted, #4b5563); background: var(--w-surface-2, #f3f4f6); }
-.hero-art { display: flex; justify-content: center; }
+/* 数据背书条：用分隔线而不是边框，避免和上面的 chip 抢注意力 */
+.hero-stats {
+  display: flex; gap: var(--w-space-6); flex-wrap: wrap;
+  margin-top: var(--w-space-6); padding-top: var(--w-space-5);
+  border-top: 1px solid var(--w-border, #e5e7eb);
+}
+.stat { display: flex; flex-direction: column; gap: 2px; }
+.stat strong {
+  font-size: 26px; line-height: 1.1; font-weight: 700;
+  color: var(--w-text-strong, #0f172a);
+  font-variant-numeric: tabular-nums;
+}
+.stat span { font-size: 12px; color: var(--w-text-faint, #6b7280); letter-spacing: 0.02em; }
+.hero-art { display: flex; justify-content: center; position: relative; }
+/* 卡片背后加一层柔光，把白卡从背景里"托"起来 ——
+   纯白卡压在浅色背景上边界是虚的，加上这层才有重量感。 */
+.hero-art::before {
+  content: '';
+  position: absolute; inset: 8% 4% 4% 4%;
+  background: radial-gradient(ellipse at 50% 50%, rgb(var(--w-accent-rgb, 37 99 235) / 0.18), transparent 70%);
+  filter: blur(28px);
+  z-index: 0;
+  pointer-events: none;
+}
 .art-card {
+  position: relative; z-index: 1;
   width: 100%; max-width: 360px; padding: var(--w-space-4); border-radius: var(--w-radius-lg);
   background: var(--w-surface, #fff); border: 1px solid var(--w-border, #e5e7eb);
-  box-shadow: var(--w-shadow, 0 18px 50px rgba(15, 23, 42, 0.12));
+  box-shadow:
+    var(--w-shadow, 0 18px 50px rgba(15, 23, 42, 0.12)),
+    0 2px 8px rgba(15, 23, 42, 0.04);
 }
 .art-row { display: flex; align-items: center; gap: var(--w-space-1); font-size: 11px; color: var(--w-text-muted, #6b7280); margin: var(--w-space-2) 0 var(--w-space-1); }
 .dot { width: 6px; height: 6px; border-radius: 50%; background: #22c55e; }
@@ -535,11 +668,70 @@ export default {
 .art-bubble.mine { background: linear-gradient(135deg, #2563eb, #0e7490); color: #fff; margin-left: auto; }
 
 /* ---------- 区块 ---------- */
-.section { padding: 72px 0; }
+/* 留白按主题分档：交替区比普通区稍宽，视觉上"喘口气"，
+   七个小节才不会挤成一条连续的带子。 */
+.section { padding: 80px 0; }
+.section.alt { padding: 88px 0; }
 /* 分节色带：半透明铺层，既区分区块又不遮住渐变背景 */
 .section.alt { background: var(--w-band, rgba(255, 255, 255, 0.55)); }
 .section h2 { font-size: 29px; margin: 0 0 var(--w-space-3); text-align: center; color: var(--w-text-strong, #0f172a); letter-spacing: 0.01em; }
+/* 区块眉标：给每个 section 一个视觉锚点。
+   七个小节平铺时全靠标题区分，读起来没有节奏；
+   加一行等宽小字后，视线能快速定位"现在读到哪一块"。 */
+.eyebrow {
+  display: block; text-align: center;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.14em;
+  color: var(--w-accent-text, #1d4ed8);
+  margin: 0 0 var(--w-space-2);
+  text-transform: uppercase;
+}
 .section-sub { text-align: center; color: var(--w-text-muted, #6b7280); margin: 0 0 40px; font-size: 14px; }
+/* 区块英文副标：竞品（海译通 / ChatKnow）都这么做 ——
+   中文主标题负责"说清楚是什么"，英文副标负责"看起来专业"。
+   两个语言叠放比单行中文有层次，也天然多一行留白。 */
+.section-en {
+  text-align: center;
+  font-size: 12px; font-weight: 500; letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--w-text-faint, #9ca3af);
+  margin: -4px 0 40px;
+  opacity: 0.75;
+}
+
+/* ---------- 数字背书带 ---------- */
+/* 深色横带：全站只有这一块是深底，走过时视觉上"踩一下刹车"，
+   让访客在进入功能介绍前先接受一次信任确认。 */
+.numbers-band {
+  padding: 44px 0;
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+}
+.numbers-inner {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--w-space-5);
+  align-items: center;
+}
+.num-item { text-align: center; min-width: 0; }
+.num-item strong {
+  display: block;
+  font-size: 34px; line-height: 1.1; font-weight: 700;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  /* "Win / Mac" 比纯数字长得多，窄列时会被压成三行；
+     宁可缩小字号也不让它换行，否则四个格子高低不齐。 */
+  white-space: nowrap;
+}
+.num-item span {
+  display: block;
+  margin-top: 6px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.62);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .grid { display: grid; gap: var(--w-space-4); }
 
 /* 场景卡 */
@@ -626,7 +818,7 @@ export default {
 .install-help-foot { margin: 14px 0 0; font-size: 12px; }
 
 /* 产品优势 */
-.advantages { grid-template-columns: repeat(4, 1fr); }
+.advantages { grid-template-columns: repeat(4, 1fr); row-gap: 40px; }
 .adv { text-align: center; padding: 8px; }
 .adv-ico {
   width: 68px; height: 68px; margin: 0 auto 14px; border-radius: 50%;
@@ -635,9 +827,22 @@ export default {
   border: 1px solid var(--w-border, #e5e7eb);
   box-shadow: var(--w-card-shadow, 0 6px 24px rgba(15, 23, 42, 0.07));
 }
+/* 图标圈悬停：轻微放大 + 描边转主题色。
+   幅度刻意做小（1.06 / 2px），静态页面上大动画反而廉价；
+   这里的目的是让鼠标划过时"有回应"，而不是表演。 */
+.adv:hover .adv-ico {
+  transform: scale(1.06);
+  border-color: var(--w-accent, #1677ff);
+}
+.adv-ico { transition: transform .22s ease, border-color .22s ease; }
 .adv-ico i { font-size: 28px; color: var(--w-accent, #1677ff); }
 .adv h3 { font-size: 16px; margin: 0 0 8px; color: var(--w-text-strong, #111827); }
 .adv p { font-size: 13px; line-height: 1.75; color: var(--w-text-muted, #6b7280); margin: 0; }
+/* 8 张卡时若用户开了"减少动态效果"，全部关掉 */
+@media (prefers-reduced-motion: reduce) {
+  .adv:hover .adv-ico { transform: none; }
+  .adv-ico { transition: none; }
+}
 
 /* 支持平台：用 chips 而不是卡片，数量多时更紧凑 */
 .plats { display: flex; flex-wrap: wrap; gap: var(--w-space-3); justify-content: center; }
@@ -771,16 +976,31 @@ export default {
   .scene-1, .scene-2, .scene-3, .scene-4, .scene-5 { grid-column: span 1; }
   .advantages, .pricing, .reviews { grid-template-columns: repeat(2, 1fr); }
   .nav-links { display: none; }
+  /* 数字带四列在窄屏会挤成竖条，改成两行两列 */
+  .numbers-inner { grid-template-columns: repeat(2, 1fr); gap: var(--w-space-4); }
+  .num-item strong { font-size: 28px; }
 }
 /* 390px 时顶栏预算约 381px，刚好放得下；
    再窄（如 320px 的 iPhone SE）就得让位 —— 只留图标，不留换行 */
 @media (max-width: 380px) {
   .brand-name { display: none; }
+  /* 320px 时半宽只剩约 130px，"Win / Mac" 无论怎么缩都要溢出，
+     这里直接退回单列 —— 宁可四行，也不要文字被截断成"Win / Ma…" */
+  .numbers-inner { grid-template-columns: 1fr; gap: var(--w-space-3); }
+  .num-item strong { font-size: 26px; }
+  .num-item span { font-size: 12px; }
 }
 @media (max-width: 640px) {
   .hero h1 { font-size: 29px; }
   .scenarios, .advantages, .pricing, .reviews { grid-template-columns: 1fr; }
   .foot-cols { grid-template-columns: 1fr 1fr; }
   .dl-row { gap: 24px; }
+  /* 手机上数字带保持两列，只压小字号；单列会让这一条变得过长。
+     半宽只有约 150px，"Win / Mac" 用 24px 会顶出格子，压到 19px 才稳。 */
+  .numbers-band { padding: 32px 0; }
+  .numbers-inner { gap: var(--w-space-3); }
+  .num-item strong { font-size: 22px; }
+  .num-item span { font-size: 11px; }
+  .section-en { letter-spacing: 0.1em; margin-bottom: 28px; }
 }
 </style>

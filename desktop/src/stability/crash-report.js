@@ -46,6 +46,15 @@ const MARKER_FILE = 'last-clean-exit'
 /** 时间戳形如 `2026-10-19 09:57:01.123`（log-file.js 的 formatLine 格式）。 */
 const LINE_RE = /^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?)\s+\[[A-Z ]+\]\s+\[(\w+)\]\s*(.*)$/
 
+/**
+ * 「上报回执」行 —— 我们自己写的，不是崩溃痕迹。
+ *
+ * 写成 `[crash] 崩溃日志已上报：N 条崩溃` 的结果是：下次启动统计时
+ * 把它当成一条崩溃，N 变大，再上报，N 再变大……日志尾巴被回执淹没，
+ * 真正的崩溃现场反而被挤出 200 行窗口。必须排除。
+ */
+const REPORT_ACK_RE = /崩溃日志已上报|crash-report (sent|ok)/i
+
 function markerPath(dir) {
   return path.join(dir, MARKER_FILE)
 }
@@ -99,6 +108,10 @@ function summarize(lines) {
   const reasons = new Set()
   for (const line of lines || []) {
     if (line.scope === 'crash') {
+      // ★ 2026-11-08：上报成功自己会写一条 [crash] 日志，下次启动又被数一遍，
+      //   数字滚雪球（观察到一个用户 10 次全是被自己数出来的）。
+      //   只数真正的崩溃痕迹，上报回执不算。
+      if (REPORT_ACK_RE.test(line.text)) continue
       crashCount++
       const r = /reason=([a-z0-9_-]+)/i.exec(line.text)
       if (r) reasons.add(r[1])
