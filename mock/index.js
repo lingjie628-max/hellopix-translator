@@ -253,6 +253,67 @@ module.exports = function registerMock(app, options) {
       { orderNum: 'HP20260902001', headImg: '', account: '628123456789', nickName: '新用户A', createTime: now(), insertTime: now(), type: '新粉', repeatAccount: '', loginAccount: '8613800000001' },
       { orderNum: 'HP20260902001', headImg: '', account: '628987654321', nickName: '回访用户B', createTime: later(-2), insertTime: now(), type: '重粉', repeatAccount: '8613800000001', loginAccount: '8613800000001' }
     ],
+    countTickets: [
+      {
+        id: 1,
+        userId: 10001,
+        title: 'WhatsApp 进粉',
+        platform: 'whatsapp-green',
+        status: 'active',
+        dayTarget: 20,
+        totalTarget: 100,
+        timezone: 'Asia/Shanghai',
+        zeroTime: '00:00:00',
+        createdAt: now(),
+        updatedAt: now()
+      }
+    ],
+    countTicketAccounts: [
+      {
+        id: 1,
+        ticketId: 1,
+        userId: 10001,
+        platform: 'whatsapp-green',
+        accountKey: '8613800000001',
+        active: true,
+        createdAt: now(),
+        updatedAt: now()
+      }
+    ],
+    countTicketFans: [
+      {
+        id: 1,
+        ticketId: 1,
+        userId: 10001,
+        conversationId: 90001,
+        customerId: 1,
+        customerPublicId: 'C_DEMO_0001',
+        platform: 'whatsapp-green',
+        accountKey: '8613800000001',
+        peerKey: '628123456789',
+        displayName: '新用户A',
+        fanType: 'new',
+        repeatOfId: null,
+        eventAt: now(),
+        dayKey: now().slice(0, 10)
+      },
+      {
+        id: 2,
+        ticketId: 1,
+        userId: 10001,
+        conversationId: 90002,
+        customerId: 2,
+        customerPublicId: 'C_DEMO_0002',
+        platform: 'whatsapp-green',
+        accountKey: '8613800000001',
+        peerKey: '628987654321',
+        displayName: '回访用户B',
+        fanType: 'repeat',
+        repeatOfId: 1,
+        eventAt: later(-2),
+        dayKey: later(-2).slice(0, 10)
+      }
+    ],
     shortLinks: [
       { id: 1, platform: 'is.gd', shareLink: 'http://localhost:8080/#/empty', type: 1, pattern: 1, message: 'Hello Pix 分流演示', hits: 3, orderNum: 'HP20260902001', accounts: '8613800000001,8613800000002' }
     ],
@@ -350,6 +411,8 @@ module.exports = function registerMock(app, options) {
   let nextFaqId = 7
   let nextSubId = 20003
   let nextLineId = 4
+  let nextCountTicketId = 2
+  let nextCountAccountId = 2
 
   function currentAdminName(req) {
     return (req.pixAdmin && req.pixAdmin.username) || String(q(req).username || 'system')
@@ -425,6 +488,70 @@ module.exports = function registerMock(app, options) {
     const user = db.users.find(u => String(u.id) === String(uid))
     if (!user) return null
     return { kind: 'main', account: user, parent: user }
+  }
+
+  function counterEntitled(parent) {
+    let clients = packOf(parent || {}).clients
+    if (typeof clients === 'string') {
+      try { clients = JSON.parse(clients) } catch (e) { return false }
+    }
+    return !!clients && (clients.counter === true || Number(clients.counter) === 1)
+  }
+
+  function requireCounterOwner(req, res) {
+    const session = requireUserSession(req, res)
+    if (!session) return null
+    if (!counterEntitled(session.parent)) {
+      res.status(403).json({ code: 'COUNT_PLAN_REQUIRED', msg: '当前套餐不包含计数工单，请升级专业版' })
+      return null
+    }
+    return Number(session.parent.id)
+  }
+
+  function findCountTicket(userId, id) {
+    return db.countTickets.find(ticket => Number(ticket.id) === Number(id) &&
+      (userId == null || Number(ticket.userId) === Number(userId))) || null
+  }
+
+  function countMetrics(ticket) {
+    const fans = db.countTicketFans.filter(fan => Number(fan.ticketId) === Number(ticket.id))
+    const day = now().slice(0, 10)
+    return {
+      totalFans: fans.length,
+      newFans: fans.filter(fan => fan.fanType === 'new').length,
+      repeatFans: fans.filter(fan => fan.fanType === 'repeat').length,
+      todayFans: fans.filter(fan => fan.dayKey === day).length,
+      todayNewFans: fans.filter(fan => fan.dayKey === day && fan.fanType === 'new').length,
+      todayRepeatFans: fans.filter(fan => fan.dayKey === day && fan.fanType === 'repeat').length,
+      businessDate: day
+    }
+  }
+
+  function publicCountTicket(ticket) {
+    const metrics = countMetrics(ticket)
+    const user = db.users.find(item => Number(item.id) === Number(ticket.userId))
+    return Object.assign({}, ticket, metrics, {
+      username: user ? user.username : '',
+      accountCount: db.countTicketAccounts.filter(account =>
+        Number(account.ticketId) === Number(ticket.id) && account.active).length
+    })
+  }
+
+  function countTicketAccounts(ticket) {
+    return db.countTicketAccounts
+      .filter(account => Number(account.ticketId) === Number(ticket.id))
+      .map(account => {
+        const fans = db.countTicketFans.filter(fan =>
+          Number(fan.ticketId) === Number(ticket.id) &&
+          fan.platform === account.platform &&
+          fan.accountKey === account.accountKey)
+        return Object.assign({}, account, {
+          totalFans: fans.length,
+          repeatFans: fans.filter(fan => fan.fanType === 'repeat').length,
+          todayFans: fans.filter(fan => fan.dayKey === now().slice(0, 10)).length
+        })
+      })
+      .sort((a, b) => Number(b.active) - Number(a.active) || Number(a.id) - Number(b.id))
   }
 
   function currentMerchant(req) {
@@ -2209,6 +2336,233 @@ module.exports = function registerMock(app, options) {
     }
     if (query.type) list = list.filter(f => f.type === query.type)
     res.json(page(list, query))
+  })
+
+  app.get('/apis/admin/count-tickets', (req, res) => {
+    if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
+    const query = q(req)
+    let list = db.countTickets.map(publicCountTicket)
+    if (query.status) list = list.filter(ticket => ticket.status === query.status)
+    if (query.keyword) {
+      const keyword = String(query.keyword).toLowerCase()
+      list = list.filter(ticket =>
+        String(ticket.title).toLowerCase().includes(keyword) ||
+        String(ticket.username).toLowerCase().includes(keyword))
+    }
+    list.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+    res.json(page(list, query))
+  })
+
+  app.get('/apis/admin/count-tickets/:id', (req, res) => {
+    if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
+    const ticket = findCountTicket(null, req.params.id)
+    if (!ticket) { res.status(404).json({ code: 'COUNT_TICKET_NOT_FOUND', msg: '计数工单不存在' }); return }
+    res.json({
+      ticket: publicCountTicket(ticket),
+      metrics: countMetrics(ticket),
+      accounts: countTicketAccounts(ticket)
+    })
+  })
+
+  app.get('/apis/admin/count-tickets/:id/fans', (req, res) => {
+    if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
+    const ticket = findCountTicket(null, req.params.id)
+    if (!ticket) { res.status(404).json({ code: 'COUNT_TICKET_NOT_FOUND', msg: '计数工单不存在' }); return }
+    const query = q(req)
+    let fans = db.countTicketFans.filter(fan =>
+      Number(fan.ticketId) === Number(ticket.id) &&
+      (!query.type || query.type === 'all' || fan.fanType === query.type) &&
+      (!query.platform || fan.platform === query.platform) &&
+      (!query.accountKey || fan.accountKey === query.accountKey) &&
+      (!query.keyword || String(fan.peerKey).includes(query.keyword) ||
+        String(fan.displayName).toLowerCase().includes(String(query.keyword).toLowerCase()))
+    )
+    fans = fans.sort((a, b) => String(b.eventAt).localeCompare(String(a.eventAt)))
+    res.json(page(fans, query))
+  })
+
+  app.get('/apis/count-tickets', (req, res) => {
+    const userId = requireCounterOwner(req, res)
+    if (!userId) return
+    const query = q(req)
+    let list = db.countTickets
+      .filter(ticket => Number(ticket.userId) === userId)
+      .map(publicCountTicket)
+    if (query.status) list = list.filter(ticket => ticket.status === query.status)
+    if (query.keyword) {
+      const keyword = String(query.keyword).toLowerCase()
+      list = list.filter(ticket => String(ticket.title).toLowerCase().includes(keyword))
+    }
+    list.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+    res.json(page(list, query))
+  })
+
+  app.get('/apis/count-tickets/available-accounts', (req, res) => {
+    const userId = requireCounterOwner(req, res)
+    if (!userId) return
+    const query = q(req)
+    const ticket = findCountTicket(userId, query.ticketId)
+    if (!ticket) { res.status(404).json({ code: 'COUNT_TICKET_NOT_FOUND', msg: '计数工单不存在' }); return }
+    const orderNumbers = new Set(db.orders
+      .filter(order => Number(order.userId) === userId)
+      .map(order => order.serialNumber))
+    const seen = new Set()
+    const rows = db.details
+      .filter(detail => orderNumbers.has(detail.orderNum))
+      .filter(detail => {
+        const key = String(detail.account)
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+      .map(detail => ({
+        platform: ticket.platform,
+        accountKey: String(detail.account),
+        conversationCount: 1,
+        lastSeenAt: detail.lastTime,
+        sampleName: detail.nickName
+      }))
+    res.json({ rows })
+  })
+
+  app.get('/apis/count-tickets/:id', (req, res) => {
+    const userId = requireCounterOwner(req, res)
+    if (!userId) return
+    const ticket = findCountTicket(userId, req.params.id)
+    if (!ticket) { res.status(404).json({ code: 'COUNT_TICKET_NOT_FOUND', msg: '计数工单不存在' }); return }
+    res.json({
+      ticket: publicCountTicket(ticket),
+      metrics: countMetrics(ticket),
+      accounts: countTicketAccounts(ticket)
+    })
+  })
+
+  app.get('/apis/count-tickets/:id/fans', (req, res) => {
+    const userId = requireCounterOwner(req, res)
+    if (!userId) return
+    const ticket = findCountTicket(userId, req.params.id)
+    if (!ticket) { res.status(404).json({ code: 'COUNT_TICKET_NOT_FOUND', msg: '计数工单不存在' }); return }
+    const query = q(req)
+    let fans = db.countTicketFans.filter(fan =>
+      Number(fan.ticketId) === Number(ticket.id) &&
+      (!query.type || query.type === 'all' || fan.fanType === query.type) &&
+      (!query.keyword || String(fan.peerKey).includes(query.keyword) ||
+        String(fan.displayName).toLowerCase().includes(String(query.keyword).toLowerCase()))
+    )
+    fans = fans.sort((a, b) => String(b.eventAt).localeCompare(String(a.eventAt)))
+    res.json(page(fans, query))
+  })
+
+  app.post('/apis/count-tickets/save', (req, res) => {
+    const userId = requireCounterOwner(req, res)
+    if (!userId) return
+    const query = q(req)
+    const title = String(query.title || '').trim()
+    const platform = String(query.platform || '').trim().toLowerCase()
+    if (!title) { res.status(400).json({ code: 'COUNT_TITLE_REQUIRED', msg: '请填写计数工单名称' }); return }
+    if (!platform) { res.status(400).json({ code: 'COUNT_PLATFORM_REQUIRED', msg: '请选择计数应用' }); return }
+    const id = query.id ? Number(query.id) : null
+    let ticket = id ? findCountTicket(userId, id) : null
+    if (id && !ticket) { res.status(404).json({ code: 'COUNT_TICKET_NOT_FOUND', msg: '计数工单不存在' }); return }
+    const hasFans = ticket && db.countTicketFans.some(fan => Number(fan.ticketId) === Number(ticket.id))
+    const hasAccounts = ticket && db.countTicketAccounts.some(account =>
+      Number(account.ticketId) === Number(ticket.id) && account.active)
+    if (ticket && platform !== ticket.platform && (hasFans || hasAccounts)) {
+      res.status(409).json({ code: 'COUNT_PLATFORM_LOCKED', msg: '该工单已绑定接入账号或已有进粉记录，不能再更换计数应用' })
+      return
+    }
+    const payload = {
+      title,
+      platform,
+      status: query.status === 'closed' ? 'closed' : 'active',
+      dayTarget: Math.max(0, Number(query.dayTarget) || 0),
+      totalTarget: Math.max(0, Number(query.totalTarget) || 0),
+      timezone: String(query.timezone || 'Asia/Shanghai'),
+      zeroTime: String(query.zeroTime || '00:00:00'),
+      updatedAt: now()
+    }
+    if (ticket) {
+      Object.assign(ticket, payload)
+      if (ticket.status === 'closed') {
+        db.countTicketAccounts.forEach(account => {
+          if (Number(account.ticketId) === Number(ticket.id)) account.active = false
+        })
+      }
+    } else {
+      ticket = Object.assign({
+        id: nextCountTicketId++,
+        userId,
+        createdAt: now()
+      }, payload)
+      db.countTickets.push(ticket)
+    }
+    res.json({
+      success: 'success',
+      msg: id ? '计数工单已保存' : '计数工单已创建',
+      id: ticket.id
+    })
+  })
+
+  app.post('/apis/count-tickets/accounts/save', (req, res) => {
+    const userId = requireCounterOwner(req, res)
+    if (!userId) return
+    const query = q(req)
+    const ticket = findCountTicket(userId, query.ticketId)
+    if (!ticket) { res.status(404).json({ code: 'COUNT_TICKET_NOT_FOUND', msg: '计数工单不存在' }); return }
+    if (ticket.status !== 'active') {
+      res.status(400).json({ code: 'COUNT_TICKET_CLOSED', msg: '已关闭的计数工单不能绑定账号' })
+      return
+    }
+    const platform = String(query.platform || '').trim().toLowerCase()
+    const accountKey = String(query.accountKey || '').trim()
+    if (!accountKey) { res.status(400).json({ code: 'COUNT_ACCOUNT_REQUIRED', msg: '请填写聊天账号' }); return }
+    if (platform !== ticket.platform) {
+      res.status(400).json({ code: 'COUNT_ACCOUNT_PLATFORM_MISMATCH', msg: '接入账号所属应用与计数工单不一致' })
+      return
+    }
+    db.countTicketAccounts.forEach(account => {
+      if (Number(account.userId) === userId && account.platform === platform &&
+          account.accountKey === accountKey && Number(account.ticketId) !== Number(ticket.id)) {
+        account.active = false
+        account.updatedAt = now()
+      }
+    })
+    let account = db.countTicketAccounts.find(item =>
+      Number(item.ticketId) === Number(ticket.id) &&
+      item.platform === platform && item.accountKey === accountKey)
+    if (account) {
+      account.active = true
+      account.updatedAt = now()
+    } else {
+      account = {
+        id: nextCountAccountId++,
+        ticketId: ticket.id,
+        userId,
+        platform,
+        accountKey,
+        active: true,
+        createdAt: now(),
+        updatedAt: now()
+      }
+      db.countTicketAccounts.push(account)
+    }
+    okMsg(res, '账号已绑定')
+  })
+
+  app.post('/apis/count-tickets/accounts/remove', (req, res) => {
+    const userId = requireCounterOwner(req, res)
+    if (!userId) return
+    const query = q(req)
+    const account = db.countTicketAccounts.find(item =>
+      Number(item.userId) === userId &&
+      Number(item.ticketId) === Number(query.ticketId) &&
+      item.platform === String(query.platform || '') &&
+      item.accountKey === String(query.accountKey || ''))
+    if (account) {
+      account.active = false
+      account.updatedAt = now()
+    }
+    okMsg(res, '账号已停用')
   })
 
   app.get('/apis/admin/links', (req, res) => {
