@@ -11,6 +11,10 @@
         <i class="el-icon-user"></i>
         <span slot="title">子账号管理</span>
       </el-menu-item>
+      <el-menu-item v-if="isMain" index="/count/tickets">
+        <i class="el-icon-data-analysis"></i>
+        <span slot="title">计数工单</span>
+      </el-menu-item>
       <el-menu-item v-if="isMain" index="/user/rechargePage">
         <i class="el-icon-wallet"></i>
         <span slot="title">充值中心</span>

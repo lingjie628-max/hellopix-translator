@@ -29,6 +29,72 @@
   - `hello-pix.service` → `server/index.js`
   - PostgreSQL 16 / Redis
   - 桌面端 → `/apis/*`
+  - Nginx → Node `127.0.0.1:3000`
+  - Node → PostgreSQL、Redis、翻译厂商
+  - 桌面客户端 → `pixfanyi.com`
+  - 管理后台 → `lindufyht.com`
+
+## 健康检查
+
+```bash
+curl -fsS http://127.0.0.1:3000/health
+curl -fsS http://127.0.0.1:3000/ready
+systemctl is-active hello-pix.service
+journalctl -u hello-pix.service -n 80 --no-pager
+```
+
+期望：服务 `active`，两个接口均返回 `ok:true`。
+
+## 发布检查
+
+```bash
+node --check server/index.js
+node --test test/tron-address.test.js test/translation-provider.test.js
+npm run build
+systemctl restart hello-pix.service
+curl -fsS http://127.0.0.1:3000/ready
+```
+
+## 回滚
+
+- 代码基线：Git 标签 `prod-20261117-security-fix`
+- 前端上一版：`/opt/hello-pix/dist.prev-fix-20261117-211202`
+- 数据库：`/var/backups/hello-pix/hello_pix-20261117-211203.dump`
+- 最新迁移 054（原生计数工单）可回滚：
+
+```bash
+node scripts/migrate.js down 1
+```
+
+054 的 down 只删除 `count_tickets`、`count_ticket_accounts`、
+`count_ticket_fans` 三张新增表，不影响客户、会话、消息、充值或翻译账本。
+
+恢复前端：
+
+```bash
+mv /opt/hello-pix/dist /opt/hello-pix/dist.failed
+mv /opt/hello-pix/dist.prev-fix-20261117-211202 /opt/hello-pix/dist
+```
+
+恢复代码：
+
+```bash
+git -C /opt/hello-pix switch prod/20261117-security-fix
+systemctl restart hello-pix.service
+```
+
+## 备份
+
+- 本机每日备份：`hello-pix-backup.timer`
+- 异地每日备份：`hello-pix-offsite-backup.timer`
+- 日志：
+  - `/var/backups/hello-pix/backup.log`
+  - `/var/log/hello-pix/backup-offsite.log`
+
+```bash
+systemctl list-timers --all | grep hello-pix
+pg_restore --list /var/backups/hello-pix/<dump>
+```
 
 ## 已知坑
 

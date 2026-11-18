@@ -14,6 +14,7 @@
         <template slot="title"><i class="el-icon-s-operation"></i><span>运营</span></template>
         <el-menu-item index="/admin/accounts">在线账号</el-menu-item>
         <el-menu-item index="/admin/fans">进粉统计</el-menu-item>
+        <el-menu-item index="/admin/count-tickets">计数工单</el-menu-item>
         <el-menu-item index="/admin/links">分流链接</el-menu-item>
         <el-menu-item index="/admin/scripts">话术回复</el-menu-item>
       </el-submenu>

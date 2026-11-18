@@ -6,6 +6,7 @@ import Landing from '../components/Landing.vue'
 import Home from '../components/Home.vue'
 import HomeIndex from '../components/HomeIndex.vue'
 // 下面这些旧「工单」模块的页面已整体删除，原因见本文件末尾的说明。
+import CountTickets from '../components/count/CountTickets.vue'
 import TranslateChannels from '../components/translate/TranslateChannels.vue'
 import UserRecharge from '../components/user/UserRecharge.vue'
 import UserRechargePage from '../components/user/UserRechargePage.vue'
@@ -26,6 +27,7 @@ import AdminCollision from '@/components/admin/AdminCollision'
 import AdminMail from '@/components/admin/AdminMail'
 import AdminAccounts from '../components/admin/AdminAccounts.vue'
 import AdminFans from '../components/admin/AdminFans.vue'
+import AdminCountTickets from '../components/admin/AdminCountTickets.vue'
 import AdminLinks from '../components/admin/AdminLinks.vue'
 import AdminScripts from '../components/admin/AdminScripts.vue'
 import AdminTranslate from '../components/admin/AdminTranslate.vue'
@@ -69,6 +71,7 @@ const routes = [
       { path: '/admin/users', name: '商户管理', component: AdminUsers },
       { path: '/admin/accounts', name: '在线账号', component: AdminAccounts },
       { path: '/admin/fans', name: '进粉统计', component: AdminFans },
+      { path: '/admin/count-tickets', name: '计数工单', component: AdminCountTickets },
       { path: '/admin/links', name: '分流链接', component: AdminLinks },
       { path: '/admin/scripts', name: '话术回复', component: AdminScripts },
       { path: '/admin/packages', name: '套餐管理', component: AdminPackages },
@@ -97,6 +100,7 @@ const routes = [
     redirect: '/home/index',
     children: [
       { path: '/home/index', name: '首页', component: HomeIndex, meta: { keepAlive: true } },
+      { path: '/count/tickets', name: '计数工单', component: CountTickets, meta: { keepAlive: true } },
       { path: '/translate/channels', name: '翻译通道', component: TranslateChannels },
       { path: '/user/Recharge', name: '充值记录', component: UserRecharge },
       { path: '/user/rechargePage', name: '充值中心', component: UserRechargePage },

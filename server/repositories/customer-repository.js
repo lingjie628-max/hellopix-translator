@@ -463,6 +463,10 @@ class CustomerRepository {
       `UPDATE conversations SET customer_id = $2 WHERE customer_id = $1`, [fromId, intoId], client)
     await this.query(
       `UPDATE messages SET customer_id = $2 WHERE customer_id = $1`, [fromId, intoId], client)
+    // 计数账本保留原始事件时间与来源账号，只改客户归属 —— 否则合并后
+    // 下一次进粉无法识别该客户曾经出现过，会错误地再算一次新粉。
+    await this.query(
+      `UPDATE count_ticket_fans SET customer_id = $2 WHERE customer_id = $1`, [fromId, intoId], client)
     // customer_owners 有 (user_id, customer_id) 的 FOLLOWING 唯一索引，
     // 两边同属一个商户时会撞索引 —— 冲突的那条直接释放，保留目标方的跟进关系。
     await this.query(

@@ -123,6 +123,9 @@ const ROUTE_CAPS = {
   'POST /admin/merge-candidates/:id/resolve': 'admin.data.customers',
   'GET /admin/collisions': 'admin.data.customers',
   'GET /admin/fans': 'admin.data.customers',
+  'GET /admin/count-tickets': 'admin.data.customers',
+  'GET /admin/count-tickets/:id': 'admin.data.customers',
+  'GET /admin/count-tickets/:id/fans': 'admin.data.customers',
 
   // ── 审计与登录日志 ───────────────────────────────────────
   // 里面是超管的 IP 和操作序列，泄露出去等于给攻击者画地图

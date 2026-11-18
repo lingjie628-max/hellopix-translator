@@ -56,6 +56,9 @@ const CASCADE_TABLES = Object.freeze([
   ['messages', 'user_id'],
   ['customer_merchant_links', 'user_id'],
   ['customer_owners', 'user_id'],
+  ['count_tickets', 'user_id'],
+  ['count_ticket_accounts', 'user_id'],
+  ['count_ticket_fans', 'user_id'],
   ['scripts', 'user_id'],
   ['login_logs', 'user_id'],
   ['short_links', 'user_id'],
@@ -69,6 +72,8 @@ const BUSINESS_TABLES = Object.freeze([
   'translation_reservations',
   'translation_usage',
   'orders',
+  'count_tickets',
+  'count_ticket_fans',
   'character_transfers',
   'char_ledger'
 ])
@@ -80,6 +85,9 @@ const LABELS = Object.freeze(
     messages: '消息',
     customer_merchant_links: '客户绑定',
     customer_owners: '客户归属',
+    count_tickets: '计数工单',
+    count_ticket_accounts: '计数账号',
+    count_ticket_fans: '进粉记录',
     scripts: '脚本',
     login_logs: '登录日志',
     short_links: '短链',

@@ -30,7 +30,7 @@ const { effectiveStatus, effectiveStatusSql } = require('../services/recharge-st
 const { buildContext } = require('./context')
 
 function productionRouter(context) {
-  const { repository: repo, auth, core, customers, accounts, security } = context
+  const { repository: repo, auth, core, customers, countTickets, accounts, security } = context
   const router = express.Router()
   // 依赖与限流器集中在 context.js 里构造一次：
   // 拆成多个路由模块后，限流器若各自 new 一遍，额度会随模块数成倍放大。
@@ -424,6 +424,23 @@ function productionRouter(context) {
     // 主账号自己的 id 在 users 表里，直接塞进去会违反外键。
     const operatorId = session.kind === 'sub' ? session.account.id : null
     const result = await customers.ingest(session.parent.id, Object.assign({}, data, { operatorId }))
+    // 计数是旁路账本，失败不能反过来阻断翻译/消息接入。
+    // 同一 conversationId 重复上报是幂等的，下一次消息还能补记。
+    try {
+      result.counting = await countTickets.captureFan(session.parent.id, {
+        conversationId: result.conversationId,
+        customerId: result.customerId,
+        platform: data.platform,
+        accountKey: data.accountKey,
+        peerKey: data.peerKey,
+        displayName: data.displayName,
+        eventAt: data.sentAt || new Date().toISOString()
+      })
+    } catch (error) {
+      console.error('[count-ticket] capture failed:',
+        error && error.code ? error.code : (error && error.message) || error)
+      result.counting = { captured: false, reason: 'count_unavailable' }
+    }
     res.json(result)
   }))
 
@@ -493,12 +510,16 @@ function productionRouter(context) {
   require('./admin/clients').registerAdminClients(router, ctx)
   // FAQ、短链、话术库、账号在线、粉丝
   require('./admin/ops').registerAdminOps(router, ctx)
+  // 原生计数工单：只读超管视图 + 粉丝明细
+  require('./admin/count-tickets').registerAdminCountTickets(router, ctx)
   // 工单（客服 ←→ 商户）
   require('./admin/tickets').registerAdminTickets(router, ctx)
   // 商户端工单：提单 / 查看 / 回复。
   // 放在这里而不是文件顶部 —— 上面的 router.use(auth.middleware()) 已生效，
   // 每条路由都能拿到 req.pixUser，归属校验才有依据。
   require('./user-tickets').registerUserTickets(router, ctx)
+  // 商户端原生计数工单：建单、绑定账号、统计与粉丝明细
+  require('./count-tickets').registerCountTickets(router, ctx)
   // 套餐、系统设置、验证码通道
   require('./admin/settings').registerAdminSettings(router, ctx)
 

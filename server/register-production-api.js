@@ -5,6 +5,8 @@ const { AuthService } = require('./services/auth-service')
 const { CoreService } = require('./services/core-service')
 const { CustomerRepository } = require('./repositories/customer-repository')
 const { CustomerIdentityService } = require('./services/customer-identity-service')
+const { CountTicketRepository } = require('./repositories/count-ticket-repository')
+const { CountTicketService } = require('./services/count-ticket-service')
 const { AccountService } = require('./services/account-service')
 const { productionRouter } = require('./routes/production')
 const { sendError } = require('./lib/http')
@@ -30,6 +32,7 @@ function registerProductionApi(app, context, options) {
   // 统一客户身份层。仓储复用 ProductionRepository 的 query/transaction，
   // 不另开连接池 —— 多一个池就多一处要配的容量与超时。
   const customers = new CustomerIdentityService(new CustomerRepository(repository))
+  const countTickets = new CountTicketService(new CountTicketRepository(repository))
   // 注册 / 找回密码 / 邮箱验证码。之前这三条是 stub。
   const accounts = new AccountService(repository, auth, deps.redis, options)
 
@@ -74,6 +77,7 @@ function registerProductionApi(app, context, options) {
     auth,
     core,
     customers,
+    countTickets,
     accounts,
     security: deps.security
   })
@@ -92,6 +96,7 @@ function registerProductionApi(app, context, options) {
     auth,
     core,
     customers,
+    countTickets,
     accounts,
     reconcileExpiredReservations: (...args) => core.reconcileExpiredReservations(...args),
     stop: () => core.stopReservationReconciliation()
