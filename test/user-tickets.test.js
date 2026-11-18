@@ -24,6 +24,9 @@ function harness (opts) {
   const o = opts || {}
   const queries = []
   const repo = {
+    async transaction (work) {
+      return work()
+    },
     query: async (sql, values) => {
       const text = String(sql)
       queries.push({ sql: text, values })

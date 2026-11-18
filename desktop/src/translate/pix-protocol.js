@@ -40,6 +40,8 @@ const HOST = 'pix'
 const ALLOWED = new Set(['patch.js', 'main.js', 'guard.js'])
 
 let registered = false
+const attachedSessions = new WeakSet()
+let attachedGlobally = false
 
 /** 注册 scheme 特权 —— 必须在 app ready **之前**调用。 */
 function registerPrivilegedScheme (electron) {
@@ -100,6 +102,7 @@ function prewarm (electron) {
  */
 function attachHandler (electron, ses, dir) {
   if (!electron || !electron.protocol || !ses || !dir) return false
+  if (attachedSessions.has(ses)) return true
   try {
     const handler = async (request) => {
       let url
@@ -119,8 +122,13 @@ function attachHandler (electron, ses, dir) {
     }
     // 用 ses.protocol 而不是全局 protocol：客页跑在独立 partition 上，
     // 挂全局会让所有 session 都暴露这三个文件。
-    if (ses.protocol && typeof ses.protocol.handle === 'function') ses.protocol.handle(SCHEME, handler)
-    else electron.protocol.handle(SCHEME, handler)
+    if (ses.protocol && typeof ses.protocol.handle === 'function') {
+      ses.protocol.handle(SCHEME, handler)
+      attachedSessions.add(ses)
+    } else {
+      if (!attachedGlobally) electron.protocol.handle(SCHEME, handler)
+      attachedGlobally = true
+    }
     registered = true
     return true
   } catch (e) {

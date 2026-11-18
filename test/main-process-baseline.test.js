@@ -108,7 +108,7 @@ const BASELINE_CHANNELS = [
   // pix:// URL —— sandbox:true 读不到本地文件，contextIsolation 又传不进
   // 页面世界，只能绕这一跳）。2026-10-29 由 translate:imageUiSource 改名而来。
   'translate:image', 'translate:pageScripts',
-  'translate:run', 'translate:savePrefs'
+  'translate:run', 'translate:savePrefs', 'translate:voiceOpus'
 ]
 
 test('纯函数行为不变（真身直接调用，不复制源码）', async () => {

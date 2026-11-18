@@ -352,17 +352,15 @@ test('结算服务：Shadow / 幂等 / 异常池', { skip: !databaseUrl }, async
     assert.equal(exc.kind, EXCEPTION_KIND.WRONG_ADDRESS)
   })
 
-  await t.test('金额不匹配任何订单 → NO_MATCH 进异常池', async () => {
+  await t.test('明显无关的金额 → 忽略，不污染异常池', async () => {
     const ctx = await makeOrder()
     // 造一个比 40.000 大得多、不可能落在任何预约上的金额
     const transfer = transferFor(ctx, { chainUnits: milliToChainUnits(99999999n).toString() })
     const r = await settle(true, transfer, ctx)
-    assert.equal(r.outcome, 'EXCEPTION')
+    assert.equal(r.outcome, 'IGNORED_UNRELATED')
     assert.equal(r.matchKind, MATCH_KIND.NO_MATCH)
-    assert.equal(r.exceptionKind, EXCEPTION_KIND.NO_MATCH)
     const exc = (await pool.query('SELECT kind, summary FROM recharge_exceptions WHERE tx_id=$1', [transfer.txId])).rows[0]
-    assert.equal(exc.kind, EXCEPTION_KIND.NO_MATCH)
-    assert.match(exc.summary, /不匹配任何订单/)
+    assert.equal(exc, undefined, '明显无关的链上金额不应进入异常池')
   })
 
   await t.test('金额精度比订单更细 → 不参与匹配，进异常池', async () => {

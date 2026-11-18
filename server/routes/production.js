@@ -46,6 +46,7 @@ function productionRouter(context) {
   // 图片翻译的独立限额（成本是文本的几十到几百倍，不能共用额度）
   const translateImageIpLimit = limits.translateImageIp
   const translateImageAccountLimit = limits.translateImageAccount
+  const translateImageParentDailyLimit = limits.translateImageParentDaily
   const crashReportLimit = limits.crashReport
   router.use(auth.middleware())
   // 下单业务逻辑在 services/recharge-order-service.js，路由只负责拼响应
@@ -403,7 +404,8 @@ function productionRouter(context) {
   const translateImage = asyncRoute(async (req, res) => {
     res.json(await core.translateImage(req.pixUser, input(req)))
   })
-  router.post('/translate/image', translateImageIpLimit, translateImageAccountLimit, translateImage)
+  router.post('/translate/image', translateImageIpLimit, translateImageAccountLimit,
+    translateImageParentDailyLimit, translateImage)
   router.post('/translate/run', translateIpLimit, translateAccountLimit, translate)
   router.post('/translate', translateIpLimit, translateAccountLimit, translate)
 

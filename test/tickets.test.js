@@ -136,6 +136,9 @@ function harness () {
   const queries = []
   const audits = []
   const repo = {
+    async transaction (work) {
+      return work()
+    },
     query: async (sql, values) => {
       queries.push({ sql: String(sql), values })
       // 按调用意图返回最小的形状，让 handler 能往下走

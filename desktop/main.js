@@ -4,6 +4,8 @@ if (!electron || !electron.app || !electron.ipcMain) {
   process.exit(1)
 }
 const { app, BrowserWindow, WebContentsView, session, ipcMain, shell, safeStorage, nativeImage, net, Menu, Tray } = electron
+const pixProtocol = require('./src/translate/pix-protocol')
+pixProtocol.registerPrivilegedScheme(electron)
 const path = require('path')
 const fs = require('fs')
 const crypto = require('crypto')
@@ -2013,6 +2015,18 @@ function trustedTabSender(wc) {
   let current = ''
   try { current = wc.getURL() } catch (e) {}
   return isAllowedPlatformUrl(tab.item, current, tab.homeUrl) ? tab : null
+}
+
+/**
+ * preload 启动阶段只校验 WebContents 已绑定到受管实例。
+ *
+ * 此时导航还没提交，getURL() 往往为空；真正的业务 IPC 仍走
+ * trustedTabSender 的完整 URL 校验。
+ */
+function trustedTabBinding(wc) {
+  const tab = findTabByWc(wc)
+  if (!tab || !tab.item || tab.item.customUrl || tab.item.id === 'tickets') return null
+  return tab
 }
 
 function reloadTabContents(tab) {
@@ -4095,6 +4109,7 @@ require('./src/ipc/translate').registerTranslateIpc({
     api,
     pushGuestPrefs,
     trustedTabSender,
+    trustedTabBinding,
     rejectUntrustedSender,
     bridgeReport,
     nativeComposer,
@@ -4413,11 +4428,9 @@ app.whenReady().then(() => {
   // 这里一次性：注册特权 scheme + 落盘三段脚本 + 把 pix:// 挂到 defaultSession。
   // 之后新建的 partition 在 web-view.js 里按需补挂（那时还没导航）。
   try {
-    const proto = require('./src/translate/pix-protocol')
     const inject = require('./src/translate/page-world-inject')
-    proto.registerPrivilegedScheme(electron)
     inject.writePageWorldScripts({ log: msg => { if (log) log.warn('page-world', msg) } })
-    const ok = proto.prewarm(electron)
+    const ok = pixProtocol.prewarm(electron)
     // 用 warn 级别：这个模块的 info 会被日志过滤器按"噪声"规则压掉，
     // 真机排查时就看不到"到底挂没挂上"。
     if (log) log.warn('page-world', 'pix:// 预挂 ' + (ok ? '成功' : '失败') + '，脚本目录 ' + inject.pageWorldDir())

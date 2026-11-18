@@ -58,7 +58,11 @@ test('★ 注入3：pix:// 协议必须在导航之前挂上（main.js 预挂 + 
     'app.whenReady 里必须调 prewarm —— 实测 protocol.handle() 晚于页面导航' +
     '就彻底失效，页面里请求脚本直接 ERR_FAILED，且 handler 不会被调用'
   )
-  assert.match(readyBody, /registerPrivilegedScheme/, '特权 scheme 必须在 ready 里注册')
+  assert.match(
+    main.slice(0, idxReady),
+    /registerPrivilegedScheme/,
+    '特权 scheme 必须在 app ready 之前注册'
+  )
 
   const view = read('desktop/src/window/web-view.js')
   assert.match(view, /attachHandler/, '每个客页的 partition 也要挂协议（新建分区不会自动继承）')

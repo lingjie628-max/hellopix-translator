@@ -2361,32 +2361,6 @@ module.exports = function registerMock(app, options) {
     res.json(page(list, query))
   })
 
-  // 工单在本地 mock 中只维护最小可执行契约：列表、红点、详情和写操作。
-  // 真正的状态机与归属校验在 PostgreSQL 路由和 ticket-service 中。
-  app.get('/apis/admin/tickets', (req, res) => {
-    res.json({ rows: [], total: 0 })
-  })
-
-  app.get('/apis/admin/tickets-unread', (req, res) => {
-    res.json({ unread: 0 })
-  })
-
-  app.get('/apis/admin/tickets/:id', (req, res) => {
-    res.status(404).json({ success: false, code: 'TICKET_NOT_FOUND', msg: '工单不存在' })
-  })
-
-  app.post('/apis/admin/tickets/create', (req, res) => {
-    res.json({ success: 'success', msg: '工单已创建（mock）', obj: { id: 1 } })
-  })
-
-  app.post('/apis/admin/tickets/reply', (req, res) => {
-    okMsg(res, '回复已发送（mock）')
-  })
-
-  app.post('/apis/admin/tickets/update', (req, res) => {
-    okMsg(res, '工单已更新（mock）')
-  })
-
   app.get('/apis/admin/settings', (req, res) => {
     if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
     res.json(Object.assign({}, db.settings, { notices: db.notices }))

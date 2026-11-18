@@ -108,6 +108,12 @@ function buildHarness () {
 
   const app = express()
   app.use(express.urlencoded({ extended: true }))
+  app.post('/test-login', async (req, res) => {
+    const found = await repo.accountByUsername(String(req.body.username || ''))
+    if (!found) return res.status(401).json({ success: false })
+    await auth.createSessionForTest(req, res, found)
+    res.json({ success: true })
+  })
   // 真实中间件：登录后 req.pixUser 由 security 里的会话解析出来
   const ctx = {
     repository: repo,
@@ -119,14 +125,6 @@ function buildHarness () {
   }
   app.use(productionRouter(ctx))
 
-  // 手工挂一个最小登录入口 —— 生产里这段在 routes/auth.js，
-  // 这里只需要"按 username 建会话"这一个行为。
-  app.post('/test-login', async (req, res) => {
-    const found = await repo.accountByUsername(String(req.body.username || ''))
-    if (!found) return res.status(401).json({ success: false })
-    await auth.createSessionForTest(req, res, found)
-    res.json({ success: true })
-  })
   app.use((err, _req, res, _next) => {
     res.status(err.status || 500).json({ success: false, msg: err.message, code: err.code })
   })

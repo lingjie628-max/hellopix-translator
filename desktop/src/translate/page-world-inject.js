@@ -38,6 +38,8 @@ const os = require('node:os')
 const path = require('node:path')
 
 const { buildImageTranslateScript } = require('./image-translate-ui')
+const { buildVoiceNoteImportScript } = require('./voice-note-import')
+const { buildWhatsAppDirectPttScript } = require('./whatsapp-direct-ptt')
 const { PATCH_BODY, GUARD_BODY } = require('./page-world-scripts')
 const { scriptUrl, attachHandler } = require('./pix-protocol')
 
@@ -49,8 +51,9 @@ let cache = null
 /**
  * 组装宿主脚本（页面世界里跑的那一份）。
  *
- * 目前只有「翻译图片」的按钮。以后要往页面世界加东西，一律往这里拼，
- * 不要再单独开一个文件、也不要再往隔离世界塞 —— 见文件头。
+ * 目前有「翻译图片」「外部音频按原生语音发送」和「快速语音」。
+ * 以后要往页面世界加东西，一律往这里拼，不要再单独开一个文件、
+ * 也不要再往隔离世界塞 —— 见文件头。
  */
 function buildHostScript () {
   return [
@@ -59,7 +62,13 @@ function buildHostScript () {
     // 已经装过就直接退出：守护脚本可能重建我们，重复装会挂两套计时器。
     '  if (window.__pixPageHostInstalled) return;',
     '  window.__pixPageHostInstalled = true;',
+    '  console.info("[pix-pageworld] host 开始");',
     buildImageTranslateScript({ buttonText: '图片翻译（GPT）' }),
+    '  console.info("[pix-pageworld] 图片翻译已安装");',
+    buildVoiceNoteImportScript(),
+    '  console.info("[pix-pageworld] 原生语音导入已安装");',
+    buildWhatsAppDirectPttScript(),
+    '  console.info("[pix-pageworld] 快速语音已安装");',
     '})();'
   ].join('\n')
 }
@@ -122,7 +131,13 @@ function writePageWorldScripts (deps) {
 
 /** 带缓存的入口（生产用）。 */
 function pageWorldScriptUrls (deps) {
-  if (cache) return cache
+  if (cache) {
+    const opts = deps || {}
+    if (opts.electron && opts.ses) {
+      try { attachHandler(opts.electron, opts.ses, cache.dir) } catch (e) {}
+    }
+    return cache
+  }
   cache = writePageWorldScripts(deps)
   return cache
 }

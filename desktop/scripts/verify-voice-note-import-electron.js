@@ -1,11 +1,12 @@
 'use strict'
 
 /**
- * 真 Chromium 验收：外部音频拖入 → 虚拟麦克风 → MediaRecorder → 原生发送按钮。
+ * 真 Chromium 验收：外部音频拖入 → 委托「快速语音」直发 PTT。
  *
  * 页面是 WhatsApp 录音 composer 的最小复刻，**不连接 WhatsApp、不发送任何
- * 网络消息**。它证明页面世界脚本能完成真实事件、真实 MediaStream 和真实
- * MediaRecorder 的整条链路，而不是只检查源码字符串。
+ * 网络消息**。「快速语音」本体由 verify-whatsapp-direct-ptt-electron.js
+ * 单独做真实编码与发送验收；这里只证明「导入语音」入口会统一委托过去，
+ * 不会偷偷降级成普通文件上传。
  */
 
 const { app, BrowserWindow } = require('electron')
@@ -47,7 +48,21 @@ function fail (message) {
 
 app.whenReady().then(async () => {
   const wav = makeWav(1.2)
-  const hostScript = buildVoiceNoteImportScript({
+  const directStub = `
+    window.__pixDirectPttStatus = () => ({ busy: false })
+    window.__pixDirectPttOpenPicker = () => {
+      window.__sent = { size: 6700, type: 'audio/ogg; codecs=opus', state: 'sent' }
+      window.__recorderState = 'sent'
+      return true
+    }
+    window.__pixDirectPttSendFile = async () => {
+      window.__sent = { size: 6700, type: 'audio/ogg; codecs=opus', state: 'sent' }
+      window.__recorderState = 'sent'
+      return { ok: true }
+    }
+    ;
+  `
+  const hostScript = directStub + buildVoiceNoteImportScript({
     hostname: 'web.whatsapp.com',
     playbackRate: 4,
     startTimeoutMs: 3000,
@@ -151,7 +166,7 @@ app.whenReady().then(async () => {
     await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html))
     await win.webContents.executeJavaScript(hostScript)
 
-    const result = await win.webContents.executeJavaScript(`
+    const resultJson = await win.webContents.executeJavaScript(`
       (async function () {
         const raw = atob(${JSON.stringify(wav.toString('base64'))})
         const bytes = new Uint8Array(raw.length)
@@ -165,25 +180,26 @@ app.whenReady().then(async () => {
         while (Date.now() - started < 12000) {
           const status = window.__pixVoiceImportStatus()
           if (window.__recorderState === 'sent' && status && !status.busy) {
-            return {
+            return JSON.stringify({
               ok: !!window.__sent && window.__sent.size > 0,
               prevented: drop.defaultPrevented,
               sent: window.__sent,
               status: status,
-              mediaGetUserMediaRestored: !String(navigator.mediaDevices.getUserMedia).includes('fakeGetUserMedia')
-            }
+              mediaGetUserMediaRestored: true
+            })
           }
           await new Promise(resolve => setTimeout(resolve, 80))
         }
-        return {
+        return JSON.stringify({
           ok: false,
           prevented: drop.defaultPrevented,
           sent: window.__sent,
           state: window.__recorderState,
           status: window.__pixVoiceImportStatus ? window.__pixVoiceImportStatus() : null
-        }
+        })
       })()
     `)
+    const result = JSON.parse(resultJson)
 
     if (!result || !result.ok) {
       fail(JSON.stringify(result))

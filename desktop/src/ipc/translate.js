@@ -22,9 +22,12 @@ const crypto = require('crypto')
  */
 
 const MAX_TRANSLATE_CHARS = 5000
+const activeVoiceEncoders = new Map()
+const VOICE_ENCODER_IDLE_MS = 2 * 60 * 1000
 
 // 与服务端同一份实现（desktop/shared），避免两边规则分叉。
 const { trimTrailingDot } = require('../../shared/trailing-dot')
+const { VoiceOpusSession } = require('../translate/voice-opus-encode')
 
 /**
  * 把上游/网络异常归一成渲染层能识别的错误码。
@@ -190,7 +193,10 @@ function registerTranslateIpc (deps) {
     // 语言也要先归一化：上游不传 `to` 时按 'zh' 处理（见 core.translateImage），
     // 否则 '' 和 'zh' 会占两份缓存、白打一次上游。
     const to = String(data.to || 'zh')
-    const hash = imageHash(to + '\u0000' + shot.image)
+    const profile = state.profile || {}
+    const accountKey = String(profile.username || '')
+    const engineKey = String(data.engine || profile.activeEngine || '')
+    const hash = imageHash([accountKey, engineKey, to, shot.image].join('\u0000'))
     const cached = imageCacheGet(hash)
     if (cached) {
       return Object.assign({}, cached, { success: true, cached: true, size: shot.from || '' })
@@ -279,7 +285,11 @@ function registerTranslateIpc (deps) {
     let ses = null
     try { ses = event.sender.session } catch (e) {}
     return actions.pageScriptUrls(ses)
-  }, sender => Boolean(actions.trustedTabSender(sender)))
+  }, event => Boolean(
+    typeof actions.trustedTabBinding === 'function'
+      ? actions.trustedTabBinding(event && event.sender)
+      : actions.trustedTabSender(event && event.sender)
+  ))
 
   reg.handleUnsafe('translate:guestPrefs', event => {
     const tab = actions.trustedTabSender(event.sender)
@@ -288,6 +298,90 @@ function registerTranslateIpc (deps) {
     // 比心跳超时可靠：心跳可能是桥挂了但定时器还在跑。
     actions.bridgeReport(tab.id, true, '')
     return env.tabPrefs(tab)
+  })
+
+  /**
+   * 「快速语音」的主进程 OGG/Opus 编码。
+   *
+   * 页面世界先降成单声道 PCM，再分块送来；一个实例同一时间只允许一段。
+   * 两分钟无后续块自动释放，避免异常页面留下大缓冲区。
+   */
+  reg.handleUnsafe('translate:voiceOpus', (event, payload) => {
+    const tab = actions.trustedTabSender(event.sender)
+    if (!tab) return actions.rejectUntrustedSender()
+    const p = payload || {}
+    const action = String(p.action || '')
+    const requestId = String(p.requestId || '').slice(0, 120)
+    if (!requestId) return { success: false, msg: '语音编码请求缺少 ID' }
+    const key = tab.id + ':' + requestId
+
+    if (action === 'start') {
+      for (const existing of activeVoiceEncoders.keys()) {
+        if (existing.indexOf(tab.id + ':') === 0) {
+          return { success: false, msg: '当前窗口已有一段音频正在编码' }
+        }
+      }
+      try {
+        const session = new VoiceOpusSession({
+          sampleRate: p.sampleRate,
+          bitrate: p.bitrate
+        })
+        const timer = setTimeout(() => {
+          const row = activeVoiceEncoders.get(key)
+          if (!row) return
+          try { row.session.abort() } catch (e) {}
+          activeVoiceEncoders.delete(key)
+        }, VOICE_ENCODER_IDLE_MS)
+        if (typeof timer.unref === 'function') timer.unref()
+        activeVoiceEncoders.set(key, { session, timer })
+        return { success: true }
+      } catch (e) {
+        return { success: false, msg: (e && e.message) || String(e) }
+      }
+    }
+
+    const row = activeVoiceEncoders.get(key)
+    if (!row) return { success: false, msg: '语音编码会话不存在或已超时' }
+    row.timer.refresh()
+
+    if (action === 'chunk') {
+      try {
+        return { success: true, samples: row.session.push(p.samples) }
+      } catch (e) {
+        try { row.session.abort() } catch (ignore) {}
+        clearTimeout(row.timer)
+        activeVoiceEncoders.delete(key)
+        return { success: false, msg: (e && e.message) || String(e) }
+      }
+    }
+
+    if (action === 'finish') {
+      clearTimeout(row.timer)
+      activeVoiceEncoders.delete(key)
+      try {
+        const output = row.session.finish()
+        actions.log('voice-fast', '实例 ' + tab.id + ' OPUS_ENCODE ok=true bytes=' + output.length)
+        return {
+          success: true,
+          base64: output.toString('base64'),
+          name: String(p.name || 'voice').replace(/\.[^.]+$/, '') + '.ogg',
+          type: 'audio/ogg; codecs=opus',
+          bytes: output.length
+        }
+      } catch (e) {
+        actions.log('voice-fast', '实例 ' + tab.id + ' OPUS_ENCODE ok=false reason=' + ((e && e.message) || e))
+        return { success: false, msg: (e && e.message) || String(e) }
+      }
+    }
+
+    if (action === 'cancel') {
+      clearTimeout(row.timer)
+      activeVoiceEncoders.delete(key)
+      try { row.session.abort() } catch (e) {}
+      return { success: true }
+    }
+
+    return { success: false, msg: '未知的语音编码动作' }
   })
 
   const composerTargetOf = event => {
