@@ -11,8 +11,8 @@
   - Desktop：`desktop/stability-boot.js` → `desktop/main.js`
 - 测试：
   - `node scripts/run-tests.js`
-  - 2026-11-15 修复后基线：2603 tests / 2522 pass / 0 fail / 81 skip
-  - 81 skip = 16 个需要 PostgreSQL/Redis 的集成测试 + 65 个已删除 Telegram 产品线的可见 quarantine
+  - 2026-11-18 1.3.10 发布基线：2873 tests / 2808 pass / 0 fail / 65 skip
+  - 65 skip = 已删除 Telegram 产品线的可见 quarantine；数据库集成测试实际执行
   - 发布前仍应执行 `./scripts/test-env.sh up`，让 16 个数据库测试实际运行
 - 发布：
   - Web：`NODE_ENV=production npm run build`，产物在 `dist/`
@@ -107,6 +107,17 @@ pg_restore --list /var/backups/hello-pix/<dump>
 - 本地 `standalone/telegram*` 在同步前已被删除；相关测试现在按缺失源码显式 skip，恢复产品线后会自动重新启用。
 - 压缩请求体已显式拒绝（415）；业务客户端不应发送 `Content-Encoding: gzip/br`。
 - `/health` 只是 liveness；部署监控与发布验收必须使用带 DB/Redis/迁移检查的 `/ready`。
+
+## 2026-11-18 1.3.10 发布
+
+- 发布分支：`release/1.3.10`
+- 版本：Desktop/Web `1.3.10`
+- 数据库迁移：`054_count_tickets`
+- 生产回滚点：`/root/hello-pix-release-20261118-210956`
+- 官网当前：Windows x64、macOS x64、macOS arm64 均为 `1.3.10`
+- macOS 产物为 ad-hoc 严格签名，未公证；Windows 未做 Authenticode
+- 更新清单使用离线私钥签名并入库，生产服务不常驻 `UPDATE_SIGNING_KEY`
+- 详细指纹、验收与回滚命令见 `docs/1.3.10-发布与回滚.md`
 
 ## 2026-11-15 修复记录
 
