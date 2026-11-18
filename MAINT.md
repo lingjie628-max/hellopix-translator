@@ -119,6 +119,19 @@ pg_restore --list /var/backups/hello-pix/<dump>
 - 更新清单使用离线私钥签名并入库，生产服务不常驻 `UPDATE_SIGNING_KEY`
 - 详细指纹、验收与回滚命令见 `docs/1.3.11-发布与回滚.md`
 
+## 2026-11-18 主机告警消抖
+
+- `certbot.service`：历史上失败过的是已删除域名 `weiersi99`；当前仅保留
+  `pixfanyi.com`、`lindufyht.com`、`wame.uk`，三张证书均在 2027-02 到期，
+  `certbot renew --dry-run` 全通过。
+- `hello-pix-recharge-watcher.service`：TronGrid 单次超时不再立刻把 oneshot
+  标 failed；写入的连续失败计数达到 5 次才升级为故障/告警。游标仍不前进，
+  上游恢复后会从断点重扫，不丢单。
+- `hello-pix-maintenance.service`：增加 `Restart=on-failure` 与 30 秒重试，
+  避免部署替换 `scripts/` 的瞬时窗口撞上 timer 后被长时间标 failed。
+- `igtk-bot.service`：`Restart=always`，当前 `active`，管理端 `127.0.0.1:18080/login`
+  返回 200；告警中的 inactive 是瞬时状态，非当前故障。
+
 ## 2026-11-15 修复记录
 
 - 生产依赖升级：`body-parser@2.4.0`、`proxy-addr@2.0.8`、

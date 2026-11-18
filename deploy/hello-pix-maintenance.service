@@ -3,6 +3,8 @@ Description=Hello Pix · 消息分区维护（提前建分区 + 清理过期分�
 Documentation=file:/opt/hello-pix/scripts/maintenance.js
 After=network-online.target postgresql.service
 Wants=network-online.target
+StartLimitIntervalSec=10min
+StartLimitBurst=3
 
 [Service]
 Type=oneshot
@@ -11,6 +13,11 @@ WorkingDirectory=/opt/hello-pix
 ExecStart=/opt/hello-pix/deploy/ops-run.sh maintenance /var/log/hello-pix/maintenance.log \
   /opt/hello-pix/deploy/with-env.sh /usr/bin/node scripts/maintenance.js --apply
 TimeoutStartSec=600
+# 部署替换 scripts/ 的极短窗口若刚好撞上 timer，单元会 203/EXEC。
+# 维护脚本本身幂等，失败后自动重试一次，避免一次瞬时碰撞把
+# host-health 的 systemctl --failed 一直点亮到下一个整点。
+Restart=on-failure
+RestartSec=30s
 Nice=10
 StandardOutput=journal
 StandardError=journal

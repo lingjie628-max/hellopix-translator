@@ -463,6 +463,27 @@ test('cron 包装脚本具备用户要求的四项保护', () => {
   assert.match(script, /游标未推进/, '要写明超时不会丢单的原因')
 })
 
+test('单次上游超时不再把 systemd 标 failed，持续失败才告警', () => {
+  const script = fs.readFileSync(
+    path.join(__dirname, '..', 'scripts', 'recharge-watcher.js'), 'utf8')
+  assert.match(script, /RETRYABLE_FAILURE_ALERT_THRESHOLD\s*=\s*5/)
+  assert.match(script, /failure\.consecutiveFailures\s*>=\s*RETRYABLE_FAILURE_ALERT_THRESHOLD/)
+  assert.match(script, /record\.fatal\s*\|\|\s*record\.persistentFailure\s*\?\s*1\s*:\s*0/)
+  assert.doesNotMatch(
+    script,
+    /catch \(error\) \{\s*record\.ok = false/,
+    '任何单次可重试异常都不能立刻让整轮退出码变成 1'
+  )
+})
+
+test('维护任务失败会自动重试，避免部署瞬时碰撞被长期标 failed', () => {
+  const unit = fs.readFileSync(
+    path.join(__dirname, '..', 'deploy', 'hello-pix-maintenance.service'), 'utf8')
+  assert.match(unit, /Restart=on-failure/)
+  assert.match(unit, /RestartSec=30s/)
+  assert.match(unit, /StartLimitBurst=3/)
+})
+
 test('logrotate 配置存在且不会让日志无限增长', () => {
   const conf = fs.readFileSync(
     path.join(__dirname, '..', 'deploy', 'logrotate-hello-pix-recharge-watcher'), 'utf8')

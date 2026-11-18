@@ -62,7 +62,7 @@ CODE=$?
 if [ "$CODE" -eq 124 ] || [ "$CODE" -eq 137 ]; then
   echo "$(date -Is) 单轮超时（${TIMEOUT_SECONDS}s）被终止 —— 事务未提交，游标未推进，下一轮重扫" >> "$LOG"
 elif [ "$CODE" -ne 0 ]; then
-  echo "$(date -Is) 本轮有失败，退出码 $CODE（游标未推进，下轮重试）" >> "$LOG"
+  echo "$(date -Is) 本轮有持续/致命失败，退出码 $CODE（游标未推进，下轮重试）" >> "$LOG"
 fi
 
 exit "$CODE"

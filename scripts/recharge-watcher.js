@@ -56,6 +56,14 @@ const NO_STATS = process.argv.includes('--no-stats')
 const STATS_FILE = process.env.RECHARGE_WATCHER_STATS_FILE ||
   '/var/log/hello-pix/recharge-watcher-stats.jsonl'
 
+/**
+ * 单次链 API 超时是常态，下一分钟自动重试即可。
+ *
+ * 连续失败达到这个次数才把 systemd 单元标成 failed，避免 host-health
+ * 每遇到一次 TronGrid 抖动就发一轮“服务故障”。不可重试错误仍然立即失败。
+ */
+const RETRYABLE_FAILURE_ALERT_THRESHOLD = 5
+
 function log(...args) {
   console.log(`[${new Date().toISOString()}]`, ...args)
 }
@@ -199,21 +207,23 @@ async function main() {
           log('  · 上游还有更多页，本轮未拉完（游标会稳步追上）')
         }
       } catch (error) {
-        record.ok = false
         const code = (error && error.code) || 'UNKNOWN'
         const retryable = Boolean(error && error.retryable)
-        record.addresses.push({
+        const failure = {
           address, error: code, retryable,
           message: String((error && error.message) || error).slice(0, 200),
           apiCalls: api.apiCalls, apiLatencyMs: api.apiLatencyMs, apiFailures: api.apiFailures
-        })
+        }
         log(`地址 ${address} 扫描失败: ${code} retryable=${retryable} ${(error && error.message) || error}`)
 
         // 失败**不动游标** —— 这一段还没扫完，下次从原处重来
         const client = await pool.connect()
         try {
           await cursor.recordFailure(client, { address, tokenContract, error })
+          const current = await cursor.get(client, { address, tokenContract })
+          failure.consecutiveFailures = Number(current && current.consecutive_failures) || 1
         } finally { client.release() }
+        record.addresses.push(failure)
 
         // 不可重试的错误必须立刻让人知道：
         // 凭据失效/参数写错，重试一万次也不会好，等下去只会一直漏单
@@ -236,6 +246,26 @@ async function main() {
           } catch (alertError) {
             log(`告警发送失败（不影响退出码）: ${alertError.message}`)
           }
+        } else if (failure.consecutiveFailures >= RETRYABLE_FAILURE_ALERT_THRESHOLD) {
+          record.persistentFailure = code
+          try {
+            await sendOpsAlert({
+              subject: `【Hello Pix 告警】链监听连续 ${failure.consecutiveFailures} 次失败：${code}`,
+              lines: [
+                `收款地址：${address}`,
+                `错误码：${code}`,
+                `错误信息：${failure.message}`,
+                `连续失败：${failure.consecutiveFailures} 次（阈值 ${RETRYABLE_FAILURE_ALERT_THRESHOLD}）`,
+                '游标未推进；上游恢复后会自动从断点重扫，不会丢单',
+                '单次超时属于上游抖动，只有连续失败才升级为主机告警'
+              ],
+              silenceKey: `recharge-watcher:persistent:${code}`,
+              silenceHours: 1,
+              source: `${os.hostname()} 的 ChainWatcher`
+            })
+          } catch (alertError) {
+            log(`持续失败告警发送失败（不影响退出码）: ${alertError.message}`)
+          }
         }
       }
     }
@@ -245,7 +275,8 @@ async function main() {
     await pool.end().catch(() => {})
   }
 
-  return record.ok ? 0 : 1
+  record.ok = record.addresses.every(item => !item.error)
+  return record.fatal || record.persistentFailure ? 1 : 0
 }
 
 /**
