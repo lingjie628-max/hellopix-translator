@@ -359,7 +359,6 @@ const SCENARIOS = [
  *   · 响应迅速 ← 消息到达即翻译，无需手动点
  *   · 专业客服 ← 官网 Telegram 客服在线
  *   · 多开隔离 ← 每个账号独立分区（本产品核心能力）
- *   · 图文翻译 ← image-translate 功能已上线
  *   · 多语言   ← detectLang + 多翻译通道
  *   · 字符透明 ← 套餐按字符计费，用量可查
  * 竞品写的"语音克隆""WABA 官方接口"我们没有，就不写。
@@ -370,7 +369,6 @@ const ADVANTAGES = [
   { icon: 'el-icon-lightning', title: '响应迅速', desc: '消息到达即翻译，无需复制粘贴，对话节奏不中断。' },
   { icon: 'el-icon-headset', title: '专业客服', desc: '在线答疑解惑，使用问题快速响应。' },
   { icon: 'el-icon-files', title: '账号多开', desc: '一台电脑同时登录多个账号，各自独立运行，互不干扰。' },
-  { icon: 'el-icon-picture-outline', title: '图文翻译', desc: '聊天里的图片也能译，商品图、截图、单据不用再手动抄。' },
   { icon: 'el-icon-chat-line-square', title: '多语种互译', desc: '收消息自动译成中文，回消息自动译成对方语言。' },
   { icon: 'el-icon-data-line', title: '用量透明', desc: '按字符计费，套餐额度与剩余用量随时可查，不清不楚不收费。' }
 ]

@@ -63,7 +63,7 @@ test('普通 <img>：给出复制 / 另存 / 新窗口三件套', () => {
   const { actions } = spyActions()
   const t = buildContextMenuTemplate(
     { mediaType: 'image', srcURL: 'https://x.com/a.jpg' }, actions)
-  assert.deepEqual(labels(t), ['复制图片', '图片另存为…', '在新窗口打开图片', '诊断图片翻译', '重新加载'])
+  assert.deepEqual(labels(t), ['复制图片', '图片另存为…', '在新窗口打开图片', '重新加载'])
 })
 
 test('★ 灯箱用 background-image（mediaType=none、srcURL 为空）也必须能存图', () => {

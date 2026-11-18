@@ -103,24 +103,18 @@ test('★ 架构5：注入脚本内部不许块注释（模板会被截断）', 
     '注入脚本内部用了块注释 —— 它整体在模板字符串里，*/ 会提前截断模板')
 })
 
-test('★ 架构6：body 放宽只对图片路由生效（全局仍是 256kb）', () => {
+test('★ 架构6：图片功能下线后不再为 /translate/image 放开大 body', () => {
   const src = read('server/index.js')
   const lines = src.split('\n')
-  // ★ 必须按行找，不能用 indexOf 搜字符串 ★
-  // 注释里也出现了同样的文本（解释为什么放宽），indexOf 会命中注释，
-  // 得出错误的"顺序反了"结论。
   const findLine = re => lines.findIndex(l => re.test(l) && !/^\s*[*/]/.test(l))
-
-  const imgIdx = findLine(/app\.use\('\/apis\/translate\/image',\s*express\.json\(\{\s*limit:\s*'16mb'/)
   const globalIdx = findLine(/app\.use\(express\.json\(\{\s*limit:\s*'256kb'[^}]*\}\)\)/)
-
-  assert.ok(imgIdx >= 0, '找不到图片路由的大 body 解析器')
   assert.ok(globalIdx >= 0, '找不到全局 256kb 解析器')
-  assert.ok(imgIdx < globalIdx,
-    '图片解析器必须排在全局之前（实际 ' + imgIdx + ' vs ' + globalIdx + '）——' +
-    '排在后面的话全局先 413，放宽等于没做')
-  // 全局那个必须仍是 256kb，不能为了让图片过而整体放宽
   assert.match(lines[globalIdx], /256kb/, '全局限制必须保持 256kb')
+  assert.equal(
+    findLine(/app\.use\('\/apis\/translate\/image',\s*express\.json/),
+    -1,
+    '图片翻译已下线，不能继续为它开放 16MB body'
+  )
 })
 
 test('★ 架构7：图片路由必须挂在 CSRF 之后（不是公开端点）', () => {

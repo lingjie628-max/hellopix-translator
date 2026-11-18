@@ -22,6 +22,7 @@ const crypto = require('crypto')
  */
 
 const MAX_TRANSLATE_CHARS = 5000
+const IMAGE_TRANSLATION_ENABLED = false
 const activeVoiceEncoders = new Map()
 const VOICE_ENCODER_IDLE_MS = 2 * 60 * 1000
 
@@ -150,21 +151,15 @@ function registerTranslateIpc (deps) {
   })
 
   /**
-   * 图片翻译。
+   * 图片翻译已下线。
    *
-   * ## 为什么渲染层只发"翻哪个 tab"，不发图片数据
-   *
-   * 图片不在渲染层手里 —— 它在**客页**里（blob/远程 URL，只在该页面进程有效）。
-   * 让渲染层去要图，就得再开一条"渲染层 ← 客页"的通道，等于把图片字节
-   * 在进程间搬两趟。所以这里由主进程直接向客页取（actions.extractImage），
-   * 拿到 base64 就地发请求。
-   *
-   * ## 为什么不重试
-   *
-   * 和文本翻译不同，图片没有字符预留可退，重试一次就是**多花一次 token**。
-   * 失败就把原因原样给用户（尤其是 NO_VISION —— 那是要换通道，不是要重试）。
+   * 保留 handler 是为了让旧页面脚本 / 旧客户端得到明确错误码，而不是静默挂住；
+   * 关闭时必须在取图之前返回，不能读客页 DOM、不能请求视觉模型。
    */
   reg.handle('translate:image', async (event, payload) => {
+    if (!IMAGE_TRANSLATION_ENABLED) {
+      return { success: false, code: 'IMAGE_TRANSLATION_DISABLED', msg: '图片翻译功能已下线' }
+    }
     const data = payload || {}
     if (typeof actions.extractImage !== 'function') {
       return { success: false, code: 'NOT_SUPPORTED', msg: '当前版本不支持图片翻译' }

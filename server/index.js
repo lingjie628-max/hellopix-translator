@@ -126,21 +126,8 @@ async function createRuntime(options) {
       res.status(503).sendFile(maintenanceFile)
     })
   }
-  /**
-   * ★ 图片翻译的专属 body 解析（必须排在全局 256kb 之前）★
-   *
-   * 全局是 `express.json({ limit: '256kb' })` —— 那是**防止大 body 打爆内存**
-   * 的安全设置，不能为了图片整体放开。而一张聊天截图 base64 后动辄 1~5MB，
-   * 不放宽的话 /translate/image 会被 express 直接 413，功能等于不可用。
-   *
-   * 所以只给这一个路径放宽到 16MB（与 core.translateImage 里 12MB 的
-   * base64 换算上限对齐，留一点 JSON 包装的余量），其余路由仍旧 256kb。
-   *
-   * `type: 'application/json'` 显式指定，避免把别的内容类型也吃掉。
-   */
   // 业务请求不需要压缩体；显式关闭 inflation，既减少攻击面，也避免
   // body-parser 的压缩流处理成为未授权请求的入口。
-  app.use('/apis/translate/image', express.json({ limit: '16mb', type: 'application/json', inflate: false }))
   app.use(express.urlencoded({ extended: false, limit: '256kb', inflate: false }))
   app.use(express.json({ limit: '256kb', inflate: false }))
 

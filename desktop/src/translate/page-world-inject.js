@@ -37,7 +37,6 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 
-const { buildImageTranslateScript } = require('./image-translate-ui')
 const { buildVoiceNoteImportScript } = require('./voice-note-import')
 const { buildWhatsAppDirectPttScript } = require('./whatsapp-direct-ptt')
 const { PATCH_BODY, GUARD_BODY } = require('./page-world-scripts')
@@ -51,7 +50,7 @@ let cache = null
 /**
  * 组装宿主脚本（页面世界里跑的那一份）。
  *
- * 目前有「翻译图片」「外部音频按原生语音发送」和「快速语音」。
+ * 目前有「外部音频按原生语音发送」和「快速语音」。
  * 以后要往页面世界加东西，一律往这里拼，不要再单独开一个文件、
  * 也不要再往隔离世界塞 —— 见文件头。
  */
@@ -63,8 +62,6 @@ function buildHostScript () {
     '  if (window.__pixPageHostInstalled) return;',
     '  window.__pixPageHostInstalled = true;',
     '  console.info("[pix-pageworld] host 开始");',
-    buildImageTranslateScript({ buttonText: '图片翻译（GPT）' }),
-    '  console.info("[pix-pageworld] 图片翻译已安装");',
     buildVoiceNoteImportScript(),
     '  console.info("[pix-pageworld] 原生语音导入已安装");',
     buildWhatsAppDirectPttScript(),

@@ -12,7 +12,7 @@
 
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { registerTranslateIpc, errorCodeOf, MAX_TRANSLATE_CHARS, clearImageCache } =
+const { registerTranslateIpc, errorCodeOf, MAX_TRANSLATE_CHARS } =
   require('../desktop/src/ipc/translate')
 
 function harness (opts) {
@@ -282,88 +282,11 @@ test('composer 在 webContents 已销毁时返回 NO_WEB_CONTENTS', () => {
   assert.equal(r.reason, 'NO_WEB_CONTENTS')
 })
 
-// ---------------------------------------------------------------------------
-// 图片翻译的本地缓存
-//
-// 图片单价远高于文本，缓存是省钱的关键；但**缓存键错了比没缓存更坏**：
-// 用户切了目标语言却拿到旧语言的译文，而且不报错，看起来像"切换没生效"。
-// ---------------------------------------------------------------------------
-
-/** 模拟一次会话：同一张图、不同目标语言。 */
-async function translateTwice (firstTo, secondTo) {
-  // 模块级缓存跨用例共享，必须显式清空 —— 否则上一个用例留下的图会被命中，
-  // 用例看起来"没请求上游"，实际是命中了别人的结果。
-  clearImageCache()
-  let upstream = 0
-  const h = harness({
-    image: 'SAMEIMAGE',
-    apiResult: async () => {
-      upstream++
-      return { success: true, ok: true, blocks: [{ source: 'hi', target: 'T' + upstream }] }
-    }
-  })
-  const call = (to) => h.handlers['translate:image']({}, { to })
-  const a = await call(firstTo)
-  const b = await call(secondTo)
-  return { a, b, upstream }
-}
-
-test('图片缓存：同一张图 + 同一语言 → 第二次命中缓存，不再打上游', async () => {
-  const { a, b, upstream } = await translateTwice('zh', 'zh')
-  assert.equal(a.success, true)
-  assert.equal(b.success, true)
-  assert.equal(b.cached, true)
-  assert.equal(upstream, 1, '同一张图同一语言不该打第二次上游（那是白花钱）')
-})
-
-test('图片缓存：换了目标语言必须重新翻译（不能回旧语言的译文）', async () => {
-  const { a, b, upstream } = await translateTwice('zh', 'en')
-  assert.equal(a.success, true)
-  assert.equal(b.success, true)
-  assert.equal(b.cached, undefined, '换语言命中旧缓存 = 用户看到中文却以为切成了英文')
-  assert.equal(upstream, 2, '换语言必须真的请求上游')
-})
-
-test('图片缓存：不传 to 与传 zh 视为同一语言（否则白打一次上游）', async () => {
-  const { b, upstream } = await translateTwice('zh', undefined)
-  assert.equal(b.cached, true, 'to 缺省等价于 zh，应命中缓存')
-  assert.equal(upstream, 1)
-})
-
-test('图片翻译：失败结果不进缓存（下次重试必须真的重试）', async () => {
-  clearImageCache()
-  let upstream = 0
-  const h = harness({
-    image: 'X',
-    apiResult: async () => {
-      upstream++
-      throw Object.assign(new Error('boom'), { code: 'IMAGE_TRANSLATE_FAILED' })
-    }
-  })
-  const r1 = await h.handlers['translate:image']({}, { to: 'zh' })
-  const r2 = await h.handlers['translate:image']({}, { to: 'zh' })
-  assert.equal(r1.success, false)
-  assert.equal(r2.success, false)
-  assert.equal(upstream, 2, '失败不该被缓存成"成功结果"')
-})
-
-test('图片翻译：取图失败按原因给不同提示，不统一说"翻译失败"', async () => {
-  const h = harness({ extract: { ok: false, reason: 'TAINTED_CANVAS' } })
+test('图片翻译已下线：IPC 不取图、不请求 API，直接返回明确错误', async () => {
+  const h = harness({ image: 'SHOULD_NOT_BE_READ' })
   const r = await h.handlers['translate:image']({}, { to: 'zh' })
   assert.equal(r.success, false)
-  assert.equal(r.code, 'TAINTED_CANVAS')
-  assert.match(r.msg, /跨域/)
-})
-
-test('图片翻译固定使用 GPT 视觉通道，不沿用 DeepSeek 等纯文本通道', async () => {
-  clearImageCache()
-  const h = harness({
-    image: 'GPT_ONLY_IMAGE',
-    apiResult: async () => ({ success: true, ok: true, blocks: [] })
-  })
-  await h.handlers['translate:image']({}, { to: 'zh', engine: 'deepseek' })
-  const call = h.calls.find(c => c[0] === 'api' && c[1] === '/translate/image')
-  assert.ok(call, '图片翻译应发到 /translate/image')
-  assert.equal(call[2].json.engine, 'gpt',
-    '图片是独立视觉功能，必须在主进程固定 GPT；不能让 deepseek 文本通道连坐')
+  assert.equal(r.code, 'IMAGE_TRANSLATION_DISABLED')
+  assert.equal(h.calls.some(c => c[0] === 'extractImage'), false)
+  assert.equal(h.calls.some(c => c[0] === 'api' && c[1] === '/translate/image'), false)
 })

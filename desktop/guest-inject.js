@@ -12,6 +12,9 @@ try {
   contextBridge = null
 }
 
+// 图片翻译已下线。保留源码便于以后评估，但默认不暴露桥、不装按钮。
+const IMAGE_TRANSLATION_ENABLED = false
+
 const pixBridge = {
   getPrefs: () => ipcRenderer.invoke('translate:guestPrefs'),
   translate: payload => {
@@ -51,16 +54,6 @@ const pixBridge = {
     linewise: !!linewise
   }),
   // ---------------------------------------------------------------------
-  // 图片翻译。
-  //
-  // 只传"翻成什么语言"，**图片本身不从这里传** —— 图片在客页里，
-  // 由主进程自己回来取（见 src/translate/preview-image.js）。
-  // 这样图片字节在进程间只搬一次（客页 → 主进程），不用再经过渲染层。
-  // ---------------------------------------------------------------------
-  translateImage: payload => ipcRenderer.invoke('translate:image', {
-    to: String((payload && payload.to) || 'zh')
-  }),
-  // ---------------------------------------------------------------------
   // 联系人设备来源（2026-11-11）。
   //
   // 只上报**本地算出来的结果**：设备类型是 preload 自己从 DOM 的 data-id
@@ -78,6 +71,12 @@ const pixBridge = {
       }).catch(() => null)
     } catch (e) { return Promise.resolve(null) }
   }
+}
+
+if (IMAGE_TRANSLATION_ENABLED) {
+  pixBridge.translateImage = payload => ipcRenderer.invoke('translate:image', {
+    to: String((payload && payload.to) || 'zh')
+  })
 }
 
 /**
@@ -5474,7 +5473,9 @@ function installVoiceConversionBridge () {
     document.addEventListener('keydown', onKeyDown, true)
     document.addEventListener('beforeinput', onBeforeInput, true)
     document.addEventListener('click', onClick, true)
-    installImageTranslate(pix)
+    if (IMAGE_TRANSLATION_ENABLED) installImageTranslate(pix)
+    // 页面世界脚本还承载 WhatsApp 语音直发，不能跟着图片翻译一起停。
+    injectPageScripts()
     schedule()
   }
 

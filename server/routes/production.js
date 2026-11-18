@@ -393,16 +393,13 @@ function productionRouter(context) {
     res.json(await core.translate(req.pixUser, input(req), req.get('Idempotency-Key')))
   })
   /**
-   * 图片翻译。
+   * 图片翻译已下线。
    *
-   * 用**独立**的限额（不是文本那两道）—— 一次图片的成本是纯文本的几十到
-   * 几百倍，挂同一份额度等于限额失效。理由与数字依据见 routes/context.js。
-   *
-   * 不要求 Idempotency-Key：图片翻译没有"字符预留"可退，重放一次只是
-   * 多花一次 token；客户端本来也不会自动重试（见 desktop 侧的调用）。
+   * 保留 410 路由而不是删成 404：旧客户端会得到明确“功能已下线”，不会把它
+   * 误判成网络错误。处理函数不读取图片、不解析视觉通道、不调用上游模型。
    */
-  const translateImage = asyncRoute(async (req, res) => {
-    res.json(await core.translateImage(req.pixUser, input(req)))
+  const translateImage = asyncRoute(async () => {
+    throw new ApiError(410, '图片翻译功能已下线', 'IMAGE_TRANSLATION_DISABLED')
   })
   router.post('/translate/image', translateImageIpLimit, translateImageAccountLimit,
     translateImageParentDailyLimit, translateImage)
