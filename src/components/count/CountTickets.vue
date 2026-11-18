@@ -43,6 +43,9 @@
             </el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="计数应用" width="145">
+          <template slot-scope="scope">{{ platformName(scope.row.platform) }}</template>
+        </el-table-column>
         <el-table-column prop="accountCount" label="账号" width="76" align="center"></el-table-column>
         <el-table-column label="累计进粉" width="104" align="right">
           <template slot-scope="scope"><b class="count-number">{{ scope.row.totalFans }}</b></template>
@@ -90,7 +93,7 @@
           <div>
             <div class="count-kicker">TICKET #{{ ticket.id }}</div>
             <h2>{{ ticket.title }}</h2>
-            <p>业务日从 {{ ticket.zeroTime }} 开始 · {{ ticket.timezone }}</p>
+            <p>{{ platformName(ticket.platform) }} · 业务日从 {{ ticket.zeroTime }} 开始 · {{ ticket.timezone }}</p>
           </div>
           <div class="count-detail-actions">
             <el-tag :type="ticket.status === 'active' ? 'success' : 'info'">
@@ -215,6 +218,11 @@
         <el-form-item label="工单名称">
           <el-input v-model="ticketForm.title" maxlength="120" show-word-limit></el-input>
         </el-form-item>
+        <el-form-item label="计数应用">
+          <el-select v-model="ticketForm.platform" filterable style="width:100%">
+            <el-option v-for="p in platformOptions" :key="p.id" :label="p.name" :value="p.id"></el-option>
+          </el-select>
+        </el-form-item>
         <el-form-item label="状态">
           <el-radio-group v-model="ticketForm.status">
             <el-radio-button label="active">进行中</el-radio-button>
@@ -245,9 +253,7 @@
     <el-dialog title="绑定接入账号" :visible.sync="accountDialog" width="480px" :close-on-click-modal="false">
       <el-form label-width="82px">
         <el-form-item label="平台">
-          <el-select v-model="accountForm.platform" filterable style="width:100%" @change="onAccountPlatformChange">
-            <el-option v-for="p in platformOptions" :key="p.id" :label="p.name" :value="p.id"></el-option>
-          </el-select>
+          <el-input :value="platformName(ticket.platform)" disabled></el-input>
         </el-form-item>
         <el-form-item label="接入账号">
           <el-select
@@ -381,6 +387,7 @@ export default {
       this.ticketForm = {
         id: source.id || null,
         title: source.title || '',
+        platform: source.platform || (this.platforms[0] && this.platforms[0].id) || 'whatsapp-green',
         status: source.status || 'active',
         dayTarget: Number(source.dayTarget) || 0,
         totalTarget: Number(source.totalTarget) || 0,
@@ -409,22 +416,19 @@ export default {
       }).catch(() => { this.savingTicket = false })
     },
     openAccountForm() {
-      this.accountForm = { platform: 'whatsapp-green', accountKey: '' }
+      this.accountForm = { platform: this.ticket.platform, accountKey: '' }
       this.accountDialog = true
-      this.getRequest('/count-tickets/available-accounts').then(resp => {
+      this.getRequest('/count-tickets/available-accounts', {
+        ticketId: this.ticket.id
+      }).then(resp => {
         if (resp && resp.data && Array.isArray(resp.data.rows)) {
           this.availableAccounts = resp.data.rows
           if (this.availableAccounts.length) {
             const first = this.availableAccounts[0]
-            this.accountForm.platform = first.platform
             this.accountForm.accountKey = first.accountKey
           }
         }
       }).catch(() => {})
-    },
-    onAccountPlatformChange() {
-      const first = this.availableAccountOptions[0]
-      this.accountForm.accountKey = first ? first.accountKey : ''
     },
     saveAccount() {
       if (!String(this.accountForm.accountKey || '').trim()) {

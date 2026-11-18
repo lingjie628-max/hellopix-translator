@@ -21,6 +21,7 @@
       <el-table-column prop="id" label="工单号" width="90"></el-table-column>
       <el-table-column prop="username" label="商户" width="130"></el-table-column>
       <el-table-column prop="title" label="工单名称" min-width="180" show-overflow-tooltip></el-table-column>
+      <el-table-column prop="platform" label="计数应用" width="130"></el-table-column>
       <el-table-column label="状态" width="90">
         <template slot-scope="scope">
           <el-tag :type="scope.row.status === 'active' ? 'success' : 'info'" size="mini">
@@ -59,7 +60,7 @@
           <div>
             <small>COUNT TICKET #{{ ticket.id }}</small>
             <h2>{{ ticket.title }}</h2>
-            <p>{{ ticket.username }} · {{ ticket.timezone }} · 每日 {{ ticket.zeroTime }} 置零</p>
+            <p>{{ ticket.platform }} · {{ ticket.username }} · {{ ticket.timezone }} · 每日 {{ ticket.zeroTime }} 置零</p>
           </div>
           <el-button @click="visible = false">关闭</el-button>
         </div>

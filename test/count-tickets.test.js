@@ -26,12 +26,14 @@ test('计数工单参数：时区、置零时间和目标值 fail-safe', () => {
 
   const normalized = normalizeTicket({
     title: '  WhatsApp 进粉  ',
+    platform: 'whatsapp-green',
     dayTarget: '12',
     totalTarget: -3,
     timezone: 'Asia/Shanghai',
     zeroTime: '04:00'
   })
   assert.equal(normalized.title, 'WhatsApp 进粉')
+  assert.equal(normalized.platform, 'whatsapp-green')
   assert.equal(normalized.dayTarget, 12)
   assert.equal(normalized.totalTarget, 0, '非法目标不能被静默保存成负数')
   assert.equal(normalized.zeroTime, '04:00:00')
@@ -134,6 +136,7 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
 
   const ticketA = await service.saveTicket(merchantA.id, {
     title: 'WhatsApp A 组',
+    platform: 'whatsapp-green',
     dayTarget: 20,
     totalTarget: 100,
     timezone: 'Asia/Shanghai',
@@ -196,12 +199,51 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
   })
   assert.equal(other.fanType, 'new')
 
-  const available = await service.availableAccounts(merchantA.id)
+  const available = await service.availableAccounts(merchantA.id, ticketA.id)
   assert.deepEqual(
     available.map(item => item.accountKey).sort(),
     ['acc-a', 'acc-b'],
     '绑定弹窗只能看到当前商户真实上报过的接入账号'
   )
+  assert.ok(
+    available.every(item => item.platform === 'whatsapp-green'),
+    '工单只能看到本应用的接入账号'
+  )
+
+  await assert.rejects(
+    () => service.saveAccount(merchantA.id, {
+      ticketId: ticketA.id,
+      platform: 'telegram-z',
+      accountKey: 'tg-acc'
+    }),
+    error => error.code === 'COUNT_ACCOUNT_PLATFORM_MISMATCH',
+    '不能把 Telegram 账号绑进 WhatsApp 工单'
+  )
+
+  const telegramTicket = await service.saveTicket(merchantA.id, {
+    title: 'Telegram 独立组',
+    platform: 'telegram-z',
+    timezone: 'Asia/Shanghai',
+    zeroTime: '00:00'
+  })
+  await service.saveAccount(merchantA.id, {
+    ticketId: telegramTicket.id,
+    platform: 'telegram-z',
+    accountKey: 'tg-acc'
+  })
+  const telegramConversation = await makeConversation(
+    merchantA.id, customer.id, 'tg-acc', 'tg-peer', 'telegram-z'
+  )
+  const telegramFan = await service.captureFan(merchantA.id, {
+    conversationId: telegramConversation,
+    customerId: customer.id,
+    platform: 'telegram-z',
+    accountKey: 'tg-acc',
+    peerKey: 'tg-peer',
+    displayName: '同一位客户',
+    eventAt: '2026-11-18T05:00:00+08:00'
+  })
+  assert.equal(telegramFan.fanType, 'new', '不同应用不能把同一客户串成重粉')
 
   const detailA = await service.detail(ticketA.id, { userId: merchantA.id })
   assert.equal(detailA.metrics.totalFans, 3)
@@ -219,6 +261,7 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
   // 同一客户在另一商户的工单再次出现，也只暴露“重粉”这个事实。
   const ticketB = await service.saveTicket(merchantB.id, {
     title: 'WhatsApp B 组',
+    platform: 'whatsapp-green',
     timezone: 'Asia/Shanghai',
     zeroTime: '00:00'
   })
@@ -248,6 +291,7 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
   // 同一账号重新绑定到另一个工单后，旧绑定自动停用。
   const ticketA2 = await service.saveTicket(merchantA.id, {
     title: 'WhatsApp A 二组',
+    platform: 'whatsapp-green',
     timezone: 'Asia/Shanghai',
     zeroTime: '00:00'
   })
@@ -264,6 +308,7 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
   await service.saveTicket(merchantA.id, {
     id: ticketA2.id,
     title: 'WhatsApp A 二组',
+    platform: 'whatsapp-green',
     status: 'closed',
     timezone: 'Asia/Shanghai',
     zeroTime: '00:00'
@@ -279,6 +324,7 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
     () => service.saveTicket(merchantA.id, {
       id: ticketA.id,
       title: 'WhatsApp A 组',
+      platform: 'whatsapp-green',
       timezone: 'UTC',
       zeroTime: '00:00'
     }),
@@ -296,6 +342,7 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
   const mergeB = await makeCustomer('merge-b')
   const mergeTicket = await service.saveTicket(merchantA.id, {
     title: '身份合并回归',
+    platform: 'whatsapp-green',
     timezone: 'Asia/Shanghai',
     zeroTime: '00:00'
   })
@@ -307,6 +354,9 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
   })
   const mergeConvA = await makeConversation(merchantA.id, mergeA.id, 'merge-a', 'merge-peer-a')
   const mergeConvB = await makeConversation(merchantA.id, mergeB.id, 'merge-b', 'merge-peer-b')
+  const mergeConvTg = await makeConversation(
+    merchantA.id, mergeB.id, 'tg-acc', 'merge-peer-tg', 'telegram-z'
+  )
   await service.captureFan(merchantA.id, {
     conversationId: mergeConvA,
     customerId: mergeA.id,
@@ -323,6 +373,14 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
     peerKey: 'merge-peer-b',
     eventAt: '2026-11-18T12:00:00+08:00'
   })
+  await service.captureFan(merchantA.id, {
+    conversationId: mergeConvTg,
+    customerId: mergeB.id,
+    platform: 'telegram-z',
+    accountKey: 'tg-acc',
+    peerKey: 'merge-peer-tg',
+    eventAt: '2026-11-18T12:30:00+08:00'
+  })
   await customerRepository.mergeCustomers(mergeB.id, mergeA.id)
   const mergedDetail = await service.detail(mergeTicket.id, { userId: merchantA.id })
   assert.equal(mergedDetail.metrics.newFans, 1)
@@ -335,4 +393,7 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
   assert.equal(mergedRows.rows[0].fan_type, 'new')
   assert.equal(mergedRows.rows[1].fan_type, 'repeat')
   assert.equal(String(mergedRows.rows[1].repeat_of_id), String(mergedRows.rows[0].id))
+  const mergedTelegram = await service.detail(telegramTicket.id, { userId: merchantA.id })
+  assert.equal(mergedTelegram.metrics.newFans, 2, 'Telegram 内该客户的首条仍是新粉')
+  assert.equal(mergedTelegram.metrics.repeatFans, 0, 'WhatsApp 的历史不能串进 Telegram 重粉')
 })

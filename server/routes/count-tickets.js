@@ -28,7 +28,10 @@ function registerCountTickets(router, ctx) {
 
   // 静态路径必须排在 /:id 之前，否则 "available-accounts" 会被当成工单号。
   router.get('/count-tickets/available-accounts', asyncRoute(async (req, res) => {
-    res.json({ rows: await countTickets.availableAccounts(ownerOf(req, countTickets)) })
+    const data = input(req)
+    res.json({
+      rows: await countTickets.availableAccounts(ownerOf(req, countTickets), data.ticketId)
+    })
   }))
 
   router.get('/count-tickets/:id', asyncRoute(async (req, res) => {

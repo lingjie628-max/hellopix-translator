@@ -37,10 +37,13 @@ function validZeroTime(value) {
 function normalizeTicket(data) {
   const title = cleanText(data.title, 120)
   if (!title) throw new ApiError(400, '请填写计数工单名称', 'COUNT_TITLE_REQUIRED')
+  const platform = cleanText(data.platform, 32).toLowerCase()
+  if (!platform) throw new ApiError(400, '请选择计数应用', 'COUNT_PLATFORM_REQUIRED')
   const status = cleanText(data.status || 'active', 16)
   if (!TICKET_STATUSES.has(status)) throw new ApiError(400, '工单状态不合法', 'COUNT_STATUS_BAD')
   return {
     title,
+    platform,
     status,
     dayTarget: target(data.dayTarget != null ? data.dayTarget : data.day_target, 1_000_000),
     totalTarget: target(data.totalTarget != null ? data.totalTarget : data.total_target, 1_000_000_000),
@@ -93,6 +96,13 @@ class CountTicketService {
             'COUNT_BUSINESS_TIME_LOCKED'
           )
         }
+        if (String(current.platform) !== payload.platform && (current.has_fans || current.has_accounts)) {
+          throw new ApiError(
+            409,
+            '该工单已绑定接入账号或已有进粉记录，不能再更换计数应用',
+            'COUNT_PLATFORM_LOCKED'
+          )
+        }
         return this.repo.updateTicket(id, userId, payload, client)
       }
       return this.repo.createTicket(userId, payload, client)
@@ -111,6 +121,13 @@ class CountTicketService {
       if (!ticket) throw new ApiError(404, '计数工单不存在', 'COUNT_TICKET_NOT_FOUND')
       if (ticket.status !== 'active') {
         throw new ApiError(400, '已关闭的计数工单不能绑定账号', 'COUNT_TICKET_CLOSED')
+      }
+      if (String(ticket.platform) !== account.platform) {
+        throw new ApiError(
+          400,
+          '接入账号所属应用与计数工单不一致',
+          'COUNT_ACCOUNT_PLATFORM_MISMATCH'
+        )
       }
       const row = await this.repo.saveAccount(ticketId, userId, account, client)
       return { account: row }
@@ -132,8 +149,14 @@ class CountTicketService {
     return { ok: true }
   }
 
-  async availableAccounts(userId) {
-    return this.repo.availableAccounts(userId)
+  async availableAccounts(userId, ticketId) {
+    const id = Number(ticketId)
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      throw new ApiError(400, '计数工单号不合法', 'COUNT_TICKET_BAD_ID')
+    }
+    const ticket = await this.repo.ticketForOwner(id, userId)
+    if (!ticket) throw new ApiError(404, '计数工单不存在', 'COUNT_TICKET_NOT_FOUND')
+    return this.repo.availableAccounts(userId, ticket.platform)
   }
 
   /**
@@ -171,7 +194,7 @@ class CountTicketService {
       const customerId = payload.customerId == null ? null : Number(payload.customerId)
       await this.repo.lockCustomer(Number.isSafeInteger(customerId) ? customerId : null, client)
       const prior = Number.isSafeInteger(customerId)
-        ? await this.repo.priorFanForCustomer(customerId, client)
+        ? await this.repo.priorFanForCustomer(customerId, platform, client)
         : await this.repo.priorFanForPeer(
           Number(ticket.id), platform, accountKey, peerKey, client
         )

@@ -467,14 +467,18 @@ class CustomerRepository {
     // 下一次进粉无法识别该客户曾经出现过，会错误地再算一次新粉。
     await this.query(
       `UPDATE count_ticket_fans SET customer_id = $2 WHERE customer_id = $1`, [fromId, intoId], client)
-    // 合并后把同一客户的全部进粉事件按真实时间重新排序：
-    // 全局最早一条是 new，其余全部是 repeat，并指向首条。
+    // 合并后把同一客户在每个应用内的进粉事件按真实时间重新排序：
+    // 每个平台最早一条是 new，其余是 repeat，并指向该平台首条。
     // 只改归属会导致两个原本独立的客户都保留 new，合并后新粉数虚高。
     await this.query(
       `WITH ranked AS (
          SELECT id,
-                first_value(id) OVER (ORDER BY event_at ASC, id ASC) AS first_id,
-                row_number() OVER (ORDER BY event_at ASC, id ASC) AS position
+                first_value(id) OVER (
+                  PARTITION BY platform ORDER BY event_at ASC, id ASC
+                ) AS first_id,
+                row_number() OVER (
+                  PARTITION BY platform ORDER BY event_at ASC, id ASC
+                ) AS position
          FROM count_ticket_fans
          WHERE customer_id = $1
        )

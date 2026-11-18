@@ -31,6 +31,7 @@ class CountTicketRepository {
          AND a.platform = $2
          AND a.account_key = $3
          AND a.active = true
+         AND t.platform = a.platform
          AND t.status = 'active'
        LIMIT 1`,
       [userId, platform, accountKey], client
@@ -53,14 +54,14 @@ class CountTicketRepository {
     await this.query('SELECT id FROM customers WHERE id = $1 FOR UPDATE', [customerId], client)
   }
 
-  async priorFanForCustomer(customerId, client) {
+  async priorFanForCustomer(customerId, platform, client) {
     const result = await this.query(
       `SELECT id, ticket_id, conversation_id, fan_type, event_at
        FROM count_ticket_fans
-       WHERE customer_id = $1
+       WHERE customer_id = $1 AND platform = $2
        ORDER BY event_at ASC, id ASC
        LIMIT 1`,
-      [customerId], client
+      [customerId, platform], client
     )
     return result.rows[0] || null
   }
@@ -122,11 +123,15 @@ class CountTicketRepository {
 
   async lockTicket(ticketId, userId, client) {
     const result = await this.query(
-      `SELECT t.id, t.user_id, t.status, t.timezone, t.zero_time,
+      `SELECT t.id, t.user_id, t.status, t.platform, t.timezone, t.zero_time,
               EXISTS(
                 SELECT 1 FROM count_ticket_fans f
                 WHERE f.ticket_id = t.id AND f.user_id = t.user_id
-              ) AS has_fans
+              ) AS has_fans,
+              EXISTS(
+                SELECT 1 FROM count_ticket_accounts a
+                WHERE a.ticket_id = t.id AND a.user_id = t.user_id
+              ) AS has_accounts
        FROM count_tickets t
        WHERE t.id = $1 AND t.user_id = $2
        FOR UPDATE`,
@@ -138,12 +143,12 @@ class CountTicketRepository {
   async createTicket(userId, payload, client) {
     const result = await this.query(
       `INSERT INTO count_tickets
-         (user_id, title, status, day_target, total_target, timezone, zero_time, closed_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::time,
-               CASE WHEN $3 = 'closed' THEN now() ELSE NULL END)
+         (user_id, title, platform, status, day_target, total_target, timezone, zero_time, closed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::time,
+               CASE WHEN $4 = 'closed' THEN now() ELSE NULL END)
        RETURNING *`,
       [
-        userId, payload.title, payload.status, payload.dayTarget, payload.totalTarget,
+        userId, payload.title, payload.platform, payload.status, payload.dayTarget, payload.totalTarget,
         payload.timezone, payload.zeroTime
       ], client
     )
@@ -154,20 +159,21 @@ class CountTicketRepository {
     const result = await this.query(
       `UPDATE count_tickets
        SET title = $3,
-           status = $4,
-           day_target = $5,
-           total_target = $6,
-           timezone = $7,
-           zero_time = $8::time,
+           platform = $4,
+           status = $5,
+           day_target = $6,
+           total_target = $7,
+           timezone = $8,
+           zero_time = $9::time,
            closed_at = CASE
-             WHEN $4 = 'closed' THEN COALESCE(closed_at, now())
+             WHEN $5 = 'closed' THEN COALESCE(closed_at, now())
              ELSE NULL
            END,
            updated_at = now()
        WHERE id = $1 AND user_id = $2
        RETURNING *`,
       [
-        ticketId, userId, payload.title, payload.status, payload.dayTarget,
+        ticketId, userId, payload.title, payload.platform, payload.status, payload.dayTarget,
         payload.totalTarget, payload.timezone, payload.zeroTime
       ], client
     )
@@ -222,17 +228,17 @@ class CountTicketRepository {
    * account_key 是客户端主进程生成的稳定 slug，不是聊天平台里的手机号。
    * 让商户手填几乎必然对不上，所以绑定弹窗直接从这张列表里选。
    */
-  async availableAccounts(userId, client) {
+  async availableAccounts(userId, platform, client) {
     const result = await this.query(
       `SELECT c.platform, c.account_key,
               count(*)::int AS conversation_count,
               max(c.last_message_at) AS last_seen_at,
               max(c.display_name) AS sample_name
        FROM conversations c
-       WHERE c.user_id = $1
+       WHERE c.user_id = $1 AND c.platform = $2
        GROUP BY c.platform, c.account_key
        ORDER BY max(c.last_message_at) DESC NULLS LAST, c.platform, c.account_key`,
-      [userId], client
+      [userId, platform], client
     )
     return mapRows(result.rows)
   }
@@ -255,7 +261,7 @@ class CountTicketRepository {
     const where = clauses.length ? clauses.join(' AND ') : 'TRUE'
     values.push(limit, offset)
     const result = await this.query(
-      `SELECT t.id, t.user_id, u.username, t.title, t.status, t.day_target, t.total_target,
+      `SELECT t.id, t.user_id, u.username, t.title, t.platform, t.status, t.day_target, t.total_target,
               t.timezone, t.zero_time, t.created_at, t.updated_at, t.closed_at,
               (SELECT count(*)::int FROM count_ticket_accounts a
                WHERE a.ticket_id = t.id AND a.user_id = t.user_id AND a.active = true) AS account_count,

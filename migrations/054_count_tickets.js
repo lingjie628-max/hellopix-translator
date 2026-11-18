@@ -20,6 +20,7 @@ exports.up = pgm => {
       id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
       user_id      bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       title        varchar(120) NOT NULL,
+      platform     text NOT NULL,
       status       text NOT NULL DEFAULT 'active',
       day_target   integer NOT NULL DEFAULT 0,
       total_target bigint NOT NULL DEFAULT 0,
@@ -29,6 +30,7 @@ exports.up = pgm => {
       updated_at   timestamptz NOT NULL DEFAULT now(),
       closed_at    timestamptz,
       CONSTRAINT count_tickets_title_check CHECK (length(btrim(title)) BETWEEN 1 AND 120),
+      CONSTRAINT count_tickets_platform_check CHECK (length(btrim(platform)) > 0),
       CONSTRAINT count_tickets_status_check CHECK (status IN ('active', 'closed')),
       CONSTRAINT count_tickets_day_target_check CHECK (day_target >= 0),
       CONSTRAINT count_tickets_total_target_check CHECK (total_target >= 0),
@@ -39,6 +41,8 @@ exports.up = pgm => {
       ON count_tickets(user_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS count_tickets_active_idx
       ON count_tickets(user_id, updated_at DESC) WHERE status = 'active';
+    CREATE INDEX IF NOT EXISTS count_tickets_platform_idx
+      ON count_tickets(user_id, platform, status);
 
     CREATE TABLE IF NOT EXISTS count_ticket_accounts (
       id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
