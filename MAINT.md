@@ -11,7 +11,7 @@
   - Desktop：`desktop/stability-boot.js` → `desktop/main.js`
 - 测试：
   - `node scripts/run-tests.js`
-  - 2026-11-18 1.3.12 发布基线：2876 tests / 2811 pass / 0 fail / 65 skip
+  - 2026-11-19 1.3.13 修复基线：2879 tests / 2814 pass / 0 fail / 65 skip
   - 65 skip = 已删除 Telegram 产品线的可见 quarantine；数据库集成测试实际执行
   - 发布前仍应执行 `./scripts/test-env.sh up`，让 16 个数据库测试实际运行
 - 发布：
@@ -398,3 +398,24 @@ pg_restore --list /var/backups/hello-pix/<dump>
 - 构建坑：T9/exFAT 上直接写 `desktop/release` 会触发 asar 头解析异常；
   本次改为 `--config.directories.output=/tmp/...` 后成功。正式构建继续使用
   APFS 或 CI 工作区。
+
+## 2026-11-19 原生计数工单完整性修复（1.3.13，待上线）
+
+- 分支：`maint/20261119-count-ticket-integrity`
+- 桌面版本：`1.3.13`
+- 只接受账号绑定之后、真实到达的入站消息：
+  - 打开会话、出向消息、绑定前历史、未来时间均不计粉。
+  - 客户端与新账本记录 `event_type=message / direction=in`。
+- 乱序补扫按真实 `event_at` 重排，最早事件始终为新粉。
+- 客户合并先递归解析最终根客户，再统一搬迁全部后代；已合并客户不能形成中间链。
+- 新增 `customer_merge_audits`，合并前快照计数粉丝、归属、撞单和身份事件。
+- 删除商户快照补入计数工单、绑定账号和进粉账本。
+- 绑定账号必须是客户端已经上报过的 `accountKey`，页面不再允许手填。
+- 页码增加百万级安全上限；重复绑定不会重置计数起点。
+- 迁移：`055_count_ticket_integrity.js`，已实测 `up -> down -> up`。
+- 验证：
+  - 全量：`2879 tests / 2814 pass / 0 fail / 65 skip`
+  - Web 生产构建、renderer `VERIFY_OK`
+  - 真 Electron：`VOICE_IMPORT_VERIFY_OK`、`WHATSAPP_DIRECT_PTT_VERIFY_OK`
+  - 死引用：309 文件，0 悬空、0 未使用 import
+- 尚未上传官网、尚未执行生产迁移；跨商户重粉口径仍需业务书面确认。
