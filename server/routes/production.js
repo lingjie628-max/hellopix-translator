@@ -432,6 +432,9 @@ function productionRouter(context) {
           accountKey: data.accountKey,
           peerKey: data.peerKey,
           displayName: data.displayName,
+          direction: data.direction,
+          body: data.body,
+          eventType: data.eventType,
           eventAt: data.sentAt || new Date().toISOString()
         })
       } catch (error) {

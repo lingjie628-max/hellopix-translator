@@ -2426,7 +2426,7 @@ function installVoiceConversionBridge () {
    * 上报一条线索。body 为空表示"只是打开了会话"——
    * 服务端据此建立跟进关系，这正是撞单检测的触发点。
    */
-  function reportClue(body, direction, sentAt) {
+  function reportClue(body, direction, sentAt, eventType) {
     var pix = api()
     if (!pix || !pix.reportCustomer) return
     var peer = currentPeer()
@@ -2444,6 +2444,7 @@ function installVoiceConversionBridge () {
         displayName: chatDisplayName(),
         body: body ? String(body).slice(0, 4000) : '',
         direction: direction || 'in',
+        eventType: eventType || (body ? 'message' : 'conversation'),
         sourceConvId: peer.peerKey,
         // WhatsApp 能从 data-id 里拿到平台原始消息 ID；Telegram 拿不到，
         // 此时靠服务端按「同会话+同时间+同内容」去重兜底
@@ -2542,7 +2543,7 @@ function installVoiceConversionBridge () {
     }
     reportedKeys[key] = 1
     reportedCount++
-    reportClue(text, direction, messageTime(node))
+    reportClue(text, direction, messageTime(node), 'message')
   }
 
   /** 会话切换时上报一次 —— 打开新客户就是撞单检测的触发时机 */
@@ -2550,7 +2551,7 @@ function installVoiceConversionBridge () {
     var peer = currentPeer()
     if (!peer) return
     if (peer.peerKey === lastPeerKey) return
-    reportClue('', 'in')
+    reportClue('', 'in', null, 'conversation')
   }
 
   /**

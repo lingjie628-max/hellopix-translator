@@ -1,6 +1,8 @@
 'use strict'
 
 const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const path = require('node:path')
 const test = require('node:test')
 
 const {
@@ -62,6 +64,18 @@ test('计数工单权益只认套餐 clients.counter', () => {
   assert.equal(publicUser(baseSession).counterSuite, true)
 })
 
+test('计数只接真实入站消息，打开会话与出向消息带独立事件类型', () => {
+  const root = path.join(__dirname, '..')
+  const guest = fs.readFileSync(path.join(root, 'desktop', 'guest-inject.js'), 'utf8')
+  const route = fs.readFileSync(path.join(root, 'server', 'routes', 'production.js'), 'utf8')
+  assert.match(guest, /reportClue\(text, direction, messageTime\(node\), 'message'\)/)
+  assert.match(guest, /reportClue\('', 'in', null, 'conversation'\)/)
+  assert.match(guest, /eventType:\s*eventType \|\|/)
+  assert.match(route, /direction:\s*data\.direction/)
+  assert.match(route, /body:\s*data\.body/)
+  assert.match(route, /eventType:\s*data\.eventType/)
+})
+
 test('原生计数：会话去重、跨账号重粉、跨商户识别与工单隔离', { skip: !databaseUrl }, async t => {
   process.env.DATABASE_URL = databaseUrl
   const { Pool } = require('pg')
@@ -85,6 +99,20 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
   }
   const service = new CountTicketService(new CountTicketRepository(db))
   const customerRepository = new CustomerRepository(db)
+  const captureInbound = (userId, data) => service.captureFan(
+    userId,
+    Object.assign({ direction: 'in', body: 'hello', eventType: 'message' }, data)
+  )
+
+  async function bindAccount(userId, ticketId, accountKey, since = '2026-01-01T00:00:00Z') {
+    await service.saveAccount(userId, { ticketId, platform: 'whatsapp-green', accountKey })
+    await pool.query(
+      `UPDATE count_ticket_accounts
+       SET created_at=$4, updated_at=$4
+       WHERE user_id=$1 AND ticket_id=$2 AND platform=$3 AND account_key=$5 AND active=true`,
+      [userId, ticketId, 'whatsapp-green', since, accountKey]
+    )
+  }
 
   let seq = 0
   const createdUsers = []
@@ -142,15 +170,11 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
     timezone: 'Asia/Shanghai',
     zeroTime: '04:00'
   })
-  await service.saveAccount(merchantA.id, {
-    ticketId: ticketA.id, platform: 'whatsapp-green', accountKey: 'acc-a'
-  })
-  await service.saveAccount(merchantA.id, {
-    ticketId: ticketA.id, platform: 'whatsapp-green', accountKey: 'acc-b'
-  })
+  await bindAccount(merchantA.id, ticketA.id, 'acc-a')
+  await bindAccount(merchantA.id, ticketA.id, 'acc-b')
 
   const conv1 = await makeConversation(merchantA.id, customer.id, 'acc-a', 'peer-1')
-  const first = await service.captureFan(merchantA.id, {
+  const first = await captureInbound(merchantA.id, {
     conversationId: conv1,
     customerId: customer.id,
     platform: 'whatsapp-green',
@@ -162,7 +186,7 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
   assert.equal(first.captured, true)
   assert.equal(first.fanType, 'new')
 
-  const duplicate = await service.captureFan(merchantA.id, {
+  const duplicate = await captureInbound(merchantA.id, {
     conversationId: conv1,
     customerId: customer.id,
     platform: 'whatsapp-green',
@@ -175,7 +199,7 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
   assert.equal(duplicate.reason, 'conversation_already_counted')
 
   const conv2 = await makeConversation(merchantA.id, customer.id, 'acc-b', 'peer-2')
-  const secondAccount = await service.captureFan(merchantA.id, {
+  const secondAccount = await captureInbound(merchantA.id, {
     conversationId: conv2,
     customerId: customer.id,
     platform: 'whatsapp-green',
@@ -188,7 +212,7 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
   assert.equal(secondAccount.fanType, 'repeat', '同客户从另一账号进入必须记重粉')
 
   const conv3 = await makeConversation(merchantA.id, otherCustomer.id, 'acc-a', 'peer-3')
-  const other = await service.captureFan(merchantA.id, {
+  const other = await captureInbound(merchantA.id, {
     conversationId: conv3,
     customerId: otherCustomer.id,
     platform: 'whatsapp-green',
@@ -198,6 +222,31 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
     eventAt: '2026-11-18T04:00:02+08:00'
   })
   assert.equal(other.fanType, 'new')
+
+  const gateCustomer = await makeCustomer('gate')
+  const gateConversation = await makeConversation(merchantA.id, gateCustomer.id, 'acc-a', 'peer-gate')
+  const gateBase = {
+    conversationId: gateConversation,
+    customerId: gateCustomer.id,
+    platform: 'whatsapp-green',
+    accountKey: 'acc-a',
+    peerKey: 'peer-gate',
+    eventAt: '2026-11-18T10:00:00+08:00'
+  }
+  assert.equal((await service.captureFan(merchantA.id, Object.assign({}, gateBase, {
+    direction: 'in', body: '', eventType: 'conversation'
+  }))).reason, 'not_an_inbound_message', '打开会话不能计粉')
+  assert.equal((await service.captureFan(merchantA.id, Object.assign({}, gateBase, {
+    direction: 'out', body: '我方主动发送', eventType: 'message'
+  }))).reason, 'not_an_inbound_message', '出向消息不能计粉')
+  assert.equal((await service.captureFan(merchantA.id, Object.assign({}, gateBase, {
+    direction: 'in', body: '历史消息', eventType: 'message',
+    eventAt: '2025-12-31T23:59:59Z'
+  }))).reason, 'before_account_binding', '账号绑定前的历史不能补进新工单')
+  assert.equal((await service.captureFan(merchantA.id, Object.assign({}, gateBase, {
+    direction: 'in', body: '未来消息', eventType: 'message',
+    eventAt: '2099-01-01T00:00:00Z'
+  }))).reason, 'event_at_in_future', '未来时间不能污染计数')
 
   const available = await service.availableAccounts(merchantA.id, ticketA.id)
   assert.deepEqual(
@@ -227,14 +276,17 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
     zeroTime: '00:00'
   })
   await service.saveAccount(merchantA.id, {
-    ticketId: telegramTicket.id,
-    platform: 'telegram-z',
-    accountKey: 'tg-acc'
+    ticketId: telegramTicket.id, platform: 'telegram-z', accountKey: 'tg-acc'
   })
+  await pool.query(
+    `UPDATE count_ticket_accounts SET created_at=$4, updated_at=$4
+     WHERE user_id=$1 AND ticket_id=$2 AND platform=$3 AND account_key='tg-acc'`,
+    [merchantA.id, telegramTicket.id, 'telegram-z', '2026-01-01T00:00:00Z']
+  )
   const telegramConversation = await makeConversation(
     merchantA.id, customer.id, 'tg-acc', 'tg-peer', 'telegram-z'
   )
-  const telegramFan = await service.captureFan(merchantA.id, {
+  const telegramFan = await captureInbound(merchantA.id, {
     conversationId: telegramConversation,
     customerId: customer.id,
     platform: 'telegram-z',
@@ -265,11 +317,9 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
     timezone: 'Asia/Shanghai',
     zeroTime: '00:00'
   })
-  await service.saveAccount(merchantB.id, {
-    ticketId: ticketB.id, platform: 'whatsapp-green', accountKey: 'acc-cross'
-  })
+  await bindAccount(merchantB.id, ticketB.id, 'acc-cross')
   const conv4 = await makeConversation(merchantB.id, customer.id, 'acc-cross', 'peer-4')
-  const crossRepeat = await service.captureFan(merchantB.id, {
+  const crossRepeat = await captureInbound(merchantB.id, {
     conversationId: conv4,
     customerId: customer.id,
     platform: 'whatsapp-green',
@@ -295,9 +345,7 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
     timezone: 'Asia/Shanghai',
     zeroTime: '00:00'
   })
-  await service.saveAccount(merchantA.id, {
-    ticketId: ticketA2.id, platform: 'whatsapp-green', accountKey: 'acc-a'
-  })
+  await bindAccount(merchantA.id, ticketA2.id, 'acc-a')
   const active = await pool.query(
     `SELECT ticket_id FROM count_ticket_accounts
      WHERE user_id=$1 AND platform='whatsapp-green' AND account_key='acc-a' AND active=true`,
@@ -346,18 +394,14 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
     timezone: 'Asia/Shanghai',
     zeroTime: '00:00'
   })
-  await service.saveAccount(merchantA.id, {
-    ticketId: mergeTicket.id, platform: 'whatsapp-green', accountKey: 'merge-a'
-  })
-  await service.saveAccount(merchantA.id, {
-    ticketId: mergeTicket.id, platform: 'whatsapp-green', accountKey: 'merge-b'
-  })
+  await bindAccount(merchantA.id, mergeTicket.id, 'merge-a')
+  await bindAccount(merchantA.id, mergeTicket.id, 'merge-b')
   const mergeConvA = await makeConversation(merchantA.id, mergeA.id, 'merge-a', 'merge-peer-a')
   const mergeConvB = await makeConversation(merchantA.id, mergeB.id, 'merge-b', 'merge-peer-b')
   const mergeConvTg = await makeConversation(
     merchantA.id, mergeB.id, 'tg-acc', 'merge-peer-tg', 'telegram-z'
   )
-  await service.captureFan(merchantA.id, {
+  await captureInbound(merchantA.id, {
     conversationId: mergeConvA,
     customerId: mergeA.id,
     platform: 'whatsapp-green',
@@ -365,7 +409,7 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
     peerKey: 'merge-peer-a',
     eventAt: '2026-11-18T11:00:00+08:00'
   })
-  await service.captureFan(merchantA.id, {
+  await captureInbound(merchantA.id, {
     conversationId: mergeConvB,
     customerId: mergeB.id,
     platform: 'whatsapp-green',
@@ -373,7 +417,7 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
     peerKey: 'merge-peer-b',
     eventAt: '2026-11-18T12:00:00+08:00'
   })
-  await service.captureFan(merchantA.id, {
+  await captureInbound(merchantA.id, {
     conversationId: mergeConvTg,
     customerId: mergeB.id,
     platform: 'telegram-z',

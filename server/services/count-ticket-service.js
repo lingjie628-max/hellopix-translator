@@ -170,15 +170,27 @@ class CountTicketService {
     const accountKey = cleanText(payload.accountKey, 200)
     const peerKey = cleanText(payload.peerKey, 200)
     const conversationId = Number(payload.conversationId)
+    const direction = cleanText(payload.direction || 'in', 8)
+    const body = String(payload.body == null ? '' : payload.body).trim()
+    const eventType = cleanText(payload.eventType || (body ? 'message' : 'conversation'), 16)
     if (!platform || !accountKey || !peerKey || !Number.isSafeInteger(conversationId)) {
       return { captured: false, reason: 'invalid_event' }
     }
+    if (eventType !== 'message' || direction !== 'in') {
+      return { captured: false, reason: 'not_an_inbound_message' }
+    }
     const eventAt = payload.eventAt ? new Date(payload.eventAt) : new Date()
     if (Number.isNaN(eventAt.getTime())) return { captured: false, reason: 'invalid_event_at' }
+    if (eventAt.getTime() > Date.now() + 10 * 60 * 1000) {
+      return { captured: false, reason: 'event_at_in_future' }
+    }
 
     return this.repo.transaction(async client => {
       const ticket = await this.repo.activeTicketForAccount(userId, platform, accountKey, client)
       if (!ticket) return { captured: false, reason: 'account_not_bound' }
+      if (ticket.account_active_since && eventAt < new Date(ticket.account_active_since)) {
+        return { captured: false, reason: 'before_account_binding' }
+      }
 
       const existing = await this.repo.fanByConversation(Number(ticket.id), conversationId, client)
       if (existing) {

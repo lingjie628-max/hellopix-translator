@@ -24,7 +24,8 @@ class CountTicketRepository {
 
   async activeTicketForAccount(userId, platform, accountKey, client) {
     const result = await this.query(
-      `SELECT t.id, t.user_id, t.title, t.timezone, t.zero_time
+      `SELECT t.id, t.user_id, t.title, t.timezone, t.zero_time,
+              GREATEST(a.created_at, a.updated_at) AS account_active_since
        FROM count_ticket_accounts a
        JOIN count_tickets t ON t.id = a.ticket_id AND t.user_id = a.user_id
        WHERE a.user_id = $1
