@@ -229,4 +229,44 @@ test('商户回收 / 删除：护栏与外键顺序', { skip: !databaseUrl }, as
     assert.equal(archive.rows[0].snapshot.user.password_hash, undefined, '存档不得包含 password_hash')
     assert.equal(archive.rows[0].snapshot.user.username, user.username)
   })
+
+  await t.test('删除：计数工单、绑定账号和进粉账本必须进入删除存档', async () => {
+    const user = await makeUser(0)
+    const ticket = await pool.query(
+      `INSERT INTO count_tickets(user_id,title,platform,timezone,zero_time)
+       VALUES($1,'待删计数工单','whatsapp-green','Asia/Shanghai','00:00') RETURNING id`,
+      [user.id]
+    )
+    const conversation = await pool.query(
+      `INSERT INTO conversations(user_id,platform,account_key,peer_key,display_name,last_message_at)
+       VALUES($1,'whatsapp-green','purge-account','purge-peer','Purge',now()) RETURNING id`,
+      [user.id]
+    )
+    await pool.query(
+      `INSERT INTO count_ticket_accounts(ticket_id,user_id,platform,account_key)
+       VALUES($1,$2,'whatsapp-green','purge-account')`,
+      [ticket.rows[0].id, user.id]
+    )
+    await pool.query(
+      `INSERT INTO count_ticket_fans
+         (ticket_id,user_id,conversation_id,platform,account_key,peer_key,display_name,
+          event_type,direction,fan_type,event_at,day_key)
+       VALUES($1,$2,$3,'whatsapp-green','purge-account','purge-peer','Purge',
+              'message','in','new',now(),current_date)`,
+      [ticket.rows[0].id, user.id, conversation.rows[0].id]
+    )
+
+    await deleteMerchant({
+      repo, admin, ip, id: user.id, confirmUsername: user.username,
+      acknowledge: 'true', reason: '删除计数存档回归'
+    })
+    const archive = await pool.query(
+      'SELECT snapshot FROM deleted_merchants WHERE user_id=$1', [user.id]
+    )
+    assert.equal(archive.rows[0].snapshot.count_tickets.length, 1)
+    assert.equal(archive.rows[0].snapshot.count_ticket_accounts.length, 1)
+    assert.equal(archive.rows[0].snapshot.count_ticket_fans.length, 1)
+    assert.equal(archive.rows[0].snapshot.count_ticket_fans[0].event_type, 'message')
+    assert.equal(archive.rows[0].snapshot.count_ticket_fans[0].direction, 'in')
+  })
 })

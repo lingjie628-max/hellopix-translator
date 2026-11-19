@@ -155,7 +155,10 @@ async function buildSnapshot(repo, user, client) {
     recharges: await dump('recharges', 'user_id'),
     char_ledger: await dump('char_ledger', 'user_id'),
     character_transfers: await dump('character_transfers', 'parent_id'),
-    orders: await dump('orders', 'user_id')
+    orders: await dump('orders', 'user_id'),
+    count_tickets: await dump('count_tickets', 'user_id'),
+    count_ticket_accounts: await dump('count_ticket_accounts', 'user_id'),
+    count_ticket_fans: await dump('count_ticket_fans', 'user_id')
   }
 }
 
