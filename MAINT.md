@@ -399,7 +399,7 @@ pg_restore --list /var/backups/hello-pix/<dump>
   本次改为 `--config.directories.output=/tmp/...` 后成功。正式构建继续使用
   APFS 或 CI 工作区。
 
-## 2026-11-19 原生计数工单完整性修复（1.3.13，待上线）
+## 2026-11-19 原生计数工单完整性修复（1.3.13，已上线）
 
 - 分支：`maint/20261119-count-ticket-integrity`
 - 桌面版本：`1.3.13`
@@ -418,4 +418,9 @@ pg_restore --list /var/backups/hello-pix/<dump>
   - Web 生产构建、renderer `VERIFY_OK`
   - 真 Electron：`VOICE_IMPORT_VERIFY_OK`、`WHATSAPP_DIRECT_PTT_VERIFY_OK`
   - 死引用：309 文件，0 悬空、0 未使用 import
-- 尚未上传官网、尚未执行生产迁移；跨商户重粉口径仍需业务书面确认。
+- 已上传官网并启用三平台 1.3.13；生产已执行迁移 055。
+- 生产真实 API 验收：基础版 403；打开会话和出向消息不计粉；
+  绑定同分钟内有效入站消息计为新粉。
+- 发布回滚点：`/root/hello-pix-release-1.3.13-20261119-211143`
+- 绑定边界热修补文件备份：
+  `/root/hello-pix-hotfix-count-binding-20261119-082130`
