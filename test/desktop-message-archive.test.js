@@ -38,7 +38,7 @@ test('客户端确实上报了消息正文（不再是恒空的 body）', () => 
     '只应剩下 reportIfPeerChanged 里那一处空 body 调用（表示"只是打开了会话"）')
 
   assert.match(guest, /function reportMessage\(/, '缺少 reportMessage')
-  assert.match(guest, /reportClue\(text, direction, messageTime\(node\)\)/,
+  assert.match(guest, /reportClue\(text, direction, messageTime\(node\), 'message'\)/,
     'reportMessage 必须把真实正文和时间传给 reportClue')
 })
 

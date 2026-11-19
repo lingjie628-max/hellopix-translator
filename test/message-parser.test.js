@@ -616,6 +616,6 @@ test('消息归档不落占位符，且归档调用点保持不变', () => {
   const reportAt = guest.indexOf('function reportMessage(')
   const report = guest.slice(reportAt, guest.indexOf('/** 会话切换时上报一次', reportAt))
   assert.match(report, /MessageParser\.stripBusy\(text\)/, '归档前没有摘占位符')
-  assert.match(report, /reportClue\(text, direction, messageTime\(node\)\)/,
+  assert.match(report, /reportClue\(text, direction, messageTime\(node\), 'message'\)/,
     '归档调用点被改动了（desktop-message-archive.test.js 依赖它）')
 })
