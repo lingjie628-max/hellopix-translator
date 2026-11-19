@@ -246,7 +246,11 @@ class CountTicketRepository {
       `INSERT INTO count_ticket_accounts(ticket_id, user_id, platform, account_key, active)
        VALUES ($1, $2, $3, $4, true)
        ON CONFLICT (ticket_id, platform, account_key) DO UPDATE
-         SET active = true, updated_at = now()
+         SET active = true,
+             updated_at = CASE
+               WHEN count_ticket_accounts.active = false THEN now()
+               ELSE count_ticket_accounts.updated_at
+             END
        RETURNING *`,
       [ticketId, userId, payload.platform, payload.accountKey], client
     )

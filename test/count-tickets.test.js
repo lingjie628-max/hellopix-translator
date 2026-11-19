@@ -195,6 +195,24 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
   })
   await bindAccount(merchantA.id, ticketA.id, 'acc-a')
   await bindAccount(merchantA.id, ticketA.id, 'acc-b')
+  const activeSinceBefore = await pool.query(
+    `SELECT updated_at FROM count_ticket_accounts
+     WHERE user_id=$1 AND ticket_id=$2 AND platform='whatsapp-green' AND account_key='acc-a'`,
+    [merchantA.id, ticketA.id]
+  )
+  await service.saveAccount(merchantA.id, {
+    ticketId: ticketA.id, platform: 'whatsapp-green', accountKey: 'acc-a'
+  })
+  const activeSinceAfter = await pool.query(
+    `SELECT updated_at FROM count_ticket_accounts
+     WHERE user_id=$1 AND ticket_id=$2 AND platform='whatsapp-green' AND account_key='acc-a'`,
+    [merchantA.id, ticketA.id]
+  )
+  assert.equal(
+    String(activeSinceAfter.rows[0].updated_at),
+    String(activeSinceBefore.rows[0].updated_at),
+    '重复点击绑定不能重置计数起点'
+  )
 
   const conv1 = await makeConversation(merchantA.id, customer.id, 'acc-a', 'peer-1')
   const first = await captureInbound(merchantA.id, {
