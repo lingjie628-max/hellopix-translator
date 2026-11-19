@@ -227,6 +227,8 @@ class CountTicketService {
         accountKey,
         peerKey,
         displayName: cleanText(payload.displayName, 200),
+        eventType,
+        direction,
         fanType,
         repeatOfId: prior ? Number(prior.id) : null,
         eventAt,

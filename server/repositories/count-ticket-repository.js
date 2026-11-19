@@ -122,16 +122,18 @@ class CountTicketRepository {
     const result = await this.query(
       `INSERT INTO count_ticket_fans
          (ticket_id, user_id, conversation_id, customer_id, platform, account_key,
-          peer_key, display_name, fan_type, repeat_of_id, event_at, day_key)
-       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-              (($11::timestamptz AT TIME ZONE $12) - $13::time)::date
+          peer_key, display_name, event_type, direction, fan_type, repeat_of_id, event_at, day_key)
+       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+              (($13::timestamptz AT TIME ZONE $14) - $15::time)::date
        ON CONFLICT (ticket_id, conversation_id)
          WHERE conversation_id IS NOT NULL
          DO NOTHING
-       RETURNING id, ticket_id, conversation_id, customer_id, fan_type, event_at, day_key`,
+       RETURNING id, ticket_id, conversation_id, customer_id, event_type, direction,
+                 fan_type, event_at, day_key`,
       [
         payload.ticketId, payload.userId, payload.conversationId, payload.customerId || null,
         payload.platform, payload.accountKey, payload.peerKey, payload.displayName || '',
+        payload.eventType, payload.direction,
         payload.fanType, payload.repeatOfId || null, payload.eventAt,
         payload.timezone, payload.zeroTime
       ], client

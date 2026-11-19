@@ -544,4 +544,16 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
   assert.equal(chainLinks.rows.filter(row => row.merged_into == null).length, 1)
   assert.ok(chainLinks.rows.every(row =>
     row.merged_into == null || String(row.merged_into) === String(rootCustomer.id)))
+  const chainAudit = await pool.query(
+    `SELECT count_ticket_fans, moved_customer_ids
+     FROM customer_merge_audits
+     WHERE from_customer_id=$1 AND into_customer_id=$2
+     ORDER BY id DESC LIMIT 1`,
+    [leafCustomer.id, rootCustomer.id]
+  )
+  assert.equal(chainAudit.rows.length, 1, '合并必须留下账本快照')
+  assert.equal(Number(chainAudit.rows[0].count_ticket_fans[0].id), leafFan.fanId)
+  assert.equal(chainAudit.rows[0].count_ticket_fans[0].event_type, 'message')
+  assert.equal(chainAudit.rows[0].count_ticket_fans[0].direction, 'in')
+  assert.deepEqual(chainAudit.rows[0].moved_customer_ids.map(Number), [Number(leafCustomer.id)])
 })

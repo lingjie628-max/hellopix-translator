@@ -322,7 +322,7 @@ class CustomerIdentityService {
       const [fromId, intoId] = row.customer_a < row.customer_b
         ? [row.customer_b, row.customer_a]
         : [row.customer_a, row.customer_b]
-      const merged = await this.repo.mergeCustomers(fromId, intoId, client)
+      const merged = await this.repo.mergeCustomers(fromId, intoId, client, { adminId })
       return { ok: true, action: 'merged', fromId: merged.fromId, intoId: merged.intoId }
     })
   }

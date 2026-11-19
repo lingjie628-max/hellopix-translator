@@ -512,7 +512,7 @@ class CustomerRepository {
    * conversations / customer_owners 的 customer_id 指向合并后的客户。
    * `merged_into` 保留指向，所以合并可回滚。
    */
-  async mergeCustomers(fromId, intoId, client) {
+  async mergeCustomers(fromId, intoId, client, options) {
     // 所有客户合并全局串行。合并候选可能互相重叠，仅锁两行仍会形成竞态链。
     await this.query("SELECT pg_advisory_xact_lock(hashtext('customer-merge'))", [], client)
     const fromRoot = await this.customerRoot(fromId, client)
@@ -530,6 +530,40 @@ class CustomerRepository {
       [[sourceId, targetId]], client
     )
     const movedIds = await this.customerDescendantIds(sourceId, client)
+    const auditRows = await this.query(
+      `SELECT
+         COALESCE((
+           SELECT jsonb_agg(to_jsonb(f) ORDER BY f.id)
+           FROM count_ticket_fans f WHERE f.customer_id = ANY($1::bigint[])
+         ), '[]'::jsonb) AS count_ticket_fans,
+         COALESCE((
+           SELECT jsonb_agg(to_jsonb(o) ORDER BY o.id)
+           FROM customer_owners o WHERE o.customer_id = ANY($1::bigint[])
+         ), '[]'::jsonb) AS customer_owners,
+         COALESCE((
+           SELECT jsonb_agg(to_jsonb(c) ORDER BY c.id)
+           FROM collision_events c WHERE c.customer_id = ANY($1::bigint[])
+         ), '[]'::jsonb) AS collision_events,
+         COALESCE((
+           SELECT jsonb_agg(to_jsonb(e) ORDER BY e.id)
+           FROM identity_match_events e WHERE e.customer_id = ANY($1::bigint[])
+         ), '[]'::jsonb) AS identity_events`,
+      [movedIds], client
+    )
+    const audit = auditRows.rows[0] || {}
+    await this.query(
+      `INSERT INTO customer_merge_audits
+         (from_customer_id, into_customer_id, admin_id, moved_customer_ids,
+          count_ticket_fans, customer_owners, collision_events, identity_events)
+       VALUES ($1,$2,$3,$4::bigint[],$5::jsonb,$6::jsonb,$7::jsonb,$8::jsonb)`,
+      [
+        sourceId, targetId, options && options.adminId ? options.adminId : null, movedIds,
+        JSON.stringify(audit.count_ticket_fans || []),
+        JSON.stringify(audit.customer_owners || []),
+        JSON.stringify(audit.collision_events || []),
+        JSON.stringify(audit.identity_events || [])
+      ], client
+    )
 
     await this.query(
       `UPDATE customer_identities SET customer_id = $2
