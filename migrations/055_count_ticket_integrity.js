@@ -14,6 +14,24 @@ exports.up = pgm => {
       ADD COLUMN IF NOT EXISTS event_type text NOT NULL DEFAULT 'message',
       ADD COLUMN IF NOT EXISTS direction text NOT NULL DEFAULT 'in';
 
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname='count_ticket_fans_event_type_check'
+      ) THEN
+        ALTER TABLE count_ticket_fans
+          ADD CONSTRAINT count_ticket_fans_event_type_check
+          CHECK (event_type = 'message');
+      END IF;
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname='count_ticket_fans_direction_check'
+      ) THEN
+        ALTER TABLE count_ticket_fans
+          ADD CONSTRAINT count_ticket_fans_direction_check
+          CHECK (direction = 'in');
+      END IF;
+    END $$;
+
     CREATE TABLE IF NOT EXISTS customer_merge_audits (
       id                  bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
       from_customer_id    bigint NOT NULL,
