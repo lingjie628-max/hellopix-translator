@@ -15,6 +15,7 @@ const { CountTicketRepository } = require('../server/repositories/count-ticket-r
 const { capabilityFor } = require('../server/lib/capabilities')
 const { packageAllowsCounter } = require('../server/lib/client-catalog')
 const { CustomerRepository } = require('../server/repositories/customer-repository')
+const { CustomerIdentityService } = require('../server/services/customer-identity-service')
 const { publicUser } = require('../server/routes/context')
 
 const databaseUrl = process.env.PIX_TEST_DATABASE_URL
@@ -99,6 +100,7 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
   }
   const service = new CountTicketService(new CountTicketRepository(db))
   const customerRepository = new CustomerRepository(db)
+  const customerIdentities = new CustomerIdentityService(customerRepository)
   const captureInbound = (userId, data) => service.captureFan(
     userId,
     Object.assign({ direction: 'in', body: 'hello', eventType: 'message' }, data)
@@ -472,4 +474,63 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
   const mergedTelegram = await service.detail(telegramTicket.id, { userId: merchantA.id })
   assert.equal(mergedTelegram.metrics.newFans, 2, 'Telegram 内该客户的首条仍是新粉')
   assert.equal(mergedTelegram.metrics.repeatFans, 0, 'WhatsApp 的历史不能串进 Telegram 重粉')
+
+  const rootCustomer = await makeCustomer('chain-root')
+  const middleCustomer = await makeCustomer('chain-middle')
+  const leafCustomer = await makeCustomer('chain-leaf')
+  await customerRepository.recordMergeCandidate(rootCustomer.id, middleCustomer.id, 'chain', 0.9, {})
+  const firstCandidate = await pool.query(
+    `SELECT id FROM customer_merge_candidates
+     WHERE customer_a=$1 AND customer_b=$2 AND status='pending'`,
+    [Math.min(rootCustomer.id, middleCustomer.id), Math.max(rootCustomer.id, middleCustomer.id)]
+  )
+  await customerIdentities.resolveMergeCandidate(firstCandidate.rows[0].id, 'merge', null)
+
+  const chainTicket = await service.saveTicket(merchantA.id, {
+    title: '合并链回归', platform: 'whatsapp-green', timezone: 'Asia/Shanghai', zeroTime: '00:00'
+  })
+  await bindAccount(merchantA.id, chainTicket.id, 'acc-chain')
+  const leafConversation = await makeConversation(
+    merchantA.id, leafCustomer.id, 'acc-chain', 'peer-chain-leaf'
+  )
+  const leafFan = await captureInbound(merchantA.id, {
+    conversationId: leafConversation,
+    customerId: leafCustomer.id,
+    platform: 'whatsapp-green',
+    accountKey: 'acc-chain',
+    peerKey: 'peer-chain-leaf',
+    eventAt: '2026-11-19T03:00:00Z'
+  })
+  assert.equal(leafFan.fanType, 'new')
+
+  await customerRepository.recordMergeCandidate(middleCustomer.id, leafCustomer.id, 'chain', 0.9, {})
+  const secondCandidate = await pool.query(
+    `SELECT id FROM customer_merge_candidates
+     WHERE customer_a=$1 AND customer_b=$2 AND status='pending'`,
+    [Math.min(middleCustomer.id, leafCustomer.id), Math.max(middleCustomer.id, leafCustomer.id)]
+  )
+  await customerIdentities.resolveMergeCandidate(secondCandidate.rows[0].id, 'merge', null)
+
+  const rootConversation = await makeConversation(
+    merchantA.id, rootCustomer.id, 'acc-chain', 'peer-chain-root'
+  )
+  const rootFan = await captureInbound(merchantA.id, {
+    conversationId: rootConversation,
+    customerId: rootCustomer.id,
+    platform: 'whatsapp-green',
+    accountKey: 'acc-chain',
+    peerKey: 'peer-chain-root',
+    eventAt: '2026-11-19T04:00:00Z'
+  })
+  assert.equal(rootFan.fanType, 'repeat', '已合并客户再作为目标后，根客户出现仍必须是重粉')
+  const chainDetail = await service.detail(chainTicket.id, { userId: merchantA.id })
+  assert.equal(chainDetail.metrics.newFans, 1)
+  assert.equal(chainDetail.metrics.repeatFans, 1)
+  const chainLinks = await pool.query(
+    'SELECT id,merged_into FROM customers WHERE id=ANY($1::bigint[]) ORDER BY id',
+    [[rootCustomer.id, middleCustomer.id, leafCustomer.id]]
+  )
+  assert.equal(chainLinks.rows.filter(row => row.merged_into == null).length, 1)
+  assert.ok(chainLinks.rows.every(row =>
+    row.merged_into == null || String(row.merged_into) === String(rootCustomer.id)))
 })

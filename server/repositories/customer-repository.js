@@ -14,6 +14,8 @@
  * 按设计可以跨商户查询 —— 但它们**不含任何聊天内容**。
  */
 
+const { ApiError } = require('../lib/http')
+
 class CustomerRepository {
   constructor(db) {
     this.db = db
@@ -51,16 +53,68 @@ class CustomerRepository {
   /** 按指纹找客户。已合并的客户要顺着 merged_into 走到最终客户。 */
   async customerByIdentity(fingerprint, client) {
     const r = await this.query(
-      `SELECT c.id, c.public_id, c.merged_into,
-              COALESCE(final.id, c.id) AS resolved_id,
-              COALESCE(final.public_id, c.public_id) AS resolved_public_id
-       FROM customer_identities ci
-       JOIN customers c ON c.id = ci.customer_id
-       LEFT JOIN customers final ON final.id = c.merged_into
-       WHERE ci.fingerprint = $1`,
+      `WITH RECURSIVE chain AS (
+         SELECT c.id, c.public_id, c.merged_into, 0 AS depth, ARRAY[c.id] AS path
+         FROM customer_identities ci
+         JOIN customers c ON c.id = ci.customer_id
+         WHERE ci.fingerprint = $1
+         UNION ALL
+         SELECT next.id, next.public_id, next.merged_into, chain.depth + 1,
+                chain.path || next.id
+         FROM customers next
+         JOIN chain ON next.id = chain.merged_into
+         WHERE chain.merged_into IS NOT NULL
+           AND NOT next.id = ANY(chain.path)
+           AND chain.depth < 32
+       )
+       SELECT id AS resolved_id, public_id AS resolved_public_id
+       FROM chain
+       WHERE merged_into IS NULL
+       LIMIT 1`,
       [fingerprint], client
     )
     return r.rows[0] || null
+  }
+
+  /** 沿 merged_into 找最终客户。遇到断链/环返回 null，绝不猜中间节点。 */
+  async customerRoot(customerId, client) {
+    const r = await this.query(
+      `WITH RECURSIVE chain AS (
+         SELECT id, merged_into, 0 AS depth, ARRAY[id] AS path
+         FROM customers WHERE id = $1
+         UNION ALL
+         SELECT next.id, next.merged_into, chain.depth + 1, chain.path || next.id
+         FROM customers next
+         JOIN chain ON next.id = chain.merged_into
+         WHERE chain.merged_into IS NOT NULL
+           AND NOT next.id = ANY(chain.path)
+           AND chain.depth < 32
+       )
+       SELECT id, depth FROM chain
+       WHERE merged_into IS NULL
+       LIMIT 1`,
+      [customerId], client
+    )
+    return r.rows[0] || null
+  }
+
+  /** 当前客户及其所有已合并后代，用于修复历史链表并统一搬到最终根。 */
+  async customerDescendantIds(customerId, client) {
+    const r = await this.query(
+      `WITH RECURSIVE tree AS (
+         SELECT id, ARRAY[id] AS path
+         FROM customers WHERE id = $1
+         UNION ALL
+         SELECT child.id, tree.path || child.id
+         FROM customers child
+         JOIN tree ON child.merged_into = tree.id
+         WHERE NOT child.id = ANY(tree.path)
+           AND cardinality(tree.path) < 64
+       )
+       SELECT id FROM tree ORDER BY id`,
+      [customerId], client
+    )
+    return r.rows.map(row => Number(row.id))
   }
 
   async createCustomer(client) {
@@ -375,8 +429,10 @@ class CustomerRepository {
       [customerId], client
     )
     if (!head.rows[0]) return null
-    // 已合并的客户要顺着 merged_into 走到最终客户，否则详情页会指向一个空壳
-    const finalId = head.rows[0].merged_into || head.rows[0].id
+    // 已合并的客户要递归走到最终客户，否则旧链接会停在中间节点。
+    const root = await this.customerRoot(customerId, client)
+    if (!root) return null
+    const finalId = Number(root.id)
 
     const [identities, conversations, owners, collisions, matches, merchants] = await Promise.all([
       this.query(
@@ -457,16 +513,41 @@ class CustomerRepository {
    * `merged_into` 保留指向，所以合并可回滚。
    */
   async mergeCustomers(fromId, intoId, client) {
+    // 所有客户合并全局串行。合并候选可能互相重叠，仅锁两行仍会形成竞态链。
+    await this.query("SELECT pg_advisory_xact_lock(hashtext('customer-merge'))", [], client)
+    const fromRoot = await this.customerRoot(fromId, client)
+    const intoRoot = await this.customerRoot(intoId, client)
+    if (!fromRoot || !intoRoot) {
+      throw new ApiError(409, '客户合并链异常，请人工核查', 'CUSTOMER_MERGE_BROKEN_CHAIN')
+    }
+    const targetId = Number(intoRoot.id)
+    const sourceId = Number(fromRoot.id)
+    if (targetId === sourceId) {
+      return { changed: false, fromId: sourceId, intoId: targetId, movedCustomerIds: 0 }
+    }
     await this.query(
-      `UPDATE customer_identities SET customer_id = $2 WHERE customer_id = $1`, [fromId, intoId], client)
+      'SELECT id FROM customers WHERE id = ANY($1::bigint[]) ORDER BY id FOR UPDATE',
+      [[sourceId, targetId]], client
+    )
+    const movedIds = await this.customerDescendantIds(sourceId, client)
+
     await this.query(
-      `UPDATE conversations SET customer_id = $2 WHERE customer_id = $1`, [fromId, intoId], client)
+      `UPDATE customer_identities SET customer_id = $2
+       WHERE customer_id = ANY($1::bigint[])`, [movedIds, targetId], client)
     await this.query(
-      `UPDATE messages SET customer_id = $2 WHERE customer_id = $1`, [fromId, intoId], client)
+      `UPDATE conversations SET customer_id = $2
+       WHERE customer_id = ANY($1::bigint[])`, [movedIds, targetId], client)
+    await this.query(
+      `UPDATE messages SET customer_id = $2
+       WHERE customer_id = ANY($1::bigint[])`, [movedIds, targetId], client)
     // 计数账本保留原始事件时间与来源账号，只改客户归属 —— 否则合并后
     // 下一次进粉无法识别该客户曾经出现过，会错误地再算一次新粉。
     await this.query(
-      `UPDATE count_ticket_fans SET customer_id = $2 WHERE customer_id = $1`, [fromId, intoId], client)
+      `UPDATE count_ticket_fans SET customer_id = $2
+       WHERE customer_id = ANY($1::bigint[])`, [movedIds, targetId], client)
+    await this.query(
+      `UPDATE identity_match_events SET customer_id = $2
+       WHERE customer_id = ANY($1::bigint[])`, [movedIds, targetId], client)
     // 合并后把同一客户在每个应用内的进粉事件按真实时间重新排序：
     // 每个平台最早一条是 new，其余是 repeat，并指向该平台首条。
     // 只改归属会导致两个原本独立的客户都保留 new，合并后新粉数虚高。
@@ -480,35 +561,46 @@ class CustomerRepository {
                   PARTITION BY platform ORDER BY event_at ASC, id ASC
                 ) AS position
          FROM count_ticket_fans
-         WHERE customer_id = $1
+       WHERE customer_id = $1
        )
        UPDATE count_ticket_fans f
        SET fan_type = CASE WHEN ranked.position = 1 THEN 'new' ELSE 'repeat' END,
            repeat_of_id = CASE WHEN ranked.position = 1 THEN NULL ELSE ranked.first_id END
        FROM ranked
        WHERE f.id = ranked.id`,
-      [intoId], client)
+      [targetId], client)
     // customer_owners 有 (user_id, customer_id) 的 FOLLOWING 唯一索引，
     // 两边同属一个商户时会撞索引 —— 冲突的那条直接释放，保留目标方的跟进关系。
     await this.query(
       `UPDATE customer_owners o SET status = 'LOST', released_at = now()
-       WHERE o.customer_id = $1 AND o.status = 'FOLLOWING' AND EXISTS (
+       WHERE o.customer_id = ANY($1::bigint[]) AND o.status = 'FOLLOWING' AND EXISTS (
          SELECT 1 FROM customer_owners t
          WHERE t.customer_id = $2 AND t.user_id = o.user_id AND t.status = 'FOLLOWING')`,
-      [fromId, intoId], client)
+      [movedIds, targetId], client)
     await this.query(
-      `UPDATE customer_owners SET customer_id = $2 WHERE customer_id = $1`, [fromId, intoId], client)
+      `UPDATE customer_owners SET customer_id = $2
+       WHERE customer_id = ANY($1::bigint[])`, [movedIds, targetId], client)
     await this.query(
-      `UPDATE collision_events SET customer_id = $2 WHERE customer_id = $1`, [fromId, intoId], client)
+      `UPDATE collision_events SET customer_id = $2
+       WHERE customer_id = ANY($1::bigint[])`, [movedIds, targetId], client)
     await this.query(
       `UPDATE customer_merchant_links l SET customer_id = $2
-       WHERE l.customer_id = $1
+       WHERE l.customer_id = ANY($1::bigint[])
          AND NOT EXISTS (SELECT 1 FROM customer_merchant_links t
                          WHERE t.customer_id = $2 AND t.user_id = l.user_id)`,
-      [fromId, intoId], client)
-    await this.query(`DELETE FROM customer_merchant_links WHERE customer_id = $1`, [fromId], client)
+      [movedIds, targetId], client)
     await this.query(
-      `UPDATE customers SET merged_into = $2, merged_at = now() WHERE id = $1`, [fromId, intoId], client)
+      `DELETE FROM customer_merchant_links WHERE customer_id = ANY($1::bigint[])`,
+      [movedIds], client)
+    await this.query(
+      `UPDATE customers SET merged_into = $2, merged_at = now()
+       WHERE id = ANY($1::bigint[])`, [movedIds, targetId], client)
+    return {
+      changed: true,
+      fromId: sourceId,
+      intoId: targetId,
+      movedCustomerIds: movedIds.length
+    }
   }
 
   async collisionSettingsSave(value, client) {
