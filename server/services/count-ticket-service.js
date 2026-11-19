@@ -266,7 +266,7 @@ class CountTicketService {
       throw new ApiError(400, '工单状态不合法', 'COUNT_STATUS_BAD')
     }
     const limit = Math.min(Math.max(Number(data.rows || data.size) || 50, 1), 100)
-    const page = Math.max(Number(data.page) || 1, 1)
+    const page = Math.min(Math.max(Number(data.page) || 1, 1), 1_000_000)
     const result = await this.repo.listTickets({
       userId,
       keyword: cleanText(data.keyword, 120),
@@ -314,7 +314,7 @@ class CountTicketService {
       throw new ApiError(400, '粉丝类型不合法', 'COUNT_FAN_TYPE_BAD')
     }
     const limit = Math.min(Math.max(Number(data.rows || data.size) || 30, 1), 100)
-    const page = Math.max(Number(data.page) || 1, 1)
+    const page = Math.min(Math.max(Number(data.page) || 1, 1), 1_000_000)
     const result = await this.repo.listFans(id, {
       type,
       platform: cleanText(data.platform, 32).toLowerCase(),

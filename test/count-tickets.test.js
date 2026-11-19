@@ -77,6 +77,19 @@ test('计数只接真实入站消息，打开会话与出向消息带独立事�
   assert.match(route, /eventType:\s*data\.eventType/)
 })
 
+test('计数列表页码有安全上限，Infinity 不能打进 SQL offset', async () => {
+  let seen = null
+  const service = new CountTicketService({
+    async listTickets(filters) {
+      seen = filters
+      return { rows: [], total: 0 }
+    }
+  })
+  const result = await service.list(1, { page: Infinity, rows: 30 })
+  assert.equal(result.page, 1_000_000)
+  assert.equal(seen.offset, (1_000_000 - 1) * 30)
+})
+
 test('原生计数：会话去重、跨账号重粉、跨商户识别与工单隔离', { skip: !databaseUrl }, async t => {
   process.env.DATABASE_URL = databaseUrl
   const { Pool } = require('pg')
