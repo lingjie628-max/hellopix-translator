@@ -50,6 +50,45 @@ class CountTicketRepository {
     return result.rows[0] || null
   }
 
+  async fanById(fanId, client) {
+    const result = await this.query(
+      `SELECT id, ticket_id, conversation_id, customer_id, fan_type, repeat_of_id, event_at
+       FROM count_ticket_fans WHERE id = $1`,
+      [fanId], client
+    )
+    return result.rows[0] || null
+  }
+
+  /**
+   * 按真实事件时间重排同一客户在同一应用内的事件。
+   *
+   * 消息补扫、跨设备同步都可能乱序到达。仅按“先到先算”会把较晚事件钉成
+   * new、较早事件错标 repeat。每次插入后重排，保证最早事件始终是新粉。
+   */
+  async rerankCustomerFans(customerId, platform, client) {
+    const result = await this.query(
+      `WITH ranked AS (
+         SELECT id,
+                first_value(id) OVER (
+                  PARTITION BY platform ORDER BY event_at ASC, id ASC
+                ) AS first_id,
+                row_number() OVER (
+                  PARTITION BY platform ORDER BY event_at ASC, id ASC
+                ) AS position
+         FROM count_ticket_fans
+         WHERE customer_id = $1 AND platform = $2
+       )
+       UPDATE count_ticket_fans f
+       SET fan_type = CASE WHEN ranked.position = 1 THEN 'new' ELSE 'repeat' END,
+           repeat_of_id = CASE WHEN ranked.position = 1 THEN NULL ELSE ranked.first_id END
+       FROM ranked
+       WHERE f.id = ranked.id
+       RETURNING f.id, f.fan_type, f.repeat_of_id`,
+      [customerId, platform], client
+    )
+    return result.rows
+  }
+
   async lockCustomer(customerId, client) {
     if (!customerId) return
     await this.query('SELECT id FROM customers WHERE id = $1 FOR UPDATE', [customerId], client)

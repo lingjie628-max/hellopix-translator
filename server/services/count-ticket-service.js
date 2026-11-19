@@ -227,11 +227,17 @@ class CountTicketService {
         zeroTime: ticket.zero_time
       }, client)
       if (inserted) {
+        let finalFan = inserted
+        if (Number.isSafeInteger(customerId)) {
+          await this.repo.rerankCustomerFans(customerId, platform, client)
+          finalFan = await this.repo.fanById(inserted.id, client) || inserted
+        }
         return {
           captured: true,
           ticketId: Number(ticket.id),
           fanId: Number(inserted.id),
-          fanType
+          fanType: finalFan.fan_type,
+          repeatOfId: finalFan.repeat_of_id == null ? null : Number(finalFan.repeat_of_id)
         }
       }
       const raced = await this.repo.fanByConversation(Number(ticket.id), conversationId, client)

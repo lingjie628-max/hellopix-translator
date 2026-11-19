@@ -248,10 +248,42 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
     eventAt: '2099-01-01T00:00:00Z'
   }))).reason, 'event_at_in_future', '未来时间不能污染计数')
 
+  const lateCustomer = await makeCustomer('late-order')
+  const lateTicket = await service.saveTicket(merchantA.id, {
+    title: '乱序补扫', platform: 'whatsapp-green', timezone: 'Asia/Shanghai', zeroTime: '00:00'
+  })
+  await bindAccount(merchantA.id, lateTicket.id, 'acc-late')
+  const laterConversation = await makeConversation(merchantA.id, lateCustomer.id, 'acc-late', 'peer-later')
+  const earlierConversation = await makeConversation(merchantA.id, lateCustomer.id, 'acc-late', 'peer-earlier')
+  const laterFirst = await captureInbound(merchantA.id, {
+    conversationId: laterConversation,
+    customerId: lateCustomer.id,
+    platform: 'whatsapp-green',
+    accountKey: 'acc-late',
+    peerKey: 'peer-later',
+    eventAt: '2026-11-19T02:00:00Z'
+  })
+  const earlierSecond = await captureInbound(merchantA.id, {
+    conversationId: earlierConversation,
+    customerId: lateCustomer.id,
+    platform: 'whatsapp-green',
+    accountKey: 'acc-late',
+    peerKey: 'peer-earlier',
+    eventAt: '2026-11-19T01:00:00Z'
+  })
+  assert.equal(laterFirst.fanType, 'new')
+  assert.equal(earlierSecond.fanType, 'new', '迟到但时间更早的事件最终必须成为新粉')
+  const ranked = await pool.query(
+    `SELECT id,fan_type,repeat_of_id FROM count_ticket_fans
+     WHERE ticket_id=$1 ORDER BY event_at,id`, [lateTicket.id]
+  )
+  assert.deepEqual(ranked.rows.map(row => row.fan_type), ['new', 'repeat'])
+  assert.equal(String(ranked.rows[1].repeat_of_id), String(ranked.rows[0].id))
+
   const available = await service.availableAccounts(merchantA.id, ticketA.id)
   assert.deepEqual(
     available.map(item => item.accountKey).sort(),
-    ['acc-a', 'acc-b'],
+    ['acc-a', 'acc-b', 'acc-late'],
     '绑定弹窗只能看到当前商户真实上报过的接入账号'
   )
   assert.ok(
