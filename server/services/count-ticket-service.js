@@ -6,6 +6,7 @@ const catalog = require('../lib/client-catalog')
 
 const TICKET_STATUSES = new Set(['active', 'closed'])
 const FAN_TYPES = new Set(['new', 'repeat'])
+const ACCOUNT_BINDING_GRACE_MS = 2 * 60 * 1000
 
 function cleanText(value, max) {
   return String(value == null ? '' : value).trim().slice(0, max)
@@ -195,7 +196,10 @@ class CountTicketService {
     return this.repo.transaction(async client => {
       const ticket = await this.repo.activeTicketForAccount(userId, platform, accountKey, client)
       if (!ticket) return { captured: false, reason: 'account_not_bound' }
-      if (ticket.account_active_since && eventAt < new Date(ticket.account_active_since)) {
+      const activeSince = ticket.account_active_since
+        ? new Date(ticket.account_active_since).getTime()
+        : 0
+      if (activeSince && eventAt.getTime() + ACCOUNT_BINDING_GRACE_MS < activeSince) {
         return { captured: false, reason: 'before_account_binding' }
       }
 

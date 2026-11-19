@@ -282,12 +282,30 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
   }))).reason, 'not_an_inbound_message', '出向消息不能计粉')
   assert.equal((await service.captureFan(merchantA.id, Object.assign({}, gateBase, {
     direction: 'in', body: '历史消息', eventType: 'message',
-    eventAt: '2025-12-31T23:59:59Z'
+    eventAt: '2025-12-30T12:00:00Z'
   }))).reason, 'before_account_binding', '账号绑定前的历史不能补进新工单')
   assert.equal((await service.captureFan(merchantA.id, Object.assign({}, gateBase, {
     direction: 'in', body: '未来消息', eventType: 'message',
     eventAt: '2099-01-01T00:00:00Z'
   }))).reason, 'event_at_in_future', '未来时间不能污染计数')
+
+  const graceCustomer = await makeCustomer('binding-grace')
+  const graceTicket = await service.saveTicket(merchantA.id, {
+    title: '绑定同分钟容差', platform: 'whatsapp-green', timezone: 'Asia/Shanghai', zeroTime: '00:00'
+  })
+  await bindAccount(merchantA.id, graceTicket.id, 'acc-grace', '2026-11-19T05:00:30Z')
+  const graceConversation = await makeConversation(
+    merchantA.id, graceCustomer.id, 'acc-grace', 'peer-grace'
+  )
+  const graceFan = await captureInbound(merchantA.id, {
+    conversationId: graceConversation,
+    customerId: graceCustomer.id,
+    platform: 'whatsapp-green',
+    accountKey: 'acc-grace',
+    peerKey: 'peer-grace',
+    eventAt: '2026-11-19T05:00:00Z'
+  })
+  assert.equal(graceFan.captured, true, '分钟精度导致的小于 2 分钟误差不能误伤刚到的消息')
 
   const lateCustomer = await makeCustomer('late-order')
   const lateTicket = await service.saveTicket(merchantA.id, {
@@ -324,7 +342,7 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
   const available = await service.availableAccounts(merchantA.id, ticketA.id)
   assert.deepEqual(
     available.map(item => item.accountKey).sort(),
-    ['acc-a', 'acc-b', 'acc-late'],
+    ['acc-a', 'acc-b', 'acc-grace', 'acc-late'],
     '绑定弹窗只能看到当前商户真实上报过的接入账号'
   )
   assert.ok(
