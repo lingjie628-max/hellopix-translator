@@ -106,13 +106,21 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
     Object.assign({ direction: 'in', body: 'hello', eventType: 'message' }, data)
   )
 
-  async function bindAccount(userId, ticketId, accountKey, since = '2026-01-01T00:00:00Z') {
-    await service.saveAccount(userId, { ticketId, platform: 'whatsapp-green', accountKey })
+  async function bindAccount(
+    userId, ticketId, accountKey, since = '2026-01-01T00:00:00Z', platform = 'whatsapp-green'
+  ) {
+    await pool.query(
+      `INSERT INTO conversations(user_id,customer_id,platform,account_key,peer_key,display_name,last_message_at)
+       VALUES($1,NULL,$2,$3,$4,$3,now())
+       ON CONFLICT (user_id,platform,account_key,peer_key) DO NOTHING`,
+      [userId, platform, accountKey, `seed-${accountKey}`]
+    )
+    await service.saveAccount(userId, { ticketId, platform, accountKey })
     await pool.query(
       `UPDATE count_ticket_accounts
        SET created_at=$4, updated_at=$4
        WHERE user_id=$1 AND ticket_id=$2 AND platform=$3 AND account_key=$5 AND active=true`,
-      [userId, ticketId, 'whatsapp-green', since, accountKey]
+      [userId, ticketId, platform, since, accountKey]
     )
   }
 
@@ -309,14 +317,7 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
     timezone: 'Asia/Shanghai',
     zeroTime: '00:00'
   })
-  await service.saveAccount(merchantA.id, {
-    ticketId: telegramTicket.id, platform: 'telegram-z', accountKey: 'tg-acc'
-  })
-  await pool.query(
-    `UPDATE count_ticket_accounts SET created_at=$4, updated_at=$4
-     WHERE user_id=$1 AND ticket_id=$2 AND platform=$3 AND account_key='tg-acc'`,
-    [merchantA.id, telegramTicket.id, 'telegram-z', '2026-01-01T00:00:00Z']
-  )
+  await bindAccount(merchantA.id, telegramTicket.id, 'tg-acc', '2026-01-01T00:00:00Z', 'telegram-z')
   const telegramConversation = await makeConversation(
     merchantA.id, customer.id, 'tg-acc', 'tg-peer', 'telegram-z'
   )
@@ -412,6 +413,16 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
     }),
     error => error.code === 'COUNT_BUSINESS_TIME_LOCKED',
     '已有粉丝后不能静默改变历史业务日口径'
+  )
+
+  await assert.rejects(
+    () => service.saveAccount(merchantA.id, {
+      ticketId: ticketA.id,
+      platform: 'whatsapp-green',
+      accountKey: 'never-reported'
+    }),
+    error => error.code === 'COUNT_ACCOUNT_NOT_REPORTED',
+    '未由客户端上报的接入账号不能手工塞进工单'
   )
 
   await assert.rejects(

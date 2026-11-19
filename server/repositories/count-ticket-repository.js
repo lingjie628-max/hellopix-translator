@@ -283,6 +283,16 @@ class CountTicketRepository {
     return mapRows(result.rows)
   }
 
+  async accountReported(userId, platform, accountKey, client) {
+    const result = await this.query(
+      `SELECT 1 FROM conversations
+       WHERE user_id=$1 AND platform=$2 AND account_key=$3
+       LIMIT 1`,
+      [userId, platform, accountKey], client
+    )
+    return result.rows.length > 0
+  }
+
   async listTickets({ userId, keyword, status, limit, offset }, client) {
     const values = []
     const clauses = []

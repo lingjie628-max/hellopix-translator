@@ -259,10 +259,9 @@
           <el-select
             v-model="accountForm.accountKey"
             filterable
-            allow-create
             default-first-option
             style="width:100%"
-            placeholder="选择已上报账号，或手动输入"
+            placeholder="选择客户端已上报账号"
           >
             <el-option
               v-for="item in availableAccountOptions"
@@ -273,10 +272,18 @@
           </el-select>
         </el-form-item>
       </el-form>
-      <p class="count-form-tip">这里选择客户端主进程实际上报的接入账号；它可能不是 WhatsApp 手机号。</p>
+      <p v-if="!availableAccountOptions.length" class="count-form-tip">
+        还没有可绑定账号。请先在客户端打开该应用的一个会话，让客户端上报接入账号。
+      </p>
+      <p v-else class="count-form-tip">这里选择客户端主进程实际上报的接入账号；它可能不是 WhatsApp 手机号。</p>
       <span slot="footer">
         <el-button @click="accountDialog = false">取消</el-button>
-        <el-button type="primary" :loading="savingAccount" @click="saveAccount">绑定</el-button>
+        <el-button
+          type="primary"
+          :loading="savingAccount"
+          :disabled="!accountForm.accountKey"
+          @click="saveAccount"
+        >绑定</el-button>
       </span>
     </el-dialog>
   </div>

@@ -129,6 +129,13 @@ class CountTicketService {
           'COUNT_ACCOUNT_PLATFORM_MISMATCH'
         )
       }
+      if (!(await this.repo.accountReported(userId, account.platform, account.accountKey, client))) {
+        throw new ApiError(
+          400,
+          '这个接入账号还没有被客户端上报，请先在客户端打开对应应用会话',
+          'COUNT_ACCOUNT_NOT_REPORTED'
+        )
+      }
       const row = await this.repo.saveAccount(ticketId, userId, account, client)
       return { account: row }
     })
