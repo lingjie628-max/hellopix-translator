@@ -167,6 +167,26 @@ test('短窗口内连续启动判定为崩溃循环，进入安全模式', () =>
   }
 })
 
+test('升级到新版本时清掉旧版本留下的崩溃循环计数', () => {
+  const dir = tmpDir()
+  const oldStarts = [Date.now(), Date.now(), Date.now()]
+  fs.writeFileSync(path.join(dir, 'health-state.json'), JSON.stringify({
+    version: '1.3.13',
+    starts: oldStarts,
+    crashed: true
+  }))
+
+  const guard = createHealthGuard({ app: {}, dir, version: '1.3.14' })
+  const stats = guard.begin()
+  assert.equal(stats.starts, 1, '新版本只能从本次启动开始计数')
+  assert.equal(stats.safeMode, false, '旧版本的崩溃循环不能把修复版第一次启动按进安全模式')
+
+  const state = JSON.parse(fs.readFileSync(path.join(dir, 'health-state.json'), 'utf8'))
+  assert.equal(state.version, '1.3.14')
+  assert.equal(state.starts.length, 1)
+  assert.equal(state.crashed, false)
+})
+
 test('致命错误：先 relaunch 再 exit，并留 crashed 标记', () => {
   const dir = tmpDir()
   let relaunched = 0

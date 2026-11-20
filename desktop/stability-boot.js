@@ -86,6 +86,7 @@ if (!GUARD_OFF) {
   guard = createHealthGuard({
     app: app,
     dir: resolveStateDir(),
+    version: app.getVersion(),
     log: consoleLog,
     options: SAFE_MODE_OFF ? { crashLoopStarts: Number.MAX_SAFE_INTEGER } : {}
   })

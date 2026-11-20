@@ -131,6 +131,7 @@ function createHealthGuard(opts) {
   const app = o.app || null
   const log = o.log || null
   const dir = o.dir || ''
+  const appVersion = String(o.version || '')
   const cfg = Object.assign({}, DEFAULTS, o.options || {})
   const clock = o.clock || (() => Date.now())
   const setT = o.setTimeout || setTimeout
@@ -194,7 +195,14 @@ function createHealthGuard(opts) {
   function begin() {
     const t = nowMs(clock)
     const prev = readState()
-    const recent = (Array.isArray(prev.starts) ? prev.starts : [])
+    // 新版本启动时不能继承旧版本的崩溃循环计数。
+    //
+    // 否则用户为了重开已经连续点了几次，升级到修复版后第一次启动仍会被
+    // 旧状态推进安全模式：GPU 被关、实例数被限、翻译桥也不注入。用户看到
+    // 的是"升级了还是不正常"，而真正的新内核根本没有按正常路径跑过。
+    // 版本变化本身就是一次新的二进制，旧版本的启动记录不能再作为本次判据。
+    const versionChanged = !!appVersion && String(prev.version || '') !== appVersion
+    const recent = (versionChanged ? [] : (Array.isArray(prev.starts) ? prev.starts : []))
       .filter(at => Number.isFinite(at) && t - at < cfg.crashLoopWindowMs)
     recent.push(t)
     stats.starts = recent.length
@@ -205,8 +213,8 @@ function createHealthGuard(opts) {
     //   hardExit() 会先写 crashed=true 再 relaunch()，那是**我们自己安排的重启**，
     //   用户什么都没做就会被连坐成循环。所以 selfRelaunch 时降级为普通判据
     //   （仍要求 5 分钟内够 3 次），而不是整条豁免 —— 真循环照样能被抓住。
-    const selfRelaunch = !!prev.selfRelaunch
-    const crashedLast = !!prev.crashed && !selfRelaunch
+    const selfRelaunch = !versionChanged && !!prev.selfRelaunch
+    const crashedLast = !versionChanged && !!prev.crashed && !selfRelaunch
     // 主判据：短窗口内启动够多次 = 上次根本没跑起来。
     // 放宽判据：上次异常退出时，2 次就够（崩溃→重开→崩溃，是典型循环）。
     const loop = recent.length >= cfg.crashLoopStarts || (crashedLast && recent.length >= 2)
@@ -214,7 +222,7 @@ function createHealthGuard(opts) {
     // crashed / selfRelaunch 都必须在这里复位：它们是「上一次」的状态，本次已消费。
     // 之前 crashed 只在 markCleanExit 里复位 —— 被系统强杀（活动监视器、断电）
     // 根本走不到那里，true 会一直留着，把后续每次重启都判成崩溃。
-    writeState({ starts: recent, crashed: false, selfRelaunch: false })
+    writeState({ version: appVersion, starts: recent, crashed: false, selfRelaunch: false })
 
     if (loop) {
       say('warn', '检测到崩溃循环（' + cfg.crashLoopWindowMs / 1000 + 's 内启动 ' +
@@ -235,7 +243,7 @@ function createHealthGuard(opts) {
     // 跑满 stableRunMs 就认为这次启动是健康的，清掉计数。
     const stable = track(() => {
       untrack(stable)
-      writeState({ starts: [], crashed: false })
+      writeState({ version: appVersion, starts: [], crashed: false })
       say('info', '已稳定运行 ' + Math.round(cfg.stableRunMs / 60000) + ' 分钟，崩溃循环计数清零')
     }, cfg.stableRunMs)
 
@@ -245,7 +253,7 @@ function createHealthGuard(opts) {
   /** 正常退出时调用（app.on('before-quit') 之后、真正退出前）。 */
   function markCleanExit() {
     const prev = readState()
-    writeState({ starts: prev.starts || [], crashed: false })
+    writeState({ version: appVersion || prev.version || '', starts: prev.starts || [], crashed: false })
   }
 
   /**
@@ -259,7 +267,7 @@ function createHealthGuard(opts) {
     say('fatal', '主进程致命错误，准备自动重启（exitCode=' + code + '）')
     const prev = readState()
     // selfRelaunch：告诉下一次启动「这次退出是我自己安排的重启」，别算成崩溃循环。
-    writeState({ starts: prev.starts || [], crashed: true, selfRelaunch: true })
+    writeState({ version: appVersion || prev.version || '', starts: prev.starts || [], crashed: true, selfRelaunch: true })
     try {
       // 不传 args：Electron 会按当前进程的启动方式重启（打包版与开发版都正确）。
       // 显式传 process.argv.slice(1) 在打包版里会把资源路径当成参数再传一遍，
@@ -495,7 +503,7 @@ function createHealthGuard(opts) {
     try {
       stats.safeMode = false
       stats.starts = 0
-      writeState({ starts: [], crashed: false })
+      writeState({ version: appVersion, starts: [], crashed: false })
       say('info', '用户手动解除安全模式：翻译桥将在实例重建后恢复')
       return true
     } catch (e) {
