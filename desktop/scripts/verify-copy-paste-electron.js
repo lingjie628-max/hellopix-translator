@@ -35,7 +35,7 @@
  * 退出码：0 = 全部通过；1 = 有项不通过；2 = 脚本自身异常。
  */
 
-const { app, BrowserWindow, WebContentsView, Menu, clipboard } = require('electron')
+const { app, BrowserWindow, WebContentsView, Menu, clipboard, ipcMain } = require('electron')
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
@@ -133,16 +133,25 @@ async function main () {
 
   // ---- 用从 main.js 切出来的**真身**组装编辑支持 ----
   const runEditCommandSrc = sliceBlock(mainSrc, 'function runEditCommand(wc, action)')
+  const installEditableFocusRouterSrc = sliceBlock(mainSrc, 'function installEditableFocusRouter ()')
   const installEditSupportSrc = sliceBlock(mainSrc, 'function installEditSupport(view)')
   const clientLog = null
-  const runEditCommand = new Function('clientLog', 'return (' + runEditCommandSrc + ')')(clientLog)
+  const runEditCommand = new Function('clientLog', 'electron',
+    'return (' + runEditCommandSrc + ')')(clientLog, { clipboard })
+  const installEditableFocusRouter = new Function('ipcMain', 'clientLog',
+    'var editableFocusRouterInstalled = false; return (' + installEditableFocusRouterSrc + ')'
+  )(ipcMain, clientLog)
   // installEditSupport 内部会调用 runEditCommand —— 必须把它一并放进闭包，
   // 否则切出来的函数体里 runEditCommand 未定义。
-  const installEditSupport = new Function('clientLog', 'Menu', 'win', 'runEditCommand',
-    'return (' + installEditSupportSrc + ')')(clientLog, Menu, win, runEditCommand)
+  const installEditSupport = new Function('clientLog', 'Menu', 'win', 'runEditCommand', 'installEditableFocusRouter',
+    'return (' + installEditSupportSrc + ')')(clientLog, Menu, win, runEditCommand, installEditableFocusRouter)
   installEditSupport(view)
 
   await view.webContents.loadFile(tmpHtml)
+  // 真实用户按快捷键时，WebContentsView 一定持有焦点。Electron 45 起
+  // 复制命令会严格检查当前 document 的焦点状态；只选中文字但不把 view
+  // 设成焦点，会在自动化环境里得到一个与真机不一致的空剪贴板。
+  view.webContents.focus()
   await sleep(200)
 
   // ---- ① 编辑支持是否被装上（快捷键处理器必须在）----
@@ -155,7 +164,7 @@ async function main () {
 
   // ---- ② 程序选中译文 + Cmd/Ctrl+C → 剪辑板必须拿到译文 ----
   console.log('\n── ② 复制：选中译文后按复制')
-  clipboard.writeText('__before__')
+  await clipboard.writeText('__before__')
   const selected = await view.webContents.executeJavaScript('window.__mock.selectTrans()')
   check('② 译文被选中（选区内容 = 译文）', selected === ZH, selected)
 
@@ -172,16 +181,16 @@ async function main () {
   }
   emitKey('c', [mod])
   await sleep(250)
-  const copied = clipboard.readText()
+  const copied = String(await clipboard.readText())
   check('② Cmd/Ctrl+C 把译文复制进了剪辑板', copied === ZH, copied)
 
   // ---- ③ 直接走 wc.copy() 兜底通道（菜单角色最终也落到这里）----
   console.log('\n── ③ 复制：wc.copy() 编辑命令通道')
-  clipboard.writeText('__before2__')
+  await clipboard.writeText('__before2__')
   await view.webContents.executeJavaScript('window.__mock.selectTrans()')
   runEditCommand(view.webContents, 'copy')
   await sleep(150)
-  const copied2 = clipboard.readText()
+  const copied2 = String(await clipboard.readText())
   check('③ webContents.copy() 同样把译文复制进剪辑板', copied2 === ZH, copied2)
 
   // ---- ④ 全选：Cmd/Ctrl+A 必须真的全选（宿主没装编辑角色时这一步此前根本无效）----
@@ -199,7 +208,7 @@ async function main () {
     'i.style.cssText="position:fixed;top:0;left:0;width:200px;height:40px";document.body.appendChild(i);' +
     'var r=document.createRange();r.selectNodeContents(i);var s=window.getSelection();s.removeAllRanges();s.addRange(r);' +
     'document.getElementById("ed").focus();true')
-  clipboard.writeText('粘贴测试文本')
+  await clipboard.writeText('粘贴测试文本')
   emitKey('v', [mod])
   await sleep(250)
   const pasted = await view.webContents.executeJavaScript('document.getElementById("ed").textContent')
@@ -207,13 +216,13 @@ async function main () {
 
   // ---- ⑥ 非译文区域不受影响：普通文本的复制不被我们的处理器搞坏 ----
   console.log('\n── ⑥ 不越界：普通区域照旧')
-  clipboard.writeText('__before3__')
+  await clipboard.writeText('__before3__')
   await view.webContents.executeJavaScript(
     'var s=window.getSelection();s.removeAllRanges();var r=document.createRange();' +
     'r.selectNodeContents(document.querySelector(".selectable-text"));s.addRange(r);true')
   emitKey('c', [mod])
   await sleep(200)
-  const copied3 = clipboard.readText()
+  const copied3 = String(await clipboard.readText())
   check('⑥ 选中原始消息（非译文）也能正常复制', copied3 === 'Hello there', copied3)
 
   // ---- 汇总 ----
