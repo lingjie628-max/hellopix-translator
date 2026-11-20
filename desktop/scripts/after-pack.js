@@ -122,6 +122,14 @@ async function afterPack(context) {
   if (!fs.existsSync(appPath)) {
     throw new Error(`[adhoc-sign] 找不到待签名的应用：${appPath}`)
   }
+  const entitlementsPath = path.join(
+    context.packager.projectDir,
+    'build',
+    'entitlements.mac.plist'
+  )
+  if (!fs.existsSync(entitlementsPath)) {
+    throw new Error(`[adhoc-sign] 找不到 entitlements：${entitlementsPath}`)
+  }
 
   // ---- 决定该不该兜底 --------------------------------------------------------
   //
@@ -158,7 +166,23 @@ async function afterPack(context) {
 
   // 内层（Helper / Framework）必须先签，再签外层。--deep 让 codesign 自行按
   // "由内到外"处理；手动逐个签容易漏掉 chrome_crashpad_handler 这类散件。
-  const signed = codesign(['--force', '--deep', '--sign', SIGN_IDENTITY, '--timestamp=none', appPath])
+  // ad-hoc 也必须真正应用 Electron 的 JIT 豁免。只把 entitlements 写在
+  // package.json 不够：electron-builder 在没有 Developer ID 时会跳过签名，
+  // 最后留下的是这个钩子产出的 ad-hoc 签名。此前这里漏了 --entitlements，
+  // 结果是 allow-jit / unsigned-executable-memory 都没有进入产物；在
+  // macOS 26/27 + Apple Silicon 上，V8 JIT 会直接触发原生崩溃。
+  const signed = codesign([
+    '--force',
+    '--deep',
+    '--sign',
+    SIGN_IDENTITY,
+    '--timestamp=none',
+    '--options',
+    'runtime',
+    '--entitlements',
+    entitlementsPath,
+    appPath
+  ])
   if (signed.status !== 0) {
     throw new Error(`[adhoc-sign] 签名失败（退出码 ${signed.status}）：\n${signed.output}`)
   }

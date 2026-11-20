@@ -104,6 +104,14 @@ test('after-pack：必须能识别 Developer ID 证书，否则会覆盖正式�
     '必须用 electron-builder 同一条 security find-identity 命令判定，口径不一致会留下"两边都没签"的空档')
 })
 
+test('after-pack：ad-hoc 签名也必须真正应用 JIT entitlements 和 hardened runtime', () => {
+  const source = fs.readFileSync(path.join(DESKTOP, buildConfig.afterPack), 'utf8')
+  assert.match(source, /--entitlements/,
+    'ad-hoc 签名不应用 entitlements 时，arm64 上的 Electron JIT 可能在启动后直接崩溃')
+  assert.match(source, /--options[\s\S]{0,80}runtime/,
+    'ad-hoc 兜底路径也必须开启 hardened runtime，不能只让配置字段看起来正确')
+})
+
 test('after-sign：必须守住"配了公证凭据却没钉上票据"这一路', () => {
   const source = fs.readFileSync(path.join(DESKTOP, buildConfig.afterSign), 'utf8')
   assert.match(source, /stapler/, 'after-sign 必须用 stapler validate 核实票据')
