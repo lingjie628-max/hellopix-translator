@@ -6,9 +6,19 @@
         <h1>计数工单</h1>
         <p>绑定客户端实际上报的接入账号后，系统按会话去重计粉。同一客户换账号再次进入，自动记为重粉。</p>
       </div>
-      <el-button type="primary" icon="el-icon-plus" @click="openTicketForm()">新建计数工单</el-button>
+      <el-button v-if="counterSuite" type="primary" icon="el-icon-plus" @click="openTicketForm()">新建计数工单</el-button>
     </section>
 
+    <section v-if="!counterSuite" class="count-locked">
+      <div class="count-locked-mark">PRO</div>
+      <div>
+        <h2>当前套餐未开通计数工单</h2>
+        <p>Hello Pix 高级版可以继续使用翻译与多开；计数工单、新粉/重粉统计和自动工单需要升级专业版。</p>
+      </div>
+      <el-button type="primary" @click="$router.push('/user/rechargePage')">查看套餐</el-button>
+    </section>
+
+    <template v-else>
     <section class="count-panel">
       <div class="count-toolbar">
         <el-input
@@ -286,6 +296,7 @@
         >绑定</el-button>
       </span>
     </el-dialog>
+    </template>
   </div>
 </template>
 
@@ -330,6 +341,10 @@ export default {
     }
   },
   computed: {
+    counterSuite() {
+      const user = this.$store.state.user || {}
+      return user.counterSuite === true || Number(user.counterSuite) === 1
+    },
     platformOptions() {
       return this.platforms.length ? this.platforms : [{ id: 'whatsapp-green', name: 'WhatsApp绿色版' }]
     },
@@ -343,7 +358,7 @@ export default {
     }).catch(() => {})
   },
   activated() {
-    this.load()
+    if (this.counterSuite) this.load()
   },
   methods: {
     load() {
@@ -529,6 +544,39 @@ export default {
   font-size: 11px;
   font-weight: 700;
   letter-spacing: .2em;
+}
+.count-locked {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 30px;
+  border: 1px solid #ecd9b7;
+  border-radius: 16px;
+  background: linear-gradient(135deg, #fffaf1, #f7f1e7);
+  box-shadow: 0 12px 30px rgba(94, 69, 30, .08);
+}
+.count-locked-mark {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 58px;
+  height: 58px;
+  border-radius: 16px;
+  color: #fff;
+  background: #a55612;
+  font: 700 18px/1 "STSong", "Songti SC", serif;
+  letter-spacing: .08em;
+}
+.count-locked h2 {
+  margin: 0 0 7px;
+  color: #5f380d;
+  font-family: "STSong", "Songti SC", serif;
+}
+.count-locked p {
+  flex: 1;
+  margin: 0;
+  color: #745d3f;
+  line-height: 1.7;
 }
 .count-panel,
 .count-section {

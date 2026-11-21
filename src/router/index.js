@@ -169,12 +169,6 @@ router.beforeEach((to, from, next) => {
       next('/home/index')
       return
     }
-    if (to.path === '/count/tickets' && !(
-      store.state.user.counterSuite === true || Number(store.state.user.counterSuite) === 1
-    )) {
-      next('/home/index')
-      return
-    }
     next()
   } else {
     next({ path: '/login', query: { redirect: to.fullPath } })

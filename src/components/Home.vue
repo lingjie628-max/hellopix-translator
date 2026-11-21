@@ -11,9 +11,9 @@
         <i class="el-icon-user"></i>
         <span slot="title">子账号管理</span>
       </el-menu-item>
-      <el-menu-item v-if="counterSuite" index="/count/tickets">
+      <el-menu-item v-if="isMain" index="/count/tickets">
         <i class="el-icon-data-analysis"></i>
-        <span slot="title">计数工单</span>
+        <span slot="title">计数工单<el-tag v-if="!counterSuite" size="mini" type="warning" effect="plain">需专业版</el-tag></span>
       </el-menu-item>
       <el-menu-item v-if="isMain" index="/user/rechargePage">
         <i class="el-icon-wallet"></i>

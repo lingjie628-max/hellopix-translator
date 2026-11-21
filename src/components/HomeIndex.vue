@@ -45,7 +45,9 @@
           <div class="quick">
             <el-button v-if="isMain" type="success" @click="$router.push('/user/rechargePage')">充值字符</el-button>
             <el-button v-if="isMain" type="primary" @click="$router.push('/user/team')">子账号管理</el-button>
-            <el-button v-if="counterSuite" type="primary" plain @click="$router.push('/count/tickets')">计数工单</el-button>
+            <el-button v-if="isMain" :type="counterSuite ? 'primary' : 'warning'" plain @click="$router.push('/count/tickets')">
+              计数工单{{ counterSuite ? '' : '（需专业版）' }}
+            </el-button>
             <el-button type="warning" @click="$router.push('/user/Recharge')">充值记录</el-button>
             <el-button v-if="isMain" type="danger" @click="toggleMaster">自动分配字符</el-button>
             <el-button @click="pwdVisible=true">修改密码</el-button>

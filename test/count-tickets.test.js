@@ -65,6 +65,22 @@ test('计数工单权益只认套餐 clients.counter', () => {
   assert.equal(publicUser(baseSession).counterSuite, true)
 })
 
+test('商户管理员始终能找到计数工单入口，未购权益时明确提示升级', () => {
+  const root = path.join(__dirname, '..')
+  const home = fs.readFileSync(path.join(root, 'src', 'components', 'Home.vue'), 'utf8')
+  const router = fs.readFileSync(path.join(root, 'src', 'router', 'index.js'), 'utf8')
+  const page = fs.readFileSync(path.join(root, 'src', 'components', 'count', 'CountTickets.vue'), 'utf8')
+
+  assert.match(home, /v-if="isMain" index="\/count\/tickets"/,
+    '商户管理员即使套餐未开通也应看到入口，不能静默隐藏')
+  assert.match(home, /需专业版/,
+    '未开通时必须明确提示需要专业版')
+  assert.doesNotMatch(router, /to\.path === '\/count\/tickets'[\s\S]{0,160}next\('\/home\/index'\)/,
+    '路由不能把未开通用户静默弹回首页')
+  assert.match(page, /当前套餐未开通计数工单/,
+    '页面必须说明未开通原因，而不是显示空白或原始 403')
+})
+
 test('计数只接真实入站消息，打开会话与出向消息带独立事件类型', () => {
   const root = path.join(__dirname, '..')
   const guest = fs.readFileSync(path.join(root, 'desktop', 'guest-inject.js'), 'utf8')
