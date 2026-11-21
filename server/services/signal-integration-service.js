@@ -51,6 +51,15 @@ function tokenHash(value) {
   return crypto.createHash('sha256').update(String(value || '')).digest('hex')
 }
 
+function createToken() {
+  const value = crypto.randomBytes(32).toString('base64url')
+  return {
+    value,
+    hash: tokenHash(value),
+    prefix: value.slice(0, 8)
+  }
+}
+
 function isoDate(value) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return null
@@ -226,7 +235,39 @@ class SignalIntegrationService {
     this.redis = redis
   }
 
-  configuration() {
+  async configuration() {
+    const row = (await this.repo.query(
+      `SELECT * FROM signal_integration_settings WHERE id=1`
+    )).rows[0]
+    const databaseConfigured = Boolean(row && (
+      row.updated_by ||
+      row.api_token_hash ||
+      row.event_token_hash ||
+      row.account_user_id
+    ))
+    if (databaseConfigured) {
+      if (!row.enabled) {
+        throw new ApiError(503, 'Signal 对接已关闭', 'SIGNAL_DISABLED')
+      }
+      if (!row.account_user_id || !row.api_token_hash || !row.event_token_hash) {
+        throw new ApiError(503, 'Signal 对接尚未完整配置', 'SIGNAL_NOT_CONFIGURED')
+      }
+      const mode = String(row.workorder_mode || 'failures').toLowerCase()
+      if (!WORKORDER_MODES.has(mode)) {
+        throw new ApiError(503, 'Signal 工单模式配置不合法', 'SIGNAL_NOT_CONFIGURED')
+      }
+      return {
+        source: 'database',
+        accountUserId: Number(row.account_user_id),
+        accountUsername: '',
+        apiToken: '',
+        apiTokenHash: String(row.api_token_hash),
+        eventToken: '',
+        eventTokenHash: String(row.event_token_hash),
+        engineId: String(row.engine_id || ''),
+        mode
+      }
+    }
     const apiToken = String(process.env.PIX_SIGNAL_API_TOKEN || '')
     const eventToken = String(process.env.PIX_SIGNAL_EVENT_TOKEN || '')
     const username = String(process.env.PIX_SIGNAL_ACCOUNT_USERNAME || '').trim()
@@ -237,15 +278,30 @@ class SignalIntegrationService {
     if (!WORKORDER_MODES.has(mode)) {
       throw new ApiError(503, 'Signal 工单模式配置不合法', 'SIGNAL_NOT_CONFIGURED')
     }
-    return { apiToken, eventToken, username, mode }
+    return {
+      source: 'environment',
+      accountUserId: null,
+      accountUsername: username,
+      apiToken,
+      apiTokenHash: '',
+      eventToken,
+      eventTokenHash: '',
+      engineId: String(process.env.PIX_SIGNAL_TRANSLATE_ENGINE || ''),
+      mode
+    }
   }
 
-  async accountSession(username) {
-    const account = await this.repo.accountByUsername(username)
-    if (!account || Number(account.status) !== 1) {
-      throw new ApiError(401, 'Signal 对接账号不可用', 'SIGNAL_AUTH_FAILED')
+  async accountSession(config) {
+    let subject
+    if (config.accountUserId) {
+      subject = `main:${config.accountUserId}`
+    } else {
+      const account = await this.repo.accountByUsername(config.accountUsername)
+      if (!account || Number(account.status) !== 1) {
+        throw new ApiError(401, 'Signal 对接账号不可用', 'SIGNAL_AUTH_FAILED')
+      }
+      subject = `${account.kind === 'sub' ? 'sub' : 'main'}:${account.id}`
     }
-    const subject = `${account.kind === 'sub' ? 'sub' : 'main'}:${account.id}`
     const session = await this.repo.sessionAccount(subject)
     if (!session || Number(session.account.status) !== 1 || Number(session.parent.status) !== 1) {
       throw new ApiError(401, 'Signal 对接账号不可用', 'SIGNAL_AUTH_FAILED')
@@ -254,16 +310,20 @@ class SignalIntegrationService {
   }
 
   async authenticate(req, kind) {
-    const config = this.configuration()
+    const config = await this.configuration()
     const supplied = bearer(req)
-    const expected = kind === 'event' ? config.eventToken : config.apiToken
-    if (!expected) {
+    const expectedToken = kind === 'event' ? config.eventToken : config.apiToken
+    const expectedHash = kind === 'event' ? config.eventTokenHash : config.apiTokenHash
+    if (!expectedToken && !expectedHash) {
       throw new ApiError(503, 'Signal 对接令牌尚未配置', 'SIGNAL_NOT_CONFIGURED')
     }
-    if (!equalToken(supplied, expected)) {
+    const valid = expectedHash
+      ? equalToken(tokenHash(supplied), expectedHash)
+      : equalToken(supplied, expectedToken)
+    if (!valid) {
       throw new ApiError(401, 'Bearer Token 不正确', 'SIGNAL_AUTH_FAILED')
     }
-    const session = await this.accountSession(config.username)
+    const session = await this.accountSession(config)
     return { config, session, tokenHash: tokenHash(supplied) }
   }
 
@@ -274,6 +334,138 @@ class SignalIntegrationService {
     if (count === 1) await this.redis.pexpire(redisKey, 60_000)
     if (count > max) {
       throw new ApiError(429, 'Signal 对接请求过于频繁', 'SIGNAL_RATE_LIMITED')
+    }
+  }
+
+  async adminState() {
+    const row = (await this.repo.query(
+      'SELECT * FROM signal_integration_settings WHERE id=1'
+    )).rows[0]
+    const accounts = (await this.repo.query(
+      `SELECT id,username,nickname,status
+       FROM users
+       WHERE status=1
+       ORDER BY updated_at DESC, id DESC
+       LIMIT 500`
+    )).rows
+    return {
+      configured: Boolean(row && (
+        row.updated_by ||
+        row.api_token_hash ||
+        row.event_token_hash ||
+        row.account_user_id
+      )),
+      enabled: Boolean(row && row.enabled),
+      accountUserId: row && row.account_user_id ? Number(row.account_user_id) : null,
+      accountUsername: row ? row.account_username : '',
+      apiTokenPrefix: row ? row.api_token_prefix : '',
+      eventTokenPrefix: row ? row.event_token_prefix : '',
+      apiTokenConfigured: Boolean(row && row.api_token_hash),
+      eventTokenConfigured: Boolean(row && row.event_token_hash),
+      engineId: row ? row.engine_id : '',
+      workorderMode: row ? row.workorder_mode : 'failures',
+      updatedAt: row ? row.updated_at : null,
+      environmentFallback: Boolean(
+        process.env.PIX_SIGNAL_API_TOKEN &&
+        process.env.PIX_SIGNAL_EVENT_TOKEN &&
+        process.env.PIX_SIGNAL_ACCOUNT_USERNAME
+      ),
+      accounts
+    }
+  }
+
+  async saveAdminSettings(admin, data, ip) {
+    const enabled = data.enabled === true
+    const accountUserId = Number(data.accountUserId)
+    if (!Number.isSafeInteger(accountUserId) || accountUserId <= 0) {
+      throw new ApiError(400, '请选择 Signal 计费商户', 'SIGNAL_ACCOUNT_REQUIRED')
+    }
+    const mode = String(data.workorderMode || 'failures').toLowerCase()
+    if (!WORKORDER_MODES.has(mode)) {
+      throw new ApiError(400, 'Signal 工单模式不合法', 'SIGNAL_WORKORDER_MODE_BAD')
+    }
+    const session = await this.repo.sessionAccount(`main:${accountUserId}`)
+    if (!session || Number(session.account.status) !== 1 || Number(session.parent.status) !== 1) {
+      throw new ApiError(400, 'Signal 计费商户不可用', 'SIGNAL_ACCOUNT_INVALID')
+    }
+    const engineId = text(data.engineId, 64)
+    const engineState = await this.core.engines(session)
+    if (!engineState.rows.some(item => item.allowed && item.enabled && !item.retired)) {
+      throw new ApiError(
+        400,
+        '该商户当前没有已接通可用的翻译通道',
+        'SIGNAL_ACCOUNT_NO_ENGINE'
+      )
+    }
+    if (engineId) {
+      const engine = engineState.rows.find(item =>
+        item.id === engineId && item.allowed && !item.retired
+      )
+      if (!engine) {
+        throw new ApiError(
+          400,
+          '所选翻译通道不在该商户当前套餐内或尚未接通',
+          'SIGNAL_ENGINE_INVALID'
+        )
+      }
+    }
+
+    const current = (await this.repo.query(
+      'SELECT * FROM signal_integration_settings WHERE id=1'
+    )).rows[0] || {}
+    const rotateApi = data.rotateApiToken === true
+    const rotateEvent = data.rotateEventToken === true
+    const api = rotateApi ? createToken() : null
+    const event = rotateEvent ? createToken() : null
+    const apiHash = api ? api.hash : current.api_token_hash
+    const eventHash = event ? event.hash : current.event_token_hash
+    if (enabled && (!apiHash || !eventHash)) {
+      throw new ApiError(
+        400,
+        '启用 Signal 对接前必须生成 API Token 和事件 Token',
+        'SIGNAL_TOKENS_REQUIRED'
+      )
+    }
+
+    await this.repo.query(
+      `UPDATE signal_integration_settings
+       SET enabled=$1,
+           account_user_id=$2,
+           account_username=$3,
+           api_token_hash=$4,
+           api_token_prefix=$5,
+           event_token_hash=$6,
+           event_token_prefix=$7,
+           engine_id=$8,
+           workorder_mode=$9,
+           updated_by=$10,
+           updated_at=NOW()
+       WHERE id=1`,
+      [
+        enabled,
+        accountUserId,
+        session.parent.username || '',
+        apiHash || null,
+        api ? api.prefix : current.api_token_prefix || '',
+        eventHash || null,
+        event ? event.prefix : current.event_token_prefix || '',
+        engineId,
+        mode,
+        admin && admin.id ? admin.id : null
+      ]
+    )
+    await this.repo.audit(
+      null,
+      admin,
+      'Signal 对接配置',
+      `${session.parent.username || accountUserId} · ${enabled ? '启用' : '关闭'} · ${mode}`,
+      ip,
+      { type: 'settings' }
+    )
+    return {
+      state: await this.adminState(),
+      apiToken: api ? api.value : null,
+      eventToken: event ? event.value : null
     }
   }
 
@@ -291,7 +483,7 @@ class SignalIntegrationService {
       from: request.sourceLanguage,
       to: request.targetLanguage,
       requestId: request.messageId || key,
-      engine: process.env.PIX_SIGNAL_TRANSLATE_ENGINE || undefined,
+      engine: auth.config.engineId || undefined,
       trigger: 'integration'
     }, key)
     const skipped = Boolean(result.skipped)
@@ -305,8 +497,7 @@ class SignalIntegrationService {
     }
   }
 
-  async createTicket(client, session, event) {
-    const mode = this.configuration().mode
+  async createTicket(client, session, event, mode) {
     const shouldCreate = mode === 'all' || (mode === 'failures' && event.status === 'error')
     if (!shouldCreate) return null
     const subject = event.status === 'error'
@@ -398,7 +589,9 @@ class SignalIntegrationService {
         }
       }
       const eventRowId = Number(inserted.rows[0].id)
-      const ticketId = await this.createTicket(client, auth.session, event)
+      const ticketId = await this.createTicket(
+        client, auth.session, event, auth.config.mode
+      )
       if (ticketId) {
         await client.query(
           'UPDATE signal_translation_events SET ticket_id=$2 WHERE id=$1',

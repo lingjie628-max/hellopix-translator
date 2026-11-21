@@ -127,6 +127,10 @@ const ROUTE_CAPS = {
   'GET /admin/count-tickets/:id': 'admin.data.customers',
   'GET /admin/count-tickets/:id/fans': 'admin.data.customers',
 
+  // ── 外部系统对接 ─────────────────────────────────────────
+  'GET /admin/integrations/signal': 'admin.read.integration',
+  'POST /admin/integrations/signal/save': 'admin.secret.integration',
+
   // ── 审计与登录日志 ───────────────────────────────────────
   // 里面是超管的 IP 和操作序列，泄露出去等于给攻击者画地图
   'GET /admin/logs': 'admin.secret.audit',
@@ -188,6 +192,7 @@ const HIGH_RISK_CAPS = new Set([
   'admin.secret.mail',
   'admin.secret.ops',
   'admin.secret.audit',
+  'admin.secret.integration',
   'admin.data.customers'
 ])
 

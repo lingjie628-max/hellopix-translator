@@ -284,6 +284,21 @@ module.exports = function registerMock(app, options) {
     ],
     countTicketBaseBatches: [],
     countTicketBaseEntries: [],
+    signalIntegration: {
+      configured: false,
+      enabled: false,
+      accountUserId: null,
+      accountUsername: '',
+      apiTokenPrefix: '',
+      eventTokenPrefix: '',
+      apiTokenConfigured: false,
+      eventTokenConfigured: false,
+      engineId: '',
+      workorderMode: 'failures',
+      updatedAt: null,
+      environmentFallback: false,
+      accounts: []
+    },
     countTicketAccounts: [
       {
         id: 1,
@@ -3013,6 +3028,55 @@ module.exports = function registerMock(app, options) {
     persistSettings()
     audit(req, '保存系统设置', '')
     okMsg(res, '设置已保存')
+  })
+
+  app.get('/apis/admin/integrations/signal', (req, res) => {
+    if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
+    db.signalIntegration.accounts = db.users
+      .filter(user => Number(user.status) === 1)
+      .map(user => ({
+        id: user.id,
+        username: user.username,
+        nickname: user.nickname,
+        status: user.status
+      }))
+    res.json(db.signalIntegration)
+  })
+
+  app.post('/apis/admin/integrations/signal/save', (req, res) => {
+    if (!isAdmin(req)) { res.status(401).json({ msg: '超管未登录' }); return }
+    const query = q(req)
+    const account = db.users.find(user => Number(user.id) === Number(query.accountUserId))
+    if (!account) { res.status(400).json({ msg: 'Signal 计费商户不可用' }); return }
+    const makeToken = prefix => `${prefix}_${Math.random().toString(36).slice(2)}`
+    const apiToken = query.rotateApiToken ? makeToken('pixsig') : ''
+    const eventToken = query.rotateEventToken ? makeToken('pixevt') : ''
+    db.signalIntegration = Object.assign(db.signalIntegration, {
+      configured: true,
+      enabled: query.enabled === true,
+      accountUserId: Number(account.id),
+      accountUsername: account.username,
+      apiTokenPrefix: apiToken ? apiToken.slice(0, 8) : db.signalIntegration.apiTokenPrefix,
+      eventTokenPrefix: eventToken ? eventToken.slice(0, 8) : db.signalIntegration.eventTokenPrefix,
+      apiTokenConfigured: Boolean(apiToken || db.signalIntegration.apiTokenConfigured),
+      eventTokenConfigured: Boolean(eventToken || db.signalIntegration.eventTokenConfigured),
+      engineId: String(query.engineId || ''),
+      workorderMode: String(query.workorderMode || 'failures'),
+      updatedAt: now(),
+      accounts: db.users.filter(user => Number(user.status) === 1).map(user => ({
+        id: user.id,
+        username: user.username,
+        nickname: user.nickname,
+        status: user.status
+      }))
+    })
+    res.json({
+      success: 'success',
+      msg: 'Signal 对接配置已保存',
+      state: db.signalIntegration,
+      apiToken: apiToken || null,
+      eventToken: eventToken || null
+    })
   })
 
   app.get('/apis/admin/clients', (req, res) => {

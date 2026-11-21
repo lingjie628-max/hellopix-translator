@@ -111,6 +111,17 @@ test('Signal Provider API 成功、跳过、鉴权失败和限流', async t => {
   let redisCount = 0
   const service = new SignalIntegrationService({
     repo: {
+      async query() {
+        return {
+          rows: [{
+            enabled: false,
+            updated_by: null,
+            api_token_hash: null,
+            event_token_hash: null,
+            account_user_id: null
+          }]
+        }
+      },
       async accountByUsername() { return { id: 1, username: 'signal-account', status: 1, kind: 'main' } },
       async sessionAccount() { return session() }
     },
@@ -240,4 +251,79 @@ test('Signal Webhook 幂等落库，失败自动建脱敏工单', { skip: !datab
   assert.equal(stored.rows[0].subject, 'Signal 翻译失败 · timeout')
   const serialized = JSON.stringify(stored.rows[0])
   assert.doesNotMatch(serialized, /原文|译文正文|Bearer|event-token-test|api-token-test/)
+})
+
+test('超管配置 Signal 对接：Token 只存哈希且只显示一次', { skip: !databaseUrl }, async t => {
+  process.env.DATABASE_URL = databaseUrl
+  delete process.env.PIX_SIGNAL_API_TOKEN
+  delete process.env.PIX_SIGNAL_EVENT_TOKEN
+  delete process.env.PIX_SIGNAL_ACCOUNT_USERNAME
+  const { Pool } = require('pg')
+  const { ProductionRepository } = require('../server/repositories/production-repository')
+  const pool = new Pool({ connectionString: databaseUrl, max: 5 })
+  const repo = new ProductionRepository(pool)
+  const username = `signal_admin_${process.pid}_${Date.now()}`
+  const user = (await pool.query(
+    `INSERT INTO users(username,password_hash,nickname,status)
+     VALUES($1,'scrypt$s$h',$1,1) RETURNING id`,
+    [username]
+  )).rows[0]
+  const service = new SignalIntegrationService({
+    repo,
+    redis: { async incr() { return 1 }, async pexpire() { return 1 } },
+    core: {
+      async engines() {
+        return {
+          rows: [{
+            id: 'deepseek',
+            provider: 'deepseek',
+            allowed: true,
+            enabled: true,
+            wired: true,
+            retired: false
+          }]
+        }
+      }
+    }
+  })
+  t.after(async () => {
+    await pool.query(
+      `UPDATE signal_integration_settings
+       SET enabled=false,account_user_id=NULL,account_username='',
+           api_token_hash=NULL,api_token_prefix='',
+           event_token_hash=NULL,event_token_prefix='',
+           engine_id='',workorder_mode='failures',updated_by=NULL,updated_at=now()
+       WHERE id=1`
+    ).catch(() => {})
+    await pool.query('DELETE FROM users WHERE id=$1', [user.id]).catch(() => {})
+    await pool.end()
+  })
+  const saved = await service.saveAdminSettings(
+    { id: null, username: 'signal-test-admin' },
+    {
+      enabled: true,
+      accountUserId: user.id,
+      engineId: 'deepseek',
+      workorderMode: 'failures',
+      rotateApiToken: true,
+      rotateEventToken: true
+    },
+    '127.0.0.1'
+  )
+  assert.match(saved.apiToken, /^[A-Za-z0-9_-]{40,}$/)
+  assert.match(saved.eventToken, /^[A-Za-z0-9_-]{40,}$/)
+  assert.equal(saved.state.configured, true)
+  assert.equal(saved.state.enabled, true)
+  const stored = await pool.query(
+    'SELECT api_token_hash,event_token_hash FROM signal_integration_settings WHERE id=1'
+  )
+  assert.match(stored.rows[0].api_token_hash, /^[a-f0-9]{64}$/)
+  assert.match(stored.rows[0].event_token_hash, /^[a-f0-9]{64}$/)
+  assert.notEqual(stored.rows[0].api_token_hash, saved.apiToken)
+
+  const auth = await service.authenticate(req(saved.apiToken), 'api')
+  assert.equal(auth.session.parent.id, user.id)
+  const state = await service.adminState()
+  assert.equal(state.apiTokenPrefix, saved.apiToken.slice(0, 8))
+  assert.equal(JSON.stringify(state).includes(saved.apiToken), false)
 })

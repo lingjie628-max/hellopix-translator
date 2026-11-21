@@ -207,6 +207,8 @@ const EXPECTED = [
   'GET /admin/count-tickets',
   'GET /admin/count-tickets/:id',
   'GET /admin/count-tickets/:id/fans',
+  'GET /admin/integrations/signal',
+  'POST /admin/integrations/signal/save',
   'GET /count-tickets',
   'GET /count-tickets/available-accounts',
   'GET /count-tickets/dedup-options',

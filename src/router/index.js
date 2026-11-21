@@ -41,6 +41,7 @@ import AdminSupport from '../components/admin/AdminSupport.vue'
 import AdminTickets from '../components/admin/AdminTickets.vue'
 import AdminNotices from '../components/admin/AdminNotices.vue'
 import AdminVerify from '../components/admin/AdminVerify.vue'
+import AdminSignalIntegration from '../components/admin/AdminSignalIntegration.vue'
 import Register from '../components/Register.vue'
 import Forgot from '../components/Forgot.vue'
 import RegSuccess from '../components/RegSuccess.vue'
@@ -87,6 +88,7 @@ const routes = [
       { path: '/admin/support', name: '帮助与客服', component: AdminSupport },
       { path: '/admin/tickets', name: '工单', component: AdminTickets },
       { path: '/admin/verify', name: '验证码接口', component: AdminVerify },
+      { path: '/admin/signal', name: 'Signal 对接', component: AdminSignalIntegration },
       { path: '/admin/settings', name: '系统设置', component: AdminSettings },
       { path: '/admin/logs', name: '登录与审计', component: AdminLogs },
       { path: '/admin/staff', name: '超管账号', component: AdminStaff },

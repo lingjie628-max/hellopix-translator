@@ -518,6 +518,7 @@ function productionRouter(context) {
   require('./admin/count-tickets').registerAdminCountTickets(router, ctx)
   // 工单（客服 ←→ 商户）
   require('./admin/tickets').registerAdminTickets(router, ctx)
+  require('./admin/signal').registerAdminSignal(router, ctx)
   // 商户端工单：提单 / 查看 / 回复。
   // 放在这里而不是文件顶部 —— 上面的 router.use(auth.middleware()) 已生效，
   // 每条路由都能拿到 req.pixUser，归属校验才有依据。

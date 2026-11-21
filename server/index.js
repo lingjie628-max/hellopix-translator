@@ -16,7 +16,8 @@ const REQUIRED_MIGRATIONS = Object.freeze([
   '055_count_ticket_integrity',
   '056_count_ticket_dedup_scope',
   '057_count_ticket_groups_base',
-  '058_signal_translation_events'
+  '058_signal_translation_events',
+  '059_signal_integration_settings'
 ])
 
 function envFlag(value) {
