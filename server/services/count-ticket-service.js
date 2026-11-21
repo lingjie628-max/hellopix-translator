@@ -74,7 +74,11 @@ class CountTicketService {
   }
 
   isEntitled(parent) {
-    return !!parent && catalog.packageAllowsCounter(parent.packageClients)
+    return !!parent && (
+      parent.enterprise === true ||
+      Number(parent.enterprise) === 1 ||
+      catalog.packageAllowsCounter(parent.packageClients)
+    )
   }
 
   async saveTicket(userId, data) {

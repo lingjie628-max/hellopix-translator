@@ -352,6 +352,11 @@ export default {
       return this.availableAccounts.filter(item => item.platform === this.accountForm.platform)
     }
   },
+  watch: {
+    counterSuite(enabled) {
+      if (enabled) this.load()
+    }
+  },
   mounted() {
     // 商户网页使用公开的站点平台表。不能调用 `/client/platforms`：
     // 那是原生客户端专用接口，网页商户会话会收到 401，随后全局拦截器

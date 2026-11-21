@@ -54,7 +54,9 @@ function publicUser(session) {
     versionId: session.parent.packageId,
     charBalance: number(session.account.charBalance),
     enterprise: number(session.parent.enterprise),
-    counterSuite: catalog.packageAllowsCounter(session.parent.packageClients)
+    // 企业账号的已售权益包含计数工单，不随基础/高级套餐的 clients.counter 开关降级。
+    counterSuite: number(session.parent.enterprise) === 1 ||
+      catalog.packageAllowsCounter(session.parent.packageClients)
   }
 }
 

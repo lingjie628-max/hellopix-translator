@@ -48,7 +48,7 @@ test('计数工单超管读接口全部显式声明客户数据权限', () => {
   assert.equal(capabilityFor('GET', '/admin/count-tickets/:id/fans'), 'admin.data.customers')
 })
 
-test('计数工单权益只认套餐 clients.counter', () => {
+test('计数工单权益认套餐 clients.counter 或企业账号', () => {
   assert.equal(packageAllowsCounter({ counter: true }), true)
   assert.equal(packageAllowsCounter({ counter: 1 }), true)
   assert.equal(packageAllowsCounter({ counter: false }), false)
@@ -63,6 +63,15 @@ test('计数工单权益只认套餐 clients.counter', () => {
   assert.equal(publicUser(baseSession).counterSuite, false)
   baseSession.parent.packageClients = { counter: true }
   assert.equal(publicUser(baseSession).counterSuite, true)
+
+  // 企业账号是已售权益的一部分：即使当前套餐是基础/高级版，也必须能使用。
+  baseSession.parent.packageClients = { counter: false }
+  baseSession.parent.enterprise = 1
+  assert.equal(publicUser(baseSession).counterSuite, true)
+
+  const service = new CountTicketService({})
+  assert.equal(service.isEntitled({ enterprise: false, packageClients: { counter: false } }), false)
+  assert.equal(service.isEntitled({ enterprise: true, packageClients: { counter: false } }), true)
 })
 
 test('商户管理员始终能找到计数工单入口，未购权益时明确提示升级', () => {
@@ -79,6 +88,10 @@ test('商户管理员始终能找到计数工单入口，未购权益时明确�
     '路由不能把未开通用户静默弹回首页')
   assert.match(page, /当前套餐未开通计数工单/,
     '页面必须说明未开通原因，而不是显示空白或原始 403')
+  assert.match(home, /refreshEntitlement/,
+    '后台调整套餐或企业权益后，商户布局应刷新权益，避免用户必须退出重登')
+  assert.match(page, /counterSuite\(enabled\)[\s\S]{0,80}this\.load\(\)/,
+    '权益在页面打开期间变为可用时，应立即加载计数工单')
   assert.match(page, /getRequest\('\/site\/platforms'\)/,
     '商户计数页必须使用公开站点平台接口')
   assert.doesNotMatch(page, /getRequest\('\/client\/platforms'\)/,

@@ -88,6 +88,9 @@ export default {
     }
   },
   mounted() {
+    // 套餐/企业权益可能在本次登录期间由后台调整。布局挂载时刷新一次公开用户
+    // 权益，避免用户必须退出重登才能看到刚开通的计数工单。
+    this.refreshEntitlement()
     this.getRequest('/site/info').then(resp => {
       if (resp && resp.data) {
         this.telegramUrl = resp.data.telegramUrl || ''
@@ -107,6 +110,18 @@ export default {
     window.removeEventListener('pix-user-ticket-read', this.fetchTicketUnread)
   },
   methods: {
+    refreshEntitlement() {
+      this.getRequest('/user/dashboard').then(resp => {
+        const data = resp && resp.data
+        if (!data) return
+        const patch = {}
+        if (data.counterSuite !== undefined) patch.counterSuite = data.counterSuite
+        if (data.enterprise !== undefined) patch.enterprise = data.enterprise
+        if (Object.keys(patch).length) {
+          this.$store.commit('login', Object.assign({}, this.$store.state.user || {}, patch))
+        }
+      }).catch(() => {})
+    },
     fetchTicketUnread() {
       if (document.hidden) return
       this.getRequest('/tickets-unread').then(resp => {
