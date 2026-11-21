@@ -79,6 +79,10 @@ test('商户管理员始终能找到计数工单入口，未购权益时明确�
     '路由不能把未开通用户静默弹回首页')
   assert.match(page, /当前套餐未开通计数工单/,
     '页面必须说明未开通原因，而不是显示空白或原始 403')
+  assert.match(page, /getRequest\('\/site\/platforms'\)/,
+    '商户计数页必须使用公开站点平台接口')
+  assert.doesNotMatch(page, /getRequest\('\/client\/platforms'\)/,
+    '商户网页不能调用原生客户端专用接口；401 会被全局拦截器当成掉线并退出登录')
 })
 
 test('计数只接真实入站消息，打开会话与出向消息带独立事件类型', () => {

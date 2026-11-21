@@ -353,7 +353,10 @@ export default {
     }
   },
   mounted() {
-    this.getRequest('/client/platforms').then(resp => {
+    // 商户网页使用公开的站点平台表。不能调用 `/client/platforms`：
+    // 那是原生客户端专用接口，网页商户会话会收到 401，随后全局拦截器
+    // 会判定“登录已过期”并清掉会话，表现就是点进计数工单后自动退出登录。
+    this.getRequest('/site/platforms').then(resp => {
       if (resp && resp.data && Array.isArray(resp.data.rows)) this.platforms = resp.data.rows
     }).catch(() => {})
   },
