@@ -266,10 +266,24 @@ module.exports = function registerMock(app, options) {
         zeroTime: '00:00:00',
         dedupScope: 'merchant',
         dedupTicketIds: [],
+        groupId: 1,
+        dedupBaseEnabled: false,
         createdAt: now(),
         updatedAt: now()
       }
     ],
+    countTicketGroups: [
+      {
+        id: 1,
+        userId: 10001,
+        name: '默认 WhatsApp 组',
+        platform: 'whatsapp-green',
+        createdAt: now(),
+        updatedAt: now()
+      }
+    ],
+    countTicketBaseBatches: [],
+    countTicketBaseEntries: [],
     countTicketAccounts: [
       {
         id: 1,
@@ -295,6 +309,7 @@ module.exports = function registerMock(app, options) {
         peerKey: '628123456789',
         displayName: '新用户A',
         fanType: 'new',
+        repeatType: 'fan',
         repeatOfId: null,
         eventAt: now(),
         dayKey: now().slice(0, 10)
@@ -311,6 +326,7 @@ module.exports = function registerMock(app, options) {
         peerKey: '628987654321',
         displayName: '回访用户B',
         fanType: 'repeat',
+        repeatType: 'fan',
         repeatOfId: 1,
         eventAt: later(-2),
         dayKey: later(-2).slice(0, 10)
@@ -533,9 +549,15 @@ module.exports = function registerMock(app, options) {
   function publicCountTicket(ticket) {
     const metrics = countMetrics(ticket)
     const user = db.users.find(item => Number(item.id) === Number(ticket.userId))
+    const group = (db.countTicketGroups || []).find(item =>
+      Number(item.id) === Number(ticket.groupId) &&
+      Number(item.userId) === Number(ticket.userId))
     return Object.assign({}, ticket, metrics, {
       dedupScope: ticket.dedupScope || 'merchant',
       dedupTicketIds: Array.isArray(ticket.dedupTicketIds) ? ticket.dedupTicketIds : [],
+      groupId: ticket.groupId || null,
+      groupName: group ? group.name : '',
+      dedupBaseEnabled: ticket.dedupBaseEnabled === true,
       username: user ? user.username : '',
       accountCount: db.countTicketAccounts.filter(account =>
         Number(account.ticketId) === Number(ticket.id) && account.active).length
@@ -2450,6 +2472,166 @@ module.exports = function registerMock(app, options) {
     res.json({ rows })
   })
 
+  app.get('/apis/count-tickets/groups', (req, res) => {
+    const userId = requireCounterOwner(req, res)
+    if (!userId) return
+    const query = q(req)
+    const rows = (db.countTicketGroups || [])
+      .filter(group => Number(group.userId) === userId &&
+        (!query.platform || group.platform === query.platform))
+      .map(group => ({
+        ...group,
+        ticketCount: db.countTickets.filter(ticket => Number(ticket.groupId) === Number(group.id)).length,
+        activeTicketCount: db.countTickets.filter(ticket =>
+          Number(ticket.groupId) === Number(group.id) && ticket.status === 'active').length
+      }))
+    res.json({ rows })
+  })
+
+  app.post('/apis/count-tickets/groups/save', (req, res) => {
+    const userId = requireCounterOwner(req, res)
+    if (!userId) return
+    const query = q(req)
+    const name = String(query.name || '').trim()
+    const platform = String(query.platform || '').toLowerCase()
+    if (!name || !platform) { res.status(400).json({ msg: '请填写分组名称和应用' }); return }
+    const id = query.id ? Number(query.id) : null
+    let group = id ? db.countTicketGroups.find(item => Number(item.id) === id && Number(item.userId) === userId) : null
+    if (id && !group) { res.status(404).json({ msg: '分组不存在' }); return }
+    if (db.countTicketGroups.some(item => Number(item.userId) === userId &&
+      item.platform === platform && item.name.toLowerCase() === name.toLowerCase() &&
+      (!group || Number(item.id) !== Number(group.id)))) {
+      res.status(409).json({ code: 'COUNT_GROUP_NAME_DUPLICATE', msg: '同一应用下已存在同名分组' })
+      return
+    }
+    if (group) {
+      group.name = name
+      group.platform = platform
+      group.updatedAt = now()
+    } else {
+      group = {
+        id: Math.max(0, ...db.countTicketGroups.map(item => Number(item.id))) + 1,
+        userId,
+        name,
+        platform,
+        createdAt: now(),
+        updatedAt: now()
+      }
+      db.countTicketGroups.push(group)
+    }
+    res.json({ success: 'success', msg: '分组已保存', group })
+  })
+
+  app.post('/apis/count-tickets/groups/delete', (req, res) => {
+    const userId = requireCounterOwner(req, res)
+    if (!userId) return
+    const id = Number(q(req).id)
+    const assigned = db.countTickets.filter(ticket =>
+      Number(ticket.userId) === userId && Number(ticket.groupId) === id).length
+    if (assigned) {
+      res.status(409).json({ code: 'COUNT_GROUP_NOT_EMPTY', msg: '分组下还有计数工单，请先把工单移出分组' })
+      return
+    }
+    db.countTicketGroups = db.countTicketGroups.filter(group =>
+      !(Number(group.id) === id && Number(group.userId) === userId))
+    okMsg(res, '分组已删除')
+  })
+
+  app.get('/apis/count-tickets/base/stats', (req, res) => {
+    const userId = requireCounterOwner(req, res)
+    if (!userId) return
+    const platform = String(q(req).platform || '').toLowerCase()
+    const entries = db.countTicketBaseEntries.filter(item =>
+      Number(item.userId) === userId && item.platform === platform)
+    res.json({
+      totalEntries: entries.length,
+      lastImportedAt: entries.reduce((latest, item) =>
+        !latest || String(item.importedAt) > String(latest) ? item.importedAt : latest, null)
+    })
+  })
+
+  app.get('/apis/count-tickets/base/entries', (req, res) => {
+    const userId = requireCounterOwner(req, res)
+    if (!userId) return
+    const query = q(req)
+    const platform = String(query.platform || '').toLowerCase()
+    let rows = db.countTicketBaseEntries.filter(item =>
+      Number(item.userId) === userId && item.platform === platform)
+    if (query.keyword) {
+      const keyword = String(query.keyword).toLowerCase()
+      rows = rows.filter(item => item.peerKey.toLowerCase().includes(keyword) ||
+        item.displayName.toLowerCase().includes(keyword))
+    }
+    rows.sort((a, b) => String(b.importedAt).localeCompare(String(a.importedAt)))
+    res.json(page(rows, query))
+  })
+
+  app.post('/apis/count-tickets/base/import', (req, res) => {
+    const userId = requireCounterOwner(req, res)
+    if (!userId) return
+    const query = q(req)
+    const platform = String(query.platform || '').toLowerCase()
+    const lines = String(query.text || '').split(/\r?\n/).filter(Boolean)
+    if (!platform || !lines.length) { res.status(400).json({ msg: '没有可导入的底库线索' }); return }
+    const seen = new Map()
+    for (const line of lines) {
+      const parts = line.split('----').map(part => part.trim())
+      if (/^(username|用户名)$/i.test(parts[0])) continue
+      seen.set(parts[0], { displayName: parts[1] || '', source: parts[2] || '' })
+    }
+    const batchId = Math.max(0, ...db.countTicketBaseBatches.map(item => Number(item.id))) + 1
+    let inserted = 0
+    let updated = 0
+    for (const [peerKey, value] of seen) {
+      const existing = db.countTicketBaseEntries.find(item =>
+        Number(item.userId) === userId && item.platform === platform && item.peerKey === peerKey)
+      if (existing) {
+        Object.assign(existing, value, { batchId, importedAt: now() })
+        updated += 1
+      } else {
+        db.countTicketBaseEntries.push({
+          id: db.countTicketBaseEntries.length + 1,
+          userId,
+          platform,
+          peerKey,
+          ...value,
+          batchId,
+          importedAt: now()
+        })
+        inserted += 1
+      }
+    }
+    db.countTicketBaseBatches.push({
+      id: batchId,
+      userId,
+      platform,
+      filename: query.filename || '',
+      totalLines: lines.length,
+      insertedCount: inserted,
+      updatedCount: updated,
+      createdAt: now()
+    })
+    res.json({
+      success: 'success',
+      msg: '底库已导入',
+      batchId,
+      totalLines: lines.length,
+      accepted: seen.size,
+      inserted,
+      updated
+    })
+  })
+
+  app.post('/apis/count-tickets/base/clear', (req, res) => {
+    const userId = requireCounterOwner(req, res)
+    if (!userId) return
+    const platform = String(q(req).platform || '').toLowerCase()
+    const before = db.countTicketBaseEntries.length
+    db.countTicketBaseEntries = db.countTicketBaseEntries.filter(item =>
+      !(Number(item.userId) === userId && item.platform === platform))
+    okMsg(res, `已清空 ${before - db.countTicketBaseEntries.length} 条底库线索`)
+  })
+
   app.get('/apis/count-tickets/:id', (req, res) => {
     const userId = requireCounterOwner(req, res)
     if (!userId) return
@@ -2497,9 +2679,20 @@ module.exports = function registerMock(app, options) {
       res.status(409).json({ code: 'COUNT_PLATFORM_LOCKED', msg: '该工单已绑定接入账号或已有进粉记录，不能再更换计数应用' })
       return
     }
-    const dedupScope = ['ticket', 'merchant', 'linked'].includes(query.dedupScope)
+    const dedupScope = ['ticket', 'merchant', 'group', 'linked'].includes(query.dedupScope)
       ? query.dedupScope
       : 'merchant'
+    const groupId = query.groupId ? Number(query.groupId) : null
+    const dedupBaseEnabled = query.dedupBaseEnabled === true || Number(query.dedupBaseEnabled) === 1
+    if (dedupScope === 'group' && !groupId) {
+      res.status(400).json({ code: 'COUNT_GROUP_REQUIRED', msg: '组内查重必须先选择命名分组' })
+      return
+    }
+    if (groupId && !db.countTicketGroups.some(group =>
+      Number(group.id) === groupId && Number(group.userId) === userId && group.platform === platform)) {
+      res.status(400).json({ code: 'COUNT_GROUP_INVALID', msg: '计数工单分组必须属于当前商户并使用同一个应用' })
+      return
+    }
     const linkedTicketIds = Array.isArray(query.linkedTicketIds)
       ? Array.from(new Set(query.linkedTicketIds.map(Number).filter(Number.isSafeInteger)))
       : []
@@ -2509,6 +2702,8 @@ module.exports = function registerMock(app, options) {
     }
     if (ticket && hasFans && (
       (ticket.dedupScope || 'merchant') !== dedupScope ||
+      Number(ticket.groupId || 0) !== Number(groupId || 0) ||
+      (ticket.dedupBaseEnabled === true) !== dedupBaseEnabled ||
       JSON.stringify((ticket.dedupTicketIds || []).slice().sort()) !==
         JSON.stringify(linkedTicketIds.slice().sort())
     )) {
@@ -2525,6 +2720,8 @@ module.exports = function registerMock(app, options) {
       zeroTime: String(query.zeroTime || '00:00:00'),
       dedupScope,
       dedupTicketIds: dedupScope === 'linked' ? linkedTicketIds : [],
+      groupId,
+      dedupBaseEnabled,
       updatedAt: now()
     }
     if (ticket) {

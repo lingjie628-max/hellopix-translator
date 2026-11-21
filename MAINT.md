@@ -465,3 +465,42 @@ node scripts/migrate.js down 1
   056 down 删除 `count_ticket_dedup_links`、`dedup_scope` 和查重函数；
   不删除工单、账号绑定或进粉账本。回滚后代码恢复为按平台全局查重。
 - 尚未部署生产；没有新增外部依赖、计费调用或密钥。
+
+## 2026-11-21 计数工单命名分组与底库（开发完成，待发布）
+
+- 迁移：`057_count_ticket_groups_base`
+- 命名分组：
+  - 新增 `count_ticket_groups`，分组按 `user_id + platform` 隔离。
+  - 工单新增可选 `group_id`；同一应用下分组名不区分大小写，不能重复。
+  - 查重范围新增 `group`，只比较当前分组内、同商户、同应用的工单。
+  - 分组下仍有工单时禁止删除。
+- 底库：
+  - 新增 `count_ticket_base_batches` 与 `count_ticket_base_entries`。
+  - 工单新增 `dedup_base_enabled`；底库按 `user_id + platform + peer_key` 唯一。
+  - 导入支持 `用户名----昵称----来源`，也兼容 Tab/逗号单行格式和 CSV 表头。
+  - 前端单次 250 行分批提交，服务端单批最多 1000 行，避开全局 256KB 请求体限制。
+  - 底库命中记为 `repeat_type=base`；`base_matched` 单独持久化，客户合并和乱序
+    重排不会把底库重粉错误改成新粉。
+  - 清空底库不删除历史进粉事实。
+- 工单已有进粉后，分组、底库开关、查重范围、关联工单和计数应用均锁定。
+- 商户删除计划直接清理关联、进粉、账号、工单、底库、批次和分组，避免分组
+  `RESTRICT` 外键堵住删商户。
+- 验证：
+  - 真库定向 `count-tickets + merchant-purge`：`18/18`。
+  - 全量：`2887 tests / 2822 pass / 0 fail / 65 known skips`。
+  - 迁移 `057 up -> down -> up` 通过。
+  - Web 生产构建通过：`js/index.0a25c88c.js`。
+  - Desktop source preload/guest：`19/19`。
+  - 死引用/未使用 import：`0/0`。
+  - 本地真实页面：创建命名分组成功；底库粘贴导入成功，统计、批次和明细
+    立即刷新，无白屏或退出登录。
+- 回滚：
+
+```bash
+# 先构建并部署回上一提交，再执行：
+node scripts/migrate.js down 1
+```
+
+  057 down 删除分组、底库、`group_id`、`dedup_base_enabled`、`repeat_type`、
+  `base_matched`，并恢复 056 的查重函数；不删除历史进粉账本。
+- 没有新增外部依赖、计费调用或密钥；尚未部署生产。

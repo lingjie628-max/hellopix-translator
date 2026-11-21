@@ -6,7 +6,11 @@
         <h1>计数工单</h1>
         <p>绑定客户端实际上报的接入账号后，系统按会话去重计粉。同一客户换账号再次进入，自动记为重粉。</p>
       </div>
-      <el-button v-if="counterSuite" type="primary" icon="el-icon-plus" @click="openTicketForm()">新建计数工单</el-button>
+      <div v-if="counterSuite" class="count-hero-actions">
+        <el-button icon="el-icon-folder-opened" @click="openGroupManager">命名分组</el-button>
+        <el-button icon="el-icon-upload2" @click="openBaseManager">底库管理</el-button>
+        <el-button type="primary" icon="el-icon-plus" @click="openTicketForm()">新建计数工单</el-button>
+      </div>
     </section>
 
     <section v-if="!counterSuite" class="count-locked">
@@ -57,6 +61,8 @@
           <template slot-scope="scope">
             <span>{{ platformName(scope.row.platform) }}</span>
             <small class="count-scope">{{ dedupScopeLabel(scope.row.dedupScope) }}</small>
+            <small v-if="scope.row.groupName" class="count-scope">{{ scope.row.groupName }}</small>
+            <small v-if="scope.row.dedupBaseEnabled" class="count-scope count-base-mark">含底库</small>
           </template>
         </el-table-column>
         <el-table-column prop="accountCount" label="账号" width="76" align="center"></el-table-column>
@@ -121,6 +127,8 @@
             <h2>{{ ticket.title }}</h2>
             <p>
               {{ platformName(ticket.platform) }} · {{ dedupScopeLabel(ticket.dedupScope) }}
+              <template v-if="ticket.groupId"> · {{ ticketGroupName(ticket.groupId) }}</template>
+              <template v-if="ticket.dedupBaseEnabled"> · 含底库</template>
               · 业务日从 {{ ticket.zeroTime }} 开始 · {{ ticket.timezone }}
             </p>
           </div>
@@ -191,6 +199,11 @@
                 <el-option label="新粉" value="new"></el-option>
                 <el-option label="重粉" value="repeat"></el-option>
               </el-select>
+              <el-select v-model="fanFilters.repeatType" size="small" @change="loadFans(1)">
+                <el-option label="全部依据" value="all"></el-option>
+                <el-option label="进线重粉" value="fan"></el-option>
+                <el-option label="底库重粉" value="base"></el-option>
+              </el-select>
               <el-input
                 v-model="fanFilters.keyword"
                 size="small"
@@ -208,6 +221,11 @@
                 <el-tag :type="scope.row.fanType === 'repeat' ? 'warning' : 'success'" size="mini">
                   {{ scope.row.fanType === 'repeat' ? '重粉' : '新粉' }}
                 </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="重粉依据" width="96">
+              <template slot-scope="scope">
+                <span>{{ scope.row.fanType === 'repeat' ? (scope.row.repeatType === 'base' ? '底库' : '进线') : '—' }}</span>
               </template>
             </el-table-column>
             <el-table-column prop="displayName" label="昵称" min-width="130" show-overflow-tooltip>
@@ -267,10 +285,38 @@
           >
             <el-option label="同商户全部工单" value="merchant"></el-option>
             <el-option label="仅当前工单" value="ticket"></el-option>
+            <el-option label="命名分组内" value="group"></el-option>
             <el-option label="指定关联工单" value="linked"></el-option>
           </el-select>
           <p class="count-form-tip count-scope-tip">
             {{ dedupScopeDescription(ticketForm.dedupScope) }}
+          </p>
+        </el-form-item>
+        <el-form-item label="命名分组">
+          <el-select
+            v-model="ticketForm.groupId"
+            clearable
+            filterable
+            style="width:100%"
+            placeholder="可选择本应用的命名分组"
+            :disabled="ticketForm.dedupLocked"
+          >
+            <el-option
+              v-for="group in groupOptions"
+              :key="group.id"
+              :label="group.name + '（' + group.ticketCount + ' 个工单）'"
+              :value="group.id"
+            ></el-option>
+          </el-select>
+        </el-form-item>
+        <el-form-item label="底库去重">
+          <el-switch
+            v-model="ticketForm.dedupBaseEnabled"
+            :disabled="ticketForm.dedupLocked"
+            active-text="命中底库记为重粉"
+          ></el-switch>
+          <p class="count-form-tip count-scope-tip">
+            只比较本商户、本应用导入的底库线索；不同应用和不同商户互不影响。
           </p>
         </el-form-item>
         <el-form-item
@@ -300,7 +346,7 @@
         </el-form-item>
         <el-alert
           v-if="ticketForm.dedupLocked"
-          title="该工单已有进粉记录，查重范围、计数应用和关联工单已锁定。"
+          title="该工单已有进粉记录，查重范围、分组、底库、计数应用和关联工单已锁定。"
           type="info"
           :closable="false"
           show-icon
@@ -330,6 +376,132 @@
         <el-button @click="ticketDialog = false">取消</el-button>
         <el-button type="primary" :loading="savingTicket" @click="saveTicket">保存</el-button>
       </span>
+    </el-dialog>
+
+    <el-dialog
+      title="命名邀请码分组"
+      :visible.sync="groupDialog"
+      width="720px"
+      :close-on-click-modal="false"
+    >
+      <el-form :inline="true" label-width="72px" class="count-inline-form">
+        <el-form-item label="应用">
+          <el-select v-model="groupForm.platform" style="width:180px" @change="loadGroups">
+            <el-option v-for="p in platformOptions" :key="p.id" :label="p.name" :value="p.id"></el-option>
+          </el-select>
+        </el-form-item>
+        <el-form-item label="分组名">
+          <el-input v-model="groupForm.name" maxlength="80" placeholder="例如：马来 A 组"></el-input>
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" :loading="groupSaving" @click="saveGroup">
+            {{ groupForm.id ? '保存修改' : '创建分组' }}
+          </el-button>
+          <el-button v-if="groupForm.id" @click="resetGroupForm">取消编辑</el-button>
+        </el-form-item>
+      </el-form>
+      <p class="count-form-tip">分组只允许同一商户、同一应用；组内查重会读取该组全部工单的历史进粉。</p>
+      <el-table :data="groups" size="small" border v-loading="groupsLoading">
+        <el-table-column prop="name" label="分组名称" min-width="180"></el-table-column>
+        <el-table-column label="应用" width="150">
+          <template slot-scope="scope">{{ platformName(scope.row.platform) }}</template>
+        </el-table-column>
+        <el-table-column prop="ticketCount" label="工单数" width="82" align="right"></el-table-column>
+        <el-table-column prop="activeTicketCount" label="进行中" width="82" align="right"></el-table-column>
+        <el-table-column label="操作" width="130" align="right">
+          <template slot-scope="scope">
+            <el-button type="text" @click="editGroup(scope.row)">编辑</el-button>
+            <el-button type="text" class="count-danger" @click="deleteGroup(scope.row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <el-empty v-if="!groupsLoading && !groups.length" description="当前应用还没有命名分组"></el-empty>
+      <span slot="footer"><el-button @click="groupDialog = false">关闭</el-button></span>
+    </el-dialog>
+
+    <el-dialog
+      title="底库管理"
+      :visible.sync="baseDialog"
+      width="880px"
+      :close-on-click-modal="false"
+    >
+      <div class="count-base-head">
+        <el-select v-model="baseForm.platform" style="width:190px" @change="refreshBase">
+          <el-option v-for="p in platformOptions" :key="p.id" :label="p.name" :value="p.id"></el-option>
+        </el-select>
+        <div class="count-base-stat">
+          <span>底库线索</span><b>{{ baseStats.totalEntries || 0 }}</b>
+        </div>
+        <div class="count-base-stat">
+          <span>最近导入</span><b class="count-base-time">{{ formatTime(baseStats.lastImportedAt) }}</b>
+        </div>
+        <el-button class="count-danger" :loading="baseClearing" @click="clearBase">清空当前应用</el-button>
+      </div>
+
+      <div class="count-base-import">
+        <div class="count-base-import-head">
+          <div>
+            <h3>导入原始线索</h3>
+            <p>一行一条：用户名----昵称----来源。单次最多 1000 条，大文件会在前端自动分批。</p>
+          </div>
+          <div>
+            <input
+              ref="baseFileInput"
+              type="file"
+              accept=".txt,.csv,text/plain,text/csv"
+              class="count-file-input"
+              @change="readBaseFile"
+            >
+            <el-button size="small" @click="$refs.baseFileInput.click()">选择 TXT / CSV</el-button>
+          </div>
+        </div>
+        <el-input
+          v-model="baseForm.text"
+          type="textarea"
+          :rows="7"
+          placeholder="628123456789----客户昵称----WhatsApp&#10;628987654321----另一个客户"
+        ></el-input>
+        <div class="count-base-import-actions">
+          <span v-if="baseForm.filename">文件：{{ baseForm.filename }}</span>
+          <el-button type="primary" :loading="baseImporting" :disabled="!baseForm.text.trim()" @click="importBase">
+            导入底库
+          </el-button>
+        </div>
+      </div>
+
+      <div class="count-base-list">
+        <div class="count-base-list-head">
+          <h3>最近导入明细</h3>
+          <el-input
+            v-model="baseFilters.keyword"
+            size="small"
+            clearable
+            placeholder="搜索用户名或昵称"
+            @keyup.enter.native="loadBaseEntries(1)"
+            @clear="loadBaseEntries(1)"
+          ></el-input>
+          <el-button size="small" @click="loadBaseEntries(1)">查询</el-button>
+        </div>
+        <el-table :data="baseEntries" size="small" border>
+          <el-table-column prop="peerKey" label="用户名 / 平台ID" min-width="180" show-overflow-tooltip></el-table-column>
+          <el-table-column prop="displayName" label="昵称" min-width="140" show-overflow-tooltip></el-table-column>
+          <el-table-column prop="source" label="来源" min-width="110" show-overflow-tooltip></el-table-column>
+          <el-table-column prop="batchId" label="批次" width="80" align="right"></el-table-column>
+          <el-table-column label="导入时间" width="168">
+            <template slot-scope="scope">{{ formatTime(scope.row.importedAt) }}</template>
+          </el-table-column>
+        </el-table>
+        <el-pagination
+          v-if="baseEntryTotal > baseFilters.rows"
+          class="count-pagination"
+          :current-page="baseFilters.page"
+          :page-size="baseFilters.rows"
+          :total="baseEntryTotal"
+          layout="total, prev, pager, next"
+          @current-change="loadBaseEntries"
+        ></el-pagination>
+      </div>
+      <span slot="footer"><el-button @click="baseDialog = false">关闭</el-button></span>
     </el-dialog>
 
     <el-dialog title="绑定接入账号" :visible.sync="accountDialog" width="480px" :close-on-click-modal="false">
@@ -388,13 +560,27 @@ export default {
       dedupTicketIds: [],
       fans: [],
       fanTotal: 0,
-      fanFilters: { type: 'all', keyword: '', page: 1, rows: 20 },
+      fanFilters: { type: 'all', repeatType: 'all', keyword: '', page: 1, rows: 20 },
       platforms: [],
       ticketDialog: false,
       savingTicket: false,
       ticketForm: {},
       dedupOptions: [],
       dedupOptionsLoading: false,
+      groups: [],
+      groupOptions: [],
+      groupsLoading: false,
+      groupDialog: false,
+      groupSaving: false,
+      groupForm: { id: null, name: '', platform: 'whatsapp-green' },
+      baseDialog: false,
+      baseForm: { platform: 'whatsapp-green', filename: '', text: '' },
+      baseStats: { totalEntries: 0, lastImportedAt: null },
+      baseEntries: [],
+      baseEntryTotal: 0,
+      baseFilters: { platform: 'whatsapp-green', keyword: '', page: 1, rows: 20 },
+      baseImporting: false,
+      baseClearing: false,
       accountDialog: false,
       savingAccount: false,
       accountForm: { platform: 'whatsapp-green', accountKey: '' },
@@ -475,6 +661,7 @@ export default {
           this.dedupTicketIds = Array.isArray(resp.data.dedupTicketIds)
             ? resp.data.dedupTicketIds.map(Number)
             : []
+          this.loadGroupOptions(this.ticket.platform)
           this.loadFans(1)
         }
       }).finally(() => { this.detailLoading = false })
@@ -503,6 +690,8 @@ export default {
         timezone: source.timezone || 'Asia/Shanghai',
         zeroTime: source.zeroTime || '00:00:00',
         dedupScope: source.dedupScope || 'merchant',
+        groupId: source.groupId == null ? null : Number(source.groupId),
+        dedupBaseEnabled: source.dedupBaseEnabled === true,
         linkedTicketIds: Array.isArray(source.dedupTicketIds)
           ? source.dedupTicketIds.map(Number)
           : (source.id && Array.isArray(this.dedupTicketIds) ? this.dedupTicketIds.slice() : []),
@@ -510,6 +699,7 @@ export default {
       }
       this.ticketDialog = true
       this.loadDedupOptions(this.ticketForm.platform, this.ticketForm.id)
+      this.loadGroupOptions(this.ticketForm.platform)
     },
     loadDedupOptions(platform, ticketId) {
       this.dedupOptions = []
@@ -526,22 +716,197 @@ export default {
         this.dedupOptionsLoading = false
       })
     },
+    loadGroupOptions(platform) {
+      this.groupOptions = []
+      if (!platform) return
+      this.getRequest('/count-tickets/groups', { platform }).then(resp => {
+        if (resp && resp.data && Array.isArray(resp.data.rows)) {
+          this.groupOptions = resp.data.rows
+        }
+      }).catch(() => {})
+    },
+    openGroupManager() {
+      const platform = this.ticketForm.platform || (this.platformOptions[0] && this.platformOptions[0].id) || 'whatsapp-green'
+      this.groupForm = { id: null, name: '', platform }
+      this.groupDialog = true
+      this.loadGroups()
+    },
+    loadGroups() {
+      this.groupsLoading = true
+      this.getRequest('/count-tickets/groups', {
+        platform: this.groupForm.platform
+      }).then(resp => {
+        if (resp && resp.data && Array.isArray(resp.data.rows)) {
+          this.groups = resp.data.rows
+        }
+      }).catch(() => {}).finally(() => {
+        this.groupsLoading = false
+      })
+    },
+    editGroup(group) {
+      this.groupForm = {
+        id: Number(group.id),
+        name: group.name,
+        platform: group.platform
+      }
+    },
+    resetGroupForm() {
+      this.groupForm = {
+        id: null,
+        name: '',
+        platform: this.groupForm.platform
+      }
+    },
+    saveGroup() {
+      if (!String(this.groupForm.name || '').trim()) {
+        this.$message.warning('请填写分组名称')
+        return
+      }
+      this.groupSaving = true
+      this.postRequest('/count-tickets/groups/save', this.groupForm).then(resp => {
+        if (resp && resp.data && resp.data.success === 'success') {
+          this.$message.success(resp.data.msg)
+          this.loadGroups()
+          this.loadGroupOptions(this.ticketForm.platform)
+          this.resetGroupForm()
+        }
+      }).catch(() => {}).finally(() => {
+        this.groupSaving = false
+      })
+    },
+    deleteGroup(group) {
+      this.$confirm(`确认删除分组「${group.name}」？分组下仍有工单时不能删除。`, '删除分组', {
+        type: 'warning'
+      }).then(() => this.postRequest('/count-tickets/groups/delete', {
+        id: group.id
+      })).then(resp => {
+        if (resp && resp.data && resp.data.success === 'success') {
+          this.$message.success(resp.data.msg)
+          this.loadGroups()
+          this.loadGroupOptions(this.ticketForm.platform)
+        }
+      }).catch(() => {})
+    },
+    openBaseManager() {
+      const platform = this.ticketForm.platform || (this.platformOptions[0] && this.platformOptions[0].id) || 'whatsapp-green'
+      this.baseForm = { platform, filename: '', text: '' }
+      this.baseFilters = { platform, keyword: '', page: 1, rows: 20 }
+      this.baseDialog = true
+      this.refreshBase()
+    },
+    refreshBase() {
+      this.baseFilters.platform = this.baseForm.platform
+      this.loadBaseStats()
+      this.loadBaseEntries(1)
+    },
+    loadBaseStats() {
+      this.getRequest('/count-tickets/base/stats', {
+        platform: this.baseForm.platform
+      }).then(resp => {
+        if (resp && resp.data) this.baseStats = resp.data
+      }).catch(() => {})
+    },
+    loadBaseEntries(page) {
+      this.baseFilters.platform = this.baseForm.platform
+      this.baseFilters.page = page || this.baseFilters.page
+      this.getRequest('/count-tickets/base/entries', this.baseFilters).then(resp => {
+        if (resp && resp.data) {
+          this.baseEntries = resp.data.rows || []
+          this.baseEntryTotal = Number(resp.data.total) || 0
+        }
+      }).catch(() => {})
+    },
+    readBaseFile(event) {
+      const file = event.target.files && event.target.files[0]
+      if (!file) return
+      const reader = new FileReader()
+      reader.onload = () => {
+        this.baseForm.filename = file.name
+        this.baseForm.text = String(reader.result || '')
+      }
+      reader.onerror = () => this.$message.error('文件读取失败')
+      reader.readAsText(file, 'utf-8')
+      event.target.value = ''
+    },
+    async importBase() {
+      const lines = String(this.baseForm.text || '').split(/\r?\n/).filter(line => line.trim())
+      if (!lines.length) {
+        this.$message.warning('没有可导入的数据')
+        return
+      }
+      this.baseImporting = true
+      let accepted = 0
+      let inserted = 0
+      let updated = 0
+      try {
+        for (let i = 0; i < lines.length; i += 250) {
+          const chunk = lines.slice(i, i + 250)
+          const resp = await this.postRequest('/count-tickets/base/import', {
+            platform: this.baseForm.platform,
+            filename: this.baseForm.filename,
+            text: chunk.join('\n')
+          })
+          if (!resp || !resp.data || resp.data.success !== 'success') {
+            throw new Error('导入失败')
+          }
+          accepted += Number(resp.data.accepted) || 0
+          inserted += Number(resp.data.inserted) || 0
+          updated += Number(resp.data.updated) || 0
+        }
+        this.$message.success(`导入完成：新增 ${inserted}，覆盖 ${updated}，有效 ${accepted}`)
+        this.baseForm.text = ''
+        this.baseForm.filename = ''
+        this.loadBaseStats()
+        this.loadBaseEntries(1)
+      } catch (_error) {
+        this.$message.error('底库导入未全部完成，请检查格式或网络后重试')
+      } finally {
+        this.baseImporting = false
+      }
+    },
+    clearBase() {
+      this.$confirm(
+        `确认清空「${platformName(this.baseForm.platform)}」当前应用的底库？历史进粉不会被删除。`,
+        '清空底库',
+        { type: 'warning' }
+      ).then(() => this.postRequest('/count-tickets/base/clear', {
+        platform: this.baseForm.platform
+      })).then(resp => {
+        if (resp && resp.data && resp.data.success === 'success') {
+          this.$message.success(resp.data.msg)
+          this.baseClearing = false
+          this.loadBaseStats()
+          this.loadBaseEntries(1)
+        }
+      }).catch(() => { this.baseClearing = false })
+      this.baseClearing = true
+    },
+    ticketGroupName(groupId) {
+      const group = this.groupOptions.find(item => Number(item.id) === Number(groupId))
+      return group ? group.name : `分组 #${groupId}`
+    },
     handleTicketPlatformChange(platform) {
       this.ticketForm.linkedTicketIds = []
       this.ticketForm.dedupScope = 'merchant'
+      this.ticketForm.groupId = null
       this.loadDedupOptions(platform, this.ticketForm.id)
+      this.loadGroupOptions(platform)
     },
     handleDedupScopeChange(scope) {
       if (scope !== 'linked') this.ticketForm.linkedTicketIds = []
     },
     dedupScopeLabel(scope) {
       if (scope === 'ticket') return '仅当前工单'
+      if (scope === 'group') return '命名分组内'
       if (scope === 'linked') return '指定关联工单'
       return '同商户全部工单'
     },
     dedupScopeDescription(scope) {
       if (scope === 'ticket') {
         return '只和本工单历史进粉比较；同一客户进入其它工单仍算新粉。'
+      }
+      if (scope === 'group') {
+        return '只和当前命名分组内的同应用工单比较，分组外和不同应用都不参与。'
       }
       if (scope === 'linked') {
         return '只和本工单及下方选中工单的历史进粉比较，不能跨应用。'
@@ -555,6 +920,10 @@ export default {
       }
       if (this.ticketForm.dedupScope === 'linked' && !this.ticketForm.linkedTicketIds.length) {
         this.$message.warning('指定查重工单至少需要选择一张其它工单')
+        return
+      }
+      if (this.ticketForm.dedupScope === 'group' && !this.ticketForm.groupId) {
+        this.$message.warning('组内查重必须先选择命名分组')
         return
       }
       this.savingTicket = true
@@ -672,6 +1041,13 @@ export default {
   max-width: 680px;
   color: rgba(255,255,255,.72);
   line-height: 1.7;
+}
+.count-hero-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 .count-kicker {
   color: #eab66e;
@@ -810,6 +1186,51 @@ export default {
 .count-scope-tip {
   margin-top: 5px;
 }
+.count-base-mark { color: var(--count-blue); font-weight: 650; }
+.count-inline-form { display: flex; align-items: flex-start; gap: 6px; flex-wrap: wrap; }
+.count-inline-form .el-input { width: 220px; }
+.count-base-head,
+.count-base-import-head,
+.count-base-import-actions,
+.count-base-list-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.count-base-head {
+  padding: 14px;
+  margin-bottom: 12px;
+  border: 1px solid var(--count-line);
+  border-radius: 12px;
+  background: var(--count-blue-soft);
+}
+.count-base-head > .count-danger { margin-left: auto; }
+.count-base-stat {
+  min-width: 120px;
+  padding-left: 14px;
+  border-left: 1px solid #c9dce9;
+}
+.count-base-stat span { display: block; color: var(--count-muted); font-size: 11px; }
+.count-base-stat b { display: block; margin-top: 4px; font-size: 20px; }
+.count-base-time { font-size: 13px !important; }
+.count-base-import,
+.count-base-list {
+  padding: 14px;
+  margin-top: 12px;
+  border: 1px solid var(--count-line);
+  border-radius: 12px;
+  background: #fff;
+}
+.count-base-import-head { justify-content: space-between; margin-bottom: 10px; }
+.count-base-import-head h3,
+.count-base-list h3 { margin: 0 0 4px; }
+.count-base-import-head p { margin: 0; color: var(--count-muted); font-size: 12px; }
+.count-base-import-actions { justify-content: flex-end; margin-top: 10px; }
+.count-base-import-actions span { margin-right: auto; color: var(--count-muted); font-size: 12px; }
+.count-base-list-head { margin-bottom: 10px; }
+.count-base-list-head h3 { margin-right: auto; }
+.count-base-list-head .el-input { width: 240px; }
+.count-file-input { display: none; }
 .count-pagination { margin-top: 14px; text-align: right; }
 .count-detail { padding: 22px; }
 .count-detail-head {

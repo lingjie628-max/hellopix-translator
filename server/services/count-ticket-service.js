@@ -6,7 +6,9 @@ const catalog = require('../lib/client-catalog')
 
 const TICKET_STATUSES = new Set(['active', 'closed'])
 const FAN_TYPES = new Set(['new', 'repeat'])
-const DEDUP_SCOPES = new Set(['ticket', 'merchant', 'linked'])
+const DEDUP_SCOPES = new Set(['ticket', 'merchant', 'group', 'linked'])
+const BASE_IMPORT_MAX = 1000
+const BASE_ENTRY_TYPES = new Set(['fan', 'base'])
 const ACCOUNT_BINDING_GRACE_MS = 2 * 60 * 1000
 
 function cleanText(value, max) {
@@ -62,6 +64,66 @@ function normalizeLinkedTicketIds(value) {
   return Array.from(ids).sort((a, b) => a - b)
 }
 
+function normalizeGroupId(value) {
+  if (value == null || value === '') return null
+  const id = Number(value)
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    throw new ApiError(400, '计数工单分组号不合法', 'COUNT_GROUP_BAD_ID')
+  }
+  return id
+}
+
+function normalizeBoolean(value, fallback) {
+  if (value == null || value === '') return fallback
+  if (value === true || value === 1 || /^(1|true|yes|on)$/i.test(String(value))) return true
+  if (value === false || value === 0 || /^(0|false|no|off)$/i.test(String(value))) return false
+  throw new ApiError(400, '开关值不合法', 'COUNT_BOOLEAN_BAD')
+}
+
+function normalizeBaseLines(value) {
+  const text = String(value == null ? '' : value).replace(/\r\n?/g, '\n')
+  const byPeer = new Map()
+  let totalLines = 0
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.trim()
+    if (!line) continue
+    totalLines += 1
+    let parts = line.includes('----')
+      ? line.split('----')
+      : (line.includes('\t') ? line.split('\t') : line.split(','))
+    parts = parts.map(part => part.trim())
+    const peerKey = cleanText(parts[0], 200)
+    if (!peerKey) continue
+    if (/^(username|peer|peerkey|用户名|平台id)$/i.test(peerKey)) continue
+    byPeer.set(peerKey, {
+      peerKey,
+      displayName: cleanText(parts[1], 200),
+      source: cleanText(parts[2], 120)
+    })
+  }
+  const entries = Array.from(byPeer.values())
+  if (entries.length > BASE_IMPORT_MAX) {
+    throw new ApiError(
+      400,
+      `单次最多导入 ${BASE_IMPORT_MAX} 条底库线索，请分批上传`,
+      'COUNT_BASE_IMPORT_TOO_MANY'
+    )
+  }
+  return { entries, totalLines }
+}
+
+function normalizeGroup(data) {
+  const name = cleanText(data.name, 80)
+  const platform = cleanText(data.platform, 32).toLowerCase()
+  if (!name) throw new ApiError(400, '请填写分组名称', 'COUNT_GROUP_NAME_REQUIRED')
+  if (!platform) throw new ApiError(400, '请选择分组应用', 'COUNT_PLATFORM_REQUIRED')
+  return {
+    id: data.id == null || data.id === '' ? null : Number(data.id),
+    name,
+    platform
+  }
+}
+
 function normalizeTicket(data) {
   const title = cleanText(data.title, 120)
   if (!title) throw new ApiError(400, '请填写计数工单名称', 'COUNT_TITLE_REQUIRED')
@@ -79,6 +141,11 @@ function normalizeTicket(data) {
     zeroTime: validZeroTime(data.zeroTime != null ? data.zeroTime : data.zero_time),
     dedupScope: normalizeDedupScope(
       data.dedupScope != null ? data.dedupScope : data.dedup_scope
+    ),
+    groupId: normalizeGroupId(data.groupId != null ? data.groupId : data.group_id),
+    dedupBaseEnabled: normalizeBoolean(
+      data.dedupBaseEnabled != null ? data.dedupBaseEnabled : data.dedup_base_enabled,
+      false
     )
   }
 }
@@ -114,6 +181,10 @@ class CountTicketService {
   async saveTicket(userId, data) {
     const payload = normalizeTicket(data || {})
     const scopeProvided = !!data && (data.dedupScope != null || data.dedup_scope != null)
+    const groupProvided = !!data && (data.groupId !== undefined || data.group_id !== undefined)
+    const baseProvided = !!data && (
+      data.dedupBaseEnabled !== undefined || data.dedup_base_enabled !== undefined
+    )
     let linkedTicketIds = normalizeLinkedTicketIds(
       data && (data.linkedTicketIds != null ? data.linkedTicketIds : data.linked_ticket_ids)
     )
@@ -133,6 +204,8 @@ class CountTicketService {
           payload.dedupScope = String(current.dedup_scope || 'merchant')
           linkedTicketIds = currentLinks.slice()
         }
+        if (!groupProvided) payload.groupId = current.group_id == null ? null : Number(current.group_id)
+        if (!baseProvided) payload.dedupBaseEnabled = current.dedup_base_enabled === true
         if (current.has_fans && (
           String(current.timezone) !== payload.timezone ||
           String(current.zero_time) !== payload.zeroTime
@@ -154,22 +227,39 @@ class CountTicketService {
           const scopeChanged = String(current.dedup_scope) !== payload.dedupScope
           const linksChanged = currentLinks.length !== linkedTicketIds.length ||
             currentLinks.some((linkedId, index) => linkedId !== linkedTicketIds[index])
-          if (scopeChanged || linksChanged) {
+          const groupChanged = (current.group_id == null ? null : Number(current.group_id)) !== payload.groupId
+          const baseChanged = current.dedup_base_enabled !== payload.dedupBaseEnabled
+          if (scopeChanged || linksChanged || groupChanged || baseChanged) {
             throw new ApiError(
               409,
-              '该工单已有进粉记录，查重范围和关联工单不能再修改',
+              '该工单已有进粉记录，查重范围、分组、底库和关联工单不能再修改',
               'COUNT_DEDUP_SCOPE_LOCKED'
             )
           }
         }
       }
 
+      if (payload.dedupScope === 'group' && !payload.groupId) {
+        throw new ApiError(400, '组内查重必须先选择命名分组', 'COUNT_GROUP_REQUIRED')
+      }
       if (payload.dedupScope === 'linked' && !linkedTicketIds.length) {
         throw new ApiError(
           400,
           '指定查重工单至少需要选择一张其它工单',
           'COUNT_DEDUP_LINKS_REQUIRED'
         )
+      }
+      if (payload.groupId) {
+        const group = await this.repo.validGroupForTicket(
+          payload.groupId, userId, payload.platform, client
+        )
+        if (!group) {
+          throw new ApiError(
+            400,
+            '计数工单分组必须属于当前商户并使用同一个应用',
+            'COUNT_GROUP_INVALID'
+          )
+        }
       }
       const linksToApply = payload.dedupScope === 'linked' ? linkedTicketIds : []
       const validLinks = await this.repo.validDedupTicketIds(
@@ -301,6 +391,7 @@ class CountTicketService {
           reason: 'conversation_already_counted',
           ticketId: Number(ticket.id),
           fanType: existing.fan_type,
+          repeatType: existing.repeat_type,
           fanId: Number(existing.id)
         }
       }
@@ -321,7 +412,11 @@ class CountTicketService {
         : await this.repo.priorFanForPeer(
           userId, Number(ticket.id), platform, peerKey, client
         )
-      const fanType = prior ? 'repeat' : 'new'
+      const baseHit = ticket.dedup_base_enabled
+        ? await this.repo.baseEntryForPeer(userId, platform, peerKey, client)
+        : null
+      const fanType = prior || baseHit ? 'repeat' : 'new'
+      const repeatType = prior ? 'fan' : (baseHit ? 'base' : 'fan')
       const inserted = await this.repo.insertFan({
         ticketId: Number(ticket.id),
         userId,
@@ -334,6 +429,8 @@ class CountTicketService {
         eventType,
         direction,
         fanType,
+        repeatType,
+        baseMatched: !!baseHit,
         repeatOfId: prior ? Number(prior.id) : null,
         eventAt,
         timezone: ticket.timezone,
@@ -353,6 +450,7 @@ class CountTicketService {
           ticketId: Number(ticket.id),
           fanId: Number(inserted.id),
           fanType: finalFan.fan_type,
+          repeatType: finalFan.repeat_type,
           repeatOfId: finalFan.repeat_of_id == null ? null : Number(finalFan.repeat_of_id)
         }
       }
@@ -362,6 +460,7 @@ class CountTicketService {
         reason: 'conversation_already_counted',
         ticketId: Number(ticket.id),
         fanType: raced ? raced.fan_type : null,
+        repeatType: raced ? raced.repeat_type : null,
         fanId: raced ? Number(raced.id) : null
       }
     })
@@ -417,6 +516,108 @@ class CountTicketService {
     return this.repo.dedupTicketOptions(userId, ticketId, platform)
   }
 
+  async groups(userId, data) {
+    const platform = cleanText(data.platform, 32).toLowerCase()
+    return this.repo.listGroups(userId, platform)
+  }
+
+  async saveGroup(userId, data) {
+    const payload = normalizeGroup(data || {})
+    if (payload.id != null && (!Number.isSafeInteger(payload.id) || payload.id <= 0)) {
+      throw new ApiError(400, '分组号不合法', 'COUNT_GROUP_BAD_ID')
+    }
+    try {
+      const row = await this.repo.saveGroup(userId, payload)
+      if (!row) throw new ApiError(404, '计数工单分组不存在', 'COUNT_GROUP_NOT_FOUND')
+      return mapRow(row)
+    } catch (error) {
+      if (error && error.code === '23505') {
+        throw new ApiError(409, '同一应用下已存在同名分组', 'COUNT_GROUP_NAME_DUPLICATE')
+      }
+      throw error
+    }
+  }
+
+  async deleteGroup(userId, data) {
+    const id = Number(data.id)
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      throw new ApiError(400, '分组号不合法', 'COUNT_GROUP_BAD_ID')
+    }
+    return this.repo.transaction(async client => {
+      const group = await this.repo.groupForOwner(id, userId, client)
+      if (!group) throw new ApiError(404, '计数工单分组不存在', 'COUNT_GROUP_NOT_FOUND')
+      const assigned = await this.repo.groupTicketCount(id, userId, client)
+      if (assigned > 0) {
+        throw new ApiError(
+          409,
+          '分组下还有计数工单，请先把工单移出分组',
+          'COUNT_GROUP_NOT_EMPTY'
+        )
+      }
+      await this.repo.deleteGroup(id, userId, client)
+      return { ok: true }
+    })
+  }
+
+  async baseStats(userId, data) {
+    const platform = cleanText(data.platform, 32).toLowerCase()
+    if (!platform) throw new ApiError(400, '请选择底库应用', 'COUNT_PLATFORM_REQUIRED')
+    return this.repo.baseStats(userId, platform)
+  }
+
+  async baseEntries(userId, data) {
+    const platform = cleanText(data.platform, 32).toLowerCase()
+    if (!platform) throw new ApiError(400, '请选择底库应用', 'COUNT_PLATFORM_REQUIRED')
+    const limit = Math.min(Math.max(Number(data.rows || data.size) || 30, 1), 100)
+    const page = Math.min(Math.max(Number(data.page) || 1, 1), 1_000_000)
+    const result = await this.repo.listBaseEntries(userId, {
+      platform,
+      keyword: cleanText(data.keyword, 200),
+      limit,
+      offset: (page - 1) * limit
+    })
+    return { rows: result.rows, total: result.total, page, pageSize: limit }
+  }
+
+  async importBase(userId, data) {
+    const platform = cleanText(data.platform, 32).toLowerCase()
+    if (!platform) throw new ApiError(400, '请选择底库应用', 'COUNT_PLATFORM_REQUIRED')
+    const { entries, totalLines } = normalizeBaseLines(data.text)
+    if (!entries.length) {
+      throw new ApiError(400, '没有可导入的底库线索', 'COUNT_BASE_IMPORT_EMPTY')
+    }
+    return this.repo.transaction(async client => {
+      const existing = await this.repo.existingBasePeers(
+        userId, platform, entries.map(item => item.peerKey), client
+      )
+      const insertedCount = entries.filter(item => !existing.has(item.peerKey)).length
+      const updatedCount = entries.length - insertedCount
+      const batch = await this.repo.createBaseBatch(userId, {
+        platform,
+        filename: cleanText(data.filename, 200),
+        totalLines,
+        insertedCount,
+        updatedCount
+      }, client)
+      await this.repo.upsertBaseEntries(
+        userId, platform, Number(batch.id), entries, client
+      )
+      return {
+        batchId: Number(batch.id),
+        totalLines,
+        accepted: entries.length,
+        inserted: insertedCount,
+        updated: updatedCount
+      }
+    })
+  }
+
+  async clearBase(userId, data) {
+    const platform = cleanText(data.platform, 32).toLowerCase()
+    if (!platform) throw new ApiError(400, '请选择底库应用', 'COUNT_PLATFORM_REQUIRED')
+    return { removed: await this.repo.clearBase(userId, platform) }
+  }
+
   async fans(ticketId, access, data) {
     const id = Number(ticketId)
     if (!Number.isSafeInteger(id)) {
@@ -431,10 +632,15 @@ class CountTicketService {
     if (type !== 'all' && !FAN_TYPES.has(type)) {
       throw new ApiError(400, '粉丝类型不合法', 'COUNT_FAN_TYPE_BAD')
     }
+    const repeatType = cleanText(data.repeatType || data.repeat_type || 'all', 16)
+    if (repeatType !== 'all' && !BASE_ENTRY_TYPES.has(repeatType)) {
+      throw new ApiError(400, '重粉依据不合法', 'COUNT_REPEAT_TYPE_BAD')
+    }
     const limit = Math.min(Math.max(Number(data.rows || data.size) || 30, 1), 100)
     const page = Math.min(Math.max(Number(data.page) || 1, 1), 1_000_000)
     const result = await this.repo.listFans(id, {
       type,
+      repeatType,
       platform: cleanText(data.platform, 32).toLowerCase(),
       accountKey: cleanText(data.accountKey != null ? data.accountKey : data.account_key, 200),
       keyword: cleanText(data.keyword, 120),
@@ -462,6 +668,8 @@ module.exports = {
   normalizeAccount,
   normalizeDedupScope,
   normalizeLinkedTicketIds,
+  normalizeGroup,
+  normalizeBaseLines,
   validTimezone,
   validZeroTime,
   normalizeAccess

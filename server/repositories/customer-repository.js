@@ -595,7 +595,15 @@ class CustomerRepository {
          WHERE f.customer_id = $1
        )
        UPDATE count_ticket_fans f
-       SET fan_type = CASE WHEN f.id = firsts.first_id THEN 'new' ELSE 'repeat' END,
+       SET fan_type = CASE
+             WHEN f.id = firsts.first_id AND f.base_matched THEN 'repeat'
+             WHEN f.id = firsts.first_id THEN 'new'
+             ELSE 'repeat'
+           END,
+           repeat_type = CASE
+             WHEN f.id = firsts.first_id AND f.base_matched THEN 'base'
+             ELSE 'fan'
+           END,
            repeat_of_id = CASE WHEN f.id = firsts.first_id THEN NULL ELSE firsts.first_id END
        FROM firsts
        WHERE f.id = firsts.id`,

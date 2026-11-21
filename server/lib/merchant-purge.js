@@ -42,6 +42,13 @@ const PURGE_PLAN = Object.freeze([
   { table: 'recharge_amount_reservations', label: '金额预约', where: 'recharge_of_user' },
   { table: 'recharges', label: '充值单', where: 'user_id' },
   { table: 'orders', label: '工单', where: 'user_id' },
+  { table: 'count_ticket_dedup_links', label: '工单查重关联', where: 'user_id' },
+  { table: 'count_ticket_fans', label: '进粉记录', where: 'user_id' },
+  { table: 'count_ticket_accounts', label: '计数账号', where: 'user_id' },
+  { table: 'count_tickets', label: '计数工单', where: 'user_id' },
+  { table: 'count_ticket_base_entries', label: '底库线索', where: 'user_id' },
+  { table: 'count_ticket_base_batches', label: '底库导入批次', where: 'user_id' },
+  { table: 'count_ticket_groups', label: '计数工单分组', where: 'user_id' },
   { table: 'character_transfers', label: '字符划转', where: 'parent_id' },
   { table: 'char_ledger', label: '字符流水', where: 'user_id' }
 ])
@@ -60,6 +67,9 @@ const CASCADE_TABLES = Object.freeze([
   ['count_ticket_accounts', 'user_id'],
   ['count_ticket_fans', 'user_id'],
   ['count_ticket_dedup_links', 'user_id'],
+  ['count_ticket_groups', 'user_id'],
+  ['count_ticket_base_entries', 'user_id'],
+  ['count_ticket_base_batches', 'user_id'],
   ['scripts', 'user_id'],
   ['login_logs', 'user_id'],
   ['short_links', 'user_id'],
@@ -90,6 +100,9 @@ const LABELS = Object.freeze(
     count_ticket_accounts: '计数账号',
     count_ticket_fans: '进粉记录',
     count_ticket_dedup_links: '工单查重关联',
+    count_ticket_groups: '工单分组',
+    count_ticket_base_entries: '底库线索',
+    count_ticket_base_batches: '底库导入批次',
     scripts: '脚本',
     login_logs: '登录日志',
     short_links: '短链',
@@ -162,6 +175,11 @@ async function buildSnapshot(repo, user, client) {
     count_tickets: await dump('count_tickets', 'user_id'),
     count_ticket_accounts: await dump('count_ticket_accounts', 'user_id'),
     count_ticket_fans: await dump('count_ticket_fans', 'user_id'),
+    count_ticket_groups: await dump('count_ticket_groups', 'user_id'),
+    count_ticket_base_entries: await dump(
+      'count_ticket_base_entries', 'user_id', 'platform, peer_key'
+    ),
+    count_ticket_base_batches: await dump('count_ticket_base_batches', 'user_id'),
     count_ticket_dedup_links: await dump(
       'count_ticket_dedup_links', 'user_id', 'ticket_id, linked_ticket_id'
     )

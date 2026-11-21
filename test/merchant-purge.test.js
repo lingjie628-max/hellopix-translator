@@ -103,6 +103,13 @@ test('商户回收 / 删除：护栏与外键顺序', { skip: !databaseUrl }, as
         'DELETE FROM recharge_amount_reservations WHERE recharge_id IN (SELECT id FROM recharges WHERE user_id=$1)',
         [userId])
       await client.query('DELETE FROM recharges WHERE user_id=$1', [userId])
+      await client.query('DELETE FROM count_ticket_dedup_links WHERE user_id=$1', [userId])
+      await client.query('DELETE FROM count_ticket_fans WHERE user_id=$1', [userId])
+      await client.query('DELETE FROM count_ticket_accounts WHERE user_id=$1', [userId])
+      await client.query('DELETE FROM count_tickets WHERE user_id=$1', [userId])
+      await client.query('DELETE FROM count_ticket_base_entries WHERE user_id=$1', [userId])
+      await client.query('DELETE FROM count_ticket_base_batches WHERE user_id=$1', [userId])
+      await client.query('DELETE FROM count_ticket_groups WHERE user_id=$1', [userId])
       await client.query('DELETE FROM character_transfers WHERE parent_id=$1', [userId])
       await client.query('DELETE FROM char_ledger WHERE user_id=$1', [userId])
       await client.query('DELETE FROM users WHERE id=$1', [userId])
@@ -232,10 +239,15 @@ test('商户回收 / 删除：护栏与外键顺序', { skip: !databaseUrl }, as
 
   await t.test('删除：计数工单、绑定账号和进粉账本必须进入删除存档', async () => {
     const user = await makeUser(0)
-    const ticket = await pool.query(
-      `INSERT INTO count_tickets(user_id,title,platform,timezone,zero_time)
-       VALUES($1,'待删计数工单','whatsapp-green','Asia/Shanghai','00:00') RETURNING id`,
+    const group = await pool.query(
+      `INSERT INTO count_ticket_groups(user_id,name,platform)
+       VALUES($1,'待删分组','whatsapp-green') RETURNING id`,
       [user.id]
+    )
+    const ticket = await pool.query(
+      `INSERT INTO count_tickets(user_id,title,platform,timezone,zero_time,group_id)
+       VALUES($1,'待删计数工单','whatsapp-green','Asia/Shanghai','00:00',$2) RETURNING id`,
+      [user.id, group.rows[0].id]
     )
     const linkedTicket = await pool.query(
       `INSERT INTO count_tickets(user_id,title,platform,timezone,zero_time,dedup_scope)
@@ -246,6 +258,18 @@ test('商户回收 / 删除：护栏与外键顺序', { skip: !databaseUrl }, as
       `INSERT INTO count_ticket_dedup_links(ticket_id,user_id,linked_ticket_id)
        VALUES($1,$2,$3)`,
       [linkedTicket.rows[0].id, user.id, ticket.rows[0].id]
+    )
+    const batch = await pool.query(
+      `INSERT INTO count_ticket_base_batches
+         (user_id,platform,filename,total_lines,inserted_count,updated_count)
+       VALUES($1,'whatsapp-green','base.txt',1,1,0) RETURNING id`,
+      [user.id]
+    )
+    await pool.query(
+      `INSERT INTO count_ticket_base_entries
+         (user_id,platform,peer_key,display_name,source,batch_id)
+       VALUES($1,'whatsapp-green','purge-base-peer','底库客户','导入',$2)`,
+      [user.id, batch.rows[0].id]
     )
     const conversation = await pool.query(
       `INSERT INTO conversations(user_id,platform,account_key,peer_key,display_name,last_message_at)
@@ -279,5 +303,8 @@ test('商户回收 / 删除：护栏与外键顺序', { skip: !databaseUrl }, as
     assert.equal(archive.rows[0].snapshot.count_ticket_fans[0].event_type, 'message')
     assert.equal(archive.rows[0].snapshot.count_ticket_fans[0].direction, 'in')
     assert.equal(archive.rows[0].snapshot.count_ticket_dedup_links.length, 1)
+    assert.equal(archive.rows[0].snapshot.count_ticket_groups.length, 1)
+    assert.equal(archive.rows[0].snapshot.count_ticket_base_entries.length, 1)
+    assert.equal(archive.rows[0].snapshot.count_ticket_base_batches.length, 1)
   })
 })

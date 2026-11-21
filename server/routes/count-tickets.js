@@ -40,6 +40,40 @@ function registerCountTickets(router, ctx) {
     })
   }))
 
+  router.get('/count-tickets/groups', asyncRoute(async (req, res) => {
+    res.json({
+      rows: await countTickets.groups(ownerOf(req, countTickets), input(req))
+    })
+  }))
+
+  router.post('/count-tickets/groups/save', asyncRoute(async (req, res) => {
+    const group = await countTickets.saveGroup(ownerOf(req, countTickets), input(req))
+    ok(res, '分组已保存', { group })
+  }))
+
+  router.post('/count-tickets/groups/delete', asyncRoute(async (req, res) => {
+    await countTickets.deleteGroup(ownerOf(req, countTickets), input(req))
+    ok(res, '分组已删除')
+  }))
+
+  router.get('/count-tickets/base/stats', asyncRoute(async (req, res) => {
+    res.json(await countTickets.baseStats(ownerOf(req, countTickets), input(req)))
+  }))
+
+  router.get('/count-tickets/base/entries', asyncRoute(async (req, res) => {
+    res.json(await countTickets.baseEntries(ownerOf(req, countTickets), input(req)))
+  }))
+
+  router.post('/count-tickets/base/import', asyncRoute(async (req, res) => {
+    const result = await countTickets.importBase(ownerOf(req, countTickets), input(req))
+    ok(res, '底库已导入', result)
+  }))
+
+  router.post('/count-tickets/base/clear', asyncRoute(async (req, res) => {
+    const result = await countTickets.clearBase(ownerOf(req, countTickets), input(req))
+    ok(res, `已清空 ${result.removed} 条底库线索`)
+  }))
+
   router.get('/count-tickets/:id', asyncRoute(async (req, res) => {
     res.json(await countTickets.detail(req.params.id, {
       userId: ownerOf(req, countTickets)

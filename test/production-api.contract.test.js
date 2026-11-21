@@ -45,11 +45,12 @@ test('migration gate accepts all required migrations and rejects missing version
       { name: '004_client_releases_draft_url' },
       { name: '054_count_tickets' },
       { name: '055_count_ticket_integrity' },
-      { name: '056_count_ticket_dedup_scope' }
+      { name: '056_count_ticket_dedup_scope' },
+      { name: '057_count_ticket_groups_base' }
     ]
   })
   const checked = await checkMigrationVersion(complete)
-  assert.equal(checked.required.length, 7)
+  assert.equal(checked.required.length, 8)
   await assert.rejects(
     checkMigrationVersion(async () => ({ rows: [{ name: '001_initial_schema' }] })),
     /数据库迁移未完成/
@@ -70,7 +71,8 @@ test('persistent runtime checks dependencies without listening on require/create
           '004_client_releases_draft_url',
           '054_count_tickets',
           '055_count_ticket_integrity',
-          '056_count_ticket_dedup_scope'
+          '056_count_ticket_dedup_scope',
+          '057_count_ticket_groups_base'
         ].map(name => ({ name }))
       }
     },

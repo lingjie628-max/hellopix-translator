@@ -21,7 +21,13 @@
       <el-table-column prop="id" label="工单号" width="90"></el-table-column>
       <el-table-column prop="username" label="商户" width="130"></el-table-column>
       <el-table-column prop="title" label="工单名称" min-width="180" show-overflow-tooltip></el-table-column>
-      <el-table-column prop="platform" label="计数应用" width="130"></el-table-column>
+      <el-table-column label="计数应用" width="150">
+        <template slot-scope="scope">
+          <span>{{ scope.row.platform }}</span>
+          <small v-if="scope.row.groupName" class="admin-count-sub">{{ scope.row.groupName }}</small>
+          <small v-if="scope.row.dedupBaseEnabled" class="admin-count-sub">含底库</small>
+        </template>
+      </el-table-column>
       <el-table-column label="查重范围" width="128">
         <template slot-scope="scope">{{ scopeLabel(scope.row.dedupScope) }}</template>
       </el-table-column>
@@ -120,6 +126,11 @@
                 <el-tag :type="scope.row.fanType === 'repeat' ? 'warning' : 'success'" size="mini">
                   {{ scope.row.fanType === 'repeat' ? '重粉' : '新粉' }}
                 </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="重粉依据" width="96">
+              <template slot-scope="scope">
+                <span>{{ scope.row.fanType === 'repeat' ? (scope.row.repeatType === 'base' ? '底库' : '进线') : '—' }}</span>
               </template>
             </el-table-column>
             <el-table-column prop="displayName" label="昵称" min-width="120" show-overflow-tooltip></el-table-column>
@@ -229,6 +240,7 @@ export default {
 .admin-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 .admin-hint { margin-left: auto; color: var(--w-text-faint); font-size: 12px; }
 .admin-count-detail { padding: 22px; text-align: left; }
+.admin-count-sub { display: block; margin-top: 2px; color: var(--w-text-faint); font-size: 11px; }
 .admin-count-head {
   display: flex;
   justify-content: space-between;

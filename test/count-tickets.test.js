@@ -10,6 +10,8 @@ const {
   normalizeTicket,
   normalizeDedupScope,
   normalizeLinkedTicketIds,
+  normalizeGroup,
+  normalizeBaseLines,
   validTimezone,
   validZeroTime
 } = require('../server/services/count-ticket-service')
@@ -49,6 +51,7 @@ test('计数工单查重范围：默认保持同商户，支持当前工单和�
   assert.equal(normalizeDedupScope(undefined), 'merchant')
   assert.equal(normalizeDedupScope('merchant'), 'merchant')
   assert.equal(normalizeDedupScope('ticket'), 'ticket')
+  assert.equal(normalizeDedupScope('group'), 'group')
   assert.equal(normalizeDedupScope('linked'), 'linked')
   assert.throws(
     () => normalizeDedupScope('global'),
@@ -59,6 +62,21 @@ test('计数工单查重范围：默认保持同商户，支持当前工单和�
     () => normalizeLinkedTicketIds([-1]),
     error => error.code === 'COUNT_DEDUP_LINKS_BAD'
   )
+  assert.deepEqual(
+    normalizeGroup({ name: '  马来 A 组 ', platform: 'WhatsApp-Green' }),
+    { id: null, name: '马来 A 组', platform: 'whatsapp-green' }
+  )
+  const base = normalizeBaseLines([
+    'username,name,source',
+    '628111----客户甲----WhatsApp',
+    '628111----客户甲更新----广告',
+    '628222,客户乙,LINE'
+  ].join('\n'))
+  assert.equal(base.totalLines, 4)
+  assert.deepEqual(base.entries, [
+    { peerKey: '628111', displayName: '客户甲更新', source: '广告' },
+    { peerKey: '628222', displayName: '客户乙', source: 'LINE' }
+  ])
 })
 
 test('计数工单超管读接口全部显式声明客户数据权限', () => {
@@ -127,6 +145,9 @@ test('商户管理员始终能找到计数工单入口，未购权益时明确�
   assert.match(page, /仅当前工单/, '必须支持只看当前工单')
   assert.match(page, /同商户全部工单/, '必须支持同一商户跨工单识别')
   assert.match(page, /指定关联工单/, '必须支持人工选择参与比较的工单')
+  assert.match(page, /命名分组内/, '必须支持命名分组查重')
+  assert.match(page, /底库管理/, '必须提供底库管理入口')
+  assert.match(page, /命中底库记为重粉/, '工单必须能启用底库去重')
 })
 
 test('商户 profile 刷新时企业账号仍返回 counterSuite=1', () => {
@@ -778,6 +799,179 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
     [Number(scopeLinkTarget.id)],
     '旧前端更新标题不能清空关联工单'
   )
+
+  const namedGroup = await service.saveGroup(merchantA.id, {
+    name: '马来 A 组',
+    platform: 'whatsapp-green'
+  })
+  const otherGroup = await service.saveGroup(merchantA.id, {
+    name: '马来 B 组',
+    platform: 'whatsapp-green'
+  })
+  const groupTicketA = await service.saveTicket(merchantA.id, {
+    title: '命名分组 A',
+    platform: 'whatsapp-green',
+    dedupScope: 'group',
+    groupId: namedGroup.id,
+    timezone: 'Asia/Shanghai',
+    zeroTime: '00:00'
+  })
+  const groupTicketB = await service.saveTicket(merchantA.id, {
+    title: '命名分组 B',
+    platform: 'whatsapp-green',
+    dedupScope: 'group',
+    groupId: namedGroup.id,
+    timezone: 'Asia/Shanghai',
+    zeroTime: '00:00'
+  })
+  const groupTicketC = await service.saveTicket(merchantA.id, {
+    title: '命名分组 C',
+    platform: 'whatsapp-green',
+    dedupScope: 'group',
+    groupId: otherGroup.id,
+    timezone: 'Asia/Shanghai',
+    zeroTime: '00:00'
+  })
+  await bindAccount(merchantA.id, groupTicketA.id, 'group-a')
+  await bindAccount(merchantA.id, groupTicketB.id, 'group-b')
+  await bindAccount(merchantA.id, groupTicketC.id, 'group-c')
+  const groupCustomer = await makeCustomer('named-group')
+  const groupConvA = await makeConversation(
+    merchantA.id, groupCustomer.id, 'group-a', 'group-peer-a'
+  )
+  const groupConvB = await makeConversation(
+    merchantA.id, groupCustomer.id, 'group-b', 'group-peer-b'
+  )
+  const groupConvC = await makeConversation(
+    merchantA.id, groupCustomer.id, 'group-c', 'group-peer-c'
+  )
+  assert.equal((await captureInbound(merchantA.id, {
+    conversationId: groupConvA,
+    customerId: groupCustomer.id,
+    platform: 'whatsapp-green',
+    accountKey: 'group-a',
+    peerKey: 'group-peer-a',
+    eventAt: '2026-11-20T07:00:00Z'
+  })).fanType, 'new')
+  assert.equal((await captureInbound(merchantA.id, {
+    conversationId: groupConvB,
+    customerId: groupCustomer.id,
+    platform: 'whatsapp-green',
+    accountKey: 'group-b',
+    peerKey: 'group-peer-b',
+    eventAt: '2026-11-20T07:01:00Z'
+  })).fanType, 'repeat', '同命名分组必须识别重粉')
+  assert.equal((await captureInbound(merchantA.id, {
+    conversationId: groupConvC,
+    customerId: groupCustomer.id,
+    platform: 'whatsapp-green',
+    accountKey: 'group-c',
+    peerKey: 'group-peer-c',
+    eventAt: '2026-11-20T07:02:00Z'
+  })).fanType, 'new', '不同命名分组不能串重粉')
+
+  await assert.rejects(
+    () => service.deleteGroup(merchantA.id, { id: namedGroup.id }),
+    error => error.code === 'COUNT_GROUP_NOT_EMPTY',
+    '分组有工单时不能删除'
+  )
+  await assert.rejects(
+    () => service.saveTicket(merchantA.id, {
+      title: '跨应用分组',
+      platform: 'telegram-z',
+      dedupScope: 'group',
+      groupId: namedGroup.id,
+      timezone: 'Asia/Shanghai',
+      zeroTime: '00:00'
+    }),
+    error => error.code === 'COUNT_GROUP_INVALID',
+    '分组不能跨应用'
+  )
+  const emptyGroup = await service.saveGroup(merchantA.id, {
+    name: '待删除空分组',
+    platform: 'whatsapp-green'
+  })
+  await service.deleteGroup(merchantA.id, { id: emptyGroup.id })
+
+  const baseImport = await service.importBase(merchantA.id, {
+    platform: 'whatsapp-green',
+    filename: 'base.txt',
+    text: [
+      'username----昵称----来源',
+      'base-peer-a----底库客户A----历史导入',
+      'base-peer-b----底库客户B----历史导入',
+      'base-peer-a----底库客户A更新----再次导入'
+    ].join('\n')
+  })
+  assert.equal(baseImport.accepted, 2)
+  assert.equal(baseImport.inserted, 2)
+  const baseTicket = await service.saveTicket(merchantA.id, {
+    title: '底库去重',
+    platform: 'whatsapp-green',
+    dedupScope: 'ticket',
+    dedupBaseEnabled: true,
+    timezone: 'Asia/Shanghai',
+    zeroTime: '00:00'
+  })
+  await bindAccount(merchantA.id, baseTicket.id, 'base-account')
+  const baseCustomer = await makeCustomer('base-hit')
+  const baseConversation = await makeConversation(
+    merchantA.id, baseCustomer.id, 'base-account', 'base-peer-a'
+  )
+  const baseHit = await captureInbound(merchantA.id, {
+    conversationId: baseConversation,
+    customerId: baseCustomer.id,
+    platform: 'whatsapp-green',
+    accountKey: 'base-account',
+    peerKey: 'base-peer-a',
+    eventAt: '2026-11-20T08:00:00Z'
+  })
+  assert.equal(baseHit.fanType, 'repeat')
+  assert.equal(baseHit.repeatType, 'base', '底库命中必须单独标记为重粉依据')
+  assert.equal(baseHit.repeatOfId, null)
+  const baseRow = await pool.query(
+    'SELECT fan_type,repeat_type,repeat_of_id FROM count_ticket_fans WHERE id=$1',
+    [baseHit.fanId]
+  )
+  assert.deepEqual(baseRow.rows[0], {
+    fan_type: 'repeat',
+    repeat_type: 'base',
+    repeat_of_id: null
+  })
+  const baseOtherMerchant = await service.saveTicket(merchantB.id, {
+    title: '其它商户底库隔离',
+    platform: 'whatsapp-green',
+    dedupScope: 'ticket',
+    dedupBaseEnabled: true,
+    timezone: 'Asia/Shanghai',
+    zeroTime: '00:00'
+  })
+  await bindAccount(merchantB.id, baseOtherMerchant.id, 'base-other')
+  const baseOtherCustomer = await makeCustomer('base-other')
+  const baseOtherConv = await makeConversation(
+    merchantB.id, baseOtherCustomer.id, 'base-other', 'base-peer-a'
+  )
+  assert.equal((await captureInbound(merchantB.id, {
+    conversationId: baseOtherConv,
+    customerId: baseOtherCustomer.id,
+    platform: 'whatsapp-green',
+    accountKey: 'base-other',
+    peerKey: 'base-peer-a',
+    eventAt: '2026-11-20T08:10:00Z'
+  })).fanType, 'new', '底库不能跨商户命中')
+  const reimport = await service.importBase(merchantA.id, {
+    platform: 'whatsapp-green',
+    text: 'base-peer-a----底库客户A最终----更新'
+  })
+  assert.equal(reimport.updated, 1)
+  const baseStats = await service.baseStats(merchantA.id, { platform: 'whatsapp-green' })
+  assert.equal(baseStats.totalEntries, 2)
+  assert.equal((await service.clearBase(merchantA.id, { platform: 'whatsapp-green' })).removed, 2)
+  assert.equal((await service.baseStats(merchantA.id, { platform: 'whatsapp-green' })).totalEntries, 0)
+  assert.equal((await pool.query(
+    'SELECT count(*)::int AS n FROM count_ticket_fans WHERE id=$1',
+    [baseHit.fanId]
+  )).rows[0].n, 1, '清空底库不能删除历史进粉')
 
   // 业务日按工单时区与置零时间计算：03:59:59 和 04:00:00 属不同业务日。
   const dayKeys = await pool.query(
