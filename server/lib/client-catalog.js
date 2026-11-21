@@ -20,10 +20,20 @@ const RELEASE_GROUPS = Object.freeze([
   { id: 'counter', label: '计数器' }
 ])
 
+const STANDALONE_ONLY_APPS = Object.freeze([
+  // Signal 没有网页版，只作为独立原生客户端发布，不能混进多开壳的平台表。
+  Object.freeze({ id: 'signal', name: 'Signal' })
+])
+
 const STANDALONE_APPS = Object.freeze(
-  platforms
-    .filter(item => !item.customUrl && item.id !== 'tickets' && item.id !== 'pm-office')
-    .map(item => Object.freeze({ id: item.id, name: item.name }))
+  [
+    ...platforms
+      .filter(item => !item.customUrl && item.id !== 'tickets' && item.id !== 'pm-office')
+      .map(item => ({ id: item.id, name: item.name })),
+    ...STANDALONE_ONLY_APPS
+  ]
+    .filter((item, index, all) => all.findIndex(other => other.id === item.id) === index)
+    .map(item => Object.freeze(item))
 )
 
 function groupId(value) {

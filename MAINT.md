@@ -164,6 +164,29 @@ pg_restore --list /var/backups/hello-pix/<dump>
 - 观察：公网 `/ready` 连续 6 次 200；`hello-pix` active、`NRestarts=0`、
   发布后 HTTP 5xx 为 0；磁盘 25%。
 
+## 2026-11-22 Hello Pix Signal 独立客户端上架
+
+- 版本：`8.39.0-alpha.1`（未签名测试版）
+- 发布记录：
+  - `#184` macOS arm64
+  - `#185` macOS x64
+  - `#186` Windows x64 portable ZIP
+- 下载目录：`/opt/hello-pix/downloads/`
+- SHA 清单：`/opt/hello-pix/downloads/SHA256SUMS`
+- 发布前快照：`/root/hello-pix-release-signal-20261122-045943`
+- 数据库快照 SHA-256：
+  `968bf3c4ff450f25c7ef3c0e149c2de8c5f139b3ee686e4de3e29cca08729e5f`
+- 官网已验证：
+  - 主下载按钮仍指向 Hello Pix `1.3.14`
+  - “其他版本”展示 Signal 的 Windows x64、macOS x64、macOS arm64
+  - `/apis/site/info` 返回三条 `standalone + app=signal`
+  - 三个公网下载地址与 SHA256SUMS 均返回 200
+- 代码修正：
+  - 独立包不进入主客户端 `primaryDownloads`
+  - `core.siteInfo().clientDownloads.*` 排除 standalone/counter
+  - `client-catalog` 增加 Signal standalone-only 应用
+- 未完成：Apple/Windows 数字签名、Apple 公证、Windows 真机测试、NSIS 安装器。
+
 ## 2026-11-15 修复记录
 
 - 生产依赖升级：`body-parser@2.4.0`、`proxy-addr@2.0.8`、

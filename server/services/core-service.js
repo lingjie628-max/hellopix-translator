@@ -1736,7 +1736,12 @@ class CoreService {
         return ''
       }
       const download = group => {
-        const rows = listed.filter(item => osOf(item) === group)
+        // 独立应用和计数器有各自入口，不能污染主客户端的下载/更新按钮。
+        const rows = listed.filter(item =>
+          item.releaseGroup !== 'standalone' &&
+          item.releaseGroup !== 'counter' &&
+          osOf(item) === group
+        )
         return pickHighest(rows, wantArch)?.url || ''
       }
       /**

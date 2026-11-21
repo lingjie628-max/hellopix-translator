@@ -417,7 +417,9 @@ export default {
     },
     /** 主推两个：Windows 安装版、macOS Apple 芯片版（按标题/架构显式挑选，不依赖录入顺序） */
     primaryDownloads() {
-      const list = this.releaseList
+      // 独立应用有自己的平台与入口，不能抢占主客户端的主下载按钮。
+      const list = this.releaseList.filter(r =>
+        r.releaseGroup !== 'standalone' && r.releaseGroup !== 'counter')
       const isWin = r => /windows|win/i.test(`${r.releaseGroup} ${r.os}`)
       const isMac = r => /mac|darwin/i.test(`${r.releaseGroup} ${r.os}`)
       /**
@@ -455,14 +457,20 @@ export default {
     },
     extraDownloads() {
       const used = new Set(this.primaryDownloads.map(i => i.url))
-      return this.releaseList.filter(r => !used.has(r.url)).map(r => ({ label: r.title || r.group, url: r.url, note: r.note }))
+      return this.releaseList.filter(r => !used.has(r.url)).map(r => {
+        const platform = [r.os, r.arch].filter(Boolean).join(' · ')
+        const label = (r.title || r.group) + (platform ? ' - ' + platform : '')
+        return { label, url: r.url, note: r.note }
+      })
     },
     allDownloads() {
       return this.releaseList.map(r => ({ label: r.title || r.group, url: r.url, note: r.note }))
     },
     /** 有没有 macOS 下载项 —— 决定是否展示安装引导（Windows 端没有这个问题） */
     hasMacDownload() {
-      return this.releaseList.some(r => /mac|darwin/i.test(`${r.releaseGroup} ${r.os}`))
+      return this.releaseList.some(r =>
+        r.releaseGroup !== 'standalone' &&
+        /mac|darwin/i.test(`${r.releaseGroup} ${r.os}`))
     },
     /** 真实联系方式，来自后台「帮助与客服」与「官方链接」配置；没配就不显示这一列 */
     contactLinks() {

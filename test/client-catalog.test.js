@@ -9,6 +9,7 @@ test('standalone catalog uses platforms.js ids and rejects custom pages', () => 
   assert.equal(catalog.isStandaloneApp('zalo'), true)
   assert.equal(catalog.isStandaloneApp('telegram-z'), true)
   assert.equal(catalog.isStandaloneApp('whatsapp-green'), true)
+  assert.equal(catalog.isStandaloneApp('signal'), true)
   assert.equal(catalog.isStandaloneApp('custom-web'), false)
   assert.equal(catalog.isStandaloneApp('tickets'), false)
   assert.equal(catalog.isStandaloneApp('pm-office'), false)
