@@ -545,3 +545,41 @@ curl -fsS http://127.0.0.1:3000/ready
 
   056/057 均为新增表、列、索引和函数；旧代码可在新结构上运行，因此常规代码
   回滚不需要先恢复数据库。只有确认数据损坏时才使用上述数据库 dump 全量恢复。
+
+## 2026-11-22 Signal Desktop 翻译对接（开发完成，待配置账号后发布）
+
+- 迁移：`058_signal_translation_events`
+- 服务端接口：
+  - `POST /apis/v1/translate`：独立 Bearer、`Idempotency-Key` 必填、
+    复用现有字符预留/结算与翻译通道。
+  - `POST /apis/integrations/signal/workorder-events`：独立 Bearer，
+    接收 `translation.completed` 脱敏事件。
+- 事件落库只包含生命周期、长度、Provider、模型、状态、原因和可选 HMAC；
+  不收原文、译文、联系人信息或服务令牌。`eventId` 唯一约束保证 Webhook 幂等。
+- 默认 `PIX_SIGNAL_WORKORDER_MODE=failures`：仅翻译失败建工单；
+  `all` 为所有唯一事件建单，`ledger` 只记录事件。
+- 自动工单分类固定 `translation`，系统消息只写审计字段；不泄露聊天正文。
+- 服务端配置名：
+  - `PIX_SIGNAL_API_TOKEN`
+  - `PIX_SIGNAL_EVENT_TOKEN`
+  - `PIX_SIGNAL_ACCOUNT_USERNAME`
+  - `PIX_SIGNAL_TRANSLATE_ENGINE`（可选）
+  - `PIX_SIGNAL_WORKORDER_MODE`
+- Signal Desktop 工作区：
+  `/Users/lingjie/Documents/Codex/2026-11-21/new-chat/work/Signal-Desktop-main`
+  - 新增 `TranslationSoftwareProvider.std.ts`
+  - ProviderRegistry 新增 `translation-software`
+  - 调用 `/apis/v1/translate`，Bearer Token 与 `messageId` 幂等键均来自主进程配置。
+  - 未修改消息渲染、Signal Protocol、libsignal 或数据库结构。
+- 验证：
+  - 服务端全量：`2892 tests / 2827 pass / 0 fail / 65 known skips`。
+  - Signal `tsc --noEmit` 通过。
+  - Signal Provider + EventReporter：`5 passing`。
+  - 本地 persistent HTTP 冒烟：错误 Token 返回稳定 `auth-failed`；
+    非法 JSON 返回稳定 `invalid-request`；路由不要求网页 Cookie/CSRF。
+  - 迁移 `058 up -> down -> up` 通过。
+  - 死引用/未使用 import：`0/0`。
+- 发布前仍需主人指定：
+  - `PIX_SIGNAL_ACCOUNT_USERNAME` 使用哪个生产商户账号计费；
+  - 两个生产 Token 的值（只写入服务器 env 和 Signal 主进程安全存储，不写仓库）；
+  - 是否直接采用默认 `failures` 工单策略。

@@ -182,6 +182,9 @@ async function buildSnapshot(repo, user, client) {
     count_ticket_base_batches: await dump('count_ticket_base_batches', 'user_id'),
     count_ticket_dedup_links: await dump(
       'count_ticket_dedup_links', 'user_id', 'ticket_id, linked_ticket_id'
+    ),
+    signal_translation_events: await dump(
+      'signal_translation_events', 'user_id', 'occurred_at, id'
     )
   }
 }

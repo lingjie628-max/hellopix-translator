@@ -222,6 +222,8 @@ const EXPECTED = [
   'POST /count-tickets/save',
   'POST /count-tickets/accounts/save',
   'POST /count-tickets/accounts/remove',
+  'POST /v1/translate',
+  'POST /integrations/signal/workorder-events',
   'GET /admin/packages',
   'POST /admin/packages/save',
   'POST /admin/packages/retire',

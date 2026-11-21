@@ -5,6 +5,7 @@ const path = require('path')
 const { createSecurity } = require('./security')
 const { createRedisSecurity } = require('./redis-security')
 const registerProductionApi = require('./register-production-api')
+const { openApiError } = require('./services/signal-integration-service')
 
 const REQUIRED_MIGRATIONS = Object.freeze([
   '001_initial_schema',
@@ -14,7 +15,8 @@ const REQUIRED_MIGRATIONS = Object.freeze([
   '054_count_tickets',
   '055_count_ticket_integrity',
   '056_count_ticket_dedup_scope',
-  '057_count_ticket_groups_base'
+  '057_count_ticket_groups_base',
+  '058_signal_translation_events'
 ])
 
 function envFlag(value) {
@@ -236,7 +238,15 @@ async function createRuntime(options) {
     if (!['GET', 'HEAD'].includes(req.method)) return next()
     res.sendFile(path.join(dist, 'index.html'))
   })
-  app.use((err, _req, res, _next) => {
+  app.use((err, req, res, _next) => {
+    const signalTranslate = /^\/apis\/v1\/translate(?:\?|$)/i.test(
+      String(req.originalUrl || '')
+    )
+    if (signalTranslate) {
+      const mapped = openApiError(err, String(req.get('Idempotency-Key') || ''))
+      if (!res.headersSent) res.status(mapped.httpStatus).json(mapped.body)
+      return
+    }
     /**
      * body 超限必须回 413，不能落进下面那句「服务器内部错误」。
      *

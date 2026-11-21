@@ -524,6 +524,8 @@ function productionRouter(context) {
   require('./user-tickets').registerUserTickets(router, ctx)
   // 商户端原生计数工单：建单、绑定账号、统计与粉丝明细
   require('./count-tickets').registerCountTickets(router, ctx)
+  // Signal Desktop 外部集成：独立 Bearer，不使用网页会话。
+  require('./signal-integration').registerSignalIntegration(router, ctx)
   // 套餐、系统设置、验证码通道
   require('./admin/settings').registerAdminSettings(router, ctx)
 

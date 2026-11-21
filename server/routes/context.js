@@ -67,7 +67,10 @@ function publicUser(session) {
  * @returns {object} ctx
  */
 function buildContext(context) {
-  const { repository: repo, auth, core, customers, countTickets, accounts, security } = context
+  const {
+    repository: repo, auth, core, customers, countTickets, signalIntegration,
+    accounts, security
+  } = context
 
   /**
    * 限流器工厂。**只在这里使用**，不要在子模块里另建。
@@ -195,6 +198,7 @@ function buildContext(context) {
     core,
     customers,
     countTickets,
+    signalIntegration,
     accounts,
     security,
     limits,

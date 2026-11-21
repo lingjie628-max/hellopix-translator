@@ -7,6 +7,7 @@ const { CustomerRepository } = require('./repositories/customer-repository')
 const { CustomerIdentityService } = require('./services/customer-identity-service')
 const { CountTicketRepository } = require('./repositories/count-ticket-repository')
 const { CountTicketService } = require('./services/count-ticket-service')
+const { SignalIntegrationService } = require('./services/signal-integration-service')
 const { AccountService } = require('./services/account-service')
 const { productionRouter } = require('./routes/production')
 const { sendError } = require('./lib/http')
@@ -33,6 +34,11 @@ function registerProductionApi(app, context, options) {
   // 不另开连接池 —— 多一个池就多一处要配的容量与超时。
   const customers = new CustomerIdentityService(new CustomerRepository(repository))
   const countTickets = new CountTicketService(new CountTicketRepository(repository))
+  const signalIntegration = new SignalIntegrationService({
+    repo: repository,
+    core,
+    redis: deps.redis
+  })
   // 注册 / 找回密码 / 邮箱验证码。之前这三条是 stub。
   const accounts = new AccountService(repository, auth, deps.redis, options)
 
@@ -78,6 +84,7 @@ function registerProductionApi(app, context, options) {
     core,
     customers,
     countTickets,
+    signalIntegration,
     accounts,
     security: deps.security
   })
@@ -97,6 +104,7 @@ function registerProductionApi(app, context, options) {
     core,
     customers,
     countTickets,
+    signalIntegration,
     accounts,
     reconcileExpiredReservations: (...args) => core.reconcileExpiredReservations(...args),
     stop: () => core.stopReservationReconciliation()

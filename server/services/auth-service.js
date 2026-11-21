@@ -43,7 +43,10 @@ const PUBLIC_PATHS = new Set([
   '/admin/login/totp',
   // 发邮箱验证码 / 注册 / 找回密码：都是"还没有账号或进不去账号"的场景。
   // 发信的两道限流在路由层与 VerificationService 里，建号/改密要图形验证码。
-  '/user/captcha', '/user/emailcode', '/user/register', '/user/forgot'
+  '/user/captcha', '/user/emailcode', '/user/register', '/user/forgot',
+  // 外部系统集成：由路由内部校验独立 Service Token，不使用网页会话。
+  '/v1/translate',
+  '/integrations/signal/workorder-events'
 ])
 
 // 自检：有含大写的键直接炸，别等线上 401 才发现。
