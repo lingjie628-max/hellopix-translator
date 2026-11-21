@@ -37,7 +37,7 @@
         <span class="count-rule">会话去重 · 消息不重复灌水 · 跨账号识别重粉</span>
       </div>
 
-      <el-table :data="rows" v-loading="loading" border stripe>
+      <el-table v-if="rows.length" :data="rows" v-loading="loading" border stripe>
         <el-table-column label="工单" min-width="210">
           <template slot-scope="scope">
             <button class="count-title" type="button" @click="openDetail(scope.row)">
@@ -80,7 +80,20 @@
         </el-table-column>
       </el-table>
 
-      <el-empty v-if="!loading && !rows.length" description="还没有计数工单"></el-empty>
+      <div v-if="!loading && !rows.length" class="count-empty-onboarding">
+        <div class="count-empty-mark">01</div>
+        <div class="count-empty-copy">
+          <h3>还没有计数工单</h3>
+          <p>计数工单不是自动出现的。先新建一张工单并绑定客户端已上报的接入账号，之后真实入站会话才会开始计粉。</p>
+          <div class="count-empty-steps">
+            <span>1. 新建计数工单</span>
+            <span>2. 打开对应应用会话</span>
+            <span>3. 绑定接入账号</span>
+            <span>4. 等真实客户入站</span>
+          </div>
+        </div>
+        <el-button type="primary" icon="el-icon-plus" @click="openTicketForm()">新建第一张工单</el-button>
+      </div>
       <el-pagination
         v-if="total > filters.rows"
         class="count-pagination"
@@ -585,6 +598,50 @@ export default {
   margin: 0;
   color: #745d3f;
   line-height: 1.7;
+}
+.count-empty-onboarding {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 28px;
+  border: 1px dashed #b8c8d8;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #f8fbfd, #f2f6f9);
+}
+.count-empty-mark {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 54px;
+  height: 54px;
+  border-radius: 16px;
+  color: #fff;
+  background: var(--count-blue);
+  font: 700 17px/1 "STSong", "Songti SC", serif;
+}
+.count-empty-copy {
+  flex: 1;
+  min-width: 0;
+}
+.count-empty-copy h3 {
+  margin: 0 0 6px;
+  color: var(--count-ink);
+  font-family: "STSong", "Songti SC", serif;
+  font-size: 20px;
+}
+.count-empty-copy p {
+  margin: 0;
+  color: var(--count-muted);
+  line-height: 1.65;
+}
+.count-empty-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-top: 14px;
+  color: var(--count-blue);
+  font-size: 12px;
+  font-weight: 650;
 }
 .count-panel,
 .count-section {

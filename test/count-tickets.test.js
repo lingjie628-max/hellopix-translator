@@ -93,6 +93,10 @@ test('商户管理员始终能找到计数工单入口，未购权益时明确�
     '后台调整套餐或企业权益后，商户布局应刷新权益，避免用户必须退出重登')
   assert.match(page, /counterSuite\(enabled\)[\s\S]{0,80}this\.load\(\)/,
     '权益在页面打开期间变为可用时，应立即加载计数工单')
+  assert.match(page, /还没有计数工单/,
+    '零工单时必须显示明确引导，不能只剩一张空表')
+  assert.match(page, /新建第一张工单/,
+    '空状态必须给出可直接执行的下一步')
   assert.match(page, /getRequest\('\/site\/platforms'\)/,
     '商户计数页必须使用公开站点平台接口')
   assert.doesNotMatch(page, /getRequest\('\/client\/platforms'\)/,
