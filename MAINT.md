@@ -143,8 +143,26 @@ pg_restore --list /var/backups/hello-pix/<dump>
 - 发布前迁移快照与数据库 dump 仍按发布流程单独创建。
 - 回滚：`node scripts/migrate.js down 1`。`060.down` 有意保留
   `count_ticket_fans.cycle_no`，避免抹掉跨周期历史；精确恢复旧口径需数据库快照。
-- 验证：计数测试 11/11；全量 2895 tests / 2830 pass / 0 fail / 65 known skips；
+- 验证：计数测试 12/12；全量 2896 tests / 2831 pass / 0 fail / 65 known skips；
   `npm run build` 通过；真实 HTTP 与浏览器分享页冒烟通过。
+
+### 2026-11-22 生产发布
+
+- 发布提交：`7478d04`
+- 上线时间：`2026-11-22 03:32:46 CST`
+- 迁移：`060_count_ticket_share_cycles`
+- 生产备份：`/root/hello-pix-release-count-cycles-20261122-033227`
+- 数据库 dump SHA-256：
+  `35d00ea2ba414778b4f8280b5606f53743fc8548f35f3cfc9380d097a8456d5b`
+- 发布前源码 SHA-256：
+  `38f817079363fbe5622ea2ea64d274997cd92a9d01cd2f8bcf1579744d34e2a8`
+- 生产 `server/index.js` 与本机一致：
+  `cc2baeaaaaab010d5e822c72462571e8e300aacb9b91ec5da37170dae9ffb738`
+- 生产前端 bundle：`dist/js/index.929b208d.js`
+- 真实生产冒烟：错误分享密码 `403`，正确密码 `200`，旧周期 1 条进粉，
+  周期归档后新周期 0 条、底库新增 1 条；临时商户与客户已自动清理。
+- 观察：公网 `/ready` 连续 6 次 200；`hello-pix` active、`NRestarts=0`、
+  发布后 HTTP 5xx 为 0；磁盘 25%。
 
 ## 2026-11-15 修复记录
 
