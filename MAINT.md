@@ -504,3 +504,44 @@ node scripts/migrate.js down 1
   057 down 删除分组、底库、`group_id`、`dedup_base_enabled`、`repeat_type`、
   `base_matched`，并恢复 056 的查重函数；不删除历史进粉账本。
 - 没有新增外部依赖、计费调用或密钥；尚未部署生产。
+
+## 2026-11-22 计数工单查重范围/分组/底库正式上线
+
+- 生产分支提交：
+  - `7e1c48a`：可配置查重范围、命名分组、底库导入与去重。
+  - `530f86d`：修复第三方 Cloudflare Insights 失败被启动守卫误判为整站
+    加载失败的问题；启动错误页现在只由同源业务资源失败触发。
+- 生产迁移：`056_count_ticket_dedup_scope`、`057_count_ticket_groups_base`
+  均已执行。
+- 发布前备份：
+  `/root/hello-pix-release-count-dedup-20261122-022231`
+  - 源码归档 SHA-256：
+    `760448a693e90950b13b3364199256e3aa1b284dd747597ec99d0b3596b41125`
+  - PostgreSQL dump SHA-256：
+    `ba02cbd3d37d0e524a866bb02a245426fcf3346a7153318bb316c3a9e6ab776e`
+- 线上产物：
+  - Web bundle：`dist/js/index.4d7754a8.js`
+  - Web bundle SHA-256：
+    `40bcecd807c4f8751128b5d33eba38b87fc5e49644558c3143ea20163ea3df44`
+  - `dist/boot-guard.js` SHA-256：
+    `def27faf798b30c4b55c103ee3bdc69f98d0eb39580afa7072fb94c516661ace`
+- 上线验收：
+  - `hello-pix.service`：active。
+  - `/ready`：PostgreSQL true、Redis true。
+  - `systemctl --failed`：空。
+  - 重启后错误日志：0。
+  - 公网 `/index.html` 已加载 `index.4d7754a8.js`。
+  - 公网 login 页真实渲染成功，不再出现 BOOT ERROR。
+  - 计数工单新增接口未登录均返回 401，不泄露数据。
+  - 全量：`2887 tests / 2822 pass / 0 fail / 65 known skips`。
+- 代码回滚命令：
+
+```bash
+tar -C /opt/hello-pix \
+  -xzf /root/hello-pix-release-count-dedup-20261122-022231/source-before-count-dedup.tar.gz
+systemctl restart hello-pix.service
+curl -fsS http://127.0.0.1:3000/ready
+```
+
+  056/057 均为新增表、列、索引和函数；旧代码可在新结构上运行，因此常规代码
+  回滚不需要先恢复数据库。只有确认数据损坏时才使用上述数据库 dump 全量恢复。
