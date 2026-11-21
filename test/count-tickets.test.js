@@ -97,6 +97,10 @@ test('商户管理员始终能找到计数工单入口，未购权益时明确�
     '零工单时必须显示明确引导，不能只剩一张空表')
   assert.match(page, /新建第一张工单/,
     '空状态必须给出可直接执行的下一步')
+  assert.match(page, /ticket \? platformName\(ticket\.platform\) : ''/,
+    '隐藏的绑定账号弹窗不能在 ticket=null 时读取 ticket.platform，否则整页白屏')
+  assert.doesNotMatch(page, /:value="platformName\(ticket\.platform\)"/,
+    '模板首帧必须能容忍 ticket 尚未选择')
   assert.match(page, /getRequest\('\/site\/platforms'\)/,
     '商户计数页必须使用公开站点平台接口')
   assert.doesNotMatch(page, /getRequest\('\/client\/platforms'\)/,

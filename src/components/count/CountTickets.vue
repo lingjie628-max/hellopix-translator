@@ -276,7 +276,7 @@
     <el-dialog title="绑定接入账号" :visible.sync="accountDialog" width="480px" :close-on-click-modal="false">
       <el-form label-width="82px">
         <el-form-item label="平台">
-          <el-input :value="platformName(ticket.platform)" disabled></el-input>
+          <el-input :value="ticket ? platformName(ticket.platform) : ''" disabled></el-input>
         </el-form-item>
         <el-form-item label="接入账号">
           <el-select
