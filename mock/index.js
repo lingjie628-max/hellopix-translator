@@ -264,6 +264,8 @@ module.exports = function registerMock(app, options) {
         totalTarget: 100,
         timezone: 'Asia/Shanghai',
         zeroTime: '00:00:00',
+        dedupScope: 'merchant',
+        dedupTicketIds: [],
         createdAt: now(),
         updatedAt: now()
       }
@@ -491,6 +493,7 @@ module.exports = function registerMock(app, options) {
   }
 
   function counterEntitled(parent) {
+    if (parent && (parent.enterprise === true || Number(parent.enterprise) === 1)) return true
     let clients = packOf(parent || {}).clients
     if (typeof clients === 'string') {
       try { clients = JSON.parse(clients) } catch (e) { return false }
@@ -531,6 +534,8 @@ module.exports = function registerMock(app, options) {
     const metrics = countMetrics(ticket)
     const user = db.users.find(item => Number(item.id) === Number(ticket.userId))
     return Object.assign({}, ticket, metrics, {
+      dedupScope: ticket.dedupScope || 'merchant',
+      dedupTicketIds: Array.isArray(ticket.dedupTicketIds) ? ticket.dedupTicketIds : [],
       username: user ? user.username : '',
       accountCount: db.countTicketAccounts.filter(account =>
         Number(account.ticketId) === Number(ticket.id) && account.active).length
@@ -660,6 +665,7 @@ module.exports = function registerMock(app, options) {
       userid: account.id,
       role: session.kind,
       enterprise: parent.enterprise ? 1 : 0,
+      counterSuite: counterEntitled(parent) ? 1 : 0,
       parentUsername: parent.username,
       imUnlimited: 1,
       nickname: account.nickname || account.username
@@ -718,6 +724,7 @@ module.exports = function registerMock(app, options) {
       nickname: account.nickname || account.username,
       role: session.kind,
       enterprise: parent.enterprise ? 1 : 0,
+      counterSuite: counterEntitled(parent) ? 1 : 0,
       packageTitle: packShortName(parent.basename),
       charBalance: session.kind === 'main' ? Number(parent.charBalance || 0) : Number(account.charBalance || 0),
       charUsed: Number(account.charUsed || 0),
@@ -834,6 +841,7 @@ module.exports = function registerMock(app, options) {
       portUnlimited: 1,
       imUnlimited: 1,
       enterprise: parent.enterprise ? 1 : 0,
+      counterSuite: counterEntitled(parent) ? 1 : 0,
       enterpriseMinPacks: Number(db.settings.enterpriseMinPacks || 2),
       email: account.email || parent.email || '',
       subCount: subs.length,
@@ -1403,6 +1411,7 @@ module.exports = function registerMock(app, options) {
       charUsed: Number(account.charUsed || 0),
       translateCount: Number(account.translateCount || 0),
       enterprise: parent.enterprise ? 1 : 0,
+      counterSuite: counterEntitled(parent) ? 1 : 0,
       announcement: currentAnnouncement(),
       telegram: db.settings.telegram,
       telegramUrl: supportUrlOf(),
@@ -2360,7 +2369,8 @@ module.exports = function registerMock(app, options) {
     res.json({
       ticket: publicCountTicket(ticket),
       metrics: countMetrics(ticket),
-      accounts: countTicketAccounts(ticket)
+      accounts: countTicketAccounts(ticket),
+      dedupTicketIds: Array.isArray(ticket.dedupTicketIds) ? ticket.dedupTicketIds : []
     })
   })
 
@@ -2425,6 +2435,21 @@ module.exports = function registerMock(app, options) {
     res.json({ rows })
   })
 
+  app.get('/apis/count-tickets/dedup-options', (req, res) => {
+    const userId = requireCounterOwner(req, res)
+    if (!userId) return
+    const query = q(req)
+    const sourceId = Number(query.ticketId) || 0
+    const platform = String(query.platform || '').toLowerCase()
+    const rows = db.countTickets
+      .filter(ticket =>
+        Number(ticket.userId) === userId &&
+        ticket.platform === platform &&
+        Number(ticket.id) !== sourceId)
+      .map(publicCountTicket)
+    res.json({ rows })
+  })
+
   app.get('/apis/count-tickets/:id', (req, res) => {
     const userId = requireCounterOwner(req, res)
     if (!userId) return
@@ -2433,7 +2458,8 @@ module.exports = function registerMock(app, options) {
     res.json({
       ticket: publicCountTicket(ticket),
       metrics: countMetrics(ticket),
-      accounts: countTicketAccounts(ticket)
+      accounts: countTicketAccounts(ticket),
+      dedupTicketIds: Array.isArray(ticket.dedupTicketIds) ? ticket.dedupTicketIds : []
     })
   })
 
@@ -2471,6 +2497,24 @@ module.exports = function registerMock(app, options) {
       res.status(409).json({ code: 'COUNT_PLATFORM_LOCKED', msg: '该工单已绑定接入账号或已有进粉记录，不能再更换计数应用' })
       return
     }
+    const dedupScope = ['ticket', 'merchant', 'linked'].includes(query.dedupScope)
+      ? query.dedupScope
+      : 'merchant'
+    const linkedTicketIds = Array.isArray(query.linkedTicketIds)
+      ? Array.from(new Set(query.linkedTicketIds.map(Number).filter(Number.isSafeInteger)))
+      : []
+    if (dedupScope === 'linked' && !linkedTicketIds.length) {
+      res.status(400).json({ code: 'COUNT_DEDUP_LINKS_REQUIRED', msg: '指定查重工单至少需要选择一张其它工单' })
+      return
+    }
+    if (ticket && hasFans && (
+      (ticket.dedupScope || 'merchant') !== dedupScope ||
+      JSON.stringify((ticket.dedupTicketIds || []).slice().sort()) !==
+        JSON.stringify(linkedTicketIds.slice().sort())
+    )) {
+      res.status(409).json({ code: 'COUNT_DEDUP_SCOPE_LOCKED', msg: '该工单已有进粉记录，查重范围和关联工单不能再修改' })
+      return
+    }
     const payload = {
       title,
       platform,
@@ -2479,6 +2523,8 @@ module.exports = function registerMock(app, options) {
       totalTarget: Math.max(0, Number(query.totalTarget) || 0),
       timezone: String(query.timezone || 'Asia/Shanghai'),
       zeroTime: String(query.zeroTime || '00:00:00'),
+      dedupScope,
+      dedupTicketIds: dedupScope === 'linked' ? linkedTicketIds : [],
       updatedAt: now()
     }
     if (ticket) {

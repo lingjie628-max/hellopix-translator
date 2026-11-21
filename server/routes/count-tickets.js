@@ -34,6 +34,12 @@ function registerCountTickets(router, ctx) {
     })
   }))
 
+  router.get('/count-tickets/dedup-options', asyncRoute(async (req, res) => {
+    res.json({
+      rows: await countTickets.dedupOptions(ownerOf(req, countTickets), input(req))
+    })
+  }))
+
   router.get('/count-tickets/:id', asyncRoute(async (req, res) => {
     res.json(await countTickets.detail(req.params.id, {
       userId: ownerOf(req, countTickets)

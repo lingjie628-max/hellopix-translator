@@ -6,6 +6,7 @@ const catalog = require('../lib/client-catalog')
 
 const TICKET_STATUSES = new Set(['active', 'closed'])
 const FAN_TYPES = new Set(['new', 'repeat'])
+const DEDUP_SCOPES = new Set(['ticket', 'merchant', 'linked'])
 const ACCOUNT_BINDING_GRACE_MS = 2 * 60 * 1000
 
 function cleanText(value, max) {
@@ -35,6 +36,32 @@ function validZeroTime(value) {
   return `${match[1]}:${match[2]}:${match[3] || '00'}`
 }
 
+function normalizeDedupScope(value) {
+  const scope = cleanText(value || 'merchant', 16)
+  if (!DEDUP_SCOPES.has(scope)) {
+    throw new ApiError(400, '查重范围不合法', 'COUNT_DEDUP_SCOPE_BAD')
+  }
+  return scope
+}
+
+function normalizeLinkedTicketIds(value) {
+  if (value == null || value === '') return []
+  const raw = Array.isArray(value) ? value : String(value).split(',')
+  const ids = new Set()
+  for (const item of raw) {
+    if (item == null || item === '') continue
+    const id = Number(item)
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      throw new ApiError(400, '指定查重工单号不合法', 'COUNT_DEDUP_LINKS_BAD')
+    }
+    ids.add(id)
+  }
+  if (ids.size > 100) {
+    throw new ApiError(400, '指定查重工单最多选择 100 张', 'COUNT_DEDUP_LINKS_TOO_MANY')
+  }
+  return Array.from(ids).sort((a, b) => a - b)
+}
+
 function normalizeTicket(data) {
   const title = cleanText(data.title, 120)
   if (!title) throw new ApiError(400, '请填写计数工单名称', 'COUNT_TITLE_REQUIRED')
@@ -49,7 +76,10 @@ function normalizeTicket(data) {
     dayTarget: target(data.dayTarget != null ? data.dayTarget : data.day_target, 1_000_000),
     totalTarget: target(data.totalTarget != null ? data.totalTarget : data.total_target, 1_000_000_000),
     timezone: validTimezone(data.timezone),
-    zeroTime: validZeroTime(data.zeroTime != null ? data.zeroTime : data.zero_time)
+    zeroTime: validZeroTime(data.zeroTime != null ? data.zeroTime : data.zero_time),
+    dedupScope: normalizeDedupScope(
+      data.dedupScope != null ? data.dedupScope : data.dedup_scope
+    )
   }
 }
 
@@ -83,14 +113,26 @@ class CountTicketService {
 
   async saveTicket(userId, data) {
     const payload = normalizeTicket(data || {})
+    const scopeProvided = !!data && (data.dedupScope != null || data.dedup_scope != null)
+    let linkedTicketIds = normalizeLinkedTicketIds(
+      data && (data.linkedTicketIds != null ? data.linkedTicketIds : data.linked_ticket_ids)
+    )
     const id = data && data.id ? Number(data.id) : null
     if (id != null && !Number.isSafeInteger(id)) {
       throw new ApiError(400, '计数工单号不合法', 'COUNT_TICKET_BAD_ID')
     }
-    const row = await this.repo.transaction(async client => {
+    const result = await this.repo.transaction(async client => {
+      let current = null
       if (id != null) {
-        const current = await this.repo.lockTicket(id, userId, client)
+        current = await this.repo.lockTicket(id, userId, client)
         if (!current) throw new ApiError(404, '计数工单不存在', 'COUNT_TICKET_NOT_FOUND')
+        const currentLinks = await this.repo.dedupTicketIds(id, userId, client)
+        if (!scopeProvided) {
+          // 滚动发布时旧前端不会提交新字段。更新请求必须保留已有口径，
+          // 不能把“字段缺失”误当成“用户主动选择同商户全部工单”。
+          payload.dedupScope = String(current.dedup_scope || 'merchant')
+          linkedTicketIds = currentLinks.slice()
+        }
         if (current.has_fans && (
           String(current.timezone) !== payload.timezone ||
           String(current.zero_time) !== payload.zeroTime
@@ -108,11 +150,56 @@ class CountTicketService {
             'COUNT_PLATFORM_LOCKED'
           )
         }
-        return this.repo.updateTicket(id, userId, payload, client)
+        if (current.has_fans) {
+          const scopeChanged = String(current.dedup_scope) !== payload.dedupScope
+          const linksChanged = currentLinks.length !== linkedTicketIds.length ||
+            currentLinks.some((linkedId, index) => linkedId !== linkedTicketIds[index])
+          if (scopeChanged || linksChanged) {
+            throw new ApiError(
+              409,
+              '该工单已有进粉记录，查重范围和关联工单不能再修改',
+              'COUNT_DEDUP_SCOPE_LOCKED'
+            )
+          }
+        }
       }
-      return this.repo.createTicket(userId, payload, client)
+
+      if (payload.dedupScope === 'linked' && !linkedTicketIds.length) {
+        throw new ApiError(
+          400,
+          '指定查重工单至少需要选择一张其它工单',
+          'COUNT_DEDUP_LINKS_REQUIRED'
+        )
+      }
+      const linksToApply = payload.dedupScope === 'linked' ? linkedTicketIds : []
+      const validLinks = await this.repo.validDedupTicketIds(
+        userId, id, payload.platform, linksToApply, client
+      )
+      if (validLinks.length !== linksToApply.length) {
+        throw new ApiError(
+          400,
+          '指定查重工单必须属于当前商户且与当前工单使用同一个应用',
+          'COUNT_DEDUP_LINKS_INVALID'
+        )
+      }
+
+      const row = id != null
+        ? await this.repo.updateTicket(id, userId, payload, client)
+        : await this.repo.createTicket(userId, payload, client)
+      const ticketId = Number(row.id)
+      await this.repo.replaceDedupLinks(
+        ticketId,
+        userId,
+        validLinks,
+        client
+      )
+      return { row, linkedTicketIds: validLinks }
     })
-    return { id: Number(row.id), ticket: row }
+    return {
+      id: Number(result.row.id),
+      ticket: result.row,
+      linkedTicketIds: result.linkedTicketIds
+    }
   }
 
   async saveAccount(userId, data) {
@@ -220,10 +307,19 @@ class CountTicketService {
 
       const customerId = payload.customerId == null ? null : Number(payload.customerId)
       await this.repo.lockCustomer(Number.isSafeInteger(customerId) ? customerId : null, client)
+      await this.repo.lockDedupKey(
+        userId,
+        platform,
+        Number.isSafeInteger(customerId) ? customerId : null,
+        peerKey,
+        client
+      )
       const prior = Number.isSafeInteger(customerId)
-        ? await this.repo.priorFanForCustomer(customerId, platform, client)
+        ? await this.repo.priorFanForCustomer(
+          userId, Number(ticket.id), customerId, platform, client
+        )
         : await this.repo.priorFanForPeer(
-          Number(ticket.id), platform, accountKey, peerKey, client
+          userId, Number(ticket.id), platform, peerKey, client
         )
       const fanType = prior ? 'repeat' : 'new'
       const inserted = await this.repo.insertFan({
@@ -247,6 +343,9 @@ class CountTicketService {
         let finalFan = inserted
         if (Number.isSafeInteger(customerId)) {
           await this.repo.rerankCustomerFans(customerId, platform, client)
+          finalFan = await this.repo.fanById(inserted.id, client) || inserted
+        } else {
+          await this.repo.rerankPeerFans(userId, platform, peerKey, client)
           finalFan = await this.repo.fanById(inserted.id, client) || inserted
         }
         return {
@@ -300,11 +399,22 @@ class CountTicketService {
       ? await this.repo.ticketForAdmin(id)
       : await this.repo.ticketForOwner(id, scope.userId)
     if (!ticket) throw new ApiError(404, '计数工单不存在', 'COUNT_TICKET_NOT_FOUND')
-    const [metrics, accounts] = await Promise.all([
+    const [metrics, accounts, dedupTicketIds] = await Promise.all([
       this.repo.metrics(id),
-      this.repo.accounts(id)
+      this.repo.accounts(id),
+      this.repo.dedupTicketIds(id, Number(ticket.user_id))
     ])
-    return { ticket: mapRow(ticket), metrics, accounts }
+    return { ticket: mapRow(ticket), metrics, accounts, dedupTicketIds }
+  }
+
+  async dedupOptions(userId, data) {
+    const ticketId = data.ticketId != null ? Number(data.ticketId) : 0
+    if (ticketId && (!Number.isSafeInteger(ticketId) || ticketId <= 0)) {
+      throw new ApiError(400, '计数工单号不合法', 'COUNT_TICKET_BAD_ID')
+    }
+    const platform = cleanText(data.platform, 32).toLowerCase()
+    if (!platform) throw new ApiError(400, '请选择计数应用', 'COUNT_PLATFORM_REQUIRED')
+    return this.repo.dedupTicketOptions(userId, ticketId, platform)
   }
 
   async fans(ticketId, access, data) {
@@ -350,6 +460,8 @@ module.exports = {
   CountTicketService,
   normalizeTicket,
   normalizeAccount,
+  normalizeDedupScope,
+  normalizeLinkedTicketIds,
   validTimezone,
   validZeroTime,
   normalizeAccess

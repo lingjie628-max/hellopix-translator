@@ -42,11 +42,14 @@ test('migration gate accepts all required migrations and rejects missing version
       { name: '001_initial_schema.js' },
       { name: '002_seed_catalog' },
       { name: '003_support_core_api' },
-      { name: '004_client_releases_draft_url' }
+      { name: '004_client_releases_draft_url' },
+      { name: '054_count_tickets' },
+      { name: '055_count_ticket_integrity' },
+      { name: '056_count_ticket_dedup_scope' }
     ]
   })
   const checked = await checkMigrationVersion(complete)
-  assert.equal(checked.required.length, 4)
+  assert.equal(checked.required.length, 7)
   await assert.rejects(
     checkMigrationVersion(async () => ({ rows: [{ name: '001_initial_schema' }] })),
     /数据库迁移未完成/
@@ -59,7 +62,17 @@ test('persistent runtime checks dependencies without listening on require/create
     pool: { query() {}, connect() {} },
     async checkDependencies() { return { postgres: true, redis: true } },
     async query() {
-      return { rows: ['001_initial_schema', '002_seed_catalog', '003_support_core_api', '004_client_releases_draft_url'].map(name => ({ name })) }
+      return {
+        rows: [
+          '001_initial_schema',
+          '002_seed_catalog',
+          '003_support_core_api',
+          '004_client_releases_draft_url',
+          '054_count_tickets',
+          '055_count_ticket_integrity',
+          '056_count_ticket_dedup_scope'
+        ].map(name => ({ name }))
+      }
     },
     getRedis() { return {} },
     async closeDependencies() { closed += 1 }

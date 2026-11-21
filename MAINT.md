@@ -424,3 +424,43 @@ pg_restore --list /var/backups/hello-pix/<dump>
 - 发布回滚点：`/root/hello-pix-release-1.3.13-20261119-211143`
 - 绑定边界热修补文件备份：
   `/root/hello-pix-hotfix-count-binding-20261119-082130`
+
+## 2026-11-21 计数工单查重范围（开发完成，待发布）
+
+- 分支：`maint/20261121-count-dedup-scope`
+- 迁移：`056_count_ticket_dedup_scope`
+- 新工单支持三种口径：
+  - `merchant`：同商户、同应用的全部工单一起查重；存量工单默认此值，
+    保持 1.3.14 行为。
+  - `ticket`：只看当前工单。
+  - `linked`：只看当前工单和人工选择的同商户、同应用工单。
+- 判定键仍是统一客户身份或平台 `peerKey`，业务边界固定为
+  `user_id + platform`。同一客户进入其它商户或其它应用不会被算作重粉。
+- 指定关联是单向关系：A 关联 B 时，A 可用 B 的历史判断重粉，但不会反向
+  改写 B 自己的新粉口径。
+- 已有进粉记录后，查重范围、关联工单和计数应用均锁定；旧前端更新标题时
+  漏传新字段会保留原值，不会误切回默认口径。
+- 并发入口增加 PostgreSQL transaction advisory lock；乱序补扫与客户合并
+  统一调用 `count_ticket_first_fan_id(...)` 重排，避免并发双新粉和跨桶改写。
+- 商户端列表、详情、新建/编辑弹窗显示查重范围；可按应用加载可关联工单。
+  超管只读页同步显示口径。Mock 同步支持企业账号权益和新接口。
+- 商户删除存档增加 `count_ticket_dedup_links`；删除确认与快照都保留关联。
+- 验证：
+  - 真库定向 `count-tickets + merchant-purge + database.integration`：
+    `19 tests / 19 pass / 0 fail`。
+  - 全量：`2887 tests / 2822 pass / 0 fail / 65 skip`；
+    65 skip 均为已移除 Telegram 产品线的已知 quarantine。
+  - Web 生产构建通过，产物入口 `js/index.177c97d7.js`。
+  - Desktop source preload/guest 验证 `19/19`。
+  - 本地真实页面：企业账号可进入计数工单，弹窗显示三种范围，
+    “指定关联工单”能加载现有工单，页面无白屏、无自动退出登录。
+- 回滚：
+
+```bash
+node scripts/migrate.js down 1
+git revert 4cb0529
+```
+
+  056 down 删除 `count_ticket_dedup_links`、`dedup_scope` 和查重函数；
+  不删除工单、账号绑定或进粉账本。回滚后代码恢复为按平台全局查重。
+- 尚未部署生产；没有新增外部依赖、计费调用或密钥。

@@ -34,7 +34,7 @@
           <el-option label="已关闭" value="closed"></el-option>
         </el-select>
         <el-button @click="search">查询</el-button>
-        <span class="count-rule">会话去重 · 消息不重复灌水 · 跨账号识别重粉</span>
+        <span class="count-rule">会话去重 · 消息不重复灌水 · 重粉按工单范围识别</span>
       </div>
 
       <el-table v-if="rows.length" :data="rows" v-loading="loading" border stripe>
@@ -54,7 +54,10 @@
           </template>
         </el-table-column>
         <el-table-column label="计数应用" width="145">
-          <template slot-scope="scope">{{ platformName(scope.row.platform) }}</template>
+          <template slot-scope="scope">
+            <span>{{ platformName(scope.row.platform) }}</span>
+            <small class="count-scope">{{ dedupScopeLabel(scope.row.dedupScope) }}</small>
+          </template>
         </el-table-column>
         <el-table-column prop="accountCount" label="账号" width="76" align="center"></el-table-column>
         <el-table-column label="累计进粉" width="104" align="right">
@@ -116,7 +119,10 @@
           <div>
             <div class="count-kicker">TICKET #{{ ticket.id }}</div>
             <h2>{{ ticket.title }}</h2>
-            <p>{{ platformName(ticket.platform) }} · 业务日从 {{ ticket.zeroTime }} 开始 · {{ ticket.timezone }}</p>
+            <p>
+              {{ platformName(ticket.platform) }} · {{ dedupScopeLabel(ticket.dedupScope) }}
+              · 业务日从 {{ ticket.zeroTime }} 开始 · {{ ticket.timezone }}
+            </p>
           </div>
           <div class="count-detail-actions">
             <el-tag :type="ticket.status === 'active' ? 'success' : 'info'">
@@ -234,7 +240,7 @@
     <el-dialog
       :title="ticketForm.id ? '编辑计数工单' : '新建计数工单'"
       :visible.sync="ticketDialog"
-      width="520px"
+      width="640px"
       :close-on-click-modal="false"
     >
       <el-form label-width="92px">
@@ -242,10 +248,63 @@
           <el-input v-model="ticketForm.title" maxlength="120" show-word-limit></el-input>
         </el-form-item>
         <el-form-item label="计数应用">
-          <el-select v-model="ticketForm.platform" filterable style="width:100%">
+          <el-select
+            v-model="ticketForm.platform"
+            filterable
+            style="width:100%"
+            :disabled="ticketForm.dedupLocked"
+            @change="handleTicketPlatformChange"
+          >
             <el-option v-for="p in platformOptions" :key="p.id" :label="p.name" :value="p.id"></el-option>
           </el-select>
         </el-form-item>
+        <el-form-item label="查重范围">
+          <el-select
+            v-model="ticketForm.dedupScope"
+            style="width:100%"
+            :disabled="ticketForm.dedupLocked"
+            @change="handleDedupScopeChange"
+          >
+            <el-option label="同商户全部工单" value="merchant"></el-option>
+            <el-option label="仅当前工单" value="ticket"></el-option>
+            <el-option label="指定关联工单" value="linked"></el-option>
+          </el-select>
+          <p class="count-form-tip count-scope-tip">
+            {{ dedupScopeDescription(ticketForm.dedupScope) }}
+          </p>
+        </el-form-item>
+        <el-form-item
+          v-if="ticketForm.dedupScope === 'linked'"
+          label="关联工单"
+        >
+          <el-select
+            v-model="ticketForm.linkedTicketIds"
+            v-loading="dedupOptionsLoading"
+            multiple
+            filterable
+            collapse-tags
+            style="width:100%"
+            placeholder="选择参与查重的其它工单"
+            :disabled="ticketForm.dedupLocked"
+          >
+            <el-option
+              v-for="item in dedupOptions"
+              :key="item.id"
+              :label="'#' + item.id + ' ' + item.title"
+              :value="item.id"
+            ></el-option>
+          </el-select>
+          <p v-if="!dedupOptionsLoading && !dedupOptions.length" class="count-form-tip">
+            当前应用还没有其它工单，请先创建目标工单再设置关联。
+          </p>
+        </el-form-item>
+        <el-alert
+          v-if="ticketForm.dedupLocked"
+          title="该工单已有进粉记录，查重范围、计数应用和关联工单已锁定。"
+          type="info"
+          :closable="false"
+          show-icon
+        ></el-alert>
         <el-form-item label="状态">
           <el-radio-group v-model="ticketForm.status">
             <el-radio-button label="active">进行中</el-radio-button>
@@ -326,6 +385,7 @@ export default {
       ticket: null,
       metrics: {},
       accounts: [],
+      dedupTicketIds: [],
       fans: [],
       fanTotal: 0,
       fanFilters: { type: 'all', keyword: '', page: 1, rows: 20 },
@@ -333,6 +393,8 @@ export default {
       ticketDialog: false,
       savingTicket: false,
       ticketForm: {},
+      dedupOptions: [],
+      dedupOptionsLoading: false,
       accountDialog: false,
       savingAccount: false,
       accountForm: { platform: 'whatsapp-green', accountKey: '' },
@@ -410,6 +472,9 @@ export default {
           this.ticket = resp.data.ticket
           this.metrics = resp.data.metrics || {}
           this.accounts = resp.data.accounts || []
+          this.dedupTicketIds = Array.isArray(resp.data.dedupTicketIds)
+            ? resp.data.dedupTicketIds.map(Number)
+            : []
           this.loadFans(1)
         }
       }).finally(() => { this.detailLoading = false })
@@ -427,6 +492,7 @@ export default {
     },
     openTicketForm(row) {
       const source = row || {}
+      const totalFans = Number(source.totalFans != null ? source.totalFans : this.metrics.totalFans) || 0
       this.ticketForm = {
         id: source.id || null,
         title: source.title || '',
@@ -435,13 +501,60 @@ export default {
         dayTarget: Number(source.dayTarget) || 0,
         totalTarget: Number(source.totalTarget) || 0,
         timezone: source.timezone || 'Asia/Shanghai',
-        zeroTime: source.zeroTime || '00:00:00'
+        zeroTime: source.zeroTime || '00:00:00',
+        dedupScope: source.dedupScope || 'merchant',
+        linkedTicketIds: Array.isArray(source.dedupTicketIds)
+          ? source.dedupTicketIds.map(Number)
+          : (source.id && Array.isArray(this.dedupTicketIds) ? this.dedupTicketIds.slice() : []),
+        dedupLocked: !!source.id && totalFans > 0
       }
       this.ticketDialog = true
+      this.loadDedupOptions(this.ticketForm.platform, this.ticketForm.id)
+    },
+    loadDedupOptions(platform, ticketId) {
+      this.dedupOptions = []
+      if (!platform) return
+      this.dedupOptionsLoading = true
+      this.getRequest('/count-tickets/dedup-options', {
+        platform,
+        ticketId: ticketId || ''
+      }).then(resp => {
+        if (resp && resp.data && Array.isArray(resp.data.rows)) {
+          this.dedupOptions = resp.data.rows
+        }
+      }).catch(() => {}).finally(() => {
+        this.dedupOptionsLoading = false
+      })
+    },
+    handleTicketPlatformChange(platform) {
+      this.ticketForm.linkedTicketIds = []
+      this.ticketForm.dedupScope = 'merchant'
+      this.loadDedupOptions(platform, this.ticketForm.id)
+    },
+    handleDedupScopeChange(scope) {
+      if (scope !== 'linked') this.ticketForm.linkedTicketIds = []
+    },
+    dedupScopeLabel(scope) {
+      if (scope === 'ticket') return '仅当前工单'
+      if (scope === 'linked') return '指定关联工单'
+      return '同商户全部工单'
+    },
+    dedupScopeDescription(scope) {
+      if (scope === 'ticket') {
+        return '只和本工单历史进粉比较；同一客户进入其它工单仍算新粉。'
+      }
+      if (scope === 'linked') {
+        return '只和本工单及下方选中工单的历史进粉比较，不能跨应用。'
+      }
+      return '和本商户同一应用的全部工单比较；不同应用、不同商户互不影响。'
     },
     saveTicket() {
       if (!String(this.ticketForm.title || '').trim()) {
         this.$message.warning('请填写工单名称')
+        return
+      }
+      if (this.ticketForm.dedupScope === 'linked' && !this.ticketForm.linkedTicketIds.length) {
+        this.$message.warning('指定查重工单至少需要选择一张其它工单')
         return
       }
       this.savingTicket = true
@@ -688,6 +801,15 @@ export default {
   font-size: 16px;
 }
 .count-repeat { color: var(--count-amber); }
+.count-scope {
+  display: block;
+  margin-top: 3px;
+  color: var(--count-muted);
+  font-size: 11px;
+}
+.count-scope-tip {
+  margin-top: 5px;
+}
 .count-pagination { margin-top: 14px; text-align: right; }
 .count-detail { padding: 22px; }
 .count-detail-head {

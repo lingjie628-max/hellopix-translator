@@ -582,26 +582,23 @@ class CustomerRepository {
     await this.query(
       `UPDATE identity_match_events SET customer_id = $2
        WHERE customer_id = ANY($1::bigint[])`, [movedIds, targetId], client)
-    // 合并后把同一客户在每个应用内的进粉事件按真实时间重新排序：
-    // 每个平台最早一条是 new，其余是 repeat，并指向该平台首条。
-    // 只改归属会导致两个原本独立的客户都保留 new，合并后新粉数虚高。
+    // 合并后按每张工单自己的查重范围重新判断。范围是单向的：
+    // A 关联 B 时，A 可以把 B 的更早事件当重粉依据，但 B 仍按 B 自己的
+    // 范围计算，不能因为 A 引用了 B 就反向改 B 的历史。
     await this.query(
-      `WITH ranked AS (
-         SELECT id,
-                first_value(id) OVER (
-                  PARTITION BY platform ORDER BY event_at ASC, id ASC
-                ) AS first_id,
-                row_number() OVER (
-                  PARTITION BY platform ORDER BY event_at ASC, id ASC
-                ) AS position
-         FROM count_ticket_fans
-       WHERE customer_id = $1
+      `WITH firsts AS (
+         SELECT f.id,
+                count_ticket_first_fan_id(
+                  f.user_id, f.ticket_id, f.platform, f.customer_id, NULL
+                ) AS first_id
+         FROM count_ticket_fans f
+         WHERE f.customer_id = $1
        )
        UPDATE count_ticket_fans f
-       SET fan_type = CASE WHEN ranked.position = 1 THEN 'new' ELSE 'repeat' END,
-           repeat_of_id = CASE WHEN ranked.position = 1 THEN NULL ELSE ranked.first_id END
-       FROM ranked
-       WHERE f.id = ranked.id`,
+       SET fan_type = CASE WHEN f.id = firsts.first_id THEN 'new' ELSE 'repeat' END,
+           repeat_of_id = CASE WHEN f.id = firsts.first_id THEN NULL ELSE firsts.first_id END
+       FROM firsts
+       WHERE f.id = firsts.id`,
       [targetId], client)
     // customer_owners 有 (user_id, customer_id) 的 FOLLOWING 唯一索引，
     // 两边同属一个商户时会撞索引 —— 冲突的那条直接释放，保留目标方的跟进关系。

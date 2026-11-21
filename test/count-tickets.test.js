@@ -8,6 +8,8 @@ const test = require('node:test')
 const {
   CountTicketService,
   normalizeTicket,
+  normalizeDedupScope,
+  normalizeLinkedTicketIds,
   validTimezone,
   validZeroTime
 } = require('../server/services/count-ticket-service')
@@ -41,6 +43,22 @@ test('计数工单参数：时区、置零时间和目标值 fail-safe', () => {
   assert.equal(normalized.dayTarget, 12)
   assert.equal(normalized.totalTarget, 0, '非法目标不能被静默保存成负数')
   assert.equal(normalized.zeroTime, '04:00:00')
+})
+
+test('计数工单查重范围：默认保持同商户，支持当前工单和指定工单', () => {
+  assert.equal(normalizeDedupScope(undefined), 'merchant')
+  assert.equal(normalizeDedupScope('merchant'), 'merchant')
+  assert.equal(normalizeDedupScope('ticket'), 'ticket')
+  assert.equal(normalizeDedupScope('linked'), 'linked')
+  assert.throws(
+    () => normalizeDedupScope('global'),
+    error => error.code === 'COUNT_DEDUP_SCOPE_BAD'
+  )
+  assert.deepEqual(normalizeLinkedTicketIds([9, '3', 3, 1]), [1, 3, 9])
+  assert.throws(
+    () => normalizeLinkedTicketIds([-1]),
+    error => error.code === 'COUNT_DEDUP_LINKS_BAD'
+  )
 })
 
 test('计数工单超管读接口全部显式声明客户数据权限', () => {
@@ -105,6 +123,10 @@ test('商户管理员始终能找到计数工单入口，未购权益时明确�
     '商户计数页必须使用公开站点平台接口')
   assert.doesNotMatch(page, /getRequest\('\/client\/platforms'\)/,
     '商户网页不能调用原生客户端专用接口；401 会被全局拦截器当成掉线并退出登录')
+  assert.match(page, /查重范围/, '工单必须允许配置新粉/重粉比较范围')
+  assert.match(page, /仅当前工单/, '必须支持只看当前工单')
+  assert.match(page, /同商户全部工单/, '必须支持同一商户跨工单识别')
+  assert.match(page, /指定关联工单/, '必须支持人工选择参与比较的工单')
 })
 
 test('商户 profile 刷新时企业账号仍返回 counterSuite=1', () => {
@@ -453,7 +475,7 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
   assert.ok(cross, '其他商户读取详情必须失败')
   assert.equal(cross.code, 'COUNT_TICKET_NOT_FOUND')
 
-  // 同一客户在另一商户的工单再次出现，也只暴露“重粉”这个事实。
+  // 另一商户即使命中了统一的客户身份，也不能把对方工单当成重粉依据。
   const ticketB = await service.saveTicket(merchantB.id, {
     title: 'WhatsApp B 组',
     platform: 'whatsapp-green',
@@ -471,7 +493,155 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
     displayName: '跨商户客户',
     eventAt: '2026-11-18T10:00:00+08:00'
   })
-  assert.equal(crossRepeat.fanType, 'repeat')
+  assert.equal(crossRepeat.fanType, 'new', '跨商户不能串重粉事实')
+
+  // 同一商户的跨工单查重由每张工单自己决定：
+  // merchant = 全商户；ticket = 只看本工单；linked = 只看人工关联工单。
+  const scopeMerchantA = await service.saveTicket(merchantA.id, {
+    title: '同商户 A',
+    platform: 'whatsapp-green',
+    dedupScope: 'merchant',
+    timezone: 'Asia/Shanghai',
+    zeroTime: '00:00'
+  })
+  const scopeMerchantB = await service.saveTicket(merchantA.id, {
+    title: '同商户 B',
+    platform: 'whatsapp-green',
+    dedupScope: 'merchant',
+    timezone: 'Asia/Shanghai',
+    zeroTime: '00:00'
+  })
+  await bindAccount(merchantA.id, scopeMerchantA.id, 'scope-merchant-a')
+  await bindAccount(merchantA.id, scopeMerchantB.id, 'scope-merchant-b')
+  const scopeCustomer = await makeCustomer('scope')
+  const scopeMerchantConvA = await makeConversation(
+    merchantA.id, scopeCustomer.id, 'scope-merchant-a', 'scope-peer-a'
+  )
+  const scopeMerchantConvB = await makeConversation(
+    merchantA.id, scopeCustomer.id, 'scope-merchant-b', 'scope-peer-b'
+  )
+  assert.equal((await captureInbound(merchantA.id, {
+    conversationId: scopeMerchantConvA,
+    customerId: scopeCustomer.id,
+    platform: 'whatsapp-green',
+    accountKey: 'scope-merchant-a',
+    peerKey: 'scope-peer-a',
+    eventAt: '2026-11-20T01:00:00Z'
+  })).fanType, 'new')
+  assert.equal((await captureInbound(merchantA.id, {
+    conversationId: scopeMerchantConvB,
+    customerId: scopeCustomer.id,
+    platform: 'whatsapp-green',
+    accountKey: 'scope-merchant-b',
+    peerKey: 'scope-peer-b',
+    eventAt: '2026-11-20T02:00:00Z'
+  })).fanType, 'repeat', '同商户全部工单必须识别跨工单重粉')
+
+  const scopeTicketA = await service.saveTicket(merchantA.id, {
+    title: '单工单 A',
+    platform: 'whatsapp-green',
+    dedupScope: 'ticket',
+    timezone: 'Asia/Shanghai',
+    zeroTime: '00:00'
+  })
+  const scopeTicketB = await service.saveTicket(merchantA.id, {
+    title: '单工单 B',
+    platform: 'whatsapp-green',
+    dedupScope: 'ticket',
+    timezone: 'Asia/Shanghai',
+    zeroTime: '00:00'
+  })
+  await bindAccount(merchantA.id, scopeTicketA.id, 'scope-ticket-a')
+  await bindAccount(merchantA.id, scopeTicketB.id, 'scope-ticket-b')
+  const scopeTicketConvA = await makeConversation(
+    merchantA.id, scopeCustomer.id, 'scope-ticket-a', 'scope-ticket-peer-a'
+  )
+  const scopeTicketConvB = await makeConversation(
+    merchantA.id, scopeCustomer.id, 'scope-ticket-b', 'scope-ticket-peer-b'
+  )
+  assert.equal((await captureInbound(merchantA.id, {
+    conversationId: scopeTicketConvA,
+    customerId: scopeCustomer.id,
+    platform: 'whatsapp-green',
+    accountKey: 'scope-ticket-a',
+    peerKey: 'scope-ticket-peer-a',
+    eventAt: '2026-11-20T03:00:00Z'
+  })).fanType, 'new')
+  assert.equal((await captureInbound(merchantA.id, {
+    conversationId: scopeTicketConvB,
+    customerId: scopeCustomer.id,
+    platform: 'whatsapp-green',
+    accountKey: 'scope-ticket-b',
+    peerKey: 'scope-ticket-peer-b',
+    eventAt: '2026-11-20T04:00:00Z'
+  })).fanType, 'new', '仅当前工单模式不能串其它工单')
+
+  const scopeLinkTarget = await service.saveTicket(merchantA.id, {
+    title: '指定关联-目标',
+    platform: 'whatsapp-green',
+    dedupScope: 'ticket',
+    timezone: 'Asia/Shanghai',
+    zeroTime: '00:00'
+  })
+  const scopeLinkSource = await service.saveTicket(merchantA.id, {
+    title: '指定关联-主工单',
+    platform: 'whatsapp-green',
+    dedupScope: 'linked',
+    linkedTicketIds: [scopeLinkTarget.id],
+    timezone: 'Asia/Shanghai',
+    zeroTime: '00:00'
+  })
+  await bindAccount(merchantA.id, scopeLinkTarget.id, 'scope-link-target')
+  await bindAccount(merchantA.id, scopeLinkSource.id, 'scope-link-source')
+  const scopeLinkTargetConv = await makeConversation(
+    merchantA.id, scopeCustomer.id, 'scope-link-target', 'scope-link-target-peer'
+  )
+  const scopeLinkSourceConv = await makeConversation(
+    merchantA.id, scopeCustomer.id, 'scope-link-source', 'scope-link-source-peer'
+  )
+  assert.equal((await captureInbound(merchantA.id, {
+    conversationId: scopeLinkTargetConv,
+    customerId: scopeCustomer.id,
+    platform: 'whatsapp-green',
+    accountKey: 'scope-link-target',
+    peerKey: 'scope-link-target-peer',
+    eventAt: '2026-11-20T05:00:00Z'
+  })).fanType, 'new')
+  assert.equal((await captureInbound(merchantA.id, {
+    conversationId: scopeLinkSourceConv,
+    customerId: scopeCustomer.id,
+    platform: 'whatsapp-green',
+    accountKey: 'scope-link-source',
+    peerKey: 'scope-link-source-peer',
+    eventAt: '2026-11-20T06:00:00Z'
+  })).fanType, 'repeat', '指定关联工单必须参与查重')
+
+  await assert.rejects(
+    () => service.saveTicket(merchantA.id, {
+      id: scopeLinkSource.id,
+      title: '指定关联-主工单',
+      platform: 'whatsapp-green',
+      dedupScope: 'merchant',
+      timezone: 'Asia/Shanghai',
+      zeroTime: '00:00'
+    }),
+    error => error.code === 'COUNT_DEDUP_SCOPE_LOCKED',
+    '已有进粉后不能偷偷改变历史口径'
+  )
+  await service.saveTicket(merchantA.id, {
+    id: scopeLinkSource.id,
+    title: '指定关联-主工单（旧前端更新）',
+    platform: 'whatsapp-green',
+    timezone: 'Asia/Shanghai',
+    zeroTime: '00:00'
+  })
+  const preservedScope = await service.detail(scopeLinkSource.id, { userId: merchantA.id })
+  assert.equal(preservedScope.ticket.dedupScope, 'linked', '旧前端漏传新字段时必须保留原口径')
+  assert.deepEqual(
+    preservedScope.dedupTicketIds.map(Number),
+    [Number(scopeLinkTarget.id)],
+    '旧前端更新标题不能清空关联工单'
+  )
 
   // 业务日按工单时区与置零时间计算：03:59:59 和 04:00:00 属不同业务日。
   const dayKeys = await pool.query(
@@ -547,10 +717,32 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
     timezone: 'Asia/Shanghai',
     zeroTime: '00:00'
   })
+  const mergeTicketOnlyA = await service.saveTicket(merchantA.id, {
+    title: '身份合并-单工单 A',
+    platform: 'whatsapp-green',
+    dedupScope: 'ticket',
+    timezone: 'Asia/Shanghai',
+    zeroTime: '00:00'
+  })
+  const mergeTicketOnlyB = await service.saveTicket(merchantA.id, {
+    title: '身份合并-单工单 B',
+    platform: 'whatsapp-green',
+    dedupScope: 'ticket',
+    timezone: 'Asia/Shanghai',
+    zeroTime: '00:00'
+  })
   await bindAccount(merchantA.id, mergeTicket.id, 'merge-a')
   await bindAccount(merchantA.id, mergeTicket.id, 'merge-b')
+  await bindAccount(merchantA.id, mergeTicketOnlyA.id, 'merge-only-a')
+  await bindAccount(merchantA.id, mergeTicketOnlyB.id, 'merge-only-b')
   const mergeConvA = await makeConversation(merchantA.id, mergeA.id, 'merge-a', 'merge-peer-a')
   const mergeConvB = await makeConversation(merchantA.id, mergeB.id, 'merge-b', 'merge-peer-b')
+  const mergeOnlyConvA = await makeConversation(
+    merchantA.id, mergeA.id, 'merge-only-a', 'merge-only-peer-a'
+  )
+  const mergeOnlyConvB = await makeConversation(
+    merchantA.id, mergeB.id, 'merge-only-b', 'merge-only-peer-b'
+  )
   const mergeConvTg = await makeConversation(
     merchantA.id, mergeB.id, 'tg-acc', 'merge-peer-tg', 'telegram-z'
   )
@@ -569,6 +761,22 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
     accountKey: 'merge-b',
     peerKey: 'merge-peer-b',
     eventAt: '2026-11-18T12:00:00+08:00'
+  })
+  await captureInbound(merchantA.id, {
+    conversationId: mergeOnlyConvA,
+    customerId: mergeA.id,
+    platform: 'whatsapp-green',
+    accountKey: 'merge-only-a',
+    peerKey: 'merge-only-peer-a',
+    eventAt: '2026-11-18T12:10:00+08:00'
+  })
+  await captureInbound(merchantA.id, {
+    conversationId: mergeOnlyConvB,
+    customerId: mergeB.id,
+    platform: 'whatsapp-green',
+    accountKey: 'merge-only-b',
+    peerKey: 'merge-only-peer-b',
+    eventAt: '2026-11-18T12:20:00+08:00'
   })
   await captureInbound(merchantA.id, {
     conversationId: mergeConvTg,
@@ -590,6 +798,22 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
   assert.equal(mergedRows.rows[0].fan_type, 'new')
   assert.equal(mergedRows.rows[1].fan_type, 'repeat')
   assert.equal(String(mergedRows.rows[1].repeat_of_id), String(mergedRows.rows[0].id))
+  const mergeOnlyRows = await pool.query(
+    `SELECT ticket_id,fan_type,repeat_of_id
+     FROM count_ticket_fans
+     WHERE ticket_id = ANY($1::bigint[])
+     ORDER BY ticket_id`,
+    [[mergeTicketOnlyA.id, mergeTicketOnlyB.id]]
+  )
+  assert.deepEqual(
+    mergeOnlyRows.rows.map(row => row.fan_type),
+    ['new', 'new'],
+    '客户合并不能把“仅当前工单”的两张工单串成重粉'
+  )
+  assert.ok(
+    mergeOnlyRows.rows.every(row => row.repeat_of_id == null),
+    '不同单工单范围不能互相指向首粉'
+  )
   const mergedTelegram = await service.detail(telegramTicket.id, { userId: merchantA.id })
   assert.equal(mergedTelegram.metrics.newFans, 2, 'Telegram 内该客户的首条仍是新粉')
   assert.equal(mergedTelegram.metrics.repeatFans, 0, 'WhatsApp 的历史不能串进 Telegram 重粉')

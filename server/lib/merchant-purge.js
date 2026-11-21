@@ -59,6 +59,7 @@ const CASCADE_TABLES = Object.freeze([
   ['count_tickets', 'user_id'],
   ['count_ticket_accounts', 'user_id'],
   ['count_ticket_fans', 'user_id'],
+  ['count_ticket_dedup_links', 'user_id'],
   ['scripts', 'user_id'],
   ['login_logs', 'user_id'],
   ['short_links', 'user_id'],
@@ -88,6 +89,7 @@ const LABELS = Object.freeze(
     count_tickets: '计数工单',
     count_ticket_accounts: '计数账号',
     count_ticket_fans: '进粉记录',
+    count_ticket_dedup_links: '工单查重关联',
     scripts: '脚本',
     login_logs: '登录日志',
     short_links: '短链',
@@ -143,9 +145,10 @@ async function buildSnapshot(repo, user, client) {
   delete safeUser.password_hash
   delete safeUser.passwordHash
 
-  const dump = async (table, where) => {
+  const dump = async (table, where, orderBy) => {
     const result = await repo.query(
-      `SELECT * FROM ${table} WHERE ${where}=$1 ORDER BY id`, [user.id], client
+      `SELECT * FROM ${table} WHERE ${where}=$1 ORDER BY ${orderBy || 'id'}`,
+      [user.id], client
     )
     return result.rows
   }
@@ -158,7 +161,10 @@ async function buildSnapshot(repo, user, client) {
     orders: await dump('orders', 'user_id'),
     count_tickets: await dump('count_tickets', 'user_id'),
     count_ticket_accounts: await dump('count_ticket_accounts', 'user_id'),
-    count_ticket_fans: await dump('count_ticket_fans', 'user_id')
+    count_ticket_fans: await dump('count_ticket_fans', 'user_id'),
+    count_ticket_dedup_links: await dump(
+      'count_ticket_dedup_links', 'user_id', 'ticket_id, linked_ticket_id'
+    )
   }
 }
 

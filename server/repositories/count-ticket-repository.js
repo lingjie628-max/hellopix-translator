@@ -24,7 +24,7 @@ class CountTicketRepository {
 
   async activeTicketForAccount(userId, platform, accountKey, client) {
     const result = await this.query(
-      `SELECT t.id, t.user_id, t.title, t.timezone, t.zero_time,
+      `SELECT t.id, t.user_id, t.title, t.timezone, t.zero_time, t.dedup_scope,
               GREATEST(a.created_at, a.updated_at) AS account_active_since
        FROM count_ticket_accounts a
        JOIN count_tickets t ON t.id = a.ticket_id AND t.user_id = a.user_id
@@ -50,6 +50,23 @@ class CountTicketRepository {
     return result.rows[0] || null
   }
 
+  /**
+   * 同一查重桶内的客户身份串行化。
+   *
+   * customer 行锁只能覆盖已建档客户；peerKey 兜底路径没有稳定的行可锁，
+   * 两个账号并发进入时就会同时判成 new。advisory lock 不写业务表，事务结束
+   * 自动释放，失败回滚也不会留下锁。
+   */
+  async lockDedupKey(userId, platform, customerId, peerKey, client) {
+    const identity = customerId
+      ? `customer:${customerId}`
+      : `peer:${peerKey}`
+    await this.query(
+      `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+      [`count-ticket:${userId}:${platform}:${identity}`], client
+    )
+  }
+
   async fanById(fanId, client) {
     const result = await this.query(
       `SELECT id, ticket_id, conversation_id, customer_id, fan_type, repeat_of_id, event_at
@@ -67,24 +84,45 @@ class CountTicketRepository {
    */
   async rerankCustomerFans(customerId, platform, client) {
     const result = await this.query(
-      `WITH ranked AS (
-         SELECT id,
-                first_value(id) OVER (
-                  PARTITION BY platform ORDER BY event_at ASC, id ASC
-                ) AS first_id,
-                row_number() OVER (
-                  PARTITION BY platform ORDER BY event_at ASC, id ASC
-                ) AS position
-         FROM count_ticket_fans
-         WHERE customer_id = $1 AND platform = $2
+      `WITH firsts AS (
+         SELECT f.id,
+                count_ticket_first_fan_id(
+                  f.user_id, f.ticket_id, f.platform, f.customer_id, NULL
+                ) AS first_id
+         FROM count_ticket_fans f
+         WHERE f.customer_id = $1 AND f.platform = $2
        )
        UPDATE count_ticket_fans f
-       SET fan_type = CASE WHEN ranked.position = 1 THEN 'new' ELSE 'repeat' END,
-           repeat_of_id = CASE WHEN ranked.position = 1 THEN NULL ELSE ranked.first_id END
-       FROM ranked
-       WHERE f.id = ranked.id
+       SET fan_type = CASE WHEN f.id = firsts.first_id THEN 'new' ELSE 'repeat' END,
+           repeat_of_id = CASE WHEN f.id = firsts.first_id THEN NULL ELSE firsts.first_id END
+       FROM firsts
+       WHERE f.id = firsts.id
        RETURNING f.id, f.fan_type, f.repeat_of_id`,
       [customerId, platform], client
+    )
+    return result.rows
+  }
+
+  async rerankPeerFans(userId, platform, peerKey, client) {
+    const result = await this.query(
+      `WITH firsts AS (
+         SELECT f.id,
+                count_ticket_first_fan_id(
+                  f.user_id, f.ticket_id, f.platform, NULL, f.peer_key
+                ) AS first_id
+         FROM count_ticket_fans f
+         WHERE f.user_id = $1
+           AND f.platform = $2
+           AND f.peer_key = $3
+           AND f.customer_id IS NULL
+       )
+       UPDATE count_ticket_fans f
+       SET fan_type = CASE WHEN f.id = firsts.first_id THEN 'new' ELSE 'repeat' END,
+           repeat_of_id = CASE WHEN f.id = firsts.first_id THEN NULL ELSE firsts.first_id END
+       FROM firsts
+       WHERE f.id = firsts.id
+       RETURNING f.id, f.fan_type, f.repeat_of_id`,
+      [userId, platform, peerKey], client
     )
     return result.rows
   }
@@ -94,26 +132,22 @@ class CountTicketRepository {
     await this.query('SELECT id FROM customers WHERE id = $1 FOR UPDATE', [customerId], client)
   }
 
-  async priorFanForCustomer(customerId, platform, client) {
+  async priorFanForCustomer(userId, ticketId, customerId, platform, client) {
     const result = await this.query(
-      `SELECT id, ticket_id, conversation_id, fan_type, event_at
-       FROM count_ticket_fans
-       WHERE customer_id = $1 AND platform = $2
-       ORDER BY event_at ASC, id ASC
-       LIMIT 1`,
-      [customerId, platform], client
+      `SELECT f.id, f.ticket_id, f.conversation_id, f.fan_type, f.event_at
+       FROM count_ticket_fans f
+       WHERE f.id = count_ticket_first_fan_id($1, $2, $4, $3, NULL)`,
+      [userId, ticketId, customerId, platform], client
     )
     return result.rows[0] || null
   }
 
-  async priorFanForPeer(ticketId, platform, accountKey, peerKey, client) {
+  async priorFanForPeer(userId, ticketId, platform, peerKey, client) {
     const result = await this.query(
-      `SELECT id, ticket_id, conversation_id, fan_type, event_at
-       FROM count_ticket_fans
-       WHERE ticket_id = $1 AND platform = $2 AND account_key = $3 AND peer_key = $4
-       ORDER BY event_at ASC, id ASC
-       LIMIT 1`,
-      [ticketId, platform, accountKey, peerKey], client
+      `SELECT f.id, f.ticket_id, f.conversation_id, f.fan_type, f.event_at
+       FROM count_ticket_fans f
+       WHERE f.id = count_ticket_first_fan_id($1, $2, $3, NULL, $4)`,
+      [userId, ticketId, platform, peerKey], client
     )
     return result.rows[0] || null
   }
@@ -165,7 +199,7 @@ class CountTicketRepository {
 
   async lockTicket(ticketId, userId, client) {
     const result = await this.query(
-      `SELECT t.id, t.user_id, t.status, t.platform, t.timezone, t.zero_time,
+      `SELECT t.id, t.user_id, t.status, t.platform, t.timezone, t.zero_time, t.dedup_scope,
               EXISTS(
                 SELECT 1 FROM count_ticket_fans f
                 WHERE f.ticket_id = t.id AND f.user_id = t.user_id
@@ -185,13 +219,14 @@ class CountTicketRepository {
   async createTicket(userId, payload, client) {
     const result = await this.query(
       `INSERT INTO count_tickets
-         (user_id, title, platform, status, day_target, total_target, timezone, zero_time, closed_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::time,
+         (user_id, title, platform, status, day_target, total_target, timezone, zero_time,
+          dedup_scope, closed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::time, $9,
                CASE WHEN $4 = 'closed' THEN now() ELSE NULL END)
        RETURNING *`,
       [
         userId, payload.title, payload.platform, payload.status, payload.dayTarget, payload.totalTarget,
-        payload.timezone, payload.zeroTime
+        payload.timezone, payload.zeroTime, payload.dedupScope
       ], client
     )
     return result.rows[0]
@@ -207,6 +242,7 @@ class CountTicketRepository {
            total_target = $7,
            timezone = $8,
            zero_time = $9::time,
+           dedup_scope = $10,
            closed_at = CASE
              WHEN $5 = 'closed' THEN COALESCE(closed_at, now())
              ELSE NULL
@@ -216,7 +252,7 @@ class CountTicketRepository {
        RETURNING *`,
       [
         ticketId, userId, payload.title, payload.platform, payload.status, payload.dayTarget,
-        payload.totalTarget, payload.timezone, payload.zeroTime
+        payload.totalTarget, payload.timezone, payload.zeroTime, payload.dedupScope
       ], client
     )
     const ticket = result.rows[0] || null
@@ -231,6 +267,59 @@ class CountTicketRepository {
       )
     }
     return ticket
+  }
+
+  async dedupTicketIds(ticketId, userId, client) {
+    const result = await this.query(
+      `SELECT linked_ticket_id
+       FROM count_ticket_dedup_links
+       WHERE ticket_id = $1 AND user_id = $2
+       ORDER BY linked_ticket_id`,
+      [ticketId, userId], client
+    )
+    return result.rows.map(row => Number(row.linked_ticket_id))
+  }
+
+  async validDedupTicketIds(userId, sourceTicketId, platform, ticketIds, client) {
+    if (!ticketIds.length) return []
+    const result = await this.query(
+      `SELECT id
+       FROM count_tickets
+       WHERE user_id = $1
+         AND platform = $2
+         AND id = ANY($3::bigint[])
+         AND id <> $4
+       ORDER BY id`,
+      [userId, platform, ticketIds, sourceTicketId || 0], client
+    )
+    return result.rows.map(row => Number(row.id))
+  }
+
+  async replaceDedupLinks(ticketId, userId, ticketIds, client) {
+    await this.query(
+      'DELETE FROM count_ticket_dedup_links WHERE ticket_id=$1 AND user_id=$2',
+      [ticketId, userId], client
+    )
+    if (!ticketIds.length) return
+    await this.query(
+      `INSERT INTO count_ticket_dedup_links(ticket_id,user_id,linked_ticket_id)
+       SELECT $1, $2, unnest($3::bigint[])`,
+      [ticketId, userId, ticketIds], client
+    )
+  }
+
+  async dedupTicketOptions(userId, ticketId, platform, client) {
+    const result = await this.query(
+      `SELECT id, title, platform, status
+       FROM count_tickets
+       WHERE user_id = $1
+         AND platform = $2
+         AND id <> $3
+       ORDER BY (status = 'closed') ASC, updated_at DESC, id DESC
+       LIMIT 500`,
+      [userId, platform, ticketId || 0], client
+    )
+    return mapRows(result.rows)
   }
 
   async saveAccount(ticketId, userId, payload, client) {
@@ -318,7 +407,13 @@ class CountTicketRepository {
     values.push(limit, offset)
     const result = await this.query(
       `SELECT t.id, t.user_id, u.username, t.title, t.platform, t.status, t.day_target, t.total_target,
-              t.timezone, t.zero_time, t.created_at, t.updated_at, t.closed_at,
+              t.timezone, t.zero_time, t.dedup_scope, t.created_at, t.updated_at, t.closed_at,
+              ARRAY(
+                SELECT l.linked_ticket_id
+                FROM count_ticket_dedup_links l
+                WHERE l.ticket_id = t.id AND l.user_id = t.user_id
+                ORDER BY l.linked_ticket_id
+              ) AS dedup_ticket_ids,
               (SELECT count(*)::int FROM count_ticket_accounts a
                WHERE a.ticket_id = t.id AND a.user_id = t.user_id AND a.active = true) AS account_count,
               (SELECT count(*)::int FROM count_ticket_fans f

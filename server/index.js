@@ -10,7 +10,10 @@ const REQUIRED_MIGRATIONS = Object.freeze([
   '001_initial_schema',
   '002_seed_catalog',
   '003_support_core_api',
-  '004_client_releases_draft_url'
+  '004_client_releases_draft_url',
+  '054_count_tickets',
+  '055_count_ticket_integrity',
+  '056_count_ticket_dedup_scope'
 ])
 
 function envFlag(value) {

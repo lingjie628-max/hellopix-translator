@@ -22,6 +22,9 @@
       <el-table-column prop="username" label="商户" width="130"></el-table-column>
       <el-table-column prop="title" label="工单名称" min-width="180" show-overflow-tooltip></el-table-column>
       <el-table-column prop="platform" label="计数应用" width="130"></el-table-column>
+      <el-table-column label="查重范围" width="128">
+        <template slot-scope="scope">{{ scopeLabel(scope.row.dedupScope) }}</template>
+      </el-table-column>
       <el-table-column label="状态" width="90">
         <template slot-scope="scope">
           <el-tag :type="scope.row.status === 'active' ? 'success' : 'info'" size="mini">
@@ -60,7 +63,10 @@
           <div>
             <small>COUNT TICKET #{{ ticket.id }}</small>
             <h2>{{ ticket.title }}</h2>
-            <p>{{ ticket.platform }} · {{ ticket.username }} · {{ ticket.timezone }} · 每日 {{ ticket.zeroTime }} 置零</p>
+            <p>
+              {{ ticket.platform }} · {{ scopeLabel(ticket.dedupScope) }} · {{ ticket.username }}
+              · {{ ticket.timezone }} · 每日 {{ ticket.zeroTime }} 置零
+            </p>
           </div>
           <el-button @click="visible = false">关闭</el-button>
         </div>
@@ -201,6 +207,11 @@ export default {
           this.fanTotal = Number(resp.data.total) || 0
         }
       }).catch(() => {})
+    },
+    scopeLabel(scope) {
+      if (scope === 'ticket') return '仅当前工单'
+      if (scope === 'linked') return '指定关联工单'
+      return '同商户全部工单'
     },
     formatTime(value) {
       if (!value) return '—'

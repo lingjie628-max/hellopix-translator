@@ -237,6 +237,16 @@ test('商户回收 / 删除：护栏与外键顺序', { skip: !databaseUrl }, as
        VALUES($1,'待删计数工单','whatsapp-green','Asia/Shanghai','00:00') RETURNING id`,
       [user.id]
     )
+    const linkedTicket = await pool.query(
+      `INSERT INTO count_tickets(user_id,title,platform,timezone,zero_time,dedup_scope)
+       VALUES($1,'待删关联工单','whatsapp-green','Asia/Shanghai','00:00','linked') RETURNING id`,
+      [user.id]
+    )
+    await pool.query(
+      `INSERT INTO count_ticket_dedup_links(ticket_id,user_id,linked_ticket_id)
+       VALUES($1,$2,$3)`,
+      [linkedTicket.rows[0].id, user.id, ticket.rows[0].id]
+    )
     const conversation = await pool.query(
       `INSERT INTO conversations(user_id,platform,account_key,peer_key,display_name,last_message_at)
        VALUES($1,'whatsapp-green','purge-account','purge-peer','Purge',now()) RETURNING id`,
@@ -263,10 +273,11 @@ test('商户回收 / 删除：护栏与外键顺序', { skip: !databaseUrl }, as
     const archive = await pool.query(
       'SELECT snapshot FROM deleted_merchants WHERE user_id=$1', [user.id]
     )
-    assert.equal(archive.rows[0].snapshot.count_tickets.length, 1)
+    assert.equal(archive.rows[0].snapshot.count_tickets.length, 2)
     assert.equal(archive.rows[0].snapshot.count_ticket_accounts.length, 1)
     assert.equal(archive.rows[0].snapshot.count_ticket_fans.length, 1)
     assert.equal(archive.rows[0].snapshot.count_ticket_fans[0].event_type, 'message')
     assert.equal(archive.rows[0].snapshot.count_ticket_fans[0].direction, 'in')
+    assert.equal(archive.rows[0].snapshot.count_ticket_dedup_links.length, 1)
   })
 })
