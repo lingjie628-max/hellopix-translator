@@ -12,6 +12,15 @@ import { formatDateTime, formateStatus } from './utils/filters'
 Vue.config.productionTip = false
 Vue.use(ElementUI)
 
+// 页面组件之外的 Vue 异常也必须可见。路由组件内部的异常由
+// AppErrorBoundary 捕获；这里兜住插件、根组件和路由生命周期里的异常。
+Vue.config.errorHandler = (error, _vm, info) => {
+  try { console.error('[hello-pix-ui-global]', error, info || '') } catch (e) {}
+  if (window.__pixShowFatal) {
+    window.__pixShowFatal(((error && error.message) || String(error || '未知错误')) + (info ? ' · ' + info : ''))
+  }
+}
+
 Vue.prototype.postRequest = postRequest
 Vue.prototype.getRequest = getRequest
 Vue.prototype.putRequest = putRequest
@@ -44,8 +53,15 @@ getRequest('/site/info').then(resp => {
   if (billing.currency) store.commit('setCurrency', billing.currency)
 }).catch(() => {})
 
-new Vue({
+const app = new Vue({
   router,
   store,
   render: h => h(App)
 }).$mount('#app')
+
+router.onError(error => {
+  try { console.error('[hello-pix-router]', error) } catch (e) {}
+  if (window.__pixShowFatal) window.__pixShowFatal((error && error.message) || '页面路由加载失败')
+})
+
+if (window.__pixBootReady) window.__pixBootReady()
