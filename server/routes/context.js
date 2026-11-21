@@ -144,6 +144,9 @@ function buildContext(context) {
     // 客户端正常一年也传不了几次（只在异常退出后的下次启动传一次），
     // 这个额度只用于挡住刷接口，不会误伤真实用户。
     crashReport: limit('crash-report-ip', 20, 60 * 60_000),
+    // 对账分享页可能被粉商多人反复打开；按 IP 给足正常刷新额度，
+    // 同时挡住拿分享 token 批量猜密码。密码哈希本身是 scrypt。
+    countShareView: limit('count-share-view', 120, 15 * 60_000),
     // 第二步的限流按来源 IP：票据本身还有尝试次数上限，两层叠加
     adminTotp: limit('admin-totp-ip', 20, 15 * 60_000),
     // 动态码/密钥相关操作只可能在已登录会话里发生，给个宽松上限防脚本刷

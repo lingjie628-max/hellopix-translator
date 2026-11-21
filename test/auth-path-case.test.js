@@ -300,6 +300,7 @@ test('其他公开接口同样不受大小写影响', async () => {
     ['/user/forgot', 'POST'],
     ['/site/info', 'GET'],
     ['/client/crash-report', 'POST'],
+    ['/public/count-ticket-shares/view', 'POST'],
     ['/admin/login', 'POST']
   ]
   for (const [path, method] of cases) {

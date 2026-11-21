@@ -12,6 +12,8 @@ const {
   normalizeLinkedTicketIds,
   normalizeGroup,
   normalizeBaseLines,
+  normalizeShare,
+  shareTokenHash,
   validTimezone,
   validZeroTime
 } = require('../server/services/count-ticket-service')
@@ -77,6 +79,47 @@ test('计数工单查重范围：默认保持同商户，支持当前工单和�
     { peerKey: '628111', displayName: '客户甲更新', source: '广告' },
     { peerKey: '628222', displayName: '客户乙', source: 'LINE' }
   ])
+})
+
+test('工单分享默认带密码，短密码拒绝，token 只以哈希落库', () => {
+  const generated = normalizeShare({})
+  assert.equal(generated.passwordProtected, true)
+  assert.equal(generated.password.length, 10)
+  assert.equal(generated.expiresInDays, 30)
+
+  const open = normalizeShare({ passwordProtected: false, password: 'abcdef' })
+  assert.deepEqual(open, {
+    passwordProtected: false,
+    password: '',
+    expiresInDays: 30
+  })
+  assert.throws(
+    () => normalizeShare({ passwordProtected: true, password: '12345' }),
+    error => error.code === 'COUNT_SHARE_PASSWORD_WEAK'
+  )
+  assert.equal(normalizeShare({ expiresInDays: 999 }).expiresInDays, 365)
+  assert.equal(shareTokenHash('abc'), shareTokenHash('abc'))
+  assert.notEqual(shareTokenHash('abc'), shareTokenHash('abcd'))
+  assert.match(shareTokenHash('abc'), /^[0-9a-f]{64}$/)
+})
+
+test('跨工单周期查重按候选工单自己的当前周期判断', () => {
+  const root = path.join(__dirname, '..')
+  const migration = fs.readFileSync(
+    path.join(root, 'migrations', '060_count_ticket_share_cycles.js'),
+    'utf8'
+  )
+  assert.match(migration, /JOIN count_tickets candidate_ticket/)
+  assert.match(
+    migration,
+    /candidate\.cycle_no = candidate_ticket\.cycle_no/,
+    '其它工单只应使用它自己的当前周期事件参与查重'
+  )
+  assert.doesNotMatch(
+    migration,
+    /candidate\.cycle_no = t\.cycle_no/,
+    '不能要求不同工单的周期编号相同，否则 A 第二次结算后会漏掉 B 当前周期的重粉'
+  )
 })
 
 test('计数工单超管读接口全部显式声明客户数据权限', () => {
@@ -148,6 +191,16 @@ test('商户管理员始终能找到计数工单入口，未购权益时明确�
   assert.match(page, /命名分组内/, '必须支持命名分组查重')
   assert.match(page, /底库管理/, '必须提供底库管理入口')
   assert.match(page, /命中底库记为重粉/, '工单必须能启用底库去重')
+  assert.match(page, /分享对账/, '工单详情必须提供粉商对账分享入口')
+  assert.match(page, /周期重置/, '工单必须支持结算周期归档')
+  assert.match(page, /历史进粉不会删除/, '周期重置文案必须说明历史账本保留')
+  const sharePage = fs.readFileSync(
+    path.join(root, 'src', 'components', 'count', 'CountShare.vue'),
+    'utf8'
+  )
+  assert.match(sharePage, /分享密码/, '分享页必须支持密码解锁')
+  assert.match(sharePage, /本周期重粉/, '分享页必须展示重粉指标')
+  assert.match(sharePage, /接粉账号/, '分享页必须提供逐账号对账')
 })
 
 test('商户 profile 刷新时企业账号仍返回 counterSuite=1', () => {
@@ -1218,4 +1271,157 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
   assert.equal(chainAudit.rows[0].count_ticket_fans[0].event_type, 'message')
   assert.equal(chainAudit.rows[0].count_ticket_fans[0].direction, 'in')
   assert.deepEqual(chainAudit.rows[0].moved_customer_ids.map(Number), [Number(leafCustomer.id)])
+})
+
+test('周期归档把当前客户转底库，分享页只读且密码不可绕过', { skip: !databaseUrl }, async t => {
+  process.env.DATABASE_URL = databaseUrl
+  const { Pool } = require('pg')
+  const pool = new Pool({ connectionString: databaseUrl, max: 4 })
+  const db = {
+    query: (text, values, client) => (client || pool).query(text, values || []),
+    transaction: async work => {
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        const result = await work(client)
+        await client.query('COMMIT')
+        return result
+      } catch (error) {
+        await client.query('ROLLBACK')
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+  }
+  const service = new CountTicketService(new CountTicketRepository(db))
+  const suffix = `${process.pid}_${Date.now()}`
+  const user = (await pool.query(
+    `INSERT INTO users(username,password_hash,nickname,status)
+     VALUES($1,'scrypt$s$h',$1,1) RETURNING id`,
+    [`cycle_share_${suffix}`]
+  )).rows[0]
+  const customer = (await pool.query(
+    `INSERT INTO customers(public_id)
+     VALUES('CYCLE_' || nextval('customers_id_seq')) RETURNING id`
+  )).rows[0]
+
+  t.after(async () => {
+    await pool.query('DELETE FROM users WHERE id=$1', [user.id])
+    await pool.query('DELETE FROM customers WHERE id=$1', [customer.id])
+    await pool.end()
+  })
+
+  const conversation = (await pool.query(
+    `INSERT INTO conversations
+       (user_id,customer_id,platform,account_key,peer_key,display_name,last_message_at)
+     VALUES($1,$2,'whatsapp-green','acc-cycle','peer-cycle','周期客户',now())
+     RETURNING id`,
+    [user.id, customer.id]
+  )).rows[0]
+  const ticket = await service.saveTicket(user.id, {
+    title: '周期分享回归',
+    platform: 'whatsapp-green',
+    dedupScope: 'ticket',
+    dedupBaseEnabled: true,
+    timezone: 'Asia/Shanghai',
+    zeroTime: '00:00'
+  })
+  await service.saveAccount(user.id, {
+    ticketId: ticket.id,
+    platform: 'whatsapp-green',
+    accountKey: 'acc-cycle'
+  })
+  await pool.query(
+    `UPDATE count_ticket_accounts
+     SET created_at='2026-01-01T00:00:00Z', updated_at='2026-01-01T00:00:00Z'
+     WHERE ticket_id=$1 AND user_id=$2`,
+    [ticket.id, user.id]
+  )
+
+  const first = await service.captureFan(user.id, {
+    conversationId: conversation.id,
+    customerId: customer.id,
+    platform: 'whatsapp-green',
+    accountKey: 'acc-cycle',
+    peerKey: 'peer-cycle',
+    displayName: '周期客户',
+    direction: 'in',
+    eventType: 'message',
+    body: 'first',
+    eventAt: '2026-11-20T01:00:00Z'
+  })
+  assert.equal(first.fanType, 'new')
+
+  const share = await service.createShare(user.id, ticket.id, {
+    passwordProtected: true,
+    password: 'share123456',
+    expiresInDays: 7
+  })
+  assert.match(share.sharePath, /^\/#\/share\/count\//)
+  await assert.rejects(
+    () => service.viewShare({ token: share.token, password: 'wrong-password' }),
+    error => error.code === 'COUNT_SHARE_PASSWORD_BAD'
+  )
+  const firstView = await service.viewShare({
+    token: share.token,
+    password: 'share123456'
+  })
+  assert.equal(firstView.ticket.title, '周期分享回归')
+  assert.equal(firstView.metrics.totalFans, 1)
+  assert.equal(firstView.accounts[0].accountKey, 'acc-cycle')
+  assert.equal(firstView.fans[0].peerKey, 'peer-cycle')
+  assert.equal('userId' in firstView, false, '公开分享响应不能泄露商户 ID')
+  assert.equal('username' in firstView.ticket, false, '公开分享响应不能泄露商户名')
+
+  const reset = await service.resetCycle(user.id, { id: ticket.id })
+  assert.equal(reset.previousCycle, 1)
+  assert.equal(reset.cycleNo, 2)
+  assert.equal(reset.promoted, 1)
+  const afterReset = await service.detail(ticket.id, { userId: user.id })
+  assert.equal(afterReset.ticket.cycleNo, 2)
+  assert.equal(afterReset.metrics.totalFans, 0, '新周期必须从 0 开始')
+  const historical = await pool.query(
+    `SELECT cycle_no FROM count_ticket_fans
+     WHERE ticket_id=$1 ORDER BY id`,
+    [ticket.id]
+  )
+  assert.deepEqual(historical.rows.map(row => row.cycle_no), [1], '重置不能删除旧周期账本')
+  const base = await pool.query(
+    `SELECT source FROM count_ticket_base_entries
+     WHERE user_id=$1 AND platform='whatsapp-green' AND peer_key='peer-cycle'`,
+    [user.id]
+  )
+  assert.equal(base.rows.length, 1)
+  assert.match(base.rows[0].source, /周期归档/)
+
+  const reentry = await service.captureFan(user.id, {
+    conversationId: conversation.id,
+    customerId: customer.id,
+    platform: 'whatsapp-green',
+    accountKey: 'acc-cycle',
+    peerKey: 'peer-cycle',
+    displayName: '周期客户',
+    direction: 'in',
+    eventType: 'message',
+    body: 'second cycle',
+    eventAt: new Date().toISOString()
+  })
+  assert.equal(reentry.captured, true)
+  assert.equal(reentry.fanType, 'repeat', '归档到底库的客户再进线必须算重粉')
+  assert.equal(reentry.repeatType, 'base')
+
+  const secondView = await service.viewShare({
+    token: share.token,
+    password: 'share123456'
+  })
+  assert.equal(secondView.metrics.totalFans, 1, '分享页必须只展示当前周期')
+  assert.equal(secondView.metrics.repeatFans, 1)
+  assert.equal(secondView.metrics.baseRepeatFans, 1)
+  assert.equal(secondView.metrics.todayBaseRepeatFans, 1)
+  await service.revokeShare(user.id, ticket.id)
+  await assert.rejects(
+    () => service.viewShare({ token: share.token, password: 'share123456' }),
+    error => error.code === 'COUNT_SHARE_NOT_FOUND'
+  )
 })

@@ -21,6 +21,7 @@ function ownerOf(req, countTickets) {
 
 function registerCountTickets(router, ctx) {
   const { countTickets } = ctx
+  const { limits } = ctx
 
   router.get('/count-tickets', asyncRoute(async (req, res) => {
     res.json(await countTickets.list(ownerOf(req, countTickets), input(req)))
@@ -74,6 +75,15 @@ function registerCountTickets(router, ctx) {
     ok(res, `已清空 ${result.removed} 条底库线索`)
   }))
 
+  // 公开只读对账页。token 和密码都放 POST body，不进入 URL 访问日志。
+  router.post(
+    '/public/count-ticket-shares/view',
+    limits.countShareView,
+    asyncRoute(async (req, res) => {
+      res.json(await countTickets.viewShare(input(req)))
+    })
+  )
+
   router.get('/count-tickets/:id', asyncRoute(async (req, res) => {
     res.json(await countTickets.detail(req.params.id, {
       userId: ownerOf(req, countTickets)
@@ -99,6 +109,35 @@ function registerCountTickets(router, ctx) {
   router.post('/count-tickets/accounts/remove', asyncRoute(async (req, res) => {
     await countTickets.removeAccount(ownerOf(req, countTickets), input(req))
     ok(res, '账号已停用')
+  }))
+
+  router.get('/count-tickets/:id/share', asyncRoute(async (req, res) => {
+    res.json(await countTickets.shareState(ownerOf(req, countTickets), req.params.id))
+  }))
+
+  router.post('/count-tickets/:id/share', asyncRoute(async (req, res) => {
+    const result = await countTickets.createShare(
+      ownerOf(req, countTickets),
+      req.params.id,
+      input(req)
+    )
+    ok(res, '分享链接已生成，旧链接同时失效', result)
+  }))
+
+  router.post('/count-tickets/:id/share/revoke', asyncRoute(async (req, res) => {
+    await countTickets.revokeShare(ownerOf(req, countTickets), req.params.id)
+    ok(res, '分享链接已停用')
+  }))
+
+  router.post('/count-tickets/:id/reset-cycle', asyncRoute(async (req, res) => {
+    const result = await countTickets.resetCycle(ownerOf(req, countTickets), {
+      id: req.params.id
+    })
+    ok(
+      res,
+      `第 ${result.previousCycle} 周期已归档，第 ${result.cycleNo} 周期开始`,
+      result
+    )
   }))
 }
 

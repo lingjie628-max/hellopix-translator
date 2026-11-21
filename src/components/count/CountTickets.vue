@@ -129,7 +129,7 @@
               {{ platformName(ticket.platform) }} · {{ dedupScopeLabel(ticket.dedupScope) }}
               <template v-if="ticket.groupId"> · {{ ticketGroupName(ticket.groupId) }}</template>
               <template v-if="ticket.dedupBaseEnabled"> · 含底库</template>
-              · 业务日从 {{ ticket.zeroTime }} 开始 · {{ ticket.timezone }}
+              · 第 {{ ticket.cycleNo || 1 }} 周期 · 业务日从 {{ ticket.zeroTime }} 开始 · {{ ticket.timezone }}
             </p>
           </div>
           <div class="count-detail-actions">
@@ -137,6 +137,12 @@
               {{ ticket.status === 'active' ? '进行中' : '已关闭' }}
             </el-tag>
             <el-button icon="el-icon-edit" @click="openTicketForm(ticket)">编辑</el-button>
+            <el-button icon="el-icon-share" @click="openShare">分享对账</el-button>
+            <el-button
+              icon="el-icon-refresh-left"
+              :disabled="ticket.status !== 'active'"
+              @click="resetCycle"
+            >周期重置</el-button>
             <el-button type="primary" icon="el-icon-plus" :disabled="ticket.status !== 'active'" @click="openAccountForm">
               绑定账号
             </el-button>
@@ -147,9 +153,11 @@
           <div class="metric-card metric-primary"><span>今日进粉</span><b>{{ metrics.todayFans || 0 }}</b></div>
           <div class="metric-card"><span>今日新粉</span><b>{{ metrics.todayNewFans || 0 }}</b></div>
           <div class="metric-card metric-repeat"><span>今日重粉</span><b>{{ metrics.todayRepeatFans || 0 }}</b></div>
+          <div class="metric-card metric-base"><span>今日疑似老粉</span><b>{{ metrics.todayBaseRepeatFans || 0 }}</b></div>
           <div class="metric-card"><span>累计进粉</span><b>{{ metrics.totalFans || 0 }}</b></div>
           <div class="metric-card"><span>累计新粉</span><b>{{ metrics.newFans || 0 }}</b></div>
           <div class="metric-card metric-repeat"><span>累计重粉</span><b>{{ metrics.repeatFans || 0 }}</b></div>
+          <div class="metric-card metric-base"><span>累计底库命中</span><b>{{ metrics.baseRepeatFans || 0 }}</b></div>
         </section>
 
         <section class="count-section">
@@ -173,6 +181,7 @@
             </el-table-column>
             <el-table-column prop="todayFans" label="今日" width="78" align="right"></el-table-column>
             <el-table-column prop="totalFans" label="累计" width="78" align="right"></el-table-column>
+            <el-table-column prop="todayRepeatFans" label="今日重粉" width="88" align="right"></el-table-column>
             <el-table-column prop="repeatFans" label="重粉" width="78" align="right"></el-table-column>
             <el-table-column label="操作" width="84" align="right">
               <template slot-scope="scope">
@@ -540,6 +549,91 @@
         >绑定</el-button>
       </span>
     </el-dialog>
+
+    <el-dialog
+      title="工单只读对账分享"
+      :visible.sync="shareDialog"
+      width="680px"
+      :close-on-click-modal="false"
+    >
+      <div v-loading="shareLoading" class="count-share-manager">
+        <div class="count-share-status">
+          <div>
+            <b>{{ shareState && shareState.enabled ? '分享链接已启用' : '当前没有可用的分享链接' }}</b>
+            <p v-if="shareState && shareState.enabled">
+              最近访问 {{ shareState.viewCount || 0 }} 次
+              <template v-if="shareState.lastViewedAt"> · {{ formatTime(shareState.lastViewedAt) }}</template>
+            </p>
+            <p v-else>生成后，粉商只能看当前工单的本周期数据，不能修改任何内容。</p>
+          </div>
+          <el-tag :type="shareState && shareState.enabled ? 'success' : 'info'" size="small">
+            {{ shareState && shareState.enabled ? '只读开启' : '未生成' }}
+          </el-tag>
+        </div>
+
+        <el-form label-width="94px" class="count-share-form">
+          <el-form-item label="访问密码">
+            <el-switch v-model="shareForm.passwordProtected" active-text="需要密码"></el-switch>
+          </el-form-item>
+          <el-form-item v-if="shareForm.passwordProtected" label="设置密码">
+            <el-input
+              v-model="shareForm.password"
+              maxlength="32"
+              show-password
+              placeholder="至少 6 位；留空自动生成"
+            ></el-input>
+          </el-form-item>
+          <el-form-item label="有效天数">
+            <el-input-number
+              v-model="shareForm.expiresInDays"
+              :min="0"
+              :max="365"
+              :step="1"
+            ></el-input-number>
+            <span class="count-form-tip count-share-days">0 表示长期有效</span>
+          </el-form-item>
+        </el-form>
+
+        <div v-if="shareCredential.url" class="count-share-credential">
+          <div>
+            <span>分享链接</span>
+            <code>{{ shareCredential.url }}</code>
+          </div>
+          <el-button size="mini" @click="copyText(shareCredential.url)">复制链接</el-button>
+          <div v-if="shareCredential.password">
+            <span>访问密码</span>
+            <code>{{ shareCredential.password }}</code>
+          </div>
+          <el-button v-if="shareCredential.password" size="mini" @click="copyText(shareCredential.password)">复制密码</el-button>
+          <el-alert
+            type="warning"
+            :closable="false"
+            show-icon
+            title="链接和密码离开此窗口后不会再显示，请现在发给对账方。"
+          ></el-alert>
+        </div>
+
+        <el-alert
+          type="info"
+          :closable="false"
+          show-icon
+          title="重新生成会让旧链接立即失效；分享页只能读取，不能修改工单或粉丝数据。"
+        ></el-alert>
+      </div>
+      <span slot="footer">
+        <el-button
+          v-if="shareState && shareState.enabled"
+          type="danger"
+          plain
+          :loading="shareRevoking"
+          @click="revokeShare"
+        >停用链接</el-button>
+        <el-button @click="shareDialog = false">关闭</el-button>
+        <el-button type="primary" :loading="shareSaving" @click="saveShare">
+          {{ shareState && shareState.enabled ? '重新生成链接' : '生成分享链接' }}
+        </el-button>
+      </span>
+    </el-dialog>
     </template>
   </div>
 </template>
@@ -585,6 +679,13 @@ export default {
       savingAccount: false,
       accountForm: { platform: 'whatsapp-green', accountKey: '' },
       availableAccounts: [],
+      shareDialog: false,
+      shareLoading: false,
+      shareSaving: false,
+      shareRevoking: false,
+      shareState: null,
+      shareCredential: { url: '', password: '' },
+      shareForm: { passwordProtected: true, password: '', expiresInDays: 30 },
       timezones: [
         'Asia/Shanghai',
         'Asia/Hong_Kong',
@@ -661,6 +762,7 @@ export default {
           this.dedupTicketIds = Array.isArray(resp.data.dedupTicketIds)
             ? resp.data.dedupTicketIds.map(Number)
             : []
+          this.shareState = resp.data.share || null
           this.loadGroupOptions(this.ticket.platform)
           this.loadFans(1)
         }
@@ -986,6 +1088,99 @@ export default {
         }
       }).catch(() => {})
     },
+    openShare() {
+      if (!this.ticket || !this.ticket.id) return
+      this.shareDialog = true
+      this.shareLoading = true
+      this.shareCredential = { url: '', password: '' }
+      this.getRequest(`/count-tickets/${this.ticket.id}/share`).then(resp => {
+        this.shareState = (resp && resp.data) || null
+        this.shareForm = {
+          passwordProtected: !this.shareState || this.shareState.passwordProtected !== false,
+          password: '',
+          expiresInDays: 30
+        }
+      }).catch(() => {}).finally(() => {
+        this.shareLoading = false
+      })
+    },
+    saveShare() {
+      if (!this.ticket || !this.ticket.id) return
+      if (this.shareForm.passwordProtected &&
+          this.shareForm.password &&
+          this.shareForm.password.length < 6) {
+        this.$message.warning('分享密码至少 6 位')
+        return
+      }
+      this.shareSaving = true
+      this.postRequest(`/count-tickets/${this.ticket.id}/share`, this.shareForm).then(resp => {
+        if (!resp || !resp.data || resp.data.success !== 'success') return
+        this.shareState = resp.data.state || null
+        this.shareCredential = {
+          url: window.location.origin + resp.data.sharePath,
+          password: resp.data.password || ''
+        }
+        this.$message.success(resp.data.msg)
+      }).catch(() => {}).finally(() => {
+        this.shareSaving = false
+      })
+    },
+    revokeShare() {
+      if (!this.ticket || !this.ticket.id) return
+      this.$confirm('停用后，已经发出去的分享链接会立即失效。', '停用分享链接', {
+        type: 'warning'
+      }).then(() => {
+        this.shareRevoking = true
+        return this.postRequest(`/count-tickets/${this.ticket.id}/share/revoke`)
+      }).then(resp => {
+        if (!resp || !resp.data || resp.data.success !== 'success') return
+        this.$message.success(resp.data.msg)
+        this.shareState = null
+        this.shareCredential = { url: '', password: '' }
+      }).catch(() => {}).finally(() => {
+        this.shareRevoking = false
+      })
+    },
+    resetCycle() {
+      if (!this.ticket || !this.ticket.id) return
+      const cycle = this.ticket.cycleNo || 1
+      this.$confirm(
+        `确认结束第 ${cycle} 周期并开始下一周期？历史进粉不会删除；当前客户会自动写入底库，新周期从 0 重新统计。`,
+        '周期重置',
+        {
+          type: 'warning',
+          confirmButtonText: '归档并开始新周期',
+          cancelButtonText: '取消'
+        }
+      ).then(() => this.postRequest(`/count-tickets/${this.ticket.id}/reset-cycle`))
+        .then(resp => {
+          if (!resp || !resp.data || resp.data.success !== 'success') return
+          this.$message.success(resp.data.msg)
+          this.openDetail({ id: this.ticket.id })
+          this.load()
+        }).catch(() => {})
+    },
+    copyText(value) {
+      const fallback = () => {
+        const textarea = document.createElement('textarea')
+        textarea.value = String(value || '')
+        textarea.style.position = 'fixed'
+        textarea.style.opacity = '0'
+        document.body.appendChild(textarea)
+        textarea.select()
+        const copied = document.execCommand('copy')
+        document.body.removeChild(textarea)
+        if (copied) this.$message.success('已复制')
+        else this.$message.error('复制失败，请手动选择')
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(String(value || '')).then(() => {
+          this.$message.success('已复制')
+        }).catch(fallback)
+      } else {
+        fallback()
+      }
+    },
     platformName(id) {
       const found = this.platforms.find(item => item.id === id)
       return found ? found.name : id
@@ -1246,7 +1441,7 @@ export default {
 .count-detail-head h2 { font-size: 28px; }
 .count-metrics {
   display: grid;
-  grid-template-columns: repeat(6, minmax(120px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: 10px;
   margin: 14px 0;
 }
@@ -1270,6 +1465,7 @@ export default {
 }
 .metric-primary { border-left-color: var(--count-blue); background: var(--count-blue-soft); }
 .metric-repeat { border-left-color: var(--count-amber); background: var(--count-amber-soft); }
+.metric-base { border-left-color: #557c93; background: #eef4f6; }
 .count-section { padding: 18px; margin-top: 14px; }
 .count-section-head { justify-content: space-between; margin-bottom: 12px; }
 .count-section-head h3 { margin: 0 0 4px; font-size: 17px; }
@@ -1283,6 +1479,57 @@ export default {
   font-size: 12px;
   line-height: 1.7;
 }
+.count-share-manager { min-height: 180px; }
+.count-share-status {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px;
+  margin-bottom: 16px;
+  background: var(--count-blue-soft);
+  border: 1px solid #c9dce9;
+  border-radius: 12px;
+}
+.count-share-status b { font-size: 15px; }
+.count-share-status p {
+  margin: 6px 0 0;
+  color: var(--count-muted);
+  font-size: 12px;
+}
+.count-share-form {
+  padding: 4px 12px;
+  border: 1px solid var(--count-line);
+  border-radius: 12px;
+}
+.count-share-days { display: inline-block; margin-left: 10px; }
+.count-share-credential {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 16px;
+  margin: 16px 0;
+  background: #fff8e8;
+  border: 1px solid #efd39d;
+  border-radius: 12px;
+}
+.count-share-credential > div:not(.el-alert) { min-width: 0; }
+.count-share-credential span {
+  display: block;
+  margin-bottom: 5px;
+  color: #7d5a22;
+  font-size: 11px;
+}
+.count-share-credential code {
+  display: block;
+  overflow: hidden;
+  color: #3f331f;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.count-share-credential .el-alert { grid-column: 1 / -1; }
 @media (max-width: 1100px) {
   .count-metrics { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
   .count-rule { display: none; }

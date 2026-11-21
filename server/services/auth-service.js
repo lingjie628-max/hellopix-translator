@@ -39,6 +39,8 @@ const PUBLIC_PATHS = new Set([
   '/client/crash-report',
   // 官网内容：未登录的访客必须能看到
   '/site/packages', '/site/faqs', '/site/platforms',
+  // 计数工单只读对账页：凭分享 token（+ 可选密码）访问，不使用用户会话。
+  '/public/count-ticket-shares/view',
   // 两步验证的第二步：此时还没有会话，靠一次性票据放行
   '/admin/login/totp',
   // 发邮箱验证码 / 注册 / 找回密码：都是"还没有账号或进不去账号"的场景。

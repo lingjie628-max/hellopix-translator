@@ -1,7 +1,9 @@
 'use strict'
 
+const crypto = require('crypto')
 const { ApiError } = require('../lib/http')
 const { mapRow } = require('../repositories/production-repository')
+const password = require('../lib/password')
 const catalog = require('../lib/client-catalog')
 
 const TICKET_STATUSES = new Set(['active', 'closed'])
@@ -10,6 +12,8 @@ const DEDUP_SCOPES = new Set(['ticket', 'merchant', 'group', 'linked'])
 const BASE_IMPORT_MAX = 1000
 const BASE_ENTRY_TYPES = new Set(['fan', 'base'])
 const ACCOUNT_BINDING_GRACE_MS = 2 * 60 * 1000
+const SHARE_DEFAULT_DAYS = 30
+const SHARE_MAX_DAYS = 365
 
 function cleanText(value, max) {
   return String(value == null ? '' : value).trim().slice(0, max)
@@ -110,6 +114,54 @@ function normalizeBaseLines(value) {
     )
   }
   return { entries, totalLines }
+}
+
+function normalizeShare(data) {
+  const passwordProtected = normalizeBoolean(
+    data && (data.passwordProtected != null
+      ? data.passwordProtected
+      : data.password_protected),
+    true
+  )
+  let sharePassword = cleanText(
+    data && (data.password != null ? data.password : data.sharePassword),
+    32
+  )
+  if (passwordProtected && !sharePassword) {
+    sharePassword = crypto.randomBytes(5).toString('hex')
+  }
+  if (sharePassword && sharePassword.length < 6) {
+    throw new ApiError(400, '分享密码至少 6 位', 'COUNT_SHARE_PASSWORD_WEAK')
+  }
+  const rawDays = data && (data.expiresInDays != null
+    ? data.expiresInDays
+    : data.expires_in_days)
+  const expiresInDays = rawDays == null || rawDays === ''
+    ? SHARE_DEFAULT_DAYS
+    : Math.min(Math.max(Math.floor(Number(rawDays) || 0), 0), SHARE_MAX_DAYS)
+  return {
+    passwordProtected,
+    password: passwordProtected ? sharePassword : '',
+    expiresInDays
+  }
+}
+
+function shareTokenHash(token) {
+  return crypto.createHash('sha256').update(String(token || '')).digest('hex')
+}
+
+function shareState(row) {
+  if (!row) return null
+  return {
+    enabled: row.enabled === true,
+    passwordProtected: row.passwordProtected === true || row.password_protected === true,
+    tokenPrefix: row.tokenPrefix || row.token_prefix || '',
+    expiresAt: row.expiresAt || row.expires_at || null,
+    viewCount: Number(row.viewCount != null ? row.viewCount : row.view_count) || 0,
+    lastViewedAt: row.lastViewedAt || row.last_viewed_at || null,
+    createdAt: row.createdAt || row.created_at || null,
+    updatedAt: row.updatedAt || row.updated_at || null
+  }
 }
 
 function normalizeGroup(data) {
@@ -434,7 +486,8 @@ class CountTicketService {
         repeatOfId: prior ? Number(prior.id) : null,
         eventAt,
         timezone: ticket.timezone,
-        zeroTime: ticket.zero_time
+        zeroTime: ticket.zero_time,
+        cycleNo: Number(ticket.cycle_no) || 1
       }, client)
       if (inserted) {
         let finalFan = inserted
@@ -464,6 +517,159 @@ class CountTicketService {
         fanId: raced ? Number(raced.id) : null
       }
     })
+  }
+
+  async resetCycle(userId, data) {
+    const ticketId = Number(data && data.id)
+    if (!Number.isSafeInteger(ticketId) || ticketId <= 0) {
+      throw new ApiError(400, '计数工单号不合法', 'COUNT_TICKET_BAD_ID')
+    }
+    return this.repo.transaction(async client => {
+      const ticket = await this.repo.lockTicket(ticketId, userId, client)
+      if (!ticket) throw new ApiError(404, '计数工单不存在', 'COUNT_TICKET_NOT_FOUND')
+      const currentCycle = Number(ticket.cycle_no) || 1
+      const promoted = await this.repo.promoteTicketFansToBase(ticket, client)
+      const cycle = await this.repo.startNextCycle(ticketId, userId, client)
+      return {
+        ticketId,
+        previousCycle: currentCycle,
+        cycleNo: Number(cycle.cycle_no),
+        cycleStartedAt: cycle.cycle_started_at,
+        promoted
+      }
+    })
+  }
+
+  async shareState(userId, ticketId) {
+    const id = Number(ticketId)
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      throw new ApiError(400, '计数工单号不合法', 'COUNT_TICKET_BAD_ID')
+    }
+    const ticket = await this.repo.ticketForOwner(id, userId)
+    if (!ticket) throw new ApiError(404, '计数工单不存在', 'COUNT_TICKET_NOT_FOUND')
+    return shareState(await this.repo.shareForOwner(id, userId))
+  }
+
+  async createShare(userId, ticketId, data) {
+    const id = Number(ticketId)
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      throw new ApiError(400, '计数工单号不合法', 'COUNT_TICKET_BAD_ID')
+    }
+    const payload = normalizeShare(data || {})
+    const token = crypto.randomBytes(24).toString('base64url')
+    // scrypt 放到事务外，避免一次分享轮换把该工单的计粉写入锁住上百毫秒。
+    const passwordHash = payload.password
+      ? await password.hashPassword(payload.password)
+      : null
+    const expiresAt = payload.expiresInDays
+      ? new Date(Date.now() + payload.expiresInDays * 24 * 60 * 60 * 1000)
+      : null
+    return this.repo.transaction(async client => {
+      const ticket = await this.repo.lockTicket(id, userId, client)
+      if (!ticket) throw new ApiError(404, '计数工单不存在', 'COUNT_TICKET_NOT_FOUND')
+
+      const row = await this.repo.upsertShare(id, userId, {
+        tokenHash: shareTokenHash(token),
+        tokenPrefix: token.slice(0, 8),
+        passwordHash,
+        expiresAt
+      }, client)
+      return {
+        token,
+        sharePath: `/#/share/count/${encodeURIComponent(token)}`,
+        password: payload.password || '',
+        state: shareState(row)
+      }
+    })
+  }
+
+  async revokeShare(userId, ticketId) {
+    const id = Number(ticketId)
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      throw new ApiError(400, '计数工单号不合法', 'COUNT_TICKET_BAD_ID')
+    }
+    return this.repo.transaction(async client => {
+      const ticket = await this.repo.lockTicket(id, userId, client)
+      if (!ticket) throw new ApiError(404, '计数工单不存在', 'COUNT_TICKET_NOT_FOUND')
+      const row = await this.repo.revokeShare(id, userId, client)
+      if (!row) throw new ApiError(404, '该工单还没有分享链接', 'COUNT_SHARE_NOT_FOUND')
+      return { ok: true }
+    })
+  }
+
+  /**
+   * 公开只读对账页。
+   *
+   * token 与密码都走 POST body，不放进 URL/query，避免进入 Nginx 访问日志。
+   * 密码错误固定返回 403 而不是 401，防止前端通用拦截器把访客当成“掉线”。
+   */
+  async viewShare(data) {
+    const token = cleanText(data && data.token, 200)
+    const suppliedPassword = String(data && data.password || '')
+    if (!token) throw new ApiError(404, '分享链接无效', 'COUNT_SHARE_NOT_FOUND')
+    const row = await this.repo.shareByTokenHash(shareTokenHash(token))
+    if (!row || row.enabled !== true) {
+      throw new ApiError(404, '分享链接无效或已停用', 'COUNT_SHARE_NOT_FOUND')
+    }
+    if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) {
+      throw new ApiError(410, '分享链接已过期，请向商户索取新链接', 'COUNT_SHARE_EXPIRED')
+    }
+    if (row.password_hash) {
+      const valid = await password.verifyPassword(row.password_hash, suppliedPassword)
+      if (!valid) {
+        throw new ApiError(403, '分享密码不正确', 'COUNT_SHARE_PASSWORD_BAD')
+      }
+    }
+
+    const limit = Math.min(Math.max(Number(data.rows || data.size) || 30, 1), 100)
+    const page = Math.min(Math.max(Number(data.page) || 1, 1), 1_000_000)
+    const ticketId = Number(row.ticket_id)
+    const type = cleanText(data.type || 'all', 16)
+    if (type !== 'all' && !FAN_TYPES.has(type)) {
+      throw new ApiError(400, '粉丝类型不合法', 'COUNT_FAN_TYPE_BAD')
+    }
+    const repeatType = cleanText(data.repeatType || data.repeat_type || 'all', 16)
+    if (repeatType !== 'all' && !BASE_ENTRY_TYPES.has(repeatType)) {
+      throw new ApiError(400, '重粉依据不合法', 'COUNT_REPEAT_TYPE_BAD')
+    }
+    const [metrics, accounts, fanResult] = await Promise.all([
+      this.repo.metrics(ticketId),
+      this.repo.accounts(ticketId),
+      this.repo.listFans(ticketId, {
+        type,
+        repeatType,
+        keyword: cleanText(data.keyword, 120),
+        limit,
+        offset: (page - 1) * limit
+      })
+    ])
+    await this.repo.recordShareView(Number(row.share_id))
+
+    return {
+      share: {
+        passwordProtected: !!row.password_hash,
+        expiresAt: row.expires_at || null
+      },
+      ticket: {
+        id: ticketId,
+        title: row.title,
+        platform: row.platform,
+        status: row.status,
+        timezone: row.timezone,
+        zeroTime: row.zero_time,
+        cycleNo: Number(row.cycle_no) || 1,
+        cycleStartedAt: row.cycle_started_at || null,
+        lastCycleResetAt: row.last_cycle_reset_at || null,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
+      },
+      metrics,
+      accounts,
+      fans: fanResult.rows,
+      total: fanResult.total,
+      page,
+      pageSize: limit
+    }
   }
 
   async list(userId, data) {
@@ -498,12 +704,13 @@ class CountTicketService {
       ? await this.repo.ticketForAdmin(id)
       : await this.repo.ticketForOwner(id, scope.userId)
     if (!ticket) throw new ApiError(404, '计数工单不存在', 'COUNT_TICKET_NOT_FOUND')
-    const [metrics, accounts, dedupTicketIds] = await Promise.all([
+    const [metrics, accounts, dedupTicketIds, share] = await Promise.all([
       this.repo.metrics(id),
       this.repo.accounts(id),
-      this.repo.dedupTicketIds(id, Number(ticket.user_id))
+      this.repo.dedupTicketIds(id, Number(ticket.user_id)),
+      this.repo.shareForOwner(id, Number(ticket.user_id))
     ])
-    return { ticket: mapRow(ticket), metrics, accounts, dedupTicketIds }
+    return { ticket: mapRow(ticket), metrics, accounts, dedupTicketIds, share: shareState(share) }
   }
 
   async dedupOptions(userId, data) {
@@ -670,6 +877,8 @@ module.exports = {
   normalizeLinkedTicketIds,
   normalizeGroup,
   normalizeBaseLines,
+  normalizeShare,
+  shareTokenHash,
   validTimezone,
   validZeroTime,
   normalizeAccess

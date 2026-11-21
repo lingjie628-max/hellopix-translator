@@ -133,6 +133,19 @@ pg_restore --list /var/backups/hello-pix/<dump>
 - `igtk-bot.service`：`Restart=always`，当前 `active`，管理端 `127.0.0.1:18080/login`
   返回 200；告警中的 inactive 是瞬时状态，非当前故障。
 
+## 2026-11-21 计数工单周期归档与对账分享
+
+- 分支：`maint/20261121-count-dedup-scope`
+- 迁移：`060_count_ticket_share_cycles`
+- 新增工单周期：重置时历史事件保留，当前客户转底库，新周期重新统计。
+- 新增只读分享页：`#/share/count/:token`，token 只存 SHA-256，密码只存 scrypt。
+- 新增指标：今日/本周期重粉、今日疑似老粉、累计底库命中。
+- 发布前迁移快照与数据库 dump 仍按发布流程单独创建。
+- 回滚：`node scripts/migrate.js down 1`。`060.down` 有意保留
+  `count_ticket_fans.cycle_no`，避免抹掉跨周期历史；精确恢复旧口径需数据库快照。
+- 验证：计数测试 11/11；全量 2895 tests / 2830 pass / 0 fail / 65 known skips；
+  `npm run build` 通过；真实 HTTP 与浏览器分享页冒烟通过。
+
 ## 2026-11-15 修复记录
 
 - 生产依赖升级：`body-parser@2.4.0`、`proxy-addr@2.0.8`、

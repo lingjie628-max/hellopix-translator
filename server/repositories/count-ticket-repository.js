@@ -25,7 +25,7 @@ class CountTicketRepository {
   async activeTicketForAccount(userId, platform, accountKey, client) {
     const result = await this.query(
       `SELECT t.id, t.user_id, t.title, t.timezone, t.zero_time, t.dedup_scope,
-              t.group_id, t.dedup_base_enabled,
+              t.group_id, t.dedup_base_enabled, t.cycle_no, t.cycle_started_at,
               GREATEST(a.created_at, a.updated_at) AS account_active_since
        FROM count_ticket_accounts a
        JOIN count_tickets t ON t.id = a.ticket_id AND t.user_id = a.user_id
@@ -35,7 +35,8 @@ class CountTicketRepository {
          AND a.active = true
          AND t.platform = a.platform
          AND t.status = 'active'
-       LIMIT 1`,
+       LIMIT 1
+       FOR UPDATE OF t`,
       [userId, platform, accountKey], client
     )
     return result.rows[0] || null
@@ -43,9 +44,12 @@ class CountTicketRepository {
 
   async fanByConversation(ticketId, conversationId, client) {
     const result = await this.query(
-      `SELECT id, fan_type, repeat_type, event_at, day_key
-       FROM count_ticket_fans
-       WHERE ticket_id = $1 AND conversation_id = $2`,
+      `SELECT f.id, f.fan_type, f.repeat_type, f.event_at, f.day_key
+       FROM count_ticket_fans f
+       JOIN count_tickets t ON t.id = f.ticket_id AND t.user_id = f.user_id
+       WHERE f.ticket_id = $1
+         AND f.conversation_id = $2
+         AND f.cycle_no = t.cycle_no`,
       [ticketId, conversationId], client
     )
     return result.rows[0] || null
@@ -87,12 +91,16 @@ class CountTicketRepository {
   async rerankCustomerFans(customerId, platform, client) {
     const result = await this.query(
       `WITH firsts AS (
-         SELECT f.id,
-                count_ticket_first_fan_id(
-                  f.user_id, f.ticket_id, f.platform, f.customer_id, NULL
-                ) AS first_id
-         FROM count_ticket_fans f
-         WHERE f.customer_id = $1 AND f.platform = $2
+       SELECT f.id,
+              count_ticket_first_fan_id(
+                f.user_id, f.ticket_id, f.platform, f.customer_id, NULL
+              ) AS first_id
+       FROM count_ticket_fans f
+       JOIN count_tickets t ON t.id = f.ticket_id AND t.user_id = f.user_id
+       WHERE f.customer_id = $1
+         AND f.platform = $2
+         AND f.cycle_no = t.cycle_no
+         AND f.event_at >= COALESCE(t.cycle_started_at, '-infinity'::timestamptz)
        )
        UPDATE count_ticket_fans f
        SET fan_type = CASE
@@ -120,11 +128,14 @@ class CountTicketRepository {
                 count_ticket_first_fan_id(
                   f.user_id, f.ticket_id, f.platform, NULL, f.peer_key
                 ) AS first_id
-         FROM count_ticket_fans f
-         WHERE f.user_id = $1
-           AND f.platform = $2
-           AND f.peer_key = $3
-           AND f.customer_id IS NULL
+       FROM count_ticket_fans f
+       JOIN count_tickets t ON t.id = f.ticket_id AND t.user_id = f.user_id
+       WHERE f.user_id = $1
+         AND f.platform = $2
+         AND f.peer_key = $3
+         AND f.customer_id IS NULL
+         AND f.cycle_no = t.cycle_no
+         AND f.event_at >= COALESCE(t.cycle_started_at, '-infinity'::timestamptz)
        )
        UPDATE count_ticket_fans f
        SET fan_type = CASE
@@ -186,14 +197,14 @@ class CountTicketRepository {
       `INSERT INTO count_ticket_fans
          (ticket_id, user_id, conversation_id, customer_id, platform, account_key,
           peer_key, display_name, event_type, direction, fan_type, repeat_type,
-          base_matched, repeat_of_id, event_at, day_key)
+          base_matched, repeat_of_id, event_at, day_key, cycle_no)
        SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-              (($15::timestamptz AT TIME ZONE $16) - $17::time)::date
-       ON CONFLICT (ticket_id, conversation_id)
+              (($15::timestamptz AT TIME ZONE $16) - $17::time)::date, $18
+       ON CONFLICT (ticket_id, cycle_no, conversation_id)
          WHERE conversation_id IS NOT NULL
          DO NOTHING
        RETURNING id, ticket_id, conversation_id, customer_id, event_type, direction,
-                 fan_type, repeat_type, base_matched, event_at, day_key`,
+                 fan_type, repeat_type, base_matched, event_at, day_key, cycle_no`,
       [
         payload.ticketId, payload.userId, payload.conversationId, payload.customerId || null,
         payload.platform, payload.accountKey, payload.peerKey, payload.displayName || '',
@@ -201,7 +212,7 @@ class CountTicketRepository {
         payload.fanType, payload.repeatType || 'fan',
         payload.baseMatched === true,
         payload.repeatOfId || null, payload.eventAt,
-        payload.timezone, payload.zeroTime
+        payload.timezone, payload.zeroTime, payload.cycleNo
       ], client
     )
     return result.rows[0] || null
@@ -232,7 +243,8 @@ class CountTicketRepository {
   async lockTicket(ticketId, userId, client) {
     const result = await this.query(
       `SELECT t.id, t.user_id, t.status, t.platform, t.timezone, t.zero_time, t.dedup_scope,
-              t.group_id, t.dedup_base_enabled,
+              t.group_id, t.dedup_base_enabled, t.cycle_no, t.cycle_started_at,
+              t.last_cycle_reset_at,
               EXISTS(
                 SELECT 1 FROM count_ticket_fans f
                 WHERE f.ticket_id = t.id AND f.user_id = t.user_id
@@ -536,6 +548,119 @@ class CountTicketRepository {
     return result.rowCount
   }
 
+  async promoteTicketFansToBase(ticket, client) {
+    const result = await this.query(
+      `INSERT INTO count_ticket_base_entries
+         (user_id, platform, peer_key, display_name, source, imported_at)
+       SELECT DISTINCT ON (f.peer_key)
+              f.user_id, f.platform, f.peer_key, f.display_name, $3, now()
+       FROM count_ticket_fans f
+       WHERE f.ticket_id = $1 AND f.user_id = $2
+       ORDER BY f.peer_key, f.event_at DESC, f.id DESC
+       ON CONFLICT (user_id, platform, peer_key) DO UPDATE
+       SET display_name = EXCLUDED.display_name,
+           source = EXCLUDED.source,
+           imported_at = now()
+       RETURNING id`,
+      [
+        ticket.id,
+        ticket.user_id,
+        `工单 #${ticket.id} 第 ${ticket.cycle_no || 1} 周期归档`
+      ], client
+    )
+    return result.rowCount
+  }
+
+  async startNextCycle(ticketId, userId, client) {
+    const result = await this.query(
+      `UPDATE count_tickets
+       SET cycle_no = cycle_no + 1,
+           cycle_started_at = now(),
+           last_cycle_reset_at = now(),
+           updated_at = now()
+       WHERE id = $1 AND user_id = $2
+       RETURNING cycle_no, cycle_started_at, last_cycle_reset_at`,
+      [ticketId, userId], client
+    )
+    return result.rows[0] || null
+  }
+
+  async shareForOwner(ticketId, userId, client) {
+    const result = await this.query(
+      `SELECT id, ticket_id, user_id, token_prefix, enabled, expires_at,
+              view_count, last_viewed_at, created_at, updated_at,
+              (password_hash IS NOT NULL) AS password_protected
+       FROM count_ticket_shares
+       WHERE ticket_id = $1 AND user_id = $2`,
+      [ticketId, userId], client
+    )
+    return mapRow(result.rows[0]) || null
+  }
+
+  async upsertShare(ticketId, userId, payload, client) {
+    const result = await this.query(
+      `INSERT INTO count_ticket_shares
+         (ticket_id, user_id, token_hash, token_prefix, password_hash, enabled,
+          expires_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, true, $6, now())
+       ON CONFLICT (ticket_id, user_id) DO UPDATE
+       SET token_hash = EXCLUDED.token_hash,
+           token_prefix = EXCLUDED.token_prefix,
+           password_hash = EXCLUDED.password_hash,
+           enabled = true,
+           expires_at = EXCLUDED.expires_at,
+           view_count = 0,
+           last_viewed_at = NULL,
+           updated_at = now()
+       RETURNING id, ticket_id, token_prefix, enabled, expires_at,
+                 (password_hash IS NOT NULL) AS password_protected,
+                 created_at, updated_at`,
+      [
+        ticketId, userId, payload.tokenHash, payload.tokenPrefix,
+        payload.passwordHash || null, payload.expiresAt || null
+      ], client
+    )
+    return mapRow(result.rows[0])
+  }
+
+  async revokeShare(ticketId, userId, client) {
+    const result = await this.query(
+      `UPDATE count_ticket_shares
+       SET enabled = false, updated_at = now()
+       WHERE ticket_id = $1 AND user_id = $2
+       RETURNING id`,
+      [ticketId, userId], client
+    )
+    return result.rows[0] || null
+  }
+
+  async shareByTokenHash(tokenHash, client) {
+    const result = await this.query(
+      `SELECT s.id AS share_id, s.ticket_id, s.user_id, s.password_hash,
+              s.enabled, s.expires_at, s.token_prefix, s.view_count,
+              s.last_viewed_at, s.created_at AS share_created_at,
+              t.title, t.platform, t.status, t.timezone, t.zero_time,
+              t.cycle_no, t.cycle_started_at, t.last_cycle_reset_at,
+              t.created_at, t.updated_at
+       FROM count_ticket_shares s
+       JOIN count_tickets t
+         ON t.id = s.ticket_id AND t.user_id = s.user_id
+       WHERE s.token_hash = $1`,
+      [tokenHash], client
+    )
+    return result.rows[0] || null
+  }
+
+  async recordShareView(shareId, client) {
+    await this.query(
+      `UPDATE count_ticket_shares
+       SET view_count = view_count + 1,
+           last_viewed_at = now()
+       WHERE id = $1`,
+      [shareId], client
+    )
+  }
+
   async saveAccount(ticketId, userId, payload, client) {
     // 重新绑定一个账号时，旧工单上的账本必须保留，只停用绑定关系。
     await this.query(
@@ -622,7 +747,8 @@ class CountTicketRepository {
     const result = await this.query(
       `SELECT t.id, t.user_id, u.username, t.title, t.platform, t.status, t.day_target, t.total_target,
               t.timezone, t.zero_time, t.dedup_scope, t.group_id, g.name AS group_name,
-              t.dedup_base_enabled, t.created_at, t.updated_at, t.closed_at,
+              t.dedup_base_enabled, t.cycle_no, t.cycle_started_at, t.last_cycle_reset_at,
+              t.created_at, t.updated_at, t.closed_at,
               ARRAY(
                 SELECT l.linked_ticket_id
                 FROM count_ticket_dedup_links l
@@ -632,15 +758,23 @@ class CountTicketRepository {
               (SELECT count(*)::int FROM count_ticket_accounts a
                WHERE a.ticket_id = t.id AND a.user_id = t.user_id AND a.active = true) AS account_count,
               (SELECT count(*)::int FROM count_ticket_fans f
-               WHERE f.ticket_id = t.id AND f.user_id = t.user_id) AS total_fans,
+               WHERE f.ticket_id = t.id AND f.user_id = t.user_id
+                 AND f.cycle_no = t.cycle_no
+                 AND f.event_at >= COALESCE(t.cycle_started_at, '-infinity'::timestamptz)) AS total_fans,
               (SELECT count(*)::int FROM count_ticket_fans f
-               WHERE f.ticket_id = t.id AND f.user_id = t.user_id AND f.fan_type = 'repeat') AS repeat_fans,
+               WHERE f.ticket_id = t.id AND f.user_id = t.user_id AND f.fan_type = 'repeat'
+                 AND f.cycle_no = t.cycle_no
+                 AND f.event_at >= COALESCE(t.cycle_started_at, '-infinity'::timestamptz)) AS repeat_fans,
               (SELECT count(*)::int FROM count_ticket_fans f
                WHERE f.ticket_id = t.id AND f.user_id = t.user_id
+                 AND f.cycle_no = t.cycle_no
+                 AND f.event_at >= COALESCE(t.cycle_started_at, '-infinity'::timestamptz)
                  AND f.day_key = ((now() AT TIME ZONE t.timezone) - t.zero_time)::date) AS today_fans,
               (SELECT count(*)::int FROM count_ticket_fans f
                WHERE f.ticket_id = t.id AND f.user_id = t.user_id
                  AND f.fan_type = 'repeat'
+                 AND f.cycle_no = t.cycle_no
+                 AND f.event_at >= COALESCE(t.cycle_started_at, '-infinity'::timestamptz)
                  AND f.day_key = ((now() AT TIME ZONE t.timezone) - t.zero_time)::date) AS today_repeat_fans
        FROM count_tickets t
        JOIN users u ON u.id = t.user_id
@@ -662,10 +796,13 @@ class CountTicketRepository {
 
   async metrics(ticketId, client) {
     const result = await this.query(
-      `SELECT t.id,
+      `SELECT t.id, t.cycle_no, t.cycle_started_at, t.last_cycle_reset_at,
               count(f.id)::int AS total_fans,
               count(f.id) FILTER (WHERE f.fan_type = 'new')::int AS new_fans,
               count(f.id) FILTER (WHERE f.fan_type = 'repeat')::int AS repeat_fans,
+              count(f.id) FILTER (
+                WHERE f.repeat_type = 'base'
+              )::int AS base_repeat_fans,
               count(f.id) FILTER (
                 WHERE f.day_key = ((now() AT TIME ZONE t.timezone) - t.zero_time)::date
               )::int AS today_fans,
@@ -677,9 +814,17 @@ class CountTicketRepository {
                 WHERE f.fan_type = 'repeat'
                   AND f.day_key = ((now() AT TIME ZONE t.timezone) - t.zero_time)::date
               )::int AS today_repeat_fans,
+              count(f.id) FILTER (
+                WHERE f.repeat_type = 'base'
+                  AND f.day_key = ((now() AT TIME ZONE t.timezone) - t.zero_time)::date
+              )::int AS today_base_repeat_fans,
               ((now() AT TIME ZONE t.timezone) - t.zero_time)::date AS business_date
        FROM count_tickets t
-       LEFT JOIN count_ticket_fans f ON f.ticket_id = t.id AND f.user_id = t.user_id
+       LEFT JOIN count_ticket_fans f
+         ON f.ticket_id = t.id
+        AND f.user_id = t.user_id
+        AND f.cycle_no = t.cycle_no
+        AND f.event_at >= COALESCE(t.cycle_started_at, '-infinity'::timestamptz)
        WHERE t.id = $1
        GROUP BY t.id, t.timezone, t.zero_time`,
       [ticketId], client
@@ -693,6 +838,10 @@ class CountTicketRepository {
               count(f.id)::int AS total_fans,
               count(f.id) FILTER (WHERE f.fan_type = 'repeat')::int AS repeat_fans,
               count(f.id) FILTER (
+                WHERE f.fan_type = 'repeat'
+                  AND f.day_key = ((now() AT TIME ZONE t.timezone) - t.zero_time)::date
+              )::int AS today_repeat_fans,
+              count(f.id) FILTER (
                 WHERE f.day_key = ((now() AT TIME ZONE t.timezone) - t.zero_time)::date
               )::int AS today_fans
        FROM count_ticket_accounts a
@@ -702,6 +851,8 @@ class CountTicketRepository {
         AND f.user_id = a.user_id
         AND f.platform = a.platform
         AND f.account_key = a.account_key
+        AND f.cycle_no = t.cycle_no
+        AND f.event_at >= COALESCE(t.cycle_started_at, '-infinity'::timestamptz)
        WHERE a.ticket_id = $1
        GROUP BY a.id, t.timezone, t.zero_time
        ORDER BY a.active DESC, a.id ASC`,
@@ -712,7 +863,11 @@ class CountTicketRepository {
 
   async listFans(ticketId, filters, client) {
     const values = [ticketId]
-    const clauses = ['f.ticket_id = $1']
+    const clauses = [
+      'f.ticket_id = $1',
+      `f.cycle_no = t.cycle_no`,
+      `f.event_at >= COALESCE(t.cycle_started_at, '-infinity'::timestamptz)`
+    ]
     if (filters.type && filters.type !== 'all') {
       values.push(filters.type)
       clauses.push(`f.fan_type = $${values.length}`)
@@ -743,7 +898,10 @@ class CountTicketRepository {
     }
     const where = clauses.join(' AND ')
     const total = await this.query(
-      `SELECT count(*)::int AS n FROM count_ticket_fans f WHERE ${where}`,
+      `SELECT count(*)::int AS n
+       FROM count_ticket_fans f
+       JOIN count_tickets t ON t.id = f.ticket_id AND t.user_id = f.user_id
+       WHERE ${where}`,
       values, client
     )
     values.push(filters.limit, filters.offset)
@@ -752,6 +910,7 @@ class CountTicketRepository {
               f.platform, f.account_key, f.peer_key, f.display_name, f.fan_type, f.repeat_type,
               f.repeat_of_id, f.event_at, f.day_key
        FROM count_ticket_fans f
+       JOIN count_tickets t ON t.id = f.ticket_id AND t.user_id = f.user_id
        LEFT JOIN customers c ON c.id = f.customer_id
        WHERE ${where}
        ORDER BY f.event_at DESC, f.id DESC

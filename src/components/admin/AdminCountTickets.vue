@@ -96,6 +96,7 @@
             </el-table-column>
             <el-table-column prop="todayFans" label="今日" width="82" align="right"></el-table-column>
             <el-table-column prop="totalFans" label="累计" width="82" align="right"></el-table-column>
+            <el-table-column prop="todayRepeatFans" label="今日重粉" width="90" align="right"></el-table-column>
             <el-table-column prop="repeatFans" label="重粉" width="82" align="right"></el-table-column>
           </el-table>
         </el-card>

@@ -7,6 +7,7 @@ import Home from '../components/Home.vue'
 import HomeIndex from '../components/HomeIndex.vue'
 // 下面这些旧「工单」模块的页面已整体删除，原因见本文件末尾的说明。
 import CountTickets from '../components/count/CountTickets.vue'
+import CountShare from '../components/count/CountShare.vue'
 import TranslateChannels from '../components/translate/TranslateChannels.vue'
 import UserRecharge from '../components/user/UserRecharge.vue'
 import UserRechargePage from '../components/user/UserRechargePage.vue'
@@ -59,6 +60,7 @@ const routes = [
   { path: '/forgot', name: '忘记密码', component: Forgot },
   { path: '/regSuccess', name: '注册成功', component: RegSuccess },
   { path: '/empty', name: '空状态', component: Empty },
+  { path: '/share/count/:token', name: '计数工单分享', component: CountShare },
   { path: '/paySuccess', name: '支付成功', component: PaySuccess },
   { path: '/payError', name: '支付失败', component: PayError },
   { path: '/admin/login', name: '超管登录', component: AdminLogin },
@@ -162,7 +164,7 @@ router.beforeEach((to, from, next) => {
     }
     return
   }
-  if (publicPages.includes(to.path)) {
+  if (publicPages.includes(to.path) || to.path.indexOf('/share/count/') === 0) {
     next()
     return
   }
