@@ -462,6 +462,31 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
   })
   assert.equal(telegramFan.fanType, 'new', '不同应用不能把同一客户串成重粉')
 
+  await assert.rejects(
+    () => service.saveTicket(merchantA.id, {
+      title: '跨应用关联必须失败',
+      platform: 'whatsapp-green',
+      dedupScope: 'linked',
+      linkedTicketIds: [telegramTicket.id],
+      timezone: 'Asia/Shanghai',
+      zeroTime: '00:00'
+    }),
+    error => error.code === 'COUNT_DEDUP_LINKS_INVALID',
+    '指定关联工单不能跨计数应用'
+  )
+
+  const dedupOptions = await service.dedupOptions(merchantA.id, {
+    ticketId: ticketA.id,
+    platform: 'whatsapp-green'
+  })
+  assert.ok(
+    dedupOptions.every(item => Number(item.id) !== Number(ticketA.id)),
+    '关联选项不能包含当前工单'
+  )
+  assert.ok(
+    dedupOptions.every(item => item.platform === 'whatsapp-green'),
+    '关联选项不能跨应用'
+  )
   const detailA = await service.detail(ticketA.id, { userId: merchantA.id })
   assert.equal(detailA.metrics.totalFans, 3)
   assert.equal(detailA.metrics.newFans, 2)
@@ -482,6 +507,14 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
     timezone: 'Asia/Shanghai',
     zeroTime: '00:00'
   })
+  const isolatedDedupOptions = await service.dedupOptions(merchantA.id, {
+    ticketId: ticketA.id,
+    platform: 'whatsapp-green'
+  })
+  assert.ok(
+    isolatedDedupOptions.every(item => Number(item.id) !== Number(ticketB.id)),
+    '关联选项不能包含其它商户工单'
+  )
   await bindAccount(merchantB.id, ticketB.id, 'acc-cross')
   const conv4 = await makeConversation(merchantB.id, customer.id, 'acc-cross', 'peer-4')
   const crossRepeat = await captureInbound(merchantB.id, {
@@ -536,6 +569,82 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
     peerKey: 'scope-peer-b',
     eventAt: '2026-11-20T02:00:00Z'
   })).fanType, 'repeat', '同商户全部工单必须识别跨工单重粉')
+
+  // 两个账号并发进线时，只允许一个事务写成新粉，另一个必须等待后判重粉。
+  const concurrentCustomer = await makeCustomer('concurrent')
+  const concurrentTicketA = await service.saveTicket(merchantA.id, {
+    title: '并发 A',
+    platform: 'whatsapp-green',
+    dedupScope: 'merchant',
+    timezone: 'Asia/Shanghai',
+    zeroTime: '00:00'
+  })
+  const concurrentTicketB = await service.saveTicket(merchantA.id, {
+    title: '并发 B',
+    platform: 'whatsapp-green',
+    dedupScope: 'merchant',
+    timezone: 'Asia/Shanghai',
+    zeroTime: '00:00'
+  })
+  await bindAccount(merchantA.id, concurrentTicketA.id, 'concurrent-a')
+  await bindAccount(merchantA.id, concurrentTicketB.id, 'concurrent-b')
+  const concurrentConvA = await makeConversation(
+    merchantA.id, concurrentCustomer.id, 'concurrent-a', 'concurrent-peer-a'
+  )
+  const concurrentConvB = await makeConversation(
+    merchantA.id, concurrentCustomer.id, 'concurrent-b', 'concurrent-peer-b'
+  )
+  const concurrentResults = await Promise.all([
+    captureInbound(merchantA.id, {
+      conversationId: concurrentConvA,
+      customerId: concurrentCustomer.id,
+      platform: 'whatsapp-green',
+      accountKey: 'concurrent-a',
+      peerKey: 'concurrent-peer-a',
+      eventAt: '2026-11-20T02:30:00Z'
+    }),
+    captureInbound(merchantA.id, {
+      conversationId: concurrentConvB,
+      customerId: concurrentCustomer.id,
+      platform: 'whatsapp-green',
+      accountKey: 'concurrent-b',
+      peerKey: 'concurrent-peer-b',
+      eventAt: '2026-11-20T02:30:01Z'
+    })
+  ])
+  assert.deepEqual(
+    concurrentResults.map(item => item.fanType).sort(),
+    ['new', 'repeat'],
+    '并发进线不能同时算成两个新粉'
+  )
+
+  const fallbackConvA = await makeConversation(
+    merchantA.id, null, 'concurrent-a', 'fallback-peer'
+  )
+  const fallbackConvB = await makeConversation(
+    merchantA.id, null, 'concurrent-b', 'fallback-peer'
+  )
+  const fallbackResults = await Promise.all([
+    captureInbound(merchantA.id, {
+      conversationId: fallbackConvA,
+      platform: 'whatsapp-green',
+      accountKey: 'concurrent-a',
+      peerKey: 'fallback-peer',
+      eventAt: '2026-11-20T02:40:00Z'
+    }),
+    captureInbound(merchantA.id, {
+      conversationId: fallbackConvB,
+      platform: 'whatsapp-green',
+      accountKey: 'concurrent-b',
+      peerKey: 'fallback-peer',
+      eventAt: '2026-11-20T02:40:01Z'
+    })
+  ])
+  assert.deepEqual(
+    fallbackResults.map(item => item.fanType).sort(),
+    ['new', 'repeat'],
+    '没有 customerId 时也必须用平台 peerKey 串行判重'
+  )
 
   const scopeTicketA = await service.saveTicket(merchantA.id, {
     title: '单工单 A',
