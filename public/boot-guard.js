@@ -63,7 +63,12 @@
     var target = event && event.target
     var tag = target && target.tagName
     if (tag === 'SCRIPT' || tag === 'LINK') {
-      showFatal('前端资源加载失败：' + String((target && (target.src || target.href)) || ''))
+      var raw = String((target && (target.src || target.href)) || '')
+      var sameOrigin = false
+      try {
+        sameOrigin = new URL(raw, window.location.href).origin === window.location.origin
+      } catch (_error) {}
+      if (sameOrigin) showFatal('前端资源加载失败：' + raw)
     }
   }, true)
 

@@ -47,4 +47,7 @@ test('业务 bundle 启动失败时有静态兜底页', () => {
   assert.match(guard, /window\.__pixShowFatal/)
   assert.match(guard, /window\.__pixBootReady/)
   assert.match(guard, /页面加载失败/)
+  assert.match(guard, /new URL\(raw, window\.location\.href\)\.origin === window\.location\.origin/,
+    '第三方统计/监控脚本失败不能整页判死')
+  assert.match(guard, /if \(sameOrigin\) showFatal/, '只有同源业务资源失败才显示启动错误页')
 })
