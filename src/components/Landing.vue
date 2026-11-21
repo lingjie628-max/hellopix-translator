@@ -12,6 +12,7 @@
           <a href="javascript:;" @click="scrollTo('platforms')">支持平台</a>
           <a href="javascript:;" @click="scrollTo('pricing')">定价标准</a>
           <a href="javascript:;" @click="scrollTo('download')">软件下载</a>
+          <a v-if="standaloneGroups.length" href="javascript:;" @click="scrollTo('standalone')">独立应用版</a>
           <a v-if="faqs.length" href="javascript:;" @click="scrollTo('faq')">常见问题</a>
           <a href="javascript:;" @click="scrollTo('contact')">联系我们</a>
         </nav>
@@ -164,6 +165,61 @@
             @click="onDownload($event, d)"
           >{{ d.label }}</a>
         </p>
+      </div>
+    </section>
+
+    <section v-if="standaloneGroups.length" id="standalone" class="standalone-section">
+      <div class="wrap standalone-shell">
+        <div class="standalone-copy">
+          <span class="eyebrow">SINGLE APP EDITION</span>
+          <h2>独立应用版</h2>
+          <p class="standalone-lead">
+            只用一个平台，就不需要下载整套多开工作台。独立客户端直接保留原平台体验，
+            登录自己的 Hello Pix 账号后启用实时翻译。
+          </p>
+          <ul class="standalone-points">
+            <li><span>01</span>聊天与翻译在同一个客户端完成</li>
+            <li><span>02</span>翻译扣当前 Hello Pix 账号的字符余额</li>
+            <li><span>03</span>每个平台独立安装、独立更新、互不影响</li>
+          </ul>
+          <p class="standalone-warning">
+            当前为未签名测试版。macOS 首次打开需在系统设置中放行；Windows 解压后直接运行。
+          </p>
+        </div>
+
+        <div class="standalone-groups">
+          <article
+            v-for="group in standaloneGroups"
+            :key="group.key"
+            class="standalone-card"
+          >
+            <header class="standalone-card-head">
+              <span class="standalone-mark">{{ group.mark }}</span>
+              <div>
+                <h3>{{ group.title }}</h3>
+                <p>原平台界面 · 内置 Hello Pix 翻译</p>
+              </div>
+              <span class="standalone-beta">BETA</span>
+            </header>
+            <div class="standalone-options">
+              <a
+                v-for="item in group.items"
+                :key="item.url"
+                class="standalone-option"
+                :href="item.url"
+                :title="item.note"
+                @click="onDownload($event, item)"
+              >
+                <span class="standalone-platform">{{ item.label }}</span>
+                <span class="standalone-version">v{{ item.version }} · 未签名</span>
+                <span class="standalone-download">下载 →</span>
+              </a>
+            </div>
+            <p class="standalone-card-foot">
+              登录入口在客户端「设置 → Hello Pix 翻译」，不保存账号密码。
+            </p>
+          </article>
+        </div>
       </div>
     </section>
 
@@ -473,6 +529,47 @@ export default {
           beta
         return { label, url: r.url, note: r.note }
       })
+    },
+    standaloneGroups() {
+      const groups = new Map()
+      const rank = item => {
+        if (/mac/i.test(item.os) && /arm|apple|m[0-9]/i.test(item.arch)) return 10
+        if (/mac/i.test(item.os) && /x64|intel/i.test(item.arch)) return 20
+        if (/windows|win/i.test(item.os)) return 30
+        return 40
+      }
+      for (const item of this.releaseList.filter(row =>
+        row.releaseGroup === 'standalone' && row.url)) {
+        const key = item.app || item.title || item.group
+        if (!groups.has(key)) {
+          groups.set(key, {
+            key,
+            title: item.title || item.app || item.group,
+            mark: String(item.app || item.title || 'A').slice(0, 1).toUpperCase(),
+            items: []
+          })
+        }
+        let label = [item.os, item.arch].filter(Boolean).join(' · ')
+        if (/windows|win/i.test(item.os) && /zip/i.test(item.url)) {
+          label = 'Windows x64 · 免安装'
+        } else if (/mac/i.test(item.os) && /arm|apple|m[0-9]/i.test(item.arch)) {
+          label = 'macOS · Apple 芯片'
+        } else if (/mac/i.test(item.os) && /x64|intel/i.test(item.arch)) {
+          label = 'macOS · Intel'
+        }
+        groups.get(key).items.push({
+          label,
+          url: item.url,
+          note: item.note || '',
+          version: item.version || '',
+          sha256: item.sha256 || '',
+          rank: rank(item)
+        })
+      }
+      return Array.from(groups.values()).map(group => ({
+        ...group,
+        items: group.items.sort((a, b) => a.rank - b.rank)
+      }))
     },
     allDownloads() {
       return this.releaseList.map(r => ({ label: r.title || r.group, url: r.url, note: r.note }))
@@ -795,6 +892,161 @@ export default {
 .extra-dl a { color: var(--w-accent, #1677ff); text-decoration: none; margin: 0 3px; }
 .extra-dl a:hover { text-decoration: underline; }
 
+/* 独立应用版：与主客户端下载明确分区，避免用户把单平台包当成多开工作台。 */
+.standalone-section {
+  position: relative;
+  padding: 92px 0;
+  overflow: hidden;
+  color: #f7f2e7;
+  background:
+    radial-gradient(circle at 82% 18%, rgba(232, 170, 74, .2), transparent 30%),
+    linear-gradient(128deg, #0b2531 0%, #12394a 55%, #0b2a34 100%);
+}
+.standalone-section::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(115deg, rgba(255,255,255,.045) 0 1px, transparent 1px 34px),
+    linear-gradient(25deg, rgba(255,255,255,.025) 0 1px, transparent 1px 46px);
+}
+.standalone-shell {
+  position: relative;
+  display: grid;
+  grid-template-columns: .9fr 1.1fr;
+  align-items: center;
+  gap: 54px;
+}
+.standalone-copy .eyebrow {
+  text-align: left;
+  color: #efbd69;
+}
+.standalone-copy h2 {
+  margin: 4px 0 14px;
+  text-align: left;
+  color: #fffaf0;
+  font-family: "STSong", "Songti SC", serif;
+  font-size: clamp(34px, 4.2vw, 54px);
+  letter-spacing: .04em;
+}
+.standalone-lead {
+  max-width: 520px;
+  margin: 0;
+  color: #c7d8dd;
+  font-size: 15px;
+  line-height: 1.9;
+}
+.standalone-points {
+  display: grid;
+  gap: 12px;
+  padding: 0;
+  margin: 28px 0 24px;
+  list-style: none;
+}
+.standalone-points li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: #eef5f3;
+  font-size: 14px;
+}
+.standalone-points span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 31px;
+  height: 31px;
+  color: #efbd69;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  border: 1px solid rgba(239, 189, 105, .5);
+  border-radius: 999px;
+}
+.standalone-warning {
+  max-width: 520px;
+  padding: 12px 14px;
+  margin: 0;
+  color: #f0d8b2;
+  font-size: 12px;
+  line-height: 1.7;
+  background: rgba(239, 189, 105, .08);
+  border-left: 2px solid #efbd69;
+}
+.standalone-groups { display: grid; gap: 18px; }
+.standalone-card {
+  padding: 22px;
+  color: #13252c;
+  background: #f6f1e7;
+  border: 1px solid rgba(255, 255, 255, .8);
+  border-radius: 18px;
+  box-shadow: 0 24px 55px rgba(0, 15, 20, .28);
+}
+.standalone-card-head {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #d8d0c2;
+}
+.standalone-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  color: #f6f1e7;
+  font-family: Georgia, serif;
+  font-size: 25px;
+  background: #12394a;
+  border-radius: 13px;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.14);
+}
+.standalone-card-head h3 { margin: 0 0 3px; color: #13252c; font-size: 19px; }
+.standalone-card-head p { margin: 0; color: #6f7674; font-size: 12px; }
+.standalone-beta {
+  margin-left: auto;
+  padding: 4px 8px;
+  color: #875212;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .13em;
+  background: #f7dfb6;
+  border-radius: 999px;
+}
+.standalone-options { display: grid; gap: 9px; padding-top: 15px; }
+.standalone-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 10px 13px;
+  color: #1a3039;
+  text-decoration: none;
+  background: #fffdf8;
+  border: 1px solid #d9d3c8;
+  border-radius: 11px;
+  transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease;
+}
+.standalone-option:hover,
+.standalone-option:focus-visible {
+  transform: translateX(3px);
+  border-color: #9b6d28;
+  box-shadow: 0 8px 18px rgba(28, 45, 48, .1);
+  outline: none;
+}
+.standalone-platform { font-weight: 700; }
+.standalone-version { color: #7b7c76; font-size: 11px; white-space: nowrap; }
+.standalone-download { color: #0d6b68; font-size: 12px; font-weight: 750; white-space: nowrap; }
+.standalone-card-foot {
+  margin: 15px 0 0;
+  color: #697574;
+  font-size: 11px;
+  line-height: 1.65;
+}
+
 /* 安装引导。默认折叠：它只对 Mac 用户里有拦截遭遇的那部分人有用，
    常开会在首页制造"这软件装不上"的错觉。 */
 .install-help {
@@ -989,6 +1241,7 @@ export default {
 @media (max-width: 1024px) {
   .hero-inner { grid-template-columns: 1fr; }
   .hero-art { order: -1; }
+  .standalone-shell { grid-template-columns: 1fr; gap: 34px; }
   .scenarios { grid-template-columns: repeat(2, 1fr); }
   .scene-1, .scene-2, .scene-3, .scene-4, .scene-5 { grid-column: span 1; }
   .advantages, .pricing, .reviews { grid-template-columns: repeat(2, 1fr); }
@@ -1012,6 +1265,12 @@ export default {
   .scenarios, .advantages, .pricing, .reviews { grid-template-columns: 1fr; }
   .foot-cols { grid-template-columns: 1fr 1fr; }
   .dl-row { gap: 24px; }
+  .standalone-section { padding: 66px 0; }
+  .standalone-card { padding: 17px; }
+  .standalone-option {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .standalone-version { display: none; }
   /* 手机上数字带保持两列，只压小字号；单列会让这一条变得过长。
      半宽只有约 150px，"Win / Mac" 用 24px 会顶出格子，压到 19px 才稳。 */
   .numbers-band { padding: 32px 0; }

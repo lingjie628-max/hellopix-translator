@@ -40,4 +40,7 @@ test('官网独立 Signal 包不抢主客户端按钮，下载标签带系统与
   )
   assert.match(landing, /r\.os, r\.arch/)
   assert.match(landing, /' - ' \+ platform/)
+  assert.match(landing, /id="standalone"/, '官网必须有独立应用版专门区块')
+  assert.match(landing, /standaloneGroups/, '独立应用版必须按 app 分组展示')
+  assert.match(landing, /未签名测试版/, '测试包必须明确标明签名状态')
 })
