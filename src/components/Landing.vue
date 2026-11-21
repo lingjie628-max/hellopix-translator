@@ -156,7 +156,13 @@
         </details>
         <p v-if="extraDownloads.length" class="extra-dl">
           其他版本：
-          <a v-for="d in extraDownloads" :key="d.url" :href="d.url" @click="onDownload($event, d)">{{ d.label }}</a>
+          <a
+            v-for="d in extraDownloads"
+            :key="d.url"
+            :href="d.url"
+            :title="d.note || d.label"
+            @click="onDownload($event, d)"
+          >{{ d.label }}</a>
         </p>
       </div>
     </section>
@@ -459,7 +465,12 @@ export default {
       const used = new Set(this.primaryDownloads.map(i => i.url))
       return this.releaseList.filter(r => !used.has(r.url)).map(r => {
         const platform = [r.os, r.arch].filter(Boolean).join(' · ')
-        const label = (r.title || r.group) + (platform ? ' - ' + platform : '')
+        const beta = r.releaseGroup === 'standalone' && r.app === 'signal'
+          ? ' · 未签名测试版'
+          : ''
+        const label = (r.title || r.group) +
+          (platform ? ' - ' + platform : '') +
+          beta
         return { label, url: r.url, note: r.note }
       })
     },
