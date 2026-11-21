@@ -458,7 +458,7 @@ pg_restore --list /var/backups/hello-pix/<dump>
 
 ```bash
 node scripts/migrate.js down 1
-git revert 4cb0529
+git revert 5cd5597
 ```
 
   056 down 删除 `count_ticket_dedup_links`、`dedup_scope` 和查重函数；
