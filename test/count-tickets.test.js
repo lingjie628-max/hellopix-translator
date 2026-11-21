@@ -612,10 +612,25 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
       eventAt: '2026-11-20T02:30:01Z'
     })
   ])
+  assert.ok(concurrentResults.every(item => item.captured), '并发事件都必须真实落账')
+  const concurrentRows = await pool.query(
+    `SELECT fan_type,repeat_of_id
+     FROM count_ticket_fans
+     WHERE conversation_id = ANY($1::bigint[])
+     ORDER BY event_at,id`,
+    [[concurrentConvA, concurrentConvB]]
+  )
   assert.deepEqual(
-    concurrentResults.map(item => item.fanType).sort(),
+    concurrentRows.rows.map(row => row.fan_type),
     ['new', 'repeat'],
     '并发进线不能同时算成两个新粉'
+  )
+  assert.equal(
+    String(concurrentRows.rows[1].repeat_of_id),
+    String((await pool.query(
+      'SELECT id FROM count_ticket_fans WHERE conversation_id=$1',
+      [concurrentConvA]
+    )).rows[0].id)
   )
 
   const fallbackConvA = await makeConversation(
@@ -640,10 +655,22 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
       eventAt: '2026-11-20T02:40:01Z'
     })
   ])
+  assert.ok(fallbackResults.every(item => item.captured), '无 customerId 的并发事件也必须落账')
+  const fallbackRows = await pool.query(
+    `SELECT id,ticket_id,user_id,customer_id,peer_key,fan_type,repeat_of_id,event_at
+     FROM count_ticket_fans
+     WHERE conversation_id = ANY($1::bigint[])
+     ORDER BY event_at,id`,
+    [[fallbackConvA, fallbackConvB]]
+  )
   assert.deepEqual(
-    fallbackResults.map(item => item.fanType).sort(),
+    fallbackRows.rows.map(row => row.fan_type),
     ['new', 'repeat'],
     '没有 customerId 时也必须用平台 peerKey 串行判重'
+  )
+  assert.equal(
+    String(fallbackRows.rows[1].repeat_of_id),
+    String(fallbackRows.rows[0].id)
   )
 
   const scopeTicketA = await service.saveTicket(merchantA.id, {
