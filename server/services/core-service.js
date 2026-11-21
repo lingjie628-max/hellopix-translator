@@ -173,7 +173,10 @@ class CoreService {
       port: number(parent.portLimit),
       userPorts: number(parent.portsInUse),
       standaloneClient: catalog.packageAllowsStandalone(json(parent.packageClients, {})) ? 1 : 0,
-      counterSuite: catalog.packageAllowsCounter(parent.packageClients) ? 1 : 0
+      // profile() 是登录响应的来源，也是 /user/dashboard 刷新权益的来源。
+      // 两处口径必须一致：企业账号默认包含计数工单，否则页面刷新后又会
+      // 被旧套餐值覆盖回 counterSuite=0。
+      counterSuite: (parent.enterprise || catalog.packageAllowsCounter(parent.packageClients)) ? 1 : 0
     }
   }
 

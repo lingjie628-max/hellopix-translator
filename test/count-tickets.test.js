@@ -11,6 +11,7 @@ const {
   validTimezone,
   validZeroTime
 } = require('../server/services/count-ticket-service')
+const { CoreService } = require('../server/services/core-service')
 const { CountTicketRepository } = require('../server/repositories/count-ticket-repository')
 const { capabilityFor } = require('../server/lib/capabilities')
 const { packageAllowsCounter } = require('../server/lib/client-catalog')
@@ -96,6 +97,23 @@ test('商户管理员始终能找到计数工单入口，未购权益时明确�
     '商户计数页必须使用公开站点平台接口')
   assert.doesNotMatch(page, /getRequest\('\/client\/platforms'\)/,
     '商户网页不能调用原生客户端专用接口；401 会被全局拦截器当成掉线并退出登录')
+})
+
+test('商户 profile 刷新时企业账号仍返回 counterSuite=1', () => {
+  const redis = { get: async () => null, set: async () => 'OK' }
+  const core = new CoreService({}, redis, null, {})
+  const session = {
+    kind: 'main',
+    account: { id: 37, username: 'jiufa', nickname: 'jiufa', charBalance: 1 },
+    parent: {
+      id: 37,
+      enterprise: true,
+      packageClients: { counter: false },
+      packageId: 2,
+      packageTitle: 'Hello Pix 高级版'
+    }
+  }
+  assert.equal(core.profile(session).counterSuite, 1)
 })
 
 test('计数只接真实入站消息，打开会话与出向消息带独立事件类型', () => {
