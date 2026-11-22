@@ -101,11 +101,6 @@
           进粉中心
           <span id="counterQueueBadge" class="counter-entry-badge hidden">0</span>
         </button>
-        <button id="ticketBtn" type="button" class="util-btn ticket-entry" title="提交问题并查看客服回复">
-          <span class="util-ico" aria-hidden="true">🎫</span>
-          工单
-          <span id="ticketBadge" class="ticket-entry-badge hidden">0</span>
-        </button>
         <button id="themeBtn" type="button" class="util-btn" title="切换日间 / 夜间模式"><span class="util-ico" id="themeIco">🌙</span><span id="themeText">夜间</span></button>
         <button id="tabLayoutBtn" type="button" class="util-btn" data-layout="top" title="标签栏：顶部（点击切换为侧面）"><span class="util-ico" id="tabLayoutIco">▤</span><span id="tabLayoutText">顶部</span></button>
         <div class="spacer"></div>
@@ -493,66 +488,6 @@
     </div>
   </div>
 
-  <div id="ticketPanel" class="modal hidden">
-    <div class="ticket-card">
-      <header class="ticket-head">
-        <div>
-          <span class="ticket-kicker">SUPPORT TICKETS</span>
-          <h3>工单中心</h3>
-        </div>
-        <button id="ticketClose" type="button" class="ticket-x" aria-label="关闭">×</button>
-      </header>
-
-      <div class="ticket-toolbar">
-        <button id="ticketNew" type="button" class="primary">+ 新建工单</button>
-        <select id="ticketStatus" aria-label="工单状态">
-          <option value="open">进行中</option>
-          <option value="resolved">已解决</option>
-          <option value="closed">已关闭</option>
-          <option value="all">全部</option>
-        </select>
-        <button id="ticketReload" type="button" class="ghost">刷新</button>
-        <span class="ticket-tip">遇到问题直接提交，客服会在这里回复</span>
-      </div>
-
-      <div id="ticketWorkspace" class="ticket-workspace">
-        <aside>
-          <div id="ticketList" class="ticket-list">
-            <div class="ticket-empty">正在加载工单…</div>
-          </div>
-        </aside>
-        <section id="ticketDetail" class="ticket-detail">
-          <div class="ticket-empty">选择左侧工单查看对话</div>
-        </section>
-      </div>
-
-      <section id="ticketCompose" class="ticket-compose hidden">
-        <label>问题类型
-          <select id="ticketCategory">
-            <option value="recharge">充值问题</option>
-            <option value="translation">翻译问题</option>
-            <option value="login">登录异常</option>
-            <option value="bug">功能故障</option>
-            <option value="feature">功能建议</option>
-            <option value="other" selected>其他</option>
-          </select>
-        </label>
-        <label>标题
-          <input id="ticketSubject" type="text" maxlength="200" placeholder="一句话说清问题">
-        </label>
-        <label>详细描述
-          <textarea id="ticketBody" rows="6" maxlength="5000"
-                    placeholder="请写清什么时候、做了什么、看到什么报错；充值问题请附金额或哈希"></textarea>
-        </label>
-        <p id="ticketComposeMsg" class="ticket-form-msg"></p>
-        <div class="ticket-compose-actions">
-          <button id="ticketCancelCreate" type="button" class="ghost">取消</button>
-          <button id="ticketSubmit" type="button" class="primary">提交工单</button>
-        </div>
-      </section>
-    </div>
-  </div>
-
   <div id="profile" class="modal hidden">
     <div class="modal-card">
       <h3>个人中心</h3>
@@ -592,9 +527,6 @@
 
   <!-- 翻译健康横幅：崩溃循环保护摘掉翻译桥时，别让用户对着没反应的「译」发呆 -->
   <script src="trans-health.js"></script>
-
-  <!-- 用户自助工单：建单 / 列表 / 详情 / 回复 / 未读 -->
-  <script src="ticket-center.js"></script>
 
   <!-- 站点信息（客服 / 页脚下载 / 独立应用）：与账号、标签栏无关的一整块 -->
   <script src="site-info.js"></script>

@@ -25,8 +25,7 @@ let proxyDetectTimer = 0
 let geoManual = false
 
 // ★ 这些是本文件的权威状态，被别的模块读取 ★
-//   current                   → 翻译设置与个人资料
-//   skipAutoLogin             → 启动自动登录
+//   current / skipAutoLogin   → site-info.js（套餐是否含独立应用）、启动自动登录
 //   appVersion                → collision-update.js 按服务端权威值刷新
 //   （线路状态 lineRows / preferAuto / selectedId / fastest 归 lines.js 所有）
 let current = null
@@ -391,7 +390,6 @@ async function enterShell(data) {
   renderTabs(await window.pix.tabs())
   if (refreshTimer) clearInterval(refreshTimer)
   refreshTimer = setInterval(pollSession, 8000)
-  ticketStart()
 }
 
 /**
@@ -878,7 +876,6 @@ if (transBarToggle) {
 }
 function backToLogin(msg) {
   if (refreshTimer) clearInterval(refreshTimer)
-  ticketStop()
   current = null
   authoritativeEngine = ''
   engineRows = []
@@ -889,7 +886,6 @@ function backToLogin(msg) {
   showOverlay(addApp, false)
   showOverlay(updatePanel, false)
   showOverlay(standalonePanel, false)
-  showOverlay(document.getElementById('ticketPanel'), false)
   showOverlay(lockScreen, false)
   show(shellScreen, false)
   show(loginScreen, true)
