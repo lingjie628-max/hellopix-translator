@@ -63,8 +63,15 @@ const bridgeWarning = require('./src/stability/bridge-warning')
 const nativeComposer = require('./src/translate/native-composer')
 // 实例资源预算：防止"开太多窗口把应用撑崩"（句柄耗尽 → 闪退，见该文件顶部）。
 const tabBudget = require('./src/window/tab-budget')
+const { buildUserAgent } = require('./src/config/user-agent')
 
-const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+const CHROME_UA = buildUserAgent({
+  platform: process.platform,
+  appVersion: require('./package.json').version,
+  electronVersion: process.versions.electron,
+  chromeVersion: process.versions.chrome
+})
+app.userAgentFallback = CHROME_UA
 
 /**
  * 一个窗口内最多同时开的实例数的**硬顶**。
