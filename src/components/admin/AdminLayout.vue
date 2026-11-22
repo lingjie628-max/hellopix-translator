@@ -3,12 +3,6 @@
     <el-menu class="admin-menu" unique-opened router :background-color="menuBg" :text-color="menuText" :active-text-color="menuActive">
       <div class="admin-logo">PIX翻译管理 超管</div>
       <el-menu-item index="/admin/dashboard"><i class="el-icon-data-analysis"></i><span slot="title">总览</span></el-menu-item>
-      <el-menu-item index="/admin/tickets">
-        <el-badge :value="ticketUnread" :hidden="!ticketUnread" :max="99">
-          <i class="el-icon-tickets"></i>
-        </el-badge>
-        <span slot="title">工单</span>
-      </el-menu-item>
       <el-menu-item index="/admin/users"><i class="el-icon-user"></i><span slot="title">商户管理</span></el-menu-item>
       <el-submenu index="ops">
         <template slot="title"><i class="el-icon-s-operation"></i><span>运营</span></template>
@@ -67,8 +61,7 @@ export default {
   components: { ThemeToggle },
   data() {
     return {
-      dark: document.documentElement.getAttribute('data-theme') === 'dark',
-      ticketUnread: 0
+      dark: document.documentElement.getAttribute('data-theme') === 'dark'
     }
   },
   computed: {
@@ -90,65 +83,17 @@ export default {
     syncDark() {
       this.dark = document.documentElement.getAttribute('data-theme') === 'dark'
     },
-    /**
-     * 拉一次未读数。
-     *
-     * 默认静默失败：这个请求每 60 秒一次，超时或 401 时弹错误框会变成
-     * 每隔一分钟糊一次脸。红点消失比报错更合适 —— 它本来只是提示。
-     */
-    refreshTicketUnread() {
-      this.getRequest('/admin/tickets-unread').then(resp => {
-        if (!resp || !resp.data) return
-        this.ticketUnread = Number(resp.data.unread) || 0
-      }).catch(() => {})
-    },
     logout() {
-      this.stopTicketPolling()
       this.postRequest('/admin/logout')
       this.$store.commit('adminLogout')
       this.$router.replace('/admin/login')
-    },
-    /**
-     * 页面隐藏时暂停轮询，可见时立刻补一次。
-     *
-     * 后台常开着好几个标签页，不暂停的话每条都比着打接口；
-     * visibilitychange 还顺带解决了「切回来时数据是旧的」。
-     */
-    onVisibilityChange() {
-      if (document.hidden) {
-        this.stopTicketPolling()
-      } else {
-        this.refreshTicketUnread()
-        this.startTicketPolling()
-      }
-    },
-    startTicketPolling() {
-      if (this.ticketTimer || document.hidden) return
-      this.ticketTimer = setInterval(() => this.refreshTicketUnread(), 60 * 1000)
-    },
-    stopTicketPolling() {
-      if (!this.ticketTimer) return
-      clearInterval(this.ticketTimer)
-      this.ticketTimer = null
     }
   },
   mounted() {
-    // 定时器句柄不放进 data：它不是渲染状态，放进去每次赋值都触发一轮
-    // 依赖收集，而且 Vue 会试图把 Timer ID 变成响应式对象。
-    this.ticketTimer = null
     document.addEventListener('pix-theme-change', this.syncDark)
-    document.addEventListener('visibilitychange', this.onVisibilityChange)
-    // 工单页读完一张票会广播这个事件，让侧栏数字立刻跟上
-    this.$root.$on('pix-ticket-read', this.refreshTicketUnread)
-    this.refreshTicketUnread()
-    this.startTicketPolling()
   },
   beforeDestroy() {
     document.removeEventListener('pix-theme-change', this.syncDark)
-    document.removeEventListener('visibilitychange', this.onVisibilityChange)
-    this.$root.$off('pix-ticket-read', this.refreshTicketUnread)
-    // 组件销毁必须清定时器，否则退出登录后还在打接口（401 刷屏）
-    this.stopTicketPolling()
   }
 }
 </script>

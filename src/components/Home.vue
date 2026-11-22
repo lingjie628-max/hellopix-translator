@@ -23,12 +23,6 @@
         <i class="el-icon-s-order"></i>
         <span slot="title">充值记录</span>
       </el-menu-item>
-      <!-- 工单：子账号也要能提（子账号没有独立余额，但「登不上」这种问题
-           必须由本人描述），所以不加 isMain 限制 -->
-      <el-menu-item index="/user/tickets">
-        <i class="el-icon-chat-dot-square"></i>
-        <span slot="title">工单<el-badge v-if="ticketUnread > 0" :value="ticketUnread" :max="99" class="tk-badge"></el-badge></span>
-      </el-menu-item>
     </el-menu>
     <el-container>
       <el-header class="cms-header">
@@ -71,7 +65,6 @@ export default {
       telegram: '',
       telegramUrl: '',
       pwdVisible: false,
-      ticketUnread: 0,
       pwd: { oldPassword: '', newPassword: '' }
     }
   },
@@ -97,17 +90,6 @@ export default {
         this.telegram = resp.data.telegram || ''
       }
     })
-    // 工单未读：60s 一次，后台标签页不发请求。
-    // 商户端只有「客服回了」这一种提醒，红点漏了就等于消息石沉大海。
-    this.fetchTicketUnread()
-    this.ticketTimer = setInterval(this.fetchTicketUnread, 60000)
-    document.addEventListener('visibilitychange', this.onVisibility)
-    window.addEventListener('pix-user-ticket-read', this.fetchTicketUnread)
-  },
-  beforeDestroy() {
-    if (this.ticketTimer) clearInterval(this.ticketTimer)
-    document.removeEventListener('visibilitychange', this.onVisibility)
-    window.removeEventListener('pix-user-ticket-read', this.fetchTicketUnread)
   },
   methods: {
     refreshEntitlement() {
@@ -121,15 +103,6 @@ export default {
           this.$store.commit('login', Object.assign({}, this.$store.state.user || {}, patch))
         }
       }).catch(() => {})
-    },
-    fetchTicketUnread() {
-      if (document.hidden) return
-      this.getRequest('/tickets-unread').then(resp => {
-        if (resp && resp.data) this.ticketUnread = Number(resp.data.unread) || 0
-      }).catch(() => {})
-    },
-    onVisibility() {
-      if (!document.hidden) this.fetchTicketUnread()
     },
     goWebUrl() {
       this.getRequest('/site/info').then(resp => {
@@ -212,15 +185,5 @@ export default {
 .el-dropdown-link {
   cursor: pointer;
   color: var(--w-text);
-}
-/* 侧栏未读角标：紧跟文字，不能把菜单项撑高 */
-.tk-badge {
-  margin-left: 6px;
-  vertical-align: middle;
-}
-.tk-badge ::v-deep .el-badge__content {
-  position: static;
-  transform: none;
-  display: inline-block;
 }
 </style>

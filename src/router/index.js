@@ -12,7 +12,6 @@ import TranslateChannels from '../components/translate/TranslateChannels.vue'
 import UserRecharge from '../components/user/UserRecharge.vue'
 import UserRechargePage from '../components/user/UserRechargePage.vue'
 import UserTeam from '../components/user/UserTeam.vue'
-import UserTickets from '../components/user/UserTickets.vue'
 import PaySuccess from '../components/paySuccess.vue'
 import PayError from '../components/payError.vue'
 import Empty from '../components/empty.vue'
@@ -39,7 +38,6 @@ import AdminStaff from '../components/admin/AdminStaff.vue'
 import AdminSecurity from '../components/admin/AdminSecurity.vue'
 import AdminClients from '../components/admin/AdminClients.vue'
 import AdminSupport from '../components/admin/AdminSupport.vue'
-import AdminTickets from '../components/admin/AdminTickets.vue'
 import AdminNotices from '../components/admin/AdminNotices.vue'
 import AdminVerify from '../components/admin/AdminVerify.vue'
 import Register from '../components/Register.vue'
@@ -87,7 +85,6 @@ const routes = [
       { path: '/admin/clients', name: '客户端版本', component: AdminClients },
       { path: '/admin/notices', name: '公告管理', component: AdminNotices },
       { path: '/admin/support', name: '帮助与客服', component: AdminSupport },
-      { path: '/admin/tickets', name: '工单', component: AdminTickets },
       { path: '/admin/verify', name: '验证码接口', component: AdminVerify },
       // 旧的“超管全局 Signal Token”入口已废弃；独立客户端登录用户自己的账号。
       { path: '/admin/signal', redirect: '/admin/clients' },
@@ -108,8 +105,7 @@ const routes = [
       { path: '/translate/channels', name: '翻译通道', component: TranslateChannels },
       { path: '/user/Recharge', name: '充值记录', component: UserRecharge },
       { path: '/user/rechargePage', name: '充值中心', component: UserRechargePage },
-      { path: '/user/team', name: '子账号管理', component: UserTeam },
-      { path: '/user/tickets', name: '工单', component: UserTickets }
+      { path: '/user/team', name: '子账号管理', component: UserTeam }
     ]
   }
 ]
