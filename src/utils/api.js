@@ -1,5 +1,4 @@
 import axios from 'axios'
-import Vue from 'vue'
 import { Message, MessageBox } from 'element-ui'
 import router from '../router'
 import store from '../store'
@@ -47,41 +46,28 @@ let reauthToken = ''
 /**
  * 管理端需要二次认证时弹的密码框（Promise 化）。
  *
- * Element UI 的 MessageBox 只接受 **VNode**（见其 main.js 里 isVNode 判断），
- * 不接受渲染函数。所以这里用 Vue 构造器的 $createElement 造 VNode ——
- * 顺带也绕开了 `dangerouslyUseHTMLString`（拼 HTML 属于没必要的 XSS 面）。
+ * 不能从 Vue 构造器原型取 VNode 工厂：Vue 2.7 只把 `$createElement`
+ * 挂在组件实例上，原型上没有。之前那样写会在收到 428 后
+ * 直接抛 TypeError，密码框根本不出现，后台所有高危保存操作都表现为“点不动”。
+ * 这里用 Element UI 原生 prompt，密码输入类型由组件处理，不需要拼 HTML。
  */
-function askReauthPassword () {
-  return new Promise(resolve => {
-    const createElement = Vue.prototype.$createElement
-    const vnode = createElement('div', null, [
-      createElement('p', null, '该操作属于高危操作，请输入当前管理员密码确认是你本人。'),
-      createElement('input', {
-        attrs: {
-          type: 'password',
-          id: 'pix-reauth-input',
-          placeholder: '当前管理员密码',
-          autocomplete: 'current-password'
-        },
-        style: 'margin-top:12px;width:100%;box-sizing:border-box;padding:0 12px;height:38px;'
-      })
-    ])
-    MessageBox({
-      title: '需要重新验证身份',
-      message: vnode,
-      showCancelButton: true,
-      confirmButtonText: '确认',
-      cancelButtonText: '取消',
-      beforeClose: (action, instance, done) => {
-        if (action !== 'confirm') { done(); resolve(''); return }
-        const el = document.getElementById('pix-reauth-input')
-        const value = el ? el.value : ''
-        if (!value) { Message.warning('请输入密码'); return }
-        done()
-        resolve(value)
+async function askReauthPassword () {
+  try {
+    const { value } = await MessageBox.prompt(
+      '该操作属于高危操作，请输入当前管理员密码确认是你本人。',
+      '需要重新验证身份',
+      {
+        confirmButtonText: '确认',
+        cancelButtonText: '取消',
+        inputType: 'password',
+        inputPlaceholder: '当前管理员密码',
+        inputValidator: input => String(input || '').trim() !== '' || '请输入当前管理员密码'
       }
-    })
-  })
+    )
+    return String(value || '').trim()
+  } catch (error) {
+    return ''
+  }
 }
 
 /**
