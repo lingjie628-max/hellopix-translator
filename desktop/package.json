@@ -60,6 +60,7 @@
       "main.js",
       "stability-boot.js",
       "preload.js",
+      "ticket-preload.js",
       "guest-inject.js",
       "line-ext-shim.js",
       "package.json",

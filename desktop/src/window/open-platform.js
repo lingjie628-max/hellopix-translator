@@ -34,9 +34,23 @@ const ANTI_REVOKE_DEFAULT = new Set(['whatsapp-pro', 'whatsapp-biz'])
 function createOpenPlatform (deps) {
   const { state, libs, env } = deps
 
-  function openPlatform (payload) {
+  async function openPlatform (payload) {
     const item = env.platforms.find(p => p.id === payload.platformId)
     if (!item) return { success: false, msg: '不支持该平台' }
+
+    // 计数工单是外壳内置的唯一页面：重复点击只切回已有标签，不反复创建
+    // Chromium 进程，也不占用实例槽位。
+    if (item.id === 'tickets') {
+      const existing = (state.tabs || []).find(tab => tab.platform === 'tickets')
+      if (existing) {
+        existing.hidden = false
+        state.activeId = existing.id
+        state.showHome = false
+        libs.layoutViews()
+        libs.sendTabs()
+        return { success: true, id: existing.id, reused: true }
+      }
+    }
 
     // ★ 资源预算：在创建任何 Chromium 对象之前先问"还能不能开" ★
     const budget = libs.tabBudget.canOpenAnotherTab({
@@ -61,6 +75,13 @@ function createOpenPlatform (deps) {
     const id = item.id + '-' + state.nextTab
     state.nextTab = state.nextTab + 1
     const partition = libs.makePartition(item.id, index)
+    if (typeof libs.prepareSession === 'function') {
+      try {
+        await libs.prepareSession(item, partition)
+      } catch (e) {
+        libs.logWarn('session', '准备 ' + item.id + ' 登录态失败：' + ((e && e.message) || e))
+      }
+    }
     const settings = libs.normalizeTabSettings(payload.settings || {})
     // WhatsApp Pro / 商业版 默认开启防撤回 —— 这是用户选这个版本的理由，
     // 但只在"没显式设置过"时才给默认值，别覆盖用户的选择。
@@ -69,7 +90,14 @@ function createOpenPlatform (deps) {
     if (!homeUrl) return { success: false, msg: '应用地址不符合安全策略' }
     const displayName = String(payload.name || item.name).trim() || item.name
     const view = libs.createWebView(partition, settings, item, homeUrl,
-      { platform: item.id, account: libs.accountSlug(), id: '' })
+      {
+        platform: item.id,
+        account: libs.accountSlug(),
+        id: '',
+        ticketProfile: item.id === 'tickets' && typeof libs.ticketProfileSeed === 'function'
+          ? libs.ticketProfileSeed()
+          : null
+      })
     const tab = {
       id: id,
       platform: item.id,

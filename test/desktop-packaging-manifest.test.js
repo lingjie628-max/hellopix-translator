@@ -64,3 +64,9 @@ test('打包清单里必须声明 guest-inject.js（不能让 preload 漏在包�
   assert.ok(files.includes('guest-inject.js'),
     'build.files 没有包含 guest-inject.js —— 装完的客户端翻译会失效')
 })
+
+test('打包清单里必须声明计数工单 preload', () => {
+  const files = (pkg.build && pkg.build.files) || []
+  assert.ok(files.includes('ticket-preload.js'),
+    'build.files 没有包含 ticket-preload.js —— 桌面进粉中心会跳登录页')
+})

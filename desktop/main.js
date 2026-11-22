@@ -803,7 +803,9 @@ function saveOpenApps() {
 
 function platformHomeUrl(item, settings) {
   if (!item) return ''
-  if (item.id === 'tickets') return String(apiBase || DEFAULT_API).replace(/\/+$/, '') + '/'
+  if (item.id === 'tickets') {
+    return String(apiBase || DEFAULT_API).replace(/\/+$/, '') + '/#/count/tickets'
+  }
   if (item.customUrl && settings && settings.customUrl) return String(settings.customUrl)
   return item.url
 }
@@ -819,6 +821,48 @@ function safePlatformHomeUrl(item, settings) {
   const candidate = platformHomeUrl(item, settings)
   if (!candidate || !isAllowedPlatformUrl(item, candidate, candidate)) return ''
   return candidate
+}
+
+/**
+ * 计数工单页面运行在独立 WebContentsView 分区里。把客户端当前的用户会话
+ * Cookie 复制进去，页面才能直接调用 /count-tickets，而不是先跳登录页。
+ * 只复制客户端 Cookie；管理端 Cookie 在 rememberCookies 阶段已经被排除。
+ */
+async function prepareTicketSession(item, partition) {
+  if (!item || item.id !== 'tickets') return
+  const base = safeApiUrl(apiBase)
+  if (!base) throw new Error('API 地址不符合安全策略')
+  const origin = new URL(base).origin
+  const ses = session.fromPartition(partition)
+  for (const [name, value] of Object.entries(cookieJar)) {
+    if (!value || !isClientCookie(name)) continue
+    const csrf = /csrf/i.test(name)
+    await ses.cookies.set({
+      url: origin + '/',
+      name: name,
+      value: value,
+      path: '/',
+      secure: origin.startsWith('https:'),
+      httpOnly: !csrf,
+      sameSite: csrf ? 'strict' : 'lax'
+    })
+  }
+}
+
+function ticketProfileSeed() {
+  if (!profile) return null
+  return {
+    id: profile.id,
+    role: profile.role,
+    username: profile.username,
+    nickname: profile.nickname || profile.username,
+    email: profile.email || '',
+    packageId: profile.packageId,
+    packageTitle: profile.basename || '',
+    charBalance: profile.charBalance,
+    enterprise: profile.enterprise,
+    counterSuite: profile.counterSuite
+  }
 }
 
 /**
@@ -3839,6 +3883,8 @@ const openPlatformApi = require('./src/window/open-platform').createOpenPlatform
     tabBudget,
     effectiveMaxTabs,
     makePartition,
+    prepareSession: prepareTicketSession,
+    ticketProfileSeed,
     normalizeTabSettings,
     safePlatformHomeUrl,
     createWebView,

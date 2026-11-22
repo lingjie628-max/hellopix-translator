@@ -124,6 +124,20 @@ test('正常页面加载完成时清掉 loadErrorUrl', () => {
   assert.equal(tab.loadErrorUrl, '', '成功后必须清，否则下次失败不再提示')
 })
 
+test('★ 计数工单使用专用 preload，并带上最小用户快照', () => {
+  const h = makeHarness({ bridge: false })
+  h.factory.createWebView(
+    'persist:tickets',
+    {},
+    { id: 'tickets', name: '计数工单' },
+    'https://pixfanyi.com/#/count/tickets',
+    { ticketProfile: { username: 'alice', counterSuite: 1 } }
+  )
+  assert.match(h.webPrefs[0].preload, /ticket-preload\.js$/)
+  assert.ok(h.webPrefs[0].additionalArguments[0].indexOf('--pix-ticket-user=') === 0)
+  assert.match(decodeURIComponent(h.webPrefs[0].additionalArguments[0]), /"username":"alice"/)
+})
+
 test('did-fail-load 只为 mainFrame 画错误页（iframe 失败是常态）', () => {
   const tab = { id: 't1' }
   const h = makeHarness({ tabs: [tab] })

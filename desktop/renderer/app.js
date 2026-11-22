@@ -487,6 +487,14 @@ userBox.onclick = async () => {
   } catch (e) {}
   showOverlay(profile, true)
 }
+counterBtn.onclick = async () => {
+  try {
+    const resp = await window.pix.open({ platformId: 'tickets', multi: false })
+    if (!resp || !resp.success) toast((resp && resp.msg) || '计数工单打开失败', 'warn')
+  } catch (error) {
+    toast((error && error.message) || '计数工单打开失败', 'warn')
+  }
+}
 profileClose.onclick = () => showOverlay(profile, false)
 bindModalDismiss(profile)
 bindModalDismiss(transPanel)

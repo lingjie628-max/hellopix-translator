@@ -66,9 +66,19 @@ function createWebViewFactory (deps) {
     })
 
     const bridgeEnabled = libs.bridgeEnabledFor(item) && !libs.safeModeDisablesBridge()
+    const ticketPreload = item && item.id === 'tickets'
+      ? env.path.join(env.dirname, 'ticket-preload.js')
+      : undefined
+    const ticketProfile = tabInfo && tabInfo.ticketProfile
+    const additionalArguments = ticketProfile
+      ? ['--pix-ticket-user=' + encodeURIComponent(JSON.stringify(ticketProfile))]
+      : []
     const view = new electron.WebContentsView({
       webPreferences: {
-        preload: bridgeEnabled ? env.path.join(env.dirname, 'guest-inject.js') : undefined,
+        preload: bridgeEnabled
+          ? env.path.join(env.dirname, 'guest-inject.js')
+          : ticketPreload,
+        additionalArguments: additionalArguments,
         partition: partition,
         contextIsolation: true,
         nodeIntegration: false,
