@@ -43,7 +43,6 @@
       </el-table-column>
       <el-table-column label="客户端权益" width="180">
         <template slot-scope="scope">
-          <el-tag v-if="scope.row.clients && scope.row.clients.standalone" size="mini">独立应用</el-tag>
           <el-tag v-if="scope.row.clients && scope.row.clients.mobile" size="mini" type="success">手机版</el-tag>
           <el-tag v-if="scope.row.clients && scope.row.clients.counter" size="mini" type="warning">计数器</el-tag>
         </template>
@@ -111,9 +110,9 @@
           </span>
         </el-form-item>
         <el-form-item label="客户端">
-          <el-checkbox :value="!!(form.clients && form.clients.standalone)" @change="val => setClient('standalone', val)">独立应用版</el-checkbox>
           <el-checkbox :value="!!(form.clients && form.clients.mobile)" @change="val => setClient('mobile', val)">手机版</el-checkbox>
           <el-checkbox :value="!!(form.clients && form.clients.counter)" @change="val => setClient('counter', val)">计数器版本</el-checkbox>
+          <div class="unit-tip">独立应用版对所有账号开放，不受套餐限制。</div>
         </el-form-item>
         <el-form-item label="翻译通道">
           <el-checkbox-group v-model="form.engines">
@@ -258,7 +257,7 @@ export default {
         subQuota: 0,
         sortOrder: last + 10,
         engines: [],
-        clients: { standalone: 0, mobile: 0, counter: 0 },
+        clients: { mobile: 0, counter: 0 },
         features: {}
       }
       this.visible = true
@@ -268,7 +267,7 @@ export default {
       this.form = Object.assign({}, row, {
         features: Object.assign({}, row.features || {}),
         engines: (row.engines || []).slice(),
-        clients: Object.assign({ standalone: 0, mobile: 0, counter: 0 }, row.clients || {})
+        clients: Object.assign({ mobile: 0, counter: 0 }, row.clients || {})
       })
       this.visible = true
     },

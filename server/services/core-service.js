@@ -172,7 +172,10 @@ class CoreService {
       expireTime: parent.expiresAt,
       port: number(parent.portLimit),
       userPorts: number(parent.portsInUse),
-      standaloneClient: catalog.packageAllowsStandalone(json(parent.packageClients, {})) ? 1 : 0,
+      // 独立应用对所有账号开放。套餐只决定翻译字符额度，不再决定能不能
+      // 下载/使用单应用客户端。旧客户端仍读取这个字段，所以保留为 1，
+      // 避免必须在同一天强制所有用户升级安装包。
+      standaloneClient: 1,
       // profile() 是登录响应的来源，也是 /user/dashboard 刷新权益的来源。
       // 两处口径必须一致：企业账号默认包含计数工单，否则页面刷新后又会
       // 被旧套餐值覆盖回 counterSuite=0。

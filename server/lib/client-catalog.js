@@ -107,11 +107,6 @@ function adminRelease(row) {
   }
 }
 
-function packageAllowsStandalone(clients) {
-  if (!clients || typeof clients !== 'object') return false
-  return clients.standalone === true || Number(clients.standalone) === 1
-}
-
 /**
  * 套餐是否包含原生计数工单。
  *
@@ -165,6 +160,5 @@ module.exports = {
   hasPublicUrl,
   publicRelease,
   adminRelease,
-  packageAllowsStandalone,
   packageAllowsCounter
 }

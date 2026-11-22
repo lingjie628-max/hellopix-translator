@@ -17,14 +17,6 @@ test('standalone catalog uses platforms.js ids and rejects custom pages', () => 
   assert.equal(catalog.groupLabel('standalone'), '独立应用')
 })
 
-test('package entitlement only opens standalone when clients.standalone is set', () => {
-  assert.equal(catalog.packageAllowsStandalone({ standalone: true, mobile: true }), true)
-  assert.equal(catalog.packageAllowsStandalone({ standalone: 1 }), true)
-  assert.equal(catalog.packageAllowsStandalone({ standalone: false, mobile: true }), false)
-  assert.equal(catalog.packageAllowsStandalone({}), false)
-  assert.equal(catalog.packageAllowsStandalone(null), false)
-})
-
 test('public catalog hides empty, unpublished and non-https download urls', async () => {
   const rows = [
     { id: 1, release_group: 'windows', title: 'Windows 客户端', os: 'Windows', arch: '64位', app: '', version: '1.0.0', url: 'https://cdn.example.com/win.exe', enabled: true },
@@ -74,7 +66,7 @@ test('main shell updates never pick standalone packages unless app is set', asyn
   assert.equal(standalone.url, 'https://cdn.example.com/zalo.dmg')
 })
 
-test('profile exposes standaloneClient from the current package', () => {
+test('profile exposes standaloneClient=1 for every package', () => {
   const core = new CoreService({ query() {} }, { get() {}, set() {} }, {})
   const allowed = core.profile({
     kind: 'main',
@@ -87,7 +79,7 @@ test('profile exposes standaloneClient from the current package', () => {
     parent: { id: 2, packageTitle: '试用', packageId: 2, packageClients: { standalone: false }, enterprise: false }
   })
   assert.equal(allowed.standaloneClient, 1)
-  assert.equal(denied.standaloneClient, 0)
+  assert.equal(denied.standaloneClient, 1, '独立应用不能因为套餐不同而被关闭')
 })
 
 test('saving a standalone release requires a platforms.js app id and https when enabled', async () => {

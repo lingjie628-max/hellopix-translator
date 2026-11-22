@@ -159,9 +159,6 @@ function showStandalonePicker(apps) {
 }
 
 function openStandaloneDownload() {
-  if (!current || Number(current.standaloneClient) !== 1) {
-    return showStandaloneNotice('当前套餐未包含独立应用版')
-  }
   const apps = standaloneApps()
   if (!apps.length) return showStandaloneNotice('独立应用尚未上架')
   if (apps.length === 1) return window.pix.openUrl(apps[0].url)
