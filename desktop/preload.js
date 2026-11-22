@@ -72,6 +72,11 @@ contextBridge.exposeInMainWorld('pix', {
     ipcRenderer.on('translate:bridgeDown', (_event, data) => cb(data))
   },
   customerReminders: () => ipcRenderer.invoke('customer:reminders'),
+  ticketList: (payload) => ipcRenderer.invoke('tickets:list', payload || {}),
+  ticketGet: (id) => ipcRenderer.invoke('tickets:get', id),
+  ticketCreate: (payload) => ipcRenderer.invoke('tickets:create', payload || {}),
+  ticketReply: (payload) => ipcRenderer.invoke('tickets:reply', payload || {}),
+  ticketUnread: () => ipcRenderer.invoke('tickets:unread'),
   saveTranslatePrefs: (payload) => ipcRenderer.invoke('translate:savePrefs', payload),
   setOverlay: (on) => ipcRenderer.invoke('app:overlay', on),
   onTranslateOpen: (cb) => {

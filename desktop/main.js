@@ -4282,6 +4282,14 @@ require('./src/ipc/auth').registerAuthIpc({
 })
 
 /**
+ * 用户自助工单。只给固定五个操作，不开放任意 API 转发。
+ */
+require('./src/ipc/tickets').registerTicketIpc({
+  reg: ipcReg,
+  actions: { api }
+})
+
+/**
  * 配置 / 线路 / 站点相关 IPC（实现见 src/ipc/config.js）。
  *
  * state 是实时代理：getter/setter 直连下面的模块级变量。

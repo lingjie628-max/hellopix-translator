@@ -45,6 +45,23 @@ window.pix = new Proxy({
   translateEngines: () => Promise.resolve({ engines: [] }),
   platforms: () => Promise.resolve({ rows: [] }),
   customerReminders: () => Promise.resolve({ rows: [] }),
+  ticketUnread: () => Promise.resolve({ unread: 1 }),
+  ticketList: () => Promise.resolve({ rows: [
+    { id: 102, subject: '充值已转账但余额没到', category: 'recharge', categoryLabel: '充值问题',
+      status: 'in_progress', statusLabel: '处理中', lastReplyAt: '2026-11-22T20:30:00Z' },
+    { id: 98, subject: 'Telegram 翻译没有显示', category: 'bug', categoryLabel: '功能故障',
+      status: 'resolved', statusLabel: '已解决', lastReplyAt: '2026-11-21T18:10:00Z' }
+  ] }),
+  ticketGet: () => Promise.resolve({
+    ticket: { id: 102, subject: '充值已转账但余额没到', category: 'recharge', categoryLabel: '充值问题',
+      status: 'in_progress', statusLabel: '处理中' },
+    messages: [
+      { id: 1, authorType: 'user', authorName: '测试账号', body: '已经转账 50U，订单号 #A102，余额还没到。',
+        createdAt: '2026-11-22T20:28:00Z' },
+      { id: 2, authorType: 'admin', authorName: '客服', body: '收到，正在核对链上交易，请稍等。',
+        createdAt: '2026-11-22T20:31:00Z' }
+    ]
+  }),
   onTabs: () => {}, onPlatforms: () => {}, onSession: () => {}, onKicked: () => {},
   onBridgeDown: () => {}, onContextCommand: () => {}, onProxySettings: () => {},
   onBackgroundRunning: () => {}, onTranslateOpen: () => {},
@@ -144,6 +161,21 @@ app.whenReady().then(async () => {
     }
   })()`)
   console.log('[probe] ' + JSON.stringify(probe))
+
+  const ticket = await win.webContents.executeJavaScript(`(async () => {
+    applyTabLayout('top')
+    ticketOpen()
+    await ticketLoadList()
+    await ticketOpenDetail(102)
+    return {
+      visible: !document.getElementById('ticketPanel').classList.contains('hidden'),
+      rows: document.querySelectorAll('#ticketList .ticket-item').length,
+      messages: document.querySelectorAll('#ticketDetail .ticket-message').length
+    }
+  })()`)
+  console.log('[ticket] ' + JSON.stringify(ticket))
+  await new Promise(r => setTimeout(r, 500))
+  await shoot(win, 'ticket')
 
   app.quit()
 }).catch(e => { console.log('[capture] fatal ' + e.stack); app.quit() })

@@ -101,6 +101,8 @@ const BASELINE_CHANNELS = [
   'device:peer',
   'lines:list', 'lines:ping', 'lines:pingAll', 'lines:select',
   'proxy:detect', 'shell:open', 'site:info',
+  // 用户自助工单：桌面端建单、列表、详情、回复与未读角标。
+  'tickets:create', 'tickets:get', 'tickets:list', 'tickets:reply', 'tickets:unread',
   'translate:bridgeStatus', 'translate:composerInsertText',
   'translate:composerSelectAllDelete', 'translate:engines', 'translate:guestPrefs',
   // 图片翻译：translate:image 走 ipcMain.handle（客页发起）。

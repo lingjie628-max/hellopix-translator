@@ -67,7 +67,7 @@ const { app, BrowserWindow } = require('electron')
 
 const EXPECTED_SCRIPTS = [
   'theme.js', 'dom.js', 'ui-kit.js', 'pure.js', 'proxy-panel.js', 'tab-layout.js',
-  'collision-update.js', 'trans-health.js', 'site-info.js', 'ops-menu.js', 'tabs.js',
+  'collision-update.js', 'trans-health.js', 'ticket-center.js', 'site-info.js', 'ops-menu.js', 'tabs.js',
   'theme-switch.js', 'lines.js', 'add-app.js', 'trans-settings.js', 'trans-bar.js', 'app.js'
 ]
 
