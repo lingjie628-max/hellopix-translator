@@ -47,3 +47,10 @@ test('计数工单 preload 把最小用户快照写入 sessionStorage', () => {
   assert.match(saved, /"username":"alice"/)
   assert.doesNotMatch(saved, /password|cookie|token/i)
 })
+
+test('恢复上次计数工单标签时同样复制 Cookie 并注入用户快照', () => {
+  const main = read('desktop/main.js')
+  const restore = main.slice(main.indexOf('function restoreOneApp'), main.indexOf('function restoreOpenApps'))
+  assert.match(restore, /prepareTicketSession/)
+  assert.match(restore, /ticketProfileSeed/)
+})

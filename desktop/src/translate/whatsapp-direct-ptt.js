@@ -351,6 +351,27 @@ function installWhatsAppDirectPtt (options) {
     }
   }
 
+  /**
+   * 只解析当前聊天模块，给客户身份桥接用。
+   *
+   * 语音发送需要 Media/Prep，而筛粉只需要 Chat。不能因为某个媒体模块
+   * 改名，就连客户身份也一起失效。
+   */
+  async function resolveChatIdentityModule () {
+    if (typeof window.requireLazy === 'function') {
+      const loaded = await Promise.all([
+        loadLazyModule('WAWebCollections'),
+        loadLazyModule('WAWebChatCollection')
+      ])
+      const chat = loaded[1] || loaded[0]
+      if (chat) return chat
+    }
+    return findModule(ns => (
+      (ns.Chat && typeof ns.Chat.getActive === 'function') ||
+      (ns.ChatCollection && typeof ns.ChatCollection.getActive === 'function')
+    ), ['ChatCollection', 'change:active'])
+  }
+
   async function resolveModules () {
     const meta = await resolveMetaModules()
     if (meta) return meta
@@ -660,7 +681,8 @@ function installWhatsAppDirectPtt (options) {
       installed: true,
       busy,
       status: lastStatus,
-      lastResult
+      lastResult,
+      peerBridged: String(document.documentElement.getAttribute('data-pix-wa-peer') || '')
     }
   }
   window.__pixDirectPttOpenPicker = openPicker
@@ -670,10 +692,54 @@ function installWhatsAppDirectPtt (options) {
   if (cfg.testMode) {
     window.__pixDirectPttSendForTest = file => runFile(file)
     window.__pixDirectPttLastResult = () => lastResult
+    window.__pixDirectPttIdentityRefresh = () => publishActiveChatIdentity()
+  }
+
+  let identityBusy = false
+  let identityModule = null
+  let lastPublishedPeer = ''
+  async function publishActiveChatIdentity () {
+    if (identityBusy) return
+    identityBusy = true
+    try {
+      if (!identityModule) identityModule = await resolveChatIdentityModule()
+      const jid = activeChatId(identityModule)
+      if (jid === lastPublishedPeer) return
+      lastPublishedPeer = jid
+      const root = document.documentElement
+      if (jid) root.setAttribute('data-pix-wa-peer', jid)
+      else root.removeAttribute('data-pix-wa-peer')
+    } catch (e) {
+      // WhatsApp 热更新后模块可能换代；下一轮重新发现，不影响其它功能。
+      identityModule = null
+    } finally {
+      identityBusy = false
+    }
   }
 
   ensureButton()
   setInterval(ensureButton, 1200)
+  // 延后首次身份读取：页面刚加载时 WhatsApp 的模块缓存还没稳定，而且不能让
+  // 身份功能抢在语音发送的失败关闭测试之前初始化内部模块。
+  setTimeout(() => publishActiveChatIdentity().catch(() => {}), 500)
+  setInterval(() => publishActiveChatIdentity().catch(() => {}), 500)
+  // 切换会话时头部会立刻变化。只观察头部，不观察消息区，避免每条消息都
+  // 触发内部模块查询；这样桥接 JID 的更新不会等到下个定时轮次。
+  try {
+    const main = document.querySelector('#main')
+    const header = main && main.querySelector('header')
+    if (header && typeof MutationObserver === 'function') {
+      let refreshQueued = false
+      new MutationObserver(() => {
+        if (refreshQueued) return
+        refreshQueued = true
+        setTimeout(() => {
+          refreshQueued = false
+          publishActiveChatIdentity().catch(() => {})
+        }, 50)
+      }).observe(header, { childList: true, subtree: true, attributes: true })
+    }
+  } catch (e) {}
 }
 
 /**

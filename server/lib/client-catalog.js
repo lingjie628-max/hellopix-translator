@@ -25,6 +25,19 @@ const STANDALONE_ONLY_APPS = Object.freeze([
   Object.freeze({ id: 'signal', name: 'Signal' })
 ])
 
+/**
+ * 真正具备“客户身份采集 → 新粉/重粉筛选”链路的平台。
+ *
+ * 平台出现在客户端里，不等于能被计数工单识别。只有采集层能稳定产出
+ * accountKey、peerKey、会话和入站消息证据的平台，才允许进入计数工单。
+ */
+const COUNTING_PLATFORMS = new Set([
+  'whatsapp-green',
+  'whatsapp-pro',
+  'whatsapp-biz',
+  'telegram-z'
+])
+
 const STANDALONE_APPS = Object.freeze(
   [
     ...platforms
@@ -49,6 +62,10 @@ function groupLabel(value) {
 
 function isStandaloneApp(appId) {
   return STANDALONE_APPS.some(item => item.id === String(appId || ''))
+}
+
+function supportsCounting(platformId) {
+  return COUNTING_PLATFORMS.has(String(platformId || '').trim().toLowerCase())
 }
 
 function hasPublicUrl(url) {
@@ -157,6 +174,7 @@ module.exports = {
   groupLabel,
   compareVersions,
   isStandaloneApp,
+  supportsCounting,
   hasPublicUrl,
   publicRelease,
   adminRelease,

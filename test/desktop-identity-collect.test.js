@@ -76,8 +76,9 @@ test('Telegram peer id 能正确解析', () => {
   const peer = loadCurrentPeer()
   assert.equal(peer('#123456789').peerKey, '123456789')
   assert.equal(peer('#123456789').kind, 'peer_id')
-  // 群组带前导负号：必须剥掉，否则同一个群在两次抓取里会得到两个身份
-  assert.equal(peer('#-1001234567890').peerKey, '1001234567890')
+  // Telegram 群/超级群/频道 ID 为负数。群没有单一客户身份，
+  // 绝不能剥掉负号当成新粉。
+  assert.equal(peer('#-1001234567890'), null)
   assert.equal(peer('#/123456789').peerKey, '123456789')
 })
 
@@ -86,6 +87,31 @@ test('用户名归一为带 @ 的小写形式', () => {
   assert.equal(peer('#@alice_01').peerKey, '@alice_01')
   assert.equal(peer('#alice_01').peerKey, '@alice_01', '不带 @ 时也要补上，保证两种写法归一')
   assert.equal(peer('#@alice_01').kind, 'username')
+})
+
+test('Telegram 公开群 #@username 靠成员数头部排除，私聊用户名不受影响', () => {
+  const srcs = PEER_FNS.map(name => {
+    const m = SRC.match(new RegExp('function ' + name + '\\(\\)\\s*\\{[\\s\\S]*?\\n  \\}'))
+    assert.ok(m, '找不到 ' + name)
+    return m[0]
+  })
+  const sandbox = {
+    location: { hash: '#@same_name' },
+    document: {
+      querySelector: selector => selector === '.ChatInfo'
+        ? { innerText: '1,234 members, 56 online' }
+        : null,
+      querySelectorAll: () => []
+    }
+  }
+  vm.createContext(sandbox)
+  vm.runInContext(SITE_SRC + '\n' + srcs.join('\n') + '\nthis.__f = currentPeer', sandbox)
+  assert.equal(sandbox.__f(), null, '公开群不能当成客户')
+
+  sandbox.document.querySelector = selector => selector === '.ChatInfo'
+    ? { innerText: 'last seen recently' }
+    : null
+  assert.equal(sandbox.__f().peerKey, '@same_name', '私聊用户名必须继续可用')
 })
 
 test('拿不到可信身份时**返回 null**，绝不猜', () => {
@@ -177,6 +203,36 @@ test('没有 #main（拿不到当前会话）时绝不猜客户身份', () => {
   vm.createContext(sandbox)
   vm.runInContext(SITE_SRC + '\n' + srcs.join('\n') + '\nthis.__f = whatsappPeer', sandbox)
   assert.equal(sandbox.__f(), null, '没有 #main 时必须返回 null，不得退回 document')
+})
+
+test('新版 WhatsApp 通过页面世界桥接的当前 JID 仍能识别客户，并排除群聊', () => {
+  const srcs = ['whatsappPeer', 'conversationScope'].map(name => {
+    const m = SRC.match(new RegExp('function ' + name + '\\(\\)\\s*\\{[\\s\\S]*?\\n  \\}'))
+    assert.ok(m, '找不到 ' + name)
+    return m[0]
+  })
+  const sandbox = {
+    document: {
+      documentElement: { getAttribute: name => name === 'data-pix-wa-peer' ? '447911123456@c.us' : '' },
+      querySelector: () => null,
+      querySelectorAll: () => []
+    }
+  }
+  vm.createContext(sandbox)
+  vm.runInContext(SITE_SRC + '\n' + srcs.join('\n') + '\nthis.__f = whatsappPeer', sandbox)
+  const peer = sandbox.__f()
+  assert.equal(peer.peerKey, '447911123456@c.us')
+  assert.equal(peer.phone, '+447911123456')
+
+  sandbox.document.documentElement.getAttribute = name =>
+    name === 'data-pix-wa-peer' ? '9988776655443322@lid' : ''
+  const lid = sandbox.__f()
+  assert.equal(lid.peerKey, '9988776655443322@lid')
+  assert.equal(lid.phone, '', '@lid 没有手机号，不能伪造跨平台号码')
+
+  sandbox.document.documentElement.getAttribute = name =>
+    name === 'data-pix-wa-peer' ? '120363012345678901@g.us' : ''
+  assert.equal(sandbox.__f(), null, '页面世界桥接的群 JID 也必须排除')
 })
 
 test('拿不到 peer 时不生成 body 之外的任何身份猜测', () => {

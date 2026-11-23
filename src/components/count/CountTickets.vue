@@ -284,6 +284,7 @@
           >
             <el-option v-for="p in platformOptions" :key="p.id" :label="p.name" :value="p.id"></el-option>
           </el-select>
+          <p class="count-form-tip">仅 WhatsApp 与 Telegram 支持自动筛粉；其它平台暂不进入计数工单。</p>
         </el-form-item>
         <el-form-item label="查重范围">
           <el-select
@@ -708,7 +709,8 @@ export default {
       return user.counterSuite === true || Number(user.counterSuite) === 1
     },
     platformOptions() {
-      return this.platforms.length ? this.platforms : [{ id: 'whatsapp-green', name: 'WhatsApp绿色版' }]
+      const supported = this.platforms.filter(item => item.countingSupported === true)
+      return supported.length ? supported : [{ id: 'whatsapp-green', name: 'WhatsApp绿色版' }]
     },
     availableAccountOptions() {
       return this.availableAccounts.filter(item => item.platform === this.accountForm.platform)

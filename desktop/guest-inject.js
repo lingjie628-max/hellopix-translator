@@ -2359,10 +2359,22 @@ function installVoiceConversionBridge () {
   function telegramPeer() {
     var hash = String(location.hash || '').replace(/^#\/?/, '').trim()
     // Telegram Web A：纯数字是 peer id（群组带前导 -），@ 开头是用户名
+    // 群/超级群/频道 ID 为负数，群里没有单一客户身份，不能进入筛粉账本。
+    if (/^-\d{4,}$/.test(hash)) return null
     if (/^-?\d{5,}$/.test(hash)) {
       return { peerKey: hash.replace(/^-/, ''), platformUid: hash, kind: 'peer_id' }
     }
     if (/^@?[A-Za-z0-9_]{4,64}$/.test(hash)) {
+      // 公开群/频道同样可能使用 #@username，没有负号可依赖。
+      // 头部成员/订阅者文案必须同时带数字，避免把昵称叫 Members 的私聊误判。
+      try {
+        var info = document && document.querySelector ? document.querySelector('.ChatInfo') : null
+        var infoText = String((info && (info.innerText || info.textContent)) || '').slice(0, 300)
+        if (/\d/.test(infoText) &&
+            /(members?|participants?|subscribers?|成员|订阅者)/i.test(infoText)) {
+          return null
+        }
+      } catch (e) {}
       return { peerKey: '@' + hash.replace(/^@/, ''), platformUid: hash, kind: 'username' }
     }
     return null
@@ -2383,6 +2395,27 @@ function installVoiceConversionBridge () {
    * 把它当客户会把整个群的人混成一个人。
    */
   function whatsappPeer() {
+    // 新版 WhatsApp 的 message data-id 只剩纯消息哈希，不再包含 JID。
+    // 页面世界脚本通过 WhatsApp 内部 ChatCollection 取当前会话，并写到
+    // 这个只读桥接属性；隔离世界通过 DOM 读取。拿不到再退回下面旧 DOM 路径。
+    try {
+      var root = document && document.documentElement
+      var bridged = String((root && root.getAttribute('data-pix-wa-peer')) || '').trim()
+      if (bridged) {
+        if (bridged.indexOf('@g.us') >= 0) return null
+        var bridgedMatch = /^(\d{5,20})@(c\.us|lid)$/.exec(bridged)
+        if (bridgedMatch) {
+          var isPhone = bridgedMatch[2] === 'c.us'
+          return {
+            peerKey: bridged,
+            platformUid: bridged,
+            phone: isPhone ? '+' + bridgedMatch[1] : '',
+            sourceMsgId: '',
+            kind: isPhone ? 'phone' : 'peer_id'
+          }
+        }
+      }
+    } catch (e) {}
     // **只看 #main（当前会话）**。老实现扫的是整个 document，而左侧会话列表
     // 的行同样带 [data-id]（@c.us）且排在 #main 之前，于是一进群/一切会话，
     // 取到的就是"左侧列表里某个私聊"——既是错误的历史基线身份（见 chatIdentity），

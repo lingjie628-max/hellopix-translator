@@ -195,6 +195,23 @@ test('★ 当前 Meta requireLazy 版本必须走 prep.sendToChat 原生 API', a
   win.close()
 })
 
+test('★ WhatsApp 页面世界必须桥接当前 JID，供新版筛粉使用', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'desktop', 'src', 'translate', 'whatsapp-direct-ptt.js'), 'utf8')
+  assert.match(src, /data-pix-wa-peer/)
+  assert.match(src, /publishActiveChatIdentity/)
+  assert.match(src, /activeChatId/)
+})
+
+test('★ 页面世界身份桥能真实写出当前 JID', async () => {
+  const { win } = makeDom()
+  try {
+    await win.__pixDirectPttIdentityRefresh()
+    assert.equal(win.document.documentElement.getAttribute('data-pix-wa-peer'), CHAT.id._serialized)
+  } finally {
+    win.close()
+  }
+})
+
 test('★ MP3/WAV 必须先解码、分块编码为 OGG/Opus，再按 PTT 发送', async () => {
   const { win, calls } = makeDom()
   try {

@@ -50,6 +50,17 @@ function normalizeDedupScope(value) {
   return scope
 }
 
+function assertCountingPlatform(platform) {
+  if (!catalog.supportsCounting(platform)) {
+    throw new ApiError(
+      400,
+      '当前应用还没有接入自动筛粉，请选择 WhatsApp 或 Telegram',
+      'COUNT_PLATFORM_UNSUPPORTED'
+    )
+  }
+  return platform
+}
+
 function normalizeLinkedTicketIds(value) {
   if (value == null || value === '') return []
   const raw = Array.isArray(value) ? value : String(value).split(',')
@@ -166,7 +177,7 @@ function shareState(row) {
 
 function normalizeGroup(data) {
   const name = cleanText(data.name, 80)
-  const platform = cleanText(data.platform, 32).toLowerCase()
+  const platform = assertCountingPlatform(cleanText(data.platform, 32).toLowerCase())
   if (!name) throw new ApiError(400, '请填写分组名称', 'COUNT_GROUP_NAME_REQUIRED')
   if (!platform) throw new ApiError(400, '请选择分组应用', 'COUNT_PLATFORM_REQUIRED')
   return {
@@ -179,7 +190,7 @@ function normalizeGroup(data) {
 function normalizeTicket(data) {
   const title = cleanText(data.title, 120)
   if (!title) throw new ApiError(400, '请填写计数工单名称', 'COUNT_TITLE_REQUIRED')
-  const platform = cleanText(data.platform, 32).toLowerCase()
+  const platform = assertCountingPlatform(cleanText(data.platform, 32).toLowerCase())
   if (!platform) throw new ApiError(400, '请选择计数应用', 'COUNT_PLATFORM_REQUIRED')
   const status = cleanText(data.status || 'active', 16)
   if (!TICKET_STATUSES.has(status)) throw new ApiError(400, '工单状态不合法', 'COUNT_STATUS_BAD')
@@ -203,7 +214,7 @@ function normalizeTicket(data) {
 }
 
 function normalizeAccount(data) {
-  const platform = cleanText(data.platform, 32).toLowerCase()
+  const platform = assertCountingPlatform(cleanText(data.platform, 32).toLowerCase())
   const accountKey = cleanText(data.accountKey != null ? data.accountKey : data.account_key, 200)
   if (!platform) throw new ApiError(400, '请选择聊天平台', 'COUNT_PLATFORM_REQUIRED')
   if (!accountKey) throw new ApiError(400, '请填写聊天账号', 'COUNT_ACCOUNT_REQUIRED')
@@ -718,13 +729,13 @@ class CountTicketService {
     if (ticketId && (!Number.isSafeInteger(ticketId) || ticketId <= 0)) {
       throw new ApiError(400, '计数工单号不合法', 'COUNT_TICKET_BAD_ID')
     }
-    const platform = cleanText(data.platform, 32).toLowerCase()
+    const platform = assertCountingPlatform(cleanText(data.platform, 32).toLowerCase())
     if (!platform) throw new ApiError(400, '请选择计数应用', 'COUNT_PLATFORM_REQUIRED')
     return this.repo.dedupTicketOptions(userId, ticketId, platform)
   }
 
   async groups(userId, data) {
-    const platform = cleanText(data.platform, 32).toLowerCase()
+    const platform = assertCountingPlatform(cleanText(data.platform, 32).toLowerCase())
     return this.repo.listGroups(userId, platform)
   }
 
@@ -767,13 +778,13 @@ class CountTicketService {
   }
 
   async baseStats(userId, data) {
-    const platform = cleanText(data.platform, 32).toLowerCase()
+    const platform = assertCountingPlatform(cleanText(data.platform, 32).toLowerCase())
     if (!platform) throw new ApiError(400, '请选择底库应用', 'COUNT_PLATFORM_REQUIRED')
     return this.repo.baseStats(userId, platform)
   }
 
   async baseEntries(userId, data) {
-    const platform = cleanText(data.platform, 32).toLowerCase()
+    const platform = assertCountingPlatform(cleanText(data.platform, 32).toLowerCase())
     if (!platform) throw new ApiError(400, '请选择底库应用', 'COUNT_PLATFORM_REQUIRED')
     const limit = Math.min(Math.max(Number(data.rows || data.size) || 30, 1), 100)
     const page = Math.min(Math.max(Number(data.page) || 1, 1), 1_000_000)
@@ -787,7 +798,7 @@ class CountTicketService {
   }
 
   async importBase(userId, data) {
-    const platform = cleanText(data.platform, 32).toLowerCase()
+    const platform = assertCountingPlatform(cleanText(data.platform, 32).toLowerCase())
     if (!platform) throw new ApiError(400, '请选择底库应用', 'COUNT_PLATFORM_REQUIRED')
     const { entries, totalLines } = normalizeBaseLines(data.text)
     if (!entries.length) {
@@ -820,7 +831,7 @@ class CountTicketService {
   }
 
   async clearBase(userId, data) {
-    const platform = cleanText(data.platform, 32).toLowerCase()
+    const platform = assertCountingPlatform(cleanText(data.platform, 32).toLowerCase())
     if (!platform) throw new ApiError(400, '请选择底库应用', 'COUNT_PLATFORM_REQUIRED')
     return { removed: await this.repo.clearBase(userId, platform) }
   }

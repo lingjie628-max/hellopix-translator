@@ -957,7 +957,12 @@ function restoreOneApp(row) {
   const homeUrl = safePlatformHomeUrl(item, settings)
   if (!homeUrl) return
   const view = createWebView(partition, settings, item, homeUrl,
-    { platform: item.id, account: accountSlug(), id: row.id || '' })
+    {
+      platform: item.id,
+      account: accountSlug(),
+      id: row.id || '',
+      ticketProfile: item.id === 'tickets' ? ticketProfileSeed() : null
+    })
   const tab = {
     id: row.id || (item.id + '-' + nextTab++),
     platform: item.id,
@@ -981,7 +986,21 @@ function restoreOneApp(row) {
   usedCount[item.id] = Math.max(Number(usedCount[item.id] || 0), index)
   const n = Number(String(tab.id).split('-').pop())
   if (n) nextTab = Math.max(nextTab, n + 1)
-  startTabLoad(tab)
+  const loadRestored = () => {
+    if (!tabs.includes(tab) || !tab.view || tab.view.webContents.isDestroyed()) return
+    startTabLoad(tab)
+  }
+  if (item.id === 'tickets') {
+    // 恢复路径和新开路径必须用同一份登录态初始化。少了这一步，Cookie 虽然
+    // 在分区里，页面仍会因 sessionStorage.user 缺失跳到登录页。
+    Promise.resolve(prepareTicketSession(item, partition))
+      .catch(error => {
+        if (clientLog) clientLog.warn('session', '恢复计数工单登录态失败：' + ((error && error.message) || error))
+      })
+      .finally(loadRestored)
+  } else {
+    loadRestored()
+  }
 }
 
 function restoreOpenApps(username) {

@@ -1836,7 +1836,11 @@ class CoreService {
   }
 
   platforms() {
-    return platforms.filter(item => item.listed !== false)
+    return platforms
+      .filter(item => item.listed !== false)
+      .map(item => Object.assign({}, item, {
+        countingSupported: catalog.supportsCounting(item.id)
+      }))
   }
 
   /**
