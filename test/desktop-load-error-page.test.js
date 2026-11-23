@@ -38,7 +38,9 @@ const fs = require('node:fs')
 const {
   describeLoadError,
   buildLoadErrorPage,
-  shouldShowErrorPage
+  shouldShowErrorPage,
+  shouldPaintLoadError,
+  clearLoadErrorForNavigation
 } = require(path.join(__dirname, '..', 'desktop', 'src/stability/load-error-page.js'))
 
 const root = path.join(__dirname, '..')
@@ -51,6 +53,7 @@ test('★ 常见网络错误码要翻成人能看懂的话', () => {
     [-106, /没联网|没有联网/],
     [-105, /解析|打不开/],
     [-102, /连不上|拒绝/],
+    [-100, /关闭|中断/],
     [-118, /超时/],
     [-109, /不可达/],
     [-130, /代理/],
@@ -153,6 +156,29 @@ test('真实失败要显示错误页', () => {
   }
 })
 
+test('★ 首条失败已排队错误页时，第二条并发回调不能再次导航', () => {
+  const tab = { loadErrorUrl: 'data:text/html,error' }
+  assert.equal(
+    shouldPaintLoadError(tab, -100),
+    false,
+    'getURL() 尚未提交时也必须靠 loadErrorUrl 挡住第二路，否则会 ERR_ABORTED'
+  )
+})
+
+test('★ 从错误页重试离开后必须解锁，下一次失败还能重画', () => {
+  const tab = { loadErrorUrl: 'data:text/html,error' }
+  assert.equal(clearLoadErrorForNavigation(tab, 'https://web.whatsapp.com/'), true)
+  assert.equal(tab.loadErrorUrl, '')
+  assert.equal(shouldPaintLoadError(tab, -100), true,
+    '重试失败时 getURL 可能仍指向旧错误页，但导航已离开，必须允许重画')
+})
+
+test('错误页自己的 data: 导航不能清掉去重锁', () => {
+  const tab = { loadErrorUrl: 'data:text/html,error' }
+  assert.equal(clearLoadErrorForNavigation(tab, 'data:text/html,error'), false)
+  assert.equal(tab.loadErrorUrl, 'data:text/html,error')
+})
+
 // ---------------------------------------------------------------- main.js 接线
 
 test('★ startTabLoad 必须接住 loadURL 的失败', () => {
@@ -176,13 +202,15 @@ test('paintLoadError 必须防递归（错误页自己失败时不能再画错�
   const idx = MAIN.indexOf('function paintLoadError(')
   assert.ok(idx > 0)
   const block = MAIN.slice(idx, idx + 1600)
-  assert.match(block, /data:text\/html/, '已在错误页上就直接返回，否则会无限重画')
+  assert.match(block, /shouldPaintLoadError\(tab, code\)/,
+    '错误页自己失败时必须由统一判定挡住，否则会无限重画')
 })
 
 test('paintLoadError 必须去重（promise 与事件会同时到达）', () => {
   const idx = MAIN.indexOf('function paintLoadError(')
   const block = MAIN.slice(idx, idx + 1600)
-  assert.match(block, /tab\.loadErrorUrl|getURL\(\)/, '两条通道同时到达时只能画一次')
+  assert.match(block, /shouldPaintLoadError\(tab, code\)/,
+    '两条通道同时到达时必须在 getURL 提交前用 loadErrorUrl 合并')
 })
 
 test('加载成功要清掉错误页标记，否则下次失败不再提示', () => {

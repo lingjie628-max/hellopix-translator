@@ -2990,23 +2990,19 @@ function startTabLoad(tab) {
  * 一次失败会**同时**从两个地方到达：`loadURL()` 的 promise reject，
  * 以及 `did-fail-load` 事件。两边都画就会连续导航两次 —— 表现为
  * 错误页一闪、甚至又触发一次失败，形成抖动。
- * 所以用 `tab.loadErrorUrl` 记住"当前已经画的是哪个错误页"，重复的直接跳过。
+ * 所以用 `tab.loadErrorUrl` 同时表示“错误页已排队或已显示”，重复的直接跳过。
  *
  * ## 必须防止"错误页自己也失败 → 无限递归"
  *
- * 错误页是 `data:` URL，正常不会再失败。但如果它真的失败了，
- * 我们不能再去画错误页（那会无限循环）。判据是 `webContents.getURL()`
- * 已经是个 data: URL 时就直接放弃，只留日志。
+ * 错误页是 `data:` URL，正常不会再失败。即使它真的失败，锁仍在，
+ * 同一轮重复回调不会继续画；直到真实页面导航开始才由 web-view 解锁。
  */
 function paintLoadError(tab, code, desc) {
   if (!tab || !tab.view || !tab.view.webContents || tab.view.webContents.isDestroyed()) return
-  // ERR_ABORTED 不是失败（被新导航取代 / 用户主动停止）——与既有实现同一口径。
-  if (!loadErrorPage.shouldShowErrorPage(code)) return
   const wc = tab.view.webContents
-  // 已经在错误页上就不要再画（防递归）。
-  let current = ''
-  try { current = String(wc.getURL() || '') } catch (e) {}
-  if (current.indexOf('data:text/html') === 0) return
+  // ERR_ABORTED 不是失败；loadErrorUrl 还必须挡住“错误页正在排队、
+  // getURL() 尚未提交”时的第二条失败回调，避免自己取消自己的错误页。
+  if (!loadErrorPage.shouldPaintLoadError(tab, code)) return
 
   const page = loadErrorPage.buildLoadErrorPage({
     code: code,
@@ -3834,6 +3830,7 @@ const webViewFactory = require('./src/window/web-view').createWebViewFactory({
     isAllowedPlatformUrl,
     pushPrefsToGuest,
     paintLoadError,
+    clearLoadErrorForNavigation: loadErrorPage.clearLoadErrorForNavigation,
     installEditSupport,
     applyWebRtcGuard: require('./src/proxy/webrtc-guard').applyWebRtcGuard,
     logError: (channel, msg) => { if (clientLog) clientLog.error(channel, msg) },

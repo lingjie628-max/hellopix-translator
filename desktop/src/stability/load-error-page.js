@@ -60,6 +60,8 @@ function describeLoadError(code, desc) {
       return { title: '打不开该网站', hint: '域名解析失败，通常是网络或 DNS 问题。请检查网络后重试；如果开了代理，请确认代理可用。' }
     case -102: // ERR_CONNECTION_REFUSED
       return { title: '连不上该网站', hint: '对方拒绝了连接。如果这台应用配了代理，请检查代理设置是否正确。' }
+    case -100: // ERR_CONNECTION_CLOSED
+      return { title: '连接被提前关闭', hint: '页面还没加载完，连接就被中断了。请稍后重试；如果反复出现，请更换代理线路或检查网络。' }
     case -101: // ERR_CONNECTION_RESET
       return { title: '连接被中断', hint: '网络连接被中途切断，通常是网络不稳定或代理故障。请稍后重试。' }
     case -118: // ERR_CONNECTION_TIMED_OUT
@@ -173,4 +175,35 @@ function shouldShowErrorPage(code) {
   return Number(code) !== -3
 }
 
-module.exports = { describeLoadError, buildLoadErrorPage, shouldShowErrorPage }
+/**
+ * `loadURL()` 的 reject 与 `did-fail-load` 会几乎同时到达。第一次调用会开始
+ * 导航到 data: 错误页，但此时 `webContents.getURL()` 往往还是原目标地址；
+ * 如果第二次只凭 getURL() 判断，就会再发起一次错误页导航，把第一次打成
+ * ERR_ABORTED。
+ *
+ * 因此 `tab.loadErrorUrl` 必须作为“已排队/已显示”的同步锁，在调用
+ * `loadURL(errorPage)` 之前写入，并由真实导航或加载成功负责清除。
+ */
+function shouldPaintLoadError(tab, code) {
+  if (!shouldShowErrorPage(code)) return false
+  return !(tab && tab.loadErrorUrl)
+}
+
+/**
+ * 用户从错误页点“重新加载”时，会从 data: 页面导航回真实目标。
+ * 在主框架导航开始、且目标不是错误页本身时清掉锁，下一次失败才能重新画。
+ */
+function clearLoadErrorForNavigation(tab, url) {
+  if (!tab || String(url || '').indexOf('data:text/html') === 0) return false
+  if (!tab.loadErrorUrl) return false
+  tab.loadErrorUrl = ''
+  return true
+}
+
+module.exports = {
+  describeLoadError,
+  buildLoadErrorPage,
+  shouldShowErrorPage,
+  shouldPaintLoadError,
+  clearLoadErrorForNavigation
+}

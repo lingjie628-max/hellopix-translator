@@ -49,6 +49,11 @@ function makeHarness (opts) {
       isAllowedPlatformUrl: () => o.allowNav !== false,
       pushPrefsToGuest: () => { logged.info.push('pushPrefs') },
       paintLoadError: (tab, code) => { logged.error.push(['paint', tab && tab.id, code]) },
+      clearLoadErrorForNavigation: (tab, url) => {
+        if (String(url || '').indexOf('data:text/html') === 0) return false
+        tab.loadErrorUrl = ''
+        return true
+      },
       installEditSupport: () => { logged.info.push('editSupport') },
       logError: (ch, msg) => { logged.error.push([ch, msg]) },
       logGuestTrace: msg => { logged.info.push(msg) },
@@ -122,6 +127,25 @@ test('正常页面加载完成时清掉 loadErrorUrl', () => {
   tab.view = view
   view.webContents.emit('did-finish-load')
   assert.equal(tab.loadErrorUrl, '', '成功后必须清，否则下次失败不再提示')
+})
+
+test('★ 从错误页重试开始真实导航时清掉 loadErrorUrl', () => {
+  const tab = { id: 't1', loadErrorUrl: 'data:text/html,error' }
+  const h = makeHarness({ tabs: [tab], currentUrl: 'data:text/html,error' })
+  const view = h.factory.createWebView('p', {}, {}, '', {})
+  tab.view = view
+  view.webContents.emit('did-start-navigation', {}, 'https://web.whatsapp.com/', false, true)
+  assert.equal(tab.loadErrorUrl, '', '不清理会让重试失败后卡在正在重新加载')
+})
+
+test('错误页自身或 iframe 导航不能清掉主页面去重锁', () => {
+  const tab = { id: 't1', loadErrorUrl: 'data:text/html,error' }
+  const h = makeHarness({ tabs: [tab], currentUrl: 'data:text/html,error' })
+  const view = h.factory.createWebView('p', {}, {}, '', {})
+  tab.view = view
+  view.webContents.emit('did-start-navigation', {}, 'data:text/html,error', false, true)
+  view.webContents.emit('did-start-navigation', {}, 'https://web.whatsapp.com/frame', false, false)
+  assert.equal(tab.loadErrorUrl, 'data:text/html,error')
 })
 
 test('★ 计数工单使用专用 preload，并带上最小用户快照', () => {

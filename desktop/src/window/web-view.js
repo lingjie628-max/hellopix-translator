@@ -145,7 +145,7 @@ function createWebViewFactory (deps) {
     //
     // 这是与 loadURL().catch 并行的第二条通道 —— 有些失败只走事件不走 promise
     // （例如页面已经在加载后中转失败）。两者都调 paintLoadError，
-    // 由那里的 `tab.loadErrorUrl` / `getURL()` 去重，不会重复画。
+    // 由那里的 `tab.loadErrorUrl` 同步锁去重，不会重复画。
     //
     // 注意 `isMainFrame`：子框架（iframe）失败不该顶掉整个页面 ——
     // WhatsApp Web 里就有若干第三方 iframe，它们失败是常态。
@@ -154,6 +154,19 @@ function createWebViewFactory (deps) {
       const tab = (state.tabs || []).find(t => t.view === view)
       if (!tab) return
       libs.paintLoadError(tab, code, desc)
+    })
+
+    // 从错误页点“重新加载”离开 data: 页面时，必须清掉去重锁；
+    // 否则再次失败会被误判成“错误页已经显示”，按钮会永远停在正在重新加载。
+    view.webContents.on('did-start-navigation', (_e, url, _isInPlace, isMainFrame) => {
+      if (!isMainFrame) return
+      const tab = (state.tabs || []).find(t => t.view === view)
+      if (!tab) return
+      if (typeof libs.clearLoadErrorForNavigation === 'function') {
+        libs.clearLoadErrorForNavigation(tab, url)
+      } else if (String(url || '').indexOf('data:text/html') !== 0) {
+        tab.loadErrorUrl = ''
+      }
     })
 
     // 加载成功 → 清掉错误页痕迹，让下一次失败还能正常提示。
