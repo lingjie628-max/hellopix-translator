@@ -673,3 +673,33 @@ curl -fsS http://127.0.0.1:3000/ready
   - 全量：`2866 tests / 2781 pass / 0 fail / 85 known skips`。
 - 详细改动、验收与回滚：
   `docs/计数工单目标设置退役-发布与回滚.md`
+
+## 2026-11-23 Hello Pix 1.3.16 桌面发布
+
+- 发布提交：`469a3b4 fix(desktop): use standard Chrome user agent`
+- 上线时间：`2026-11-23 23:00 CST` 左右
+- 修复错误页重复导航、`ERR_ABORTED` 竞态和重试后无法重新显示。
+- 新增 `ERR_CONNECTION_CLOSED (-100)` 中文提示。
+- User-Agent 改为 Electron 45 实际 Chromium 版本的标准 Chrome UA。
+- 生产记录：#190 Windows x64、#191 macOS x64、#192 macOS arm64。
+- 1.3.15 的 #187/#188/#189 已停用并保留安装包用于回滚。
+- 官网 `downloads.client_url` 与公告已切到 1.3.16。
+- GitHub Release：
+  `https://github.com/lingjie628-max/hellopix-translator/releases/tag/v1.3.16`
+- 安装包 SHA256：
+  - arm64 DMG：
+    `72b65e7cebe9d8064cc5f527f748178180573c41b1053f0768c4c7fe3ce48031`
+  - x64 DMG：
+    `4cbb687b5032ef4eb4aaab4c9c52371c59892f4d68eeddc47e794ee08e9561d3`
+  - Windows 安装版：
+    `462393fd68b5b1ea968cafea2d7cb56b85664da05e73be8f7df3dd8d02051e4e`
+- 验收：
+  - 全量：`2781 pass / 0 fail / 85 known skips`。
+  - 两架构 macOS 签名/entitlement 与两个 DMG 完整性通过。
+  - 打包版连续运行 >60 秒。
+  - 真机 WhatsApp 页面正常进入扫码登录，`unsupported=false`。
+  - 三份生产更新清单客户端公钥验签通过。
+- 发布前快照：
+  `/root/hello-pix-release-1.3.16-20261123-220219`
+- 详细回滚：
+  `docs/1.3.16-发布与回滚.md`
