@@ -42,6 +42,14 @@ axios.interceptors.request.use(config => {
  * 会话被偷的场景下，攻击者拿到 cookie 也没用 —— 他没有密码。
  */
 let reauthToken = ''
+/**
+ * 同一时间只保留一个二次认证弹窗。
+ *
+ * 用户连续点保存时，每个 428 都会进拦截器。Element UI 的 MessageBox 是单例，
+ * 同时弹多个会把前一个顶掉/关掉，现场表现就是“点保存没反应”，而服务端日志
+ * 能连续看到一串 428。并发请求共享同一次密码输入，输完后各自带 token 重试。
+ */
+let reauthPrompt = null
 
 /**
  * 管理端需要二次认证时弹的密码框（Promise 化）。
@@ -52,21 +60,29 @@ let reauthToken = ''
  * 这里用 Element UI 原生 prompt，密码输入类型由组件处理，不需要拼 HTML。
  */
 async function askReauthPassword () {
+  if (reauthPrompt) return reauthPrompt
+  reauthPrompt = (async () => {
+    try {
+      const { value } = await MessageBox.prompt(
+        '保存商户套餐、账号或资金设置属于高危操作。请输入当前管理员密码确认是本人操作。',
+        '需要重新验证身份',
+        {
+          confirmButtonText: '确认并保存',
+          cancelButtonText: '取消',
+          inputType: 'password',
+          inputPlaceholder: '当前管理员登录密码',
+          inputValidator: input => String(input || '').trim() !== '' || '请输入当前管理员密码'
+        }
+      )
+      return String(value || '').trim()
+    } catch (error) {
+      return ''
+    }
+  })()
   try {
-    const { value } = await MessageBox.prompt(
-      '该操作属于高危操作，请输入当前管理员密码确认是你本人。',
-      '需要重新验证身份',
-      {
-        confirmButtonText: '确认',
-        cancelButtonText: '取消',
-        inputType: 'password',
-        inputPlaceholder: '当前管理员密码',
-        inputValidator: input => String(input || '').trim() !== '' || '请输入当前管理员密码'
-      }
-    )
-    return String(value || '').trim()
-  } catch (error) {
-    return ''
+    return await reauthPrompt
+  } finally {
+    reauthPrompt = null
   }
 }
 

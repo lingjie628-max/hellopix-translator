@@ -148,7 +148,7 @@
       </el-form>
       <span slot="footer">
         <el-button @click="visible=false">取消</el-button>
-        <el-button type="primary" @click="save">保存</el-button>
+        <el-button type="primary" :loading="saving" @click="save">保存</el-button>
       </span>
     </el-dialog>
 
@@ -256,6 +256,7 @@ export default {
       rowsPerPage: 10,
       total: 0,
       visible: false,
+      saving: false,
       packs: [],
       trialChars: 10000,
       form: {},
@@ -461,6 +462,7 @@ export default {
       })
     },
     save() {
+      if (this.saving) return
       // 编辑时**绝不能**回传 charBalance。
       // 服务端 `/admin/users/save` 有一条守卫：请求带 charBalance 就 400
       // （USE_CHARACTER_GRANT），因为余额只能经 char_ledger 变更。
@@ -468,12 +470,15 @@ export default {
       // 于是「编辑商户」必然失败，表现就是"能建号、改不了套餐"。
       const payload = Object.assign({}, this.form)
       if (payload.id) delete payload.charBalance
+      this.saving = true
       this.postRequest('/admin/users/save', payload).then(resp => {
         this.$message({ type: resp.data.success, message: resp.data.msg })
         if (resp.data.success !== 'error') {
           this.visible = false
           this.load()
         }
+      }).catch(() => {}).finally(() => {
+        this.saving = false
       })
     },
     openReset(row) {
