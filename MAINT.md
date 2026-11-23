@@ -11,6 +11,7 @@
   - Desktop：`desktop/stability-boot.js` → `desktop/main.js`
 - 测试：
   - `node scripts/run-tests.js`
+  - 2026-11-23 代客开户/工单软删除基线：2941 tests / 2876 pass / 0 fail / 65 skip
   - 2026-11-19 1.3.13 修复基线：2879 tests / 2814 pass / 0 fail / 65 skip
   - 65 skip = 已删除 Telegram 产品线的可见 quarantine；数据库集成测试实际执行
   - 发布前仍应执行 `./scripts/test-env.sh up`，让 16 个数据库测试实际运行
@@ -673,6 +674,33 @@ curl -fsS http://127.0.0.1:3000/ready
   - 全量：`2866 tests / 2781 pass / 0 fail / 85 known skips`。
 - 详细改动、验收与回滚：
   `docs/计数工单目标设置退役-发布与回滚.md`
+
+## 2026-11-24 代客开户与计数工单删除上线
+
+- 上线时间：`2026-11-24 05:00:49 CST`（主人本地时间为 2026-11-23）
+- 超管“新建商户”改为“代客开户”，用户无需自行注册。
+- 开户前强制加载套餐，并校验账号、套餐和 10 位字母+数字密码。
+- 编辑商户可继续由超管修改套餐、到期时间、子账号额度和基础资料。
+- 连续 `428` 只显示一个管理员密码确认框，保存按钮防连点。
+- 计数工单新增软删除：列表、详情、自动计粉和分享立即失效，历史进粉保留，
+  已删除工单不再参与后续查重。
+- 迁移：`061_count_ticket_soft_delete`
+- 前端：`dist/js/index.ddcc0ee2.js`
+  - SHA-256：
+    `6eac8ae0b916ef0ba093622f6fc261e35efe11ed3156ba84c23d378b6da70423`
+- 验证：
+  - 全量：`2941 tests / 2876 pass / 0 fail / 65 known skips`
+  - 真实 PostgreSQL 计数测试 `13/13`。
+  - 迁移完成 `up -> down -> up`。
+  - 公网 `/ready` 连续 6 次 200；两个域名首页 200。
+  - 发布前后商户、工单、进粉、账号和超管条数不变。
+  - 切换瞬间同客户端两条请求出现 502，同秒自动重试成 200，之后无新增 5xx。
+- 发布前快照：
+  `/root/hello-pix-release-admin-count-delete-20261124-050007`
+- 旧前端回滚目录：
+  `/opt/hello-pix/dist.pre-admin-count-delete-20261124-050048`
+- 详细回滚：
+  `docs/2026-11-24-代客开户与工单删除-发布与回滚.md`
 
 ## 2026-11-23 Hello Pix 1.3.17 桌面发布
 
