@@ -644,3 +644,32 @@ curl -fsS http://127.0.0.1:3000/ready
   - 死引用/未使用 import：`0/0`。
 - 发布后由超管在页面选择生产商户并生成 Token；Token 不进入仓库、Markdown
   或聊天记录，保存到 Signal 主进程安全存储。
+
+## 2026-11-23 计数工单目标设置退役上线
+
+- 发布提交：`87bf530 feat(count-tickets): retire target settings`
+- 上线时间：`2026-11-23 21:34 CST`
+- 商户计数工单删除“单日 / 总目标”列表列和编辑字段。
+- 前端不再提交目标参数；服务端忽略旧参数；创建/编辑/列表 SQL 不再读写
+  `day_target` / `total_target`。
+- 数据库旧列保留兼容，历史值不清空，后续编辑不再更新；无数据库迁移。
+- 发布前快照：
+  `/root/hello-pix-release-retire-count-targets-20261123-213330`
+  - 源码归档 SHA-256：
+    `c23f8b71b26e79ef97f2292203a0d06f5a8c05b25587c3bc1d7fc51ca3f19008`
+  - PostgreSQL dump SHA-256：
+    `53a242c4399c026fe9e272f03ddbdf6d67436daa4a42963478571126d6a3bd0f`
+- 线上 Web bundle：`dist/js/index.de3c1bfc.js`
+  - SHA-256：
+    `4cbadab2270684031d8b378fbfaf27eae7a21e1bfac49199d3a3dbe9b25287de`
+- 验收：
+  - `hello-pix.service` active，`NRestarts=0`，`failed=0`。
+  - `/ready` 连续 6 次 200，PostgreSQL/Redis 均 true。
+  - 公网首页与超管域名首页 200。
+  - 公网 bundle 与服务端哈希一致。
+  - 未登录 `/apis/count-tickets` 返回 401。
+  - 线上 dist 与计数 SQL 的目标字段命中均为 0。
+  - 发布后近 10 分钟错误日志 0。
+  - 全量：`2866 tests / 2781 pass / 0 fail / 85 known skips`。
+- 详细改动、验收与回滚：
+  `docs/计数工单目标设置退役-发布与回滚.md`
