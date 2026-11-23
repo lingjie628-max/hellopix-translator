@@ -19,12 +19,6 @@ function cleanText(value, max) {
   return String(value == null ? '' : value).trim().slice(0, max)
 }
 
-function target(value, max) {
-  const number = Math.floor(Number(value))
-  if (!Number.isFinite(number) || number < 0) return 0
-  return Math.min(number, max)
-}
-
 function validTimezone(value) {
   const timezone = cleanText(value || 'Asia/Shanghai', 64)
   try {
@@ -198,8 +192,6 @@ function normalizeTicket(data) {
     title,
     platform,
     status,
-    dayTarget: target(data.dayTarget != null ? data.dayTarget : data.day_target, 1_000_000),
-    totalTarget: target(data.totalTarget != null ? data.totalTarget : data.total_target, 1_000_000_000),
     timezone: validTimezone(data.timezone),
     zeroTime: validZeroTime(data.zeroTime != null ? data.zeroTime : data.zero_time),
     dedupScope: normalizeDedupScope(

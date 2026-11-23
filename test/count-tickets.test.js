@@ -27,7 +27,7 @@ const { publicUser } = require('../server/routes/context')
 
 const databaseUrl = process.env.PIX_TEST_DATABASE_URL
 
-test('计数工单参数：时区、置零时间和目标值 fail-safe', () => {
+test('计数工单参数：时区、置零时间；目标设置已退役', () => {
   assert.equal(validTimezone('Asia/Shanghai'), 'Asia/Shanghai')
   assert.throws(() => validTimezone('Mars/Olympus'), error => error.code === 'COUNT_TIMEZONE_BAD')
   assert.equal(validZeroTime('04:30'), '04:30:00')
@@ -44,8 +44,8 @@ test('计数工单参数：时区、置零时间和目标值 fail-safe', () => {
   })
   assert.equal(normalized.title, 'WhatsApp 进粉')
   assert.equal(normalized.platform, 'whatsapp-green')
-  assert.equal(normalized.dayTarget, 12)
-  assert.equal(normalized.totalTarget, 0, '非法目标不能被静默保存成负数')
+  assert.equal(Object.hasOwn(normalized, 'dayTarget'), false)
+  assert.equal(Object.hasOwn(normalized, 'totalTarget'), false)
   assert.equal(normalized.zeroTime, '04:00:00')
 })
 
@@ -343,8 +343,6 @@ test('原生计数：会话去重、跨账号重粉、跨商户识别与工单�
   const ticketA = await service.saveTicket(merchantA.id, {
     title: 'WhatsApp A 组',
     platform: 'whatsapp-green',
-    dayTarget: 20,
-    totalTarget: 100,
     timezone: 'Asia/Shanghai',
     zeroTime: '04:00'
   })

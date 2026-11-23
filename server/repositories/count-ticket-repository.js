@@ -264,13 +264,13 @@ class CountTicketRepository {
   async createTicket(userId, payload, client) {
     const result = await this.query(
       `INSERT INTO count_tickets
-         (user_id, title, platform, status, day_target, total_target, timezone, zero_time,
+         (user_id, title, platform, status, timezone, zero_time,
           dedup_scope, group_id, dedup_base_enabled, closed_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::time, $9, $10, $11,
+       VALUES ($1, $2, $3, $4, $5, $6::time, $7, $8, $9,
                CASE WHEN $4 = 'closed' THEN now() ELSE NULL END)
        RETURNING *`,
       [
-        userId, payload.title, payload.platform, payload.status, payload.dayTarget, payload.totalTarget,
+        userId, payload.title, payload.platform, payload.status,
         payload.timezone, payload.zeroTime, payload.dedupScope,
         payload.groupId || null, payload.dedupBaseEnabled
       ], client
@@ -284,13 +284,11 @@ class CountTicketRepository {
        SET title = $3,
            platform = $4,
            status = $5,
-           day_target = $6,
-           total_target = $7,
-           timezone = $8,
-           zero_time = $9::time,
-           dedup_scope = $10,
-           group_id = $11,
-           dedup_base_enabled = $12,
+           timezone = $6,
+           zero_time = $7::time,
+           dedup_scope = $8,
+           group_id = $9,
+           dedup_base_enabled = $10,
            closed_at = CASE
              WHEN $5 = 'closed' THEN COALESCE(closed_at, now())
              ELSE NULL
@@ -299,8 +297,8 @@ class CountTicketRepository {
        WHERE id = $1 AND user_id = $2
        RETURNING *`,
       [
-        ticketId, userId, payload.title, payload.platform, payload.status, payload.dayTarget,
-        payload.totalTarget, payload.timezone, payload.zeroTime, payload.dedupScope,
+        ticketId, userId, payload.title, payload.platform, payload.status,
+        payload.timezone, payload.zeroTime, payload.dedupScope,
         payload.groupId || null, payload.dedupBaseEnabled
       ], client
     )
@@ -745,7 +743,7 @@ class CountTicketRepository {
     const where = clauses.length ? clauses.join(' AND ') : 'TRUE'
     values.push(limit, offset)
     const result = await this.query(
-      `SELECT t.id, t.user_id, u.username, t.title, t.platform, t.status, t.day_target, t.total_target,
+      `SELECT t.id, t.user_id, u.username, t.title, t.platform, t.status,
               t.timezone, t.zero_time, t.dedup_scope, t.group_id, g.name AS group_name,
               t.dedup_base_enabled, t.cycle_no, t.cycle_started_at, t.last_cycle_reset_at,
               t.created_at, t.updated_at, t.closed_at,

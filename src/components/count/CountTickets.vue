@@ -78,9 +78,6 @@
         <el-table-column label="今日重粉" width="104" align="right">
           <template slot-scope="scope"><b class="count-number count-repeat">{{ scope.row.todayRepeatFans }}</b></template>
         </el-table-column>
-        <el-table-column label="单日 / 总目标" min-width="132">
-          <template slot-scope="scope">{{ scope.row.dayTarget }} / {{ scope.row.totalTarget }}</template>
-        </el-table-column>
         <el-table-column label="操作" width="150" fixed="right">
           <template slot-scope="scope">
             <el-button type="text" @click="openDetail(scope.row)">明细</el-button>
@@ -366,12 +363,6 @@
             <el-radio-button label="active">进行中</el-radio-button>
             <el-radio-button label="closed">已关闭</el-radio-button>
           </el-radio-group>
-        </el-form-item>
-        <el-form-item label="单日目标">
-          <el-input-number v-model="ticketForm.dayTarget" :min="0" :max="1000000"></el-input-number>
-        </el-form-item>
-        <el-form-item label="总目标">
-          <el-input-number v-model="ticketForm.totalTarget" :min="0" :max="1000000000"></el-input-number>
         </el-form-item>
         <el-form-item label="业务时区">
           <el-select v-model="ticketForm.timezone" filterable allow-create style="width:100%">
@@ -789,8 +780,6 @@ export default {
         title: source.title || '',
         platform: source.platform || (this.platforms[0] && this.platforms[0].id) || 'whatsapp-green',
         status: source.status || 'active',
-        dayTarget: Number(source.dayTarget) || 0,
-        totalTarget: Number(source.totalTarget) || 0,
         timezone: source.timezone || 'Asia/Shanghai',
         zeroTime: source.zeroTime || '00:00:00',
         dedupScope: source.dedupScope || 'merchant',
