@@ -223,6 +223,7 @@ const EXPECTED = [
   'GET /count-tickets/:id',
   'GET /count-tickets/:id/fans',
   'POST /count-tickets/save',
+  'POST /count-tickets/delete',
   'POST /count-tickets/accounts/save',
   'POST /count-tickets/accounts/remove',
   'GET /count-tickets/:id/share',

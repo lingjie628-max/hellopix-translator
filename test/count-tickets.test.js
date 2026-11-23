@@ -122,6 +122,30 @@ test('跨工单周期查重按候选工单自己的当前周期判断', () => {
   )
 })
 
+test('计数工单删除采用软删除，历史账本保留且不再参与后续查重', () => {
+  const root = path.join(__dirname, '..')
+  const migration = fs.readFileSync(
+    path.join(root, 'migrations', '061_count_ticket_soft_delete.js'),
+    'utf8'
+  )
+  const repository = fs.readFileSync(
+    path.join(root, 'server', 'repositories', 'count-ticket-repository.js'),
+    'utf8'
+  )
+  assert.match(migration, /ADD COLUMN IF NOT EXISTS deleted_at timestamptz/,
+    '删除必须记录软删除时间')
+  assert.match(migration, /candidate_ticket\.deleted_at IS NULL/,
+    '已删除工单的历史事件不能再被当成其它工单的重粉依据')
+  assert.match(repository, /softDeleteTicket/,
+    '仓储层必须提供软删除方法')
+  assert.match(repository, /deactivateTicketAccounts/,
+    '删除后必须停用接入账号，防止继续自动计粉')
+  assert.match(repository, /removeDedupLinksForTicket/,
+    '删除后必须清理指向它的关联查重关系')
+  assert.match(repository, /t\.deleted_at IS NULL/,
+    '列表、详情和自动计粉查询必须排除已删除工单')
+})
+
 test('计数工单超管读接口全部显式声明客户数据权限', () => {
   assert.equal(capabilityFor('GET', '/admin/count-tickets'), 'admin.data.customers')
   assert.equal(capabilityFor('GET', '/admin/count-tickets/:id'), 'admin.data.customers')
@@ -194,6 +218,10 @@ test('商户管理员始终能找到计数工单入口，未购权益时明确�
   assert.match(page, /分享对账/, '工单详情必须提供粉商对账分享入口')
   assert.match(page, /周期重置/, '工单必须支持结算周期归档')
   assert.match(page, /历史进粉不会删除/, '周期重置文案必须说明历史账本保留')
+  assert.match(page, /删除工单/, '编辑弹窗必须提供删除工单入口')
+  assert.match(page, /\/count-tickets\/delete/, '删除按钮必须调用后端删除接口')
+  assert.match(page, /历史进粉账本保留供核对/, '删除确认必须说明历史账本仍保留')
+  assert.match(page, /不再参与后续查重/, '删除确认必须说明后续重粉口径不再使用该工单')
   const sharePage = fs.readFileSync(
     path.join(root, 'src', 'components', 'count', 'CountShare.vue'),
     'utf8'
@@ -1422,4 +1450,49 @@ test('周期归档把当前客户转底库，分享页只读且密码不可绕�
     () => service.viewShare({ token: share.token, password: 'share123456' }),
     error => error.code === 'COUNT_SHARE_NOT_FOUND'
   )
+
+  const deleteShare = await service.createShare(user.id, ticket.id, {
+    passwordProtected: false,
+    expiresInDays: 7
+  })
+  await service.viewShare({ token: deleteShare.token })
+  const fanCountBeforeDelete = (await pool.query(
+    'SELECT count(*)::int AS n FROM count_ticket_fans WHERE ticket_id=$1',
+    [ticket.id]
+  )).rows[0].n
+
+  const deleted = await service.deleteTicket(user.id, { id: ticket.id })
+  assert.equal(deleted.id, Number(ticket.id))
+  assert.equal(deleted.title, '周期分享回归')
+  const liveList = await service.list(user.id, { status: 'all' })
+  assert.equal(
+    liveList.rows.some(row => Number(row.id) === Number(ticket.id)),
+    false,
+    '软删除后商户列表不能再显示该工单'
+  )
+  await assert.rejects(
+    () => service.detail(ticket.id, { userId: user.id }),
+    error => error.code === 'COUNT_TICKET_NOT_FOUND',
+    '软删除后详情必须按不存在处理'
+  )
+  await assert.rejects(
+    () => service.viewShare({ token: deleteShare.token }),
+    error => error.code === 'COUNT_SHARE_NOT_FOUND',
+    '删除工单必须让分享链接立即失效'
+  )
+  const deletedRow = (await pool.query(
+    'SELECT status,deleted_at FROM count_tickets WHERE id=$1',
+    [ticket.id]
+  )).rows[0]
+  assert.equal(deletedRow.status, 'closed')
+  assert.ok(deletedRow.deleted_at, '删除必须落软删除时间')
+  assert.equal((await pool.query(
+    'SELECT count(*)::int AS n FROM count_ticket_fans WHERE ticket_id=$1',
+    [ticket.id]
+  )).rows[0].n, fanCountBeforeDelete, '删除工单不能清掉历史进粉账本')
+  assert.equal((await pool.query(
+    `SELECT count(*)::int AS n FROM count_ticket_accounts
+     WHERE ticket_id=$1 AND active=true`,
+    [ticket.id]
+  )).rows[0].n, 0, '删除工单必须停用全部接入账号')
 })

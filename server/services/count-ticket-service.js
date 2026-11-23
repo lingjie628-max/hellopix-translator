@@ -347,6 +347,25 @@ class CountTicketService {
     }
   }
 
+  async deleteTicket(userId, data) {
+    const ticketId = Number(data && data.id)
+    if (!Number.isSafeInteger(ticketId) || ticketId <= 0) {
+      throw new ApiError(400, '计数工单号不合法', 'COUNT_TICKET_BAD_ID')
+    }
+    return this.repo.transaction(async client => {
+      const current = await this.repo.lockTicket(ticketId, userId, client)
+      if (!current) throw new ApiError(404, '计数工单不存在', 'COUNT_TICKET_NOT_FOUND')
+
+      // 先断开所有继续写数的入口，再软删除主行。粉丝账本不删：
+      // 删除后不再参与后续查重，但历史核对仍需要原始事件。
+      await this.repo.deactivateTicketAccounts(ticketId, userId, client)
+      await this.repo.removeDedupLinksForTicket(ticketId, userId, client)
+      await this.repo.revokeShare(ticketId, userId, client)
+      const deleted = await this.repo.softDeleteTicket(ticketId, userId, client)
+      return { id: Number(deleted.id), title: deleted.title }
+    })
+  }
+
   async saveAccount(userId, data) {
     const ticketId = Number(data.ticketId != null ? data.ticketId : data.ticket_id)
     if (!Number.isSafeInteger(ticketId)) {

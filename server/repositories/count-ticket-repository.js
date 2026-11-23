@@ -35,6 +35,7 @@ class CountTicketRepository {
          AND a.active = true
          AND t.platform = a.platform
          AND t.status = 'active'
+         AND t.deleted_at IS NULL
        LIMIT 1
        FOR UPDATE OF t`,
       [userId, platform, accountKey], client
@@ -99,6 +100,7 @@ class CountTicketRepository {
        JOIN count_tickets t ON t.id = f.ticket_id AND t.user_id = f.user_id
        WHERE f.customer_id = $1
          AND f.platform = $2
+         AND t.deleted_at IS NULL
          AND f.cycle_no = t.cycle_no
          AND f.event_at >= COALESCE(t.cycle_started_at, '-infinity'::timestamptz)
        )
@@ -134,6 +136,7 @@ class CountTicketRepository {
          AND f.platform = $2
          AND f.peer_key = $3
          AND f.customer_id IS NULL
+         AND t.deleted_at IS NULL
          AND f.cycle_no = t.cycle_no
          AND f.event_at >= COALESCE(t.cycle_started_at, '-infinity'::timestamptz)
        )
@@ -223,7 +226,7 @@ class CountTicketRepository {
       `SELECT t.*, u.username
        FROM count_tickets t
        JOIN users u ON u.id = t.user_id
-       WHERE t.id = $1 AND t.user_id = $2`,
+       WHERE t.id = $1 AND t.user_id = $2 AND t.deleted_at IS NULL`,
       [ticketId, userId], client
     )
     return result.rows[0] || null
@@ -234,7 +237,7 @@ class CountTicketRepository {
       `SELECT t.*, u.username
        FROM count_tickets t
        JOIN users u ON u.id = t.user_id
-       WHERE t.id = $1`,
+       WHERE t.id = $1 AND t.deleted_at IS NULL`,
       [ticketId], client
     )
     return result.rows[0] || null
@@ -254,7 +257,7 @@ class CountTicketRepository {
                 WHERE a.ticket_id = t.id AND a.user_id = t.user_id
               ) AS has_accounts
        FROM count_tickets t
-       WHERE t.id = $1 AND t.user_id = $2
+       WHERE t.id = $1 AND t.user_id = $2 AND t.deleted_at IS NULL
        FOR UPDATE`,
       [ticketId, userId], client
     )
@@ -294,7 +297,7 @@ class CountTicketRepository {
              ELSE NULL
            END,
            updated_at = now()
-       WHERE id = $1 AND user_id = $2
+       WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
        RETURNING *`,
       [
         ticketId, userId, payload.title, payload.platform, payload.status,
@@ -314,6 +317,40 @@ class CountTicketRepository {
       )
     }
     return ticket
+  }
+
+  async softDeleteTicket(ticketId, userId, client) {
+    const result = await this.query(
+      `UPDATE count_tickets
+       SET status = 'closed',
+           closed_at = COALESCE(closed_at, now()),
+           deleted_at = COALESCE(deleted_at, now()),
+           updated_at = now()
+       WHERE id = $1
+         AND user_id = $2
+         AND deleted_at IS NULL
+       RETURNING id, title`,
+      [ticketId, userId], client
+    )
+    return result.rows[0] || null
+  }
+
+  async deactivateTicketAccounts(ticketId, userId, client) {
+    await this.query(
+      `UPDATE count_ticket_accounts
+       SET active = false, updated_at = now()
+       WHERE ticket_id = $1 AND user_id = $2 AND active = true`,
+      [ticketId, userId], client
+    )
+  }
+
+  async removeDedupLinksForTicket(ticketId, userId, client) {
+    await this.query(
+      `DELETE FROM count_ticket_dedup_links
+       WHERE user_id = $1
+         AND (ticket_id = $2 OR linked_ticket_id = $2)`,
+      [userId, ticketId], client
+    )
   }
 
   async dedupTicketIds(ticketId, userId, client) {
@@ -336,6 +373,7 @@ class CountTicketRepository {
          AND platform = $2
          AND id = ANY($3::bigint[])
          AND id <> $4
+         AND deleted_at IS NULL
        ORDER BY id`,
       [userId, platform, ticketIds, sourceTicketId || 0], client
     )
@@ -362,6 +400,7 @@ class CountTicketRepository {
        WHERE user_id = $1
          AND platform = $2
          AND id <> $3
+         AND deleted_at IS NULL
        ORDER BY (status = 'closed') ASC, updated_at DESC, id DESC
        LIMIT 500`,
       [userId, platform, ticketId || 0], client
@@ -382,7 +421,7 @@ class CountTicketRepository {
               count(t.id) FILTER (WHERE t.status = 'active')::int AS active_ticket_count
        FROM count_ticket_groups g
        LEFT JOIN count_tickets t
-         ON t.group_id = g.id AND t.user_id = g.user_id
+         ON t.group_id = g.id AND t.user_id = g.user_id AND t.deleted_at IS NULL
        WHERE ${clauses.join(' AND ')}
        GROUP BY g.id
        ORDER BY g.updated_at DESC, g.id DESC`,
@@ -436,7 +475,7 @@ class CountTicketRepository {
     const result = await this.query(
       `SELECT count(*)::int AS n
        FROM count_tickets
-       WHERE group_id = $1 AND user_id = $2`,
+       WHERE group_id = $1 AND user_id = $2 AND deleted_at IS NULL`,
       [groupId, userId], client
     )
     return Number(result.rows[0] && result.rows[0].n) || 0
@@ -576,7 +615,7 @@ class CountTicketRepository {
            cycle_started_at = now(),
            last_cycle_reset_at = now(),
            updated_at = now()
-       WHERE id = $1 AND user_id = $2
+       WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
        RETURNING cycle_no, cycle_started_at, last_cycle_reset_at`,
       [ticketId, userId], client
     )
@@ -643,7 +682,7 @@ class CountTicketRepository {
        FROM count_ticket_shares s
        JOIN count_tickets t
          ON t.id = s.ticket_id AND t.user_id = s.user_id
-       WHERE s.token_hash = $1`,
+       WHERE s.token_hash = $1 AND t.deleted_at IS NULL`,
       [tokenHash], client
     )
     return result.rows[0] || null
@@ -740,7 +779,8 @@ class CountTicketRepository {
       values.push(`%${keyword}%`)
       clauses.push(`(t.title ILIKE $${values.length} OR u.username ILIKE $${values.length})`)
     }
-    const where = clauses.length ? clauses.join(' AND ') : 'TRUE'
+    clauses.unshift('t.deleted_at IS NULL')
+    const where = clauses.join(' AND ')
     values.push(limit, offset)
     const result = await this.query(
       `SELECT t.id, t.user_id, u.username, t.title, t.platform, t.status,
@@ -823,7 +863,7 @@ class CountTicketRepository {
         AND f.user_id = t.user_id
         AND f.cycle_no = t.cycle_no
         AND f.event_at >= COALESCE(t.cycle_started_at, '-infinity'::timestamptz)
-       WHERE t.id = $1
+       WHERE t.id = $1 AND t.deleted_at IS NULL
        GROUP BY t.id, t.timezone, t.zero_time`,
       [ticketId], client
     )
@@ -852,6 +892,7 @@ class CountTicketRepository {
         AND f.cycle_no = t.cycle_no
         AND f.event_at >= COALESCE(t.cycle_started_at, '-infinity'::timestamptz)
        WHERE a.ticket_id = $1
+         AND t.deleted_at IS NULL
        GROUP BY a.id, t.timezone, t.zero_time
        ORDER BY a.active DESC, a.id ASC`,
       [ticketId], client
@@ -864,7 +905,8 @@ class CountTicketRepository {
     const clauses = [
       'f.ticket_id = $1',
       `f.cycle_no = t.cycle_no`,
-      `f.event_at >= COALESCE(t.cycle_started_at, '-infinity'::timestamptz)`
+      `f.event_at >= COALESCE(t.cycle_started_at, '-infinity'::timestamptz)`,
+      't.deleted_at IS NULL'
     ]
     if (filters.type && filters.type !== 'all') {
       values.push(filters.type)

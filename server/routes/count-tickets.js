@@ -101,6 +101,11 @@ function registerCountTickets(router, ctx) {
     ok(res, result.id ? '计数工单已保存' : '计数工单已创建', { id: result.id })
   }))
 
+  router.post('/count-tickets/delete', asyncRoute(async (req, res) => {
+    const result = await countTickets.deleteTicket(ownerOf(req, countTickets), input(req))
+    ok(res, `计数工单「${result.title}」已删除`, result)
+  }))
+
   router.post('/count-tickets/accounts/save', asyncRoute(async (req, res) => {
     await countTickets.saveAccount(ownerOf(req, countTickets), input(req))
     ok(res, '账号已绑定')

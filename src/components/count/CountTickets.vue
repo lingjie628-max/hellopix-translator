@@ -373,9 +373,19 @@
           <el-input v-model="ticketForm.zeroTime" placeholder="00:00:00"></el-input>
         </el-form-item>
       </el-form>
-      <span slot="footer">
-        <el-button @click="ticketDialog = false">取消</el-button>
-        <el-button type="primary" :loading="savingTicket" @click="saveTicket">保存</el-button>
+      <span slot="footer" class="count-ticket-footer">
+        <el-button
+          v-if="ticketForm.id"
+          type="danger"
+          plain
+          :loading="deletingTicket"
+          :disabled="savingTicket"
+          @click="deleteTicket"
+        >删除工单</el-button>
+        <span class="count-ticket-footer-actions">
+          <el-button @click="ticketDialog = false">取消</el-button>
+          <el-button type="primary" :loading="savingTicket" :disabled="deletingTicket" @click="saveTicket">保存</el-button>
+        </span>
       </span>
     </el-dialog>
 
@@ -650,6 +660,7 @@ export default {
       platforms: [],
       ticketDialog: false,
       savingTicket: false,
+      deletingTicket: false,
       ticketForm: {},
       dedupOptions: [],
       dedupOptionsLoading: false,
@@ -1032,6 +1043,32 @@ export default {
           }
         }
       }).catch(() => { this.savingTicket = false })
+    },
+    deleteTicket() {
+      if (!this.ticketForm.id || this.deletingTicket) return
+      const title = String(this.ticketForm.title || '').trim() || `#${this.ticketForm.id}`
+      this.$confirm(
+        `确认删除工单「${title}」？删除后会立即从列表和自动计粉中消失，分享链接同时失效；历史进粉账本保留供核对，但不再参与后续查重。`,
+        '删除计数工单',
+        {
+          type: 'warning',
+          confirmButtonText: '确认删除',
+          cancelButtonText: '取消',
+          confirmButtonClass: 'el-button--danger'
+        }
+      ).then(() => {
+        this.deletingTicket = true
+        return this.postRequest('/count-tickets/delete', { id: this.ticketForm.id })
+      }).then(resp => {
+        if (!resp || !resp.data || resp.data.success !== 'success') return
+        this.$message.success(resp.data.msg)
+        this.ticketDialog = false
+        this.detailVisible = false
+        this.ticket = null
+        this.load()
+      }).catch(() => {}).finally(() => {
+        this.deletingTicket = false
+      })
     },
     openAccountForm() {
       this.accountForm = { platform: this.ticket.platform, accountKey: '' }
@@ -1464,6 +1501,12 @@ export default {
 .count-fan-filters .el-input { width: 180px; }
 .count-fan-filters .el-select { width: 96px; }
 .count-danger { color: #b42318; }
+.count-ticket-footer {
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+.count-ticket-footer-actions { margin-left: auto; }
 .count-form-tip {
   margin: 0;
   color: var(--count-muted);
