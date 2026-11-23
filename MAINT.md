@@ -674,6 +674,42 @@ curl -fsS http://127.0.0.1:3000/ready
 - 详细改动、验收与回滚：
   `docs/计数工单目标设置退役-发布与回滚.md`
 
+## 2026-11-23 Hello Pix 1.3.17 桌面发布
+
+- 发布提交：`b46d7a0 chore(release): prepare 1.3.17`
+- 图片修复提交：`6e79740 fix(desktop): harden image copy and save`
+- 上线时间：`2026-11-24 04:41 CST`（主人本地时间为 2026-11-23）
+- 根因：Electron 45 已删除 `clipboard.writeImage/readImage`；旧调用直接报
+  `electron.clipboard.writeImage is not a function`。
+- 修复：改用 `ClipboardItem + clipboard.write` 并保留旧版兼容分支；复制后
+  校验 `clipboard.has('image/png')`，另存为校验真实落盘结果。
+- 图片链路补齐 Shadow DOM、Canvas、CSS 背景图、空 `srcURL` 回退，以及
+  WebP/AVIF 页面转 PNG；复制与保存均有成功/失败提示。
+- 生产记录：#193 Windows x64、#194 macOS x64、#195 macOS arm64。
+- 1.3.16 的 #190/#191/#192 已停用；官网、自动更新和公告切到 1.3.17。
+- GitHub Release：
+  `https://github.com/lingjie628-max/hellopix-translator/releases/tag/v1.3.17`
+- 安装包 SHA256：
+  - arm64 DMG：
+    `d1975e11fb59446089a973e3c6a6e941d47000783e738d7f48bebc6cef458a59`
+  - x64 DMG：
+    `be985ea3f66333acec2b280682c07ebcd05faee55dd8339d689b95583c01bf4d`
+  - Windows 安装版：
+    `2fe0356b8866cf1a4f0f2a9aa31b1831993da412598d654a1b6b3ab6e2f0d804`
+- 验收：
+  - 全量：`2874 tests / 2789 pass / 0 fail / 85 known skips`。
+  - 图片复制/右键定向测试 `30/30`。
+  - 真实打包版复制 PNG 到 macOS 剪贴板并读回 `1024 x 1024`。
+  - macOS 签名、DMG 完整性、Windows 构建及三平台 `app.asar` 检查通过。
+  - 三份生产更新清单客户端公钥验签通过。
+  - 公网 `site/info` 返回三条 1.3.17，三个下载 URL 均 HTTP 206 且长度一致。
+  - `/ready` 连续 6 次 200；官网和后台首页 200。
+  - 发布后 Nginx 5xx 为 0，应用 error 日志为 0。
+- 发布前快照：
+  `/root/hello-pix-release-1.3.17-20261124-044145`
+- 详细回滚：
+  `docs/1.3.17-发布与回滚.md`
+
 ## 2026-11-23 Hello Pix 1.3.16 桌面发布
 
 - 发布提交：`469a3b4 fix(desktop): use standard Chrome user agent`
