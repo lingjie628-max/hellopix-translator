@@ -67,8 +67,6 @@ const { buildUserAgent } = require('./src/config/user-agent')
 
 const CHROME_UA = buildUserAgent({
   platform: process.platform,
-  appVersion: require('./package.json').version,
-  electronVersion: process.versions.electron,
   chromeVersion: process.versions.chrome
 })
 app.userAgentFallback = CHROME_UA
