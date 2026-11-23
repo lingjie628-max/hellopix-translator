@@ -68,6 +68,22 @@ test('编辑态：提交载荷必须剔除 charBalance', () => {
     '服务端的余额守卫不能被删掉 —— 余额只能走 char_ledger，不能从用户编辑接口改')
 })
 
+test('超管代客开户：套餐先加载，初始密码和必填项在提交前校验', () => {
+  assert.match(source, /代客开户/, '后台入口必须明确这是超管代客开户')
+  assert.match(source, /商户无需自己注册/,
+    '新建弹窗必须说明用户不需要自行注册')
+  assert.match(source, /这是商户首次登录密码/,
+    '后台必须明确初始密码交给谁')
+  assert.match(source, /async openEdit\(row\)/,
+    '打开开户/编辑弹窗时必须先确保套餐已加载')
+  assert.match(source, /没有可用套餐，请先在套餐管理中创建套餐/,
+    '套餐为空时不能带着不存在 id=1 去保存')
+  assert.match(source, /请填写商户登录账号/, '保存前必须校验账号')
+  assert.match(source, /请选择商户套餐/, '保存前必须校验套餐')
+  assert.match(source, /密码至少需要 10 位，且同时包含字母和数字/,
+    '新建和修改密码时必须给出与服务端一致的前端校验')
+})
+
 test('子账号额度在编辑表单里可见可改', () => {
   const at = source.indexOf('<el-form-item label="子账号额度">')
   assert.ok(at > 0,

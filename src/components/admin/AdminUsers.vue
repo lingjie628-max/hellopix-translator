@@ -3,7 +3,7 @@
     <div class="admin-bar">
       <el-input v-model="keyword" placeholder="搜索账号/昵称" style="width: 220px" clearable></el-input>
       <el-button type="primary" @click="load">搜索</el-button>
-      <el-button type="success" @click="openEdit()">新建商户</el-button>
+      <el-button type="success" @click="openEdit()">代客开户</el-button>
     </div>
     <el-table :data="rows" v-loading="loading" border stripe>
       <el-table-column prop="id" label="ID" width="80"></el-table-column>
@@ -72,13 +72,22 @@
     <el-pagination style="margin-top:12px" :current-page="page" :page-size="rowsPerPage" :total="total"
                    layout="total, prev, pager, next" @current-change="onPage"></el-pagination>
 
-    <el-dialog :title="form.id ? '编辑商户' : '新建商户'" :visible.sync="visible" width="520px">
+    <el-dialog :title="form.id ? '编辑商户与套餐' : '超管代客开户'" :visible.sync="visible" width="520px">
       <el-form :model="form" label-width="90px">
+        <div class="provision-tip">
+          <template v-if="form.id">
+            这里由超管直接修改商户套餐、到期时间、子账号额度和基础资料。字符余额仍走独立的流水入口。
+          </template>
+          <template v-else>
+            商户无需自己注册。请在这里设置账号、初始密码和套餐，保存后把账号密码交给商户即可登录。
+          </template>
+        </div>
         <el-form-item label="账号">
           <el-input v-model="form.username" :disabled="!!form.id"></el-input>
         </el-form-item>
         <el-form-item label="密码">
           <el-input v-model="form.password" :placeholder="form.id ? '不填则不修改' : '请输入至少 10 位密码（字母+数字）'"></el-input>
+          <div class="trial-tip">{{ form.id ? '留空表示保持原密码不变。' : '这是商户首次登录密码，请另行安全告知商户。' }}</div>
         </el-form-item>
         <el-form-item label="商户名">
           <el-input v-model="form.nickname"></el-input>
@@ -385,7 +394,19 @@ export default {
       const pack = this.packs.find(p => p.id === this.form.versionId)
       if (pack) this.form.subQuota = Number(pack.subQuota || 0)
     },
-    openEdit(row) {
+    async openEdit(row) {
+      if (!this.packs.length) {
+        try {
+          const resp = await this.getRequest('/admin/packages')
+          if (resp && Array.isArray(resp.data)) this.packs = resp.data
+        } catch (_error) {
+          return
+        }
+      }
+      if (!this.packs.length) {
+        this.$message.error('没有可用套餐，请先在套餐管理中创建套餐')
+        return
+      }
       if (row) {
         /**
          * 布尔列必须归一成 0/1。
@@ -420,9 +441,9 @@ export default {
         })
       } else {
         // 新建：默认取第一个套餐自带的端口与子账号额度，省一步手填
-        const first = this.packs[0] || {}
+        const first = this.packs[0]
         this.form = {
-          versionId: first.id || 1,
+          versionId: first.id,
           port: Number(first.port || 0),
           status: 1,
           charBalance: this.trialChars,
@@ -463,6 +484,21 @@ export default {
     },
     save() {
       if (this.saving) return
+      if (!String(this.form.username || '').trim()) {
+        this.$message.warning('请填写商户登录账号')
+        return
+      }
+      if (!this.form.versionId) {
+        this.$message.warning('请选择商户套餐')
+        return
+      }
+      if (!this.form.id || this.form.password) {
+        const password = String(this.form.password || '')
+        if (password.length < 10 || !/[A-Za-z]/.test(password) || !/[0-9]/.test(password)) {
+          this.$message.warning('密码至少需要 10 位，且同时包含字母和数字')
+          return
+        }
+      }
       // 编辑时**绝不能**回传 charBalance。
       // 服务端 `/admin/users/save` 有一条守卫：请求带 charBalance 就 400
       // （USE_CHARACTER_GRANT），因为余额只能经 char_ledger 变更。
@@ -572,6 +608,16 @@ export default {
 <style scoped>
 .admin-page { text-align: left; }
 .trial-tip { color: var(--w-text-faint); font-size: 12px; line-height: 1.4; }
+.provision-tip {
+  margin: -2px 0 16px;
+  padding: 11px 12px;
+  color: var(--w-text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+  background: var(--w-panel-soft, rgba(30, 111, 168, .07));
+  border: 1px solid var(--w-line, rgba(120, 140, 160, .22));
+  border-radius: 8px;
+}
 .admin-bar { margin-bottom: 12px; }
 .danger-link { color: #f56c6c; }
 .dialog-tip { color: var(--w-text-faint); font-size: 12px; line-height: 1.6; }
