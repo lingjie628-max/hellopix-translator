@@ -81,6 +81,11 @@ function buildContextMenuTemplate (params, actions) {
     } else if (srcURL) {
       // data: URL 存下来多半是缩略图占位，不如让用户直接复制走。
       template.push({ label: '复制图片', accelerator: 'CmdOrCtrl+C', click: () => call('copyImage') })
+    } else {
+      // 新版 WhatsApp 可能给 mediaType=image，但灯箱节点没有 srcURL。
+      // 这时不能只留“重新加载”，必须退到页面内嗅探。
+      template.push({ label: '复制图片', accelerator: 'CmdOrCtrl+C', click: () => call('copyFromPage') })
+      template.push({ label: '图片另存为…', click: () => call('saveFromPage') })
     }
     if (hasSelection) {
       template.push({ type: 'separator' })

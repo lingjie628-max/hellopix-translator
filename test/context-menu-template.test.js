@@ -37,6 +37,7 @@ function spyActions () {
       saveImage: mark('saveImage'),
       openImage: mark('openImage'),
       saveFromPage: mark('saveFromPage'),
+      copyFromPage: mark('copyFromPage'),
       copyText: mark('copyText'),
       cut: mark('cut'),
       paste: mark('paste'),
@@ -79,6 +80,17 @@ test('★ 灯箱用 background-image（mediaType=none、srcURL 为空）也必�
 
   clickItem(t, ls.indexOf('保存图片…'))
   assert.deepEqual(called, ['saveFromPage'], '点了「保存图片…」却没有走到页面内嗅探')
+})
+
+test('★ mediaType=image 但 srcURL 为空时，必须退回页面内复制/另存', () => {
+  const { called, actions } = spyActions()
+  const t = buildContextMenuTemplate({ mediaType: 'image', srcURL: '' }, actions)
+  const ls = labels(t)
+  assert.ok(ls.includes('复制图片'), '图片上下文缺 srcURL 时仍必须有复制入口')
+  assert.ok(ls.includes('图片另存为…'), '图片上下文缺 srcURL 时仍必须有另存入口')
+  clickItem(t, ls.indexOf('复制图片'))
+  clickItem(t, ls.indexOf('图片另存为…'))
+  assert.deepEqual(called, ['copyFromPage', 'saveFromPage'])
 })
 
 test('★ 空白处右键不能是空菜单（也不能只有"重新加载"这一项）', () => {

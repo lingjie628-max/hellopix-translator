@@ -130,6 +130,38 @@ test('复制失败必须有用户可见的提示，不能静默 return false', (
   assert.match(body, /catch/, '必须有 catch')
 })
 
+test('★ 失败提示必须直接发给 webContents，不能再取一次 .webContents', () => {
+  const body = functionBody(mainSrc, 'notifyImageAction')
+  assert.match(body, /target\.send\('app:toast'/, 'target 已经是 webContents，应直接 send')
+  assert.match(body, /win[\s\S]{0,160}webContents/,
+    '提示必须优先发到主窗口；客页 preload 没有 app:toast 监听器')
+  assert.ok(!body.includes('target.webContents.send'),
+    'target.webContents 不存在，这会把失败提示再次吞掉')
+})
+
+test('★ 复制成功后要校验剪贴板并提示，不能只看 writeImage 没抛错', () => {
+  const body = functionBody(mainSrc, 'copyImageToClipboard')
+  assert.match(body, /writeImageToClipboard/, '复制必须走统一的剪贴板写入适配层')
+  assert.match(body, /notifyImageCopyDone|notifyImageCopySucceeded/, '复制成功必须有用户反馈')
+})
+
+test('★ Electron 45 必须使用 ClipboardItem + clipboard.write，旧 writeImage 已删除', () => {
+  const body = functionBody(mainSrc, 'writeImageToClipboard')
+  assert.match(body, /ClipboardItem/, 'Electron 45 必须使用 ClipboardItem')
+  assert.match(body, /clipboard\.write|clip\.write/, 'Electron 45 必须调用 clipboard.write')
+  assert.match(body, /image\/png/, '写入 MIME 必须是 image/png')
+  assert.match(body, /new Blob/, 'ClipboardItem 的图片负载必须是 Blob')
+  assert.match(body, /clip\.has/, '写入后必须检查剪贴板确实含有 image/png')
+  assert.match(body, /writeImage/, '应保留 Electron 44 及更早版本的兼容分支')
+})
+
+test('★ 另存为必须校验落盘结果并提示成功/失败', () => {
+  const body = functionBody(mainSrc, 'saveImageAs')
+  assert.match(body, /stat\(/, '写完后必须确认文件真实存在且有大小')
+  assert.match(body, /notifyImageSaved/, '保存成功必须有用户反馈')
+  assert.match(body, /notifyImageCopyFailed/, '保存失败必须给用户可读提示')
+})
+
 test('提示通道真的接通了：main 发 → preload 转 → renderer 显示', () => {
   // 主进程发
   assert.match(mainSrc, /webContents\.send\('app:toast'/, '主进程没有发 app:toast')
@@ -193,6 +225,36 @@ test('页面嗅探逻辑被保存/复制共用，不能各写一份', () => {
   const saveBody = functionBody(mainSrc, 'saveImageFromPage')
   assert.match(copyBody, /sniffPageImageUrl/, '复制必须复用 sniffPageImageUrl')
   assert.match(saveBody, /sniffPageImageUrl/, '保存必须复用 sniffPageImageUrl')
+})
+
+test('★ 页面嗅探必须覆盖 Shadow DOM、Canvas 和背景图', () => {
+  const body = functionBody(mainSrc, 'sniffPageImageUrl')
+  assert.match(body, /shadowRoot/, 'WhatsApp 新版组件可能在 Shadow DOM 内')
+  assert.match(body, /querySelectorAll\([^)]*canvas|canvas/, 'Canvas 灯箱必须能导出 PNG')
+  assert.match(body, /toDataURL\('image\/png'\)/, 'Canvas 必须重编码成 PNG')
+  assert.match(body, /backgroundImage/, 'background-image 兜底不能丢')
+})
+
+test('页面嗅探脚本必须语法合法', () => {
+  const body = functionBody(mainSrc, 'sniffPageImageUrl')
+  const marker = 'const SNIFF = '
+  const start = body.indexOf(marker)
+  assert.ok(start >= 0, '找不到 SNIFF 常量')
+  const codeStart = start + marker.length
+  const codeEnd = body.indexOf('\n  try', codeStart)
+  assert.ok(codeEnd > codeStart, '找不到 SNIFF 模板结尾')
+  const literal = body.slice(codeStart, codeEnd).trim()
+  const code = new Function('return ' + literal)()
+  assert.doesNotThrow(
+    () => new Function('innerWidth', 'innerHeight', 'document', 'getComputedStyle', code),
+    'SNIFF 注入脚本语法错误，运行时整条复制/保存链都会失败'
+  )
+})
+
+test('★ nativeImage 解不了的 http(s) WebP 要回退到页面解码', () => {
+  const body = functionBody(mainSrc, 'copyImageToClipboard')
+  assert.match(body, /nativeImage[\s\S]{0,400}isEmpty[\s\S]{0,800}readUrlInPage/,
+    'nativeImage 为空时必须用页面 createImageBitmap/canvas 再试一次')
 })
 
 test('嗅探出的 URL 必须过协议白名单，不能拿来就用', () => {

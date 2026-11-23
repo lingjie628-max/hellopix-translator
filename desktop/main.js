@@ -3098,11 +3098,22 @@ function runEditCommand(wc, action) {
  */
 async function copyImageToClipboard (wc, url) {
   try {
-    const buf = await downloadAsBuffer(wc, url)
+    let buf = await downloadAsBuffer(wc, url)
     if (!buf || !buf.length) { notifyImageCopyFailed(wc, '图片是空的'); return false }
-    const image = electron.nativeImage.createFromBuffer(buf)
+    let image = electron.nativeImage.createFromBuffer(buf)
+    if (!image || image.isEmpty()) {
+      // nativeImage 只稳定支持 PNG/JPEG。http(s) 的 WebP/AVIF 等格式先交给
+      // 页面 createImageBitmap → canvas 重编码成 PNG，再回到主进程。
+      try {
+        buf = await readUrlInPage(wc, url)
+        image = electron.nativeImage.createFromBuffer(buf)
+      } catch (e) {
+        if (clientLog) clientLog.warn('context-menu', '页面重编码图片失败：' + ((e && e.message) || e))
+      }
+    }
     if (!image || image.isEmpty()) { notifyImageCopyFailed(wc, '这张图解码不了'); return false }
-    electron.clipboard.writeImage(image)
+    await writeImageToClipboard(image)
+    notifyImageCopyDone(wc)
     return true
   } catch (e) {
     if (clientLog) clientLog.warn('context-menu', '复制图片失败：' + ((e && e.message) || e))
@@ -3112,23 +3123,71 @@ async function copyImageToClipboard (wc, url) {
 }
 
 /**
+ * 写图片到系统剪贴板。
+ *
+ * Electron 45 按 W3C Clipboard API 重写：旧的
+ * clipboard.writeImage/readImage 已删除，必须用 ClipboardItem + write()。
+ * 保留旧签名分支只用于兼容 Electron 44 及更早版本。
+ */
+async function writeImageToClipboard (image) {
+  const clip = electron.clipboard
+  if (!clip) throw new Error('系统剪贴板不可用')
+  const png = image && typeof image.toPNG === 'function' ? image.toPNG() : null
+  if (!png || !png.length) throw new Error('图片转 PNG 失败')
+
+  if (electron.ClipboardItem && typeof clip.write === 'function') {
+    await clip.write([
+      new electron.ClipboardItem({
+        'image/png': new Blob([new Uint8Array(png)], { type: 'image/png' })
+      })
+    ])
+    if (typeof clip.has === 'function' && !(await clip.has('image/png'))) {
+      throw new Error('剪贴板没有接收到图片')
+    }
+    return
+  }
+
+  // 兼容旧版 Electron。
+  if (typeof clip.writeImage === 'function') {
+    clip.writeImage(image)
+    return
+  }
+  throw new Error('当前 Electron 不支持写入图片剪贴板')
+}
+
+/**
  * 复制失败必须让用户看见。
  *
  * 剪贴板操作是**静默**的：写进去了没有反馈，没写进去也没有。原来失败就
  * `return false`，用户点了「复制图片」去微信里粘贴发现什么都没有，只会以为
  * 软件坏了。发一条 toast 到渲染层，讲清楚失败在哪一步。
  */
-function notifyImageCopyFailed (wc, reason) {
+function notifyImageAction (wc, text, type) {
   const wcOf = el => (el && el.webContents) || ((el && el.send) ? el : null)
-  const target = wcOf(wc) || (win && win.webContents)
+  // app:toast 的监听器在主窗口 renderer，不在远程客页 preload。
+  // 因此优先主窗口；只有主窗口已销毁时才退回调用方 wc。
+  const mainWc = win && (!win.isDestroyed || !win.isDestroyed()) ? win.webContents : null
+  const target = mainWc || wcOf(wc)
   try {
     if (target && typeof target.send === 'function' && !target.isDestroyed()) {
       // 固定走 'app:toast' 通道，渲染层已在 app.js 订阅
-      target.webContents.send('app:toast', { text: '复制图片失败' + (reason ? '：' + reason : ''), type: 'warn' })
+      target.send('app:toast', { text, type: type || 'info' })
     }
   } catch (e) {
-    if (clientLog) clientLog.warn('context-menu', '复制失败提示发送失败：' + ((e && e.message) || e))
+    if (clientLog) clientLog.warn('context-menu', '图片操作提示发送失败：' + ((e && e.message) || e))
   }
+}
+
+function notifyImageCopyFailed (wc, reason) {
+  notifyImageAction(wc, '复制图片失败' + (reason ? '：' + reason : ''), 'warn')
+}
+
+function notifyImageCopyDone (wc) {
+  notifyImageAction(wc, '图片已复制，可以直接粘贴', 'success')
+}
+
+function notifyImageSaved (wc) {
+  notifyImageAction(wc, '图片已保存', 'success')
 }
 
 /**
@@ -3138,9 +3197,13 @@ function notifyImageCopyFailed (wc, reason) {
  * 保存一个没有扩展名的文件，Windows 上双击打不开，用户会以为存坏了。
  */
 async function saveImageAs (win, url) {
+  const wc = win && win.webContents
   try {
-    const buf = await downloadAsBuffer(win && win.webContents, url)
-    if (!buf || !buf.length) return false
+    const buf = await downloadAsBuffer(wc, url)
+    if (!buf || !buf.length) {
+      notifyImageCopyFailed(wc, '图片是空的')
+      return false
+    }
     const ext = imageExtOf(url, buf)
     const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
     const result = await electron.dialog.showSaveDialog(win, {
@@ -3150,9 +3213,13 @@ async function saveImageAs (win, url) {
     })
     if (result.canceled || !result.filePath) return false
     await fs.promises.writeFile(result.filePath, buf)
+    const saved = await fs.promises.stat(result.filePath)
+    if (!saved.isFile() || saved.size <= 0) throw new Error('文件没有写入成功')
+    notifyImageSaved(wc)
     return true
   } catch (e) {
     if (clientLog) clientLog.warn('context-menu', '保存图片失败：' + ((e && e.message) || e))
+    notifyImageCopyFailed(wc, (e && e.message) || '')
     return false
   }
 }
@@ -3443,14 +3510,16 @@ function installEditSupport(view) {
     // （可能是用户聊天内容）。拿到真实参数后再决定怎么改，别凭空猜第二次。
     try {
       if (clientLog) {
-        clientLog.info('context-menu', JSON.stringify({
+        // 用 warn：线上日志过滤器会压掉普通 info，真正排障时这条必须落盘。
+        clientLog.warn('context-menu', JSON.stringify({
           mediaType: params && params.mediaType,
           srcURL: String((params && params.srcURL) || '').slice(0, 120),
           hasSelection: !!(params && params.selectionText),
           isEditable: !!(params && params.isEditable),
           x: params && params.x,
           y: params && params.y,
-          canSaveImage: !!(params && params.editFlags && params.editFlags.canSaveImage)
+          canSaveImage: !!(params && params.editFlags && params.editFlags.canSaveImage),
+          pageURL: String(wc.getURL() || '').slice(0, 160)
         }))
       }
     } catch (e) {}
@@ -3641,25 +3710,48 @@ async function sniffPageImageUrl (wc) {
         const h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0))
         return w * h
       }
+      const inDialog = (el) => {
+        try {
+          return !!(el.closest && el.closest('[role="dialog"],[aria-modal="true"]'))
+        } catch (e) { return false }
+      }
       let best = null
-      for (const img of document.images) {
-        const url = img.currentSrc || img.src
-        if (!url) continue
-        const area = visibleArea(img)
-        if (area > 0 && (!best || area > best.area)) best = { area, url }
-      }
-      if (best) return best.url
-      let bg = null
-      for (const el of document.querySelectorAll('*')) {
-        const cs = getComputedStyle(el)
-        const bi = cs.backgroundImage
-        if (!bi || bi === 'none') continue
-        const m = bi.match(/url\\\\(["']?([^"')]+)["']?\\\\)/)
-        if (!m) continue
+      const consider = (url, el, bonus) => {
+        url = String(url || '').trim()
+        if (!url || !/^(https?:\\/\\/|blob:|data:)/i.test(url)) return
         const area = visibleArea(el)
-        if (area > 0 && (!bg || area > bg.area)) bg = { area, url: m[1] }
+        if (area <= 0) return
+        const score = area * (bonus || 1) * (inDialog(el) ? 1.25 : 1)
+        if (!best || score > best.score) best = { score, url }
       }
-      return bg ? bg.url : ''
+
+      // 兼容 WhatsApp 新版 Web Components：递归进入开放的 shadowRoot。
+      const roots = [document]
+      for (let i = 0; i < roots.length; i++) {
+        const root = roots[i]
+        for (const el of root.querySelectorAll('*')) {
+          if (el.shadowRoot) roots.push(el.shadowRoot)
+        }
+        for (const img of root.querySelectorAll('img')) {
+          consider(img.currentSrc || img.src, img)
+        }
+        for (const canvas of root.querySelectorAll('canvas')) {
+          try {
+            // Canvas 图片没有 URL；导出 PNG 后按 data:image 走同一条复制/保存链。
+            consider(canvas.toDataURL('image/png'), canvas, 1.1)
+          } catch (e) {}
+        }
+        for (const el of root.querySelectorAll('*')) {
+          let bi = ''
+          try { bi = getComputedStyle(el).backgroundImage } catch (e) {}
+          if (!bi || bi === 'none') continue
+          const m = bi.match(/url\\(([^)]+)\\)/i)
+          if (!m) continue
+          const url = m[1].trim().replace(/^["']|["']$/g, '')
+          consider(url, el)
+        }
+      }
+      return best ? best.url : ''
     })()
   `
   try {
